@@ -178,6 +178,10 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
     public var notices: [String]
     /// How the AI was chosen for this turn, such as "Auto · medium".
     public var routeLabel: String?
+    /// Set when the turn paused because it reached the "stop and ask" amount: what it had cost.
+    public var spendCheck: Double?
+    /// After the user said "keep going", the turn may spend up to this before asking again.
+    public var approvedSpendUpTo: Double?
 
     public init(status: Status = .running, steps: [AssistantStep] = [], failure: TurnFailure? = nil, notices: [String] = [], routeLabel: String? = nil) {
         self.status = status
@@ -185,6 +189,8 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
         self.failure = failure
         self.notices = notices
         self.routeLabel = routeLabel
+        self.spendCheck = nil
+        self.approvedSpendUpTo = nil
     }
 
     /// The AIs that answered, in order, without repeats.
@@ -198,7 +204,7 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
 
     /// The question set the AI is waiting on, if any.
     public var pendingQuestions: (stepIndex: Int, callIndex: Int, questions: QuestionSet)? {
-        guard status == .waitingForUser else { return nil }
+        guard status == .waitingForUser, spendCheck == nil else { return nil }
         for (stepIndex, step) in steps.enumerated().reversed() {
             for (callIndex, call) in step.toolCalls.enumerated() where call.status == .waitingForUser {
                 if let questions = call.questions { return (stepIndex, callIndex, questions) }

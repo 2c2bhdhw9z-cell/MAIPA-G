@@ -38,6 +38,7 @@ public actor DataRepoSync {
 
     public enum Failure: Error, Sendable, Equatable {
         case notSetUp
+        /// The repo exists, but MAIPA-G's app isn't allowed into it.
         case repoNotVisible
     }
 
@@ -73,32 +74,44 @@ public actor DataRepoSync {
     public func ensureRepository(owner: String, addToInstallation: (@Sendable (Int) async throws -> Void)? = nil) async throws -> RepoRef {
         let ref = RepoRef(owner: owner, name: Self.repoName)
         if let existing = try await github.repositoryIfExists(ref) {
-            if state.repo != ref || state.branch != existing.defaultBranch {
-                state = State()
-                state.repo = ref
-                state.branch = existing.defaultBranch
-                saveState()
-            }
+            adopt(ref, branch: existing.defaultBranch)
             return ref
         }
-        let created = try await github.createUserRepository(
-            name: Self.repoName,
-            isPrivate: true,
-            description: "MAIPA-G keeps your chats and settings here. You don't need to touch anything in it.",
-            autoInit: true
-        )
-        if let addToInstallation { try await addToInstallation(created.id) }
+        let created: GitHubRepo
+        do {
+            created = try await github.createUserRepository(
+                name: Self.repoName,
+                isPrivate: true,
+                description: "MAIPA-G keeps your chats and settings here. You don't need to touch anything in it.",
+                autoInit: true
+            )
+        } catch let error as GitHubAPIError where error.status == 422 && error.message.lowercased().contains("already exists") {
+            // It exists, but the app was only let into some repos and this isn't one of them.
+            throw Failure.repoNotVisible
+        }
+        if let addToInstallation { try? await addToInstallation(created.id) }
         // A brand-new repo can take a moment to become visible to the app.
         for attempt in 1...8 {
             if try await github.repositoryIfExists(ref) != nil { break }
             if attempt == 8 { throw Failure.repoNotVisible }
             try await Task.sleep(nanoseconds: UInt64(attempt) * 500_000_000)
         }
+        adopt(ref, branch: created.defaultBranch)
+        return ref
+    }
+
+    private func adopt(_ ref: RepoRef, branch: String) {
+        guard state.repo != ref || state.branch != branch else { return }
         state = State()
         state.repo = ref
-        state.branch = created.defaultBranch
+        state.branch = branch
         saveState()
-        return ref
+    }
+
+    /// Forgets which repo and files were in sync, for signing out.
+    public func reset() {
+        state = State()
+        saveState()
     }
 
     /// Brings the phone and GitHub into line. Safe to call often; does nothing when nothing changed.
@@ -173,20 +186,34 @@ public actor DataRepoSync {
             }
         }
 
-        // GitHub to phone.
+        // GitHub to phone. A file the phone changed while this sync was running (a reply still
+        // coming in, say) is left alone: the next sync sees both versions and keeps the newer.
         let fetched = try await fetchBlobs(repo, paths: downloads.filter { conflictContents[$0] == nil }, ids: remote)
+        var skipped = Set<String>()
         for (path, data) in fetched.merging(conflictContents, uniquingKeysWith: { _, conflict in conflict }) {
             let url = dataDirectory.appendingPathComponent(path)
+            guard currentBlobID(at: url) == local[path] else {
+                skipped.insert(path)
+                continue
+            }
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try data.write(to: url, options: .atomic)
         }
-        report.downloaded = downloads
-        for path in deleteHere { try? FileManager.default.removeItem(at: dataDirectory.appendingPathComponent(path)) }
-        report.deletedHere = deleteHere
+        for path in deleteHere {
+            let url = dataDirectory.appendingPathComponent(path)
+            guard currentBlobID(at: url) == local[path] else {
+                skipped.insert(path)
+                continue
+            }
+            try? FileManager.default.removeItem(at: url)
+        }
+        report.downloaded = downloads.filter { !skipped.contains($0) }
+        report.deletedHere = deleteHere.filter { !skipped.contains($0) }
 
+        // What both sides now agree on. Skipped paths keep their old agreed version, so the next
+        // sync still sees them as changed on both sides.
         var agreed = remote
-        for path in downloads { agreed[path] = remote[path] }
-        for path in deleteHere { agreed[path] = nil }
+        for path in skipped { agreed[path] = base[path] }
 
         // Phone to GitHub, as one commit.
         if uploads.isEmpty && deleteThere.isEmpty {
@@ -243,6 +270,10 @@ public actor DataRepoSync {
             result[path] = Hashing.gitBlobID(data)
         }
         return result
+    }
+
+    private func currentBlobID(at url: URL) -> String? {
+        (try? Data(contentsOf: url)).map(Hashing.gitBlobID)
     }
 
     private func fetchBlobs(_ repo: RepoRef, paths: [String], ids: [String: String]) async throws -> [String: Data] {

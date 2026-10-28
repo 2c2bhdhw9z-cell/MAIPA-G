@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <defs>
+    <linearGradient id="body" x1="0.15" y1="0.1" x2="0.85" y2="0.95">
+      <stop offset="0" stop-color="#5cf5cf"/>
+      <stop offset="0.55" stop-color="#2ee6b6"/>
+      <stop offset="1" stop-color="#33a6ff"/>
+    </linearGradient>
+    <radialGradient id="spark" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.45" stop-color="#b9fff0"/>
+      <stop offset="1" stop-color="#2ee6b6" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <path d="M60 25 C 60 25, 62 18, 67 13" fill="none" stroke="#2ee6b6" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="68" cy="12" r="9" fill="url(#spark)"/>
+  <path d="M60 26 C 88 26, 104 44, 104 70 C 104 95, 85 108, 60 108 C 35 108, 16 95, 16 70 C 16 44, 32 26, 60 26 Z" fill="url(#body)"/>
+  <ellipse cx="46" cy="66" rx="7" ry="10" fill="#0b1a22"/>
+  <ellipse cx="74" cy="66" rx="7" ry="10" fill="#0b1a22"/>
+  <circle cx="48.5" cy="62" r="2.4" fill="#ffffff"/>
+  <circle cx="76.5" cy="62" r="2.4" fill="#ffffff"/>
+  <path d="M38 40 C 44 34, 54 31, 62 31" fill="none" stroke="#ffffff" stroke-opacity="0.45" stroke-width="4" stroke-linecap="round"/>
+</svg>

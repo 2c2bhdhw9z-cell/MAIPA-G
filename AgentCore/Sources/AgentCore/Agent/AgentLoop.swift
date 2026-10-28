@@ -7,16 +7,22 @@ public struct AgentTurnInput: Sendable {
     public var chat: Chat
     public var route: Route
     public var systemPrompt: String
-    /// The tools besides ask_user, which is always available.
+    /// The tools besides ask_user, which is always available when tools are.
     public var tools: [any AgentTool]
+    /// False for AIs that can't use tools at all: then no tools, not even ask_user, are offered.
+    public var allowTools: Bool
     public var maxSteps: Int
+    /// "Stop and ask when a job has cost $__", in dollars, or nil when that setting is off.
+    public var spendLimit: Double?
 
-    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], maxSteps: Int = 40) {
+    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 40, spendLimit: Double? = nil) {
         self.chat = chat
         self.route = route
         self.systemPrompt = systemPrompt
         self.tools = tools
+        self.allowTools = allowTools
         self.maxSteps = maxSteps
+        self.spendLimit = spendLimit
     }
 }
 
@@ -63,6 +69,7 @@ private struct Runner {
     let tools: [String: any AgentTool]
     let specs: [ToolSpec]
     let maxSteps: Int
+    let spendLimit: Double?
     let environment: AgentEnvironment
     let continuation: AsyncStream<AgentEvent>.Continuation
     var switchedToFree = false
@@ -77,10 +84,13 @@ private struct Runner {
         route = input.route
         systemPrompt = input.systemPrompt
         var byName: [String: any AgentTool] = [:]
-        for tool in input.tools { byName[tool.name] = tool }
+        if input.allowTools {
+            for tool in input.tools { byName[tool.name] = tool }
+        }
         tools = byName
-        specs = input.tools.map(\.spec) + [AskUserTool.spec]
+        specs = input.allowTools ? input.tools.map(\.spec) + [AskUserTool.spec] : []
         maxSteps = input.maxSteps
+        spendLimit = input.spendLimit.flatMap { $0 > 0 ? $0 : nil }
         self.environment = environment
         self.continuation = continuation
     }
@@ -94,6 +104,7 @@ private struct Runner {
     mutating func run() async {
         turn.status = .running
         turn.failure = nil
+        turn.spendCheck = nil
         if turn.routeLabel == nil { turn.routeLabel = route.label }
         emit(milestone: true)
         var newSteps = 0
@@ -113,8 +124,18 @@ private struct Runner {
                 }
                 guard newSteps < maxSteps else {
                     turn.status = .stopped
-                    turn.failure = TurnFailure(kind: .stepLimit, message: "I stopped after \(maxSteps) steps so this doesn't run up a bill. Say \"keep going\" if you want more.")
+                    turn.failure = TurnFailure(kind: .stepLimit, message: "I stopped after \(maxSteps) steps so this doesn't run up a bill. Tap Keep going if you want more.")
                     break
+                }
+                // "Stop and ask when a job has cost $__": checked before every request to the AI,
+                // since that is where money is spent.
+                if let spendLimit {
+                    let spent = turn.usage.cost ?? 0
+                    if spent >= (turn.approvedSpendUpTo ?? spendLimit) {
+                        turn.status = .waitingForUser
+                        turn.spendCheck = spent
+                        break
+                    }
                 }
                 newSteps += 1
                 try await requestStep()

@@ -1,0 +1,82 @@
+:root {
+  color-scheme: dark light;
+  --ink: #0b0f14;
+  --surface: #121821;
+  --text: #eef2f6;
+  --muted: #9aa7b6;
+  --mint: #2ee6b6;
+  --sky: #33a6ff;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --ink: #f6f7f4;
+    --surface: #ffffff;
+    --text: #0e141b;
+    --muted: #5b6672;
+    --mint: #0fa383;
+    --sky: #1f7fd6;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--ink);
+  color: var(--text);
+  font: 17px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Rounded", "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 32px 20px;
+  background:
+    radial-gradient(60vmax 40vmax at 20% 10%, color-mix(in srgb, var(--mint) 18%, transparent), transparent 70%),
+    radial-gradient(50vmax 40vmax at 90% 90%, color-mix(in srgb, var(--sky) 16%, transparent), transparent 70%),
+    var(--ink);
+}
+
+main {
+  width: min(420px, 100%);
+  text-align: center;
+}
+
+.mark {
+  width: 84px;
+  height: 84px;
+  margin: 0 auto 20px;
+  background: url("mascot.svg") center / contain no-repeat;
+}
+
+h1 {
+  margin: 0 0 8px;
+  font-size: 26px;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+p {
+  margin: 0 0 18px;
+  color: var(--muted);
+}
+
+.button {
+  display: inline-block;
+  padding: 13px 22px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--mint), var(--sky));
+  color: #04120e;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.small {
+  font-size: 14px;
+}
+
+a { color: var(--sky); }

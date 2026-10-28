@@ -182,6 +182,55 @@ struct AgentLoopTests {
         #expect(finished.steps.isEmpty)
     }
 
+    @Test func spendLimitPausesAndCanBeRaised() async throws {
+        // Each step costs $0.60 (see toolsDone); the limit is $1.
+        let call = { (id: String) in Self.toolCall(id: id, name: "read_file", arguments: #"{"path":"a"}"#) }
+        let costly = #"{"id":"g","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"cost":0.6}}"#
+        let transport = ScriptedTransport([
+            .events([call("c1"), costly]),
+            .events([call("c2"), costly]),
+            .events([Self.text("Done."), Self.done]),
+        ])
+        let environment = AgentEnvironment(
+            openRouter: OpenRouterClient(transport: transport, apiKey: "sk"),
+            freeRoute: { ModelRouter.route(choice: .free, difficulty: .normal, thinking: .medium, account: AccountState(), catalogue: [:]) },
+            onOutOfCredits: {}
+        )
+        var paused: AssistantTurn?
+        for await event in AgentLoop.run(AgentTurnInput(chat: Self.newChat("go"), route: Self.route(), systemPrompt: "s", tools: [EchoTool()], spendLimit: 1), environment: environment) {
+            if case .updated(let turn, _) = event { paused = turn }
+        }
+        let first = try #require(paused)
+        #expect(first.status == .waitingForUser)
+        #expect(first.spendCheck == 1.2)
+        #expect(first.pendingQuestions == nil)
+        #expect(transport.requestCount == 2)
+
+        // "Keep going": allow another dollar.
+        var chat = Self.newChat("go")
+        var approved = first
+        approved.approvedSpendUpTo = 1.2 + 1
+        chat.messages[1].assistantTurn = approved
+        var finished: AssistantTurn?
+        for await event in AgentLoop.run(AgentTurnInput(chat: chat, route: Self.route(), systemPrompt: "s", tools: [EchoTool()], spendLimit: 1), environment: environment) {
+            if case .updated(let turn, _) = event { finished = turn }
+        }
+        #expect(finished?.status == .done)
+        #expect(finished?.spendCheck == nil)
+        #expect(finished?.steps.last?.text == "Done.")
+    }
+
+    @Test func noToolsForModelsThatCantUseThem() async throws {
+        let transport = ScriptedTransport([.events([Self.text("Hi."), Self.done])])
+        let environment = AgentEnvironment(
+            openRouter: OpenRouterClient(transport: transport, apiKey: "sk"),
+            freeRoute: { ModelRouter.route(choice: .free, difficulty: .normal, thinking: .medium, account: AccountState(), catalogue: [:]) },
+            onOutOfCredits: {}
+        )
+        for await _ in AgentLoop.run(AgentTurnInput(chat: Self.newChat("hi"), route: Self.route(), systemPrompt: "s", tools: [EchoTool()], allowTools: false), environment: environment) {}
+        #expect(transport.sentBodies.first?["tools"] == nil)
+    }
+
     @Test func transcriptAlwaysAnswersEveryToolCall() {
         var chat = Chat()
         var step = AssistantStep()
