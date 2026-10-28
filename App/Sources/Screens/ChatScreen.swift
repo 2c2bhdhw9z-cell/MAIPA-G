@@ -149,8 +149,15 @@ struct ChatScreen: View {
         // Not in the list (yet): "anthropic/claude-sonnet-5.5:free" reads as "Claude Sonnet 5.5".
         let base = id.split(separator: "/").last.map(String.init) ?? id
         let plain = base.split(separator: ":").first.map(String.init) ?? base
+        let shouted: Set<String> = ["gpt", "glm", "ai", "llm", "qwq", "oss", "vl"]
         return plain.split(separator: "-").map { word in
-            word.first.map { $0.isLetter ? $0.uppercased() + word.dropFirst() : String(word) } ?? ""
+            if shouted.contains(word.lowercased()) { return word.uppercased() }
+            // Sizes like "70b", "1.5b" and "8x7b" read as "70B", "1.5B" and "8x7B".
+            if word.count > 1, let first = word.first, first.isNumber, let unit = word.last, "bkm".contains(unit),
+               word.dropLast().allSatisfy({ $0.isNumber || $0 == "." || $0 == "x" }) {
+                return String(word.dropLast()) + String(unit).uppercased()
+            }
+            return word.first.map { $0.isLetter ? $0.uppercased() + word.dropFirst() : String(word) } ?? ""
         }.joined(separator: " ")
     }
 

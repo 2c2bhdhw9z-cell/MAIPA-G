@@ -36,6 +36,8 @@ struct ModelPicker: View {
                     .pickerStyle(.segmented)
                     .listRowBackground(Color.clear)
                     .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                } footer: {
+                    Text("Prices are dollars for reading / writing a million tokens (about 750,000 words). \"Reads\" is how much it can take in at once.")
                 }
                 ForEach(groups, id: \.maker) { group in
                     Section(group.maker) {
@@ -129,14 +131,19 @@ struct ModelPicker: View {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(model.shortName).font(.body)
-                    HStack(spacing: 6) {
+                    HStack(spacing: 4) {
                         Text(price(model))
-                        if !model.thinkingLevels.isEmpty { Label("Thinks", systemImage: "brain").labelStyle(.titleAndIcon) }
-                        if let context = model.contextLength { Text("holds \(Self.tokens(context))") }
-                        if cantReadRepo { Text("Can't read repos").foregroundStyle(Theme.danger) }
+                        if !model.thinkingLevels.isEmpty { Text("· thinks") }
+                        if let context = model.contextLength { Text("· reads \(Self.tokens(context))") }
                     }
                     .font(.caption)
                     .foregroundStyle(Theme.secondaryText)
+                    .lineLimit(1)
+                    if cantReadRepo {
+                        Text("Can't read repos")
+                            .font(.caption)
+                            .foregroundStyle(Theme.danger)
+                    }
                 }
                 Spacer()
                 if current == .model(model.id) { Image(systemName: "checkmark").foregroundStyle(theme.accent) }
@@ -156,17 +163,22 @@ struct ModelPicker: View {
         return "\(max(1, count / 1000))K"
     }
 
-    /// Dollars per million tokens (about 750,000 words), in and out.
+    /// Dollars per million tokens (about 750,000 words), for reading and for writing.
     private func price(_ model: ModelInfo) -> String {
         if model.isFree { return "Free" }
         guard let input = model.promptPrice, let output = model.completionPrice else { return "Price varies" }
+        // "$3", "$1.50", "$12.50", "$0.25", and "$0.075" when cents alone would round it off.
         func dollars(_ perToken: Double) -> String {
             let perMillion = perToken * 1_000_000
-            if perMillion >= 10 { return String(format: "$%.0f", perMillion) }
-            if perMillion >= 1 { return String(format: "$%.2g", perMillion) }
-            return String(format: "$%.2f", perMillion)
+            if perMillion == 0 { return "$0" }
+            if perMillion < 0.01 { return "<$0.01" }
+            if perMillion < 1, abs(perMillion * 100 - (perMillion * 100).rounded()) > 0.001 {
+                return String(format: "$%.3f", perMillion)
+            }
+            let text = String(format: "%.2f", perMillion)
+            return "$" + (text.hasSuffix(".00") ? String(text.dropLast(3)) : text)
         }
-        return "\(dollars(input)) in / \(dollars(output)) out per 1M"
+        return "\(dollars(input)) / \(dollars(output))"
     }
 }
 
