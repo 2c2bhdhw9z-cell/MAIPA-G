@@ -122,8 +122,8 @@ E. Agents and workflows
 19. Kiro's choice: the ready-made agents are Kiro's set, in plain names: Planner, Designer,
     Design checker, Coder, Code checker, Second opinion (another checker on a different AI),
     Review combiner, Investigator (report only), Researcher (tries experiments, keeps what
-    works), Builder (starts the build, checks the .ipa) and Workflow maker. Plus Side-copy sender
-    and Feedback answerer, for repos set to side copies.
+    works), Builder (starts a build when asked, checks the .ipa) and Workflow maker. Plus Request
+    sender and Feedback answerer, which open the pull request and answer comments on it.
 20. Kiro's choice: the ready-made workflows are Kiro's set: Look into something, Keep going until
     a goal is met, Work through a checklist, and Full feature (requirements, design, checked
     design, plan, build with a two-AI review, final check). Also Two-AI review, Experiment until
