@@ -1,7 +1,8 @@
 # MAIPA-G plan
 
-**Status (27 October 2026, late evening Eastern): every question is answered. The final plan was
-shown to him in short. Build 1 starts when he says go.**
+**Status (28 October 2026, 5 PM Eastern): he said go ("I want to continue this"). Build 1 is
+being made on the branch `build-1` (one pull request, squash-merged when its build check passes).
+Every question is answered; the plan below is final.**
 
 ## What it is
 An iPhone app (.ipa) for AI agents and workflows, with GitHub built in, like Kiro (app.kiro.dev)
