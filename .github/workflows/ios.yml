@@ -73,7 +73,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: MAIPA-G-screenshots-${{ github.run_number }}
-          path: App/build/screenshots/*.png
+          path: |
+            App/build/screenshots/*.png
+            App/build/screenshots/*.txt
           if-no-files-found: warn
           retention-days: 14
 

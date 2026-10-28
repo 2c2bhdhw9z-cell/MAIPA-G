@@ -271,6 +271,7 @@ final class AppModel {
         case "chat": library.preview(summaries: summaries, open: PreviewScenes.sampleChat())
         case "questions": library.preview(summaries: summaries, open: PreviewScenes.questionChat())
         case "working": library.preview(summaries: summaries, open: PreviewScenes.workingChat())
+        case "thinking": library.preview(summaries: summaries, open: PreviewScenes.thinkingChat())
         case "menu":
             library.preview(summaries: summaries, open: nil)
             isMenuOpen = true

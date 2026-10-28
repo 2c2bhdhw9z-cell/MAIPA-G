@@ -103,6 +103,16 @@ enum PreviewScenes {
         return chat
     }
 
+    /// The moment just after sending: Spark and "Thinking…", nothing written yet.
+    static func thinkingChat() -> Chat {
+        var chat = Chat(title: "Birthday message for Mom")
+        chat.messages = [
+            .user("Write a short birthday message for my mom, something warm but not cheesy"),
+            ChatMessage(body: .assistant(AssistantTurn(status: .running, steps: [AssistantStep()], routeLabel: "Auto · low"))),
+        ]
+        return chat
+    }
+
     static func sampleSummaries() -> [ChatSummary] {
         let titles: [(String, String?, Double)] = [
             ("How saving chats works", "2c2bhdhw9z-cell/MAIPA-G", -60),

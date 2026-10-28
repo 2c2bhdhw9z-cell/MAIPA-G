@@ -12,7 +12,7 @@ APP_DIR="$ROOT/App"
 OUT="$APP_DIR/build/screenshots"
 DERIVED="$APP_DIR/build/SimulatorDerivedData"
 DEVICE_NAME="${MAIPAG_SIMULATOR:-iPhone 17 Pro Max}"
-SCENES="${MAIPAG_SCENES:-home-new home chat questions working menu settings connect models}"
+SCENES="${MAIPAG_SCENES:-home-new home chat questions working thinking menu settings connect models}"
 BUNDLE_ID="dev.maipag.app"
 
 mkdir -p "$OUT"
@@ -94,7 +94,21 @@ for appearance in dark light; do
       known_reports="$(crash_reports)"
       failures=$((failures + 1))
     elif [ "$(size_of "$shot")" -le 150000 ]; then
-      echo "::warning::the '$scene' scene ($appearance) still looked empty after waiting"
+      # Still the plain launch colour: the app is stuck before drawing its first screen. Simulator
+      # apps are ordinary Mac processes, so `sample` can show exactly where it is stuck.
+      echo "::error::the '$scene' scene ($appearance) never drew anything"
+      failures=$((failures + 1))
+      pid="$(pgrep -f 'MAIPA-G.app/MAIPA-G' | head -n 1 || true)"
+      if [ -n "$pid" ]; then
+        echo "---- where MAIPA-G (pid $pid) is stuck ----"
+        sample "$pid" 2 -file "$OUT/stuck-$appearance-$scene.txt" >/dev/null 2>&1 || true
+        sed -n '1,140p' "$OUT/stuck-$appearance-$scene.txt" 2>/dev/null || true
+        top -l 1 -pid "$pid" -stats pid,cpu,mem,state 2>/dev/null | tail -n 2 || true
+      else
+        echo "---- MAIPA-G is not running ----"
+      fi
+      echo "---- its log ----"
+      xcrun simctl spawn "$UDID" log show --last 1m --style compact --predicate 'process == "MAIPA-G"' 2>/dev/null | tail -n 40 || true
     fi
     echo "    $appearance-$scene.png ($(size_of "$shot") bytes)"
   done
