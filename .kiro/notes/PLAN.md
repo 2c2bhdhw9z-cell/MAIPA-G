@@ -1,9 +1,7 @@
 # MAIPA-G plan
 
-**Status (27 October 2026, 11:36 PM Eastern): the owner has answered. Questions 7 and 16 are still
-open, asked again in plainer words (see "Still open").** Nothing gets built until those are
-answered and he has OK'd the final plan. Then show him the final plan in short and start build 1
-when he says go.
+**Status (27 October 2026, late evening Eastern): every question is answered. The final plan was
+shown to him in short. Build 1 starts when he says go.**
 
 ## What it is
 An iPhone app (.ipa) for AI agents and workflows, with GitHub built in, like Kiro (app.kiro.dev)
@@ -38,15 +36,18 @@ install it with his sideloading app and his own certificate.
 8. **Cost counter:** every chat shows what it cost.
 9. **Undo:** one tap takes back the last change an agent saved.
 10. **Settings:** OpenRouter, GitHub, Dark, Light, System and colours, every effect's switch,
-    notifications, the workflow choice (answer 15), how each repo saves changes, and Technical
-    details. It also says when a new MAIPA-G build is out.
-- Chats, memories, agents and workflows are kept in a private repo on his GitHub (answer 16,
-  still open), so deleting the app before each install (he always does) loses nothing.
+    notifications, the workflow choice (answer 15), how each repo saves changes, "Stop and ask
+    when a job has cost $__" (answer 7b), and Technical details. It also says when a new MAIPA-G
+    build is out.
+- Chats, memories, agents and workflows are kept in a private repo on his GitHub (answer 16), so
+  deleting the app before each install (he always does) loses nothing.
 - Its changes show on GitHub under MAIPA-G's name, so they can be told apart from Kiro's.
 
 ## Decided (27 October 2026)
 "Kiro's choice" marks the ones where he said "however you do it", "idk" or "do whatever". In
-those cases, copy how Kiro does it.
+those cases, copy how Kiro works **out of the box, as Amazon made it**. That is NOT the same as
+his personal rules for Kiro (no branches, one build per batch and so on); he corrected this on
+27 October 2026 for answer 11. See `.kiro/steering/owner-rules.md`.
 
 A. Big picture
 1. Mostly for his apps and games, but everyday things too (writing, research, documents).
@@ -55,25 +56,45 @@ A. Big picture
 
 B. The AI
 3. OpenRouter, plus Apple's free AI on the iPhone.
-4. He has no AI account yet. The app gets a "Sign in with OpenRouter" button: he makes a free
-   account there and taps Allow, with no key to copy. Free AIs work with $0 on it.
-5. New chats start on **Auto**. With $0 on OpenRouter, or if paid use isn't allowed (7a), Auto
-   uses only free AIs, plus Apple's AI for tiny jobs like chat titles.
+4. He first said no AI account. Later the same day he said he has an account with about $5 on
+   it, taken to be OpenRouter. The app gets a "Sign in with OpenRouter" button: he signs in and
+   taps Allow, with no key to copy. With under $10 bought in total, the free AIs stay at 50
+   requests a day.
+5. New chats start on **Auto**, which picks the AI for each task, like Kiro's Auto: cheap ones
+   for easy things, smarter ones for hard work. With $0 on OpenRouter, Auto and free models use
+   only the free AIs. Apple's AI handles tiny jobs like chat titles. If he has picked a paid AI
+   himself and the balance runs out, the chat asks him (switch to free AIs, or stop).
 6. Thinking starts on medium. Each chat can change it, but the control only shows when the
    chosen AI supports thinking levels.
-7. Still open.
+7. Money (answered 27 October 2026):
+   - 7a. Yes, Auto may spend on harder jobs, and how much should depend on the task.
+   - 7b. "Put a switch in the settings": Settings has "Stop and ask when a job has cost $__". It
+     starts off, because Kiro has no such stop out of the box, and the amount is $1 when turned on.
 
 C. GitHub
 8. All repos.
-9. Kiro's choice: it saves to the branch picked in the chat (main unless he picks another),
-   like Kiro does for him. A per-repo switch can make it use a side copy instead, with Keep or
-   Throw away, tidied up automatically. Undo takes back the last saved change.
+9. Kiro's choice, fixed on 27 October 2026 to Kiro's factory default, which is also how Arena
+   works (Arena's agent commits, pushes and opens a pull request):
+   - If the chat's branch is main, it works on a new side branch. If he picked another branch,
+     it works on that one.
+   - When it's done, it opens a pull request into main. The chat shows "Add it" (merge, then
+     delete the side branch) and "Throw away" (close it and delete the branch).
+   - It tidies up after itself, so no branches or requests are left lying around.
+   - A per-repo switch can make it save straight to the branch instead.
+   - Undo takes back the last saved change.
+   - A repo's own rules win. Continuum's say no branches, so there it saves straight to master.
 10. Kiro's choice ("do whatever"): MAIPA-G may work on Continuum. In the batch where MAIPA-G
     first changes code (build 2), update Continuum's "Only Kiro works on this repository" rule
     to allow MAIPA-G, his own app.
-11. Kiro's choice: builds work the way Kiro does them. One build at the end of a finished batch,
-    never in the middle. Then it checks the build and gives the download link and test steps.
-    It follows each repo's own build rules.
+11. Kiro's choice, fixed on 27 October 2026. He said: "not the way I want you to do it, the way
+    you normally are programmed". Out of the box, Kiro:
+    - checks its own work before saying it's done, building and testing where it has a computer
+      (on GitHub's computers in Autonomous);
+    - lets the repo's own automatic builds run when it saves, then checks their results and
+      fixes failures;
+    - starts a build by hand only when he asks.
+    It does not copy his personal "one build per batch, .ipa link and test steps" rules. A
+    repo's own rules files still apply.
 12. It asks before deleting files and before changing a repo's build setup. The exceptions:
     he has told it to just get on with it, or a memory says otherwise.
 13. It may create new repos.
@@ -82,9 +103,14 @@ D. Where the work runs
 14. Autonomous starts off.
 15. Workflows start when he asks, and also by themselves for big jobs. Settings has the same
     three choices as Kiro: When asked, Big jobs too (the default), and Everything.
-16. Still open.
-17. Kiro's choice, from his "never stop early" rule (he didn't follow the question): jobs keep
-    going until they're done. GitHub stops a run after 6 hours, so MAIPA-G hands over to a fresh
+16. Yes to both (27 October 2026): the private "MAIPA-G-data" repo, and the small job file
+    added to a repo the first time Autonomous is used on it. He said storing data in a repo
+    feels like "a stupid/crude way to save data". It's used because MAIPA-G has no server of
+    its own (Kiro and Arena keep chats on theirs), and a private repo is his, free, and survives
+    deleting the app. He never has to look at it. If a better place turns up that works on a
+    sideloaded app, switch to it.
+17. Kiro's choice (he didn't follow the question): jobs keep going until they're done, the same
+    as Kiro out of the box. GitHub stops a run after 6 hours, so MAIPA-G hands over to a fresh
     run. The money rule (7) still applies.
 18. He picked "show it in the app", and pointed out that sideloaded apps do get notifications.
     He's right: an app can post its own notifications. So it shows everything in the app, plus
@@ -141,18 +167,6 @@ H. Safety, code, order
 37. The build order is fine.
 38. Nothing to add or remove.
 
-## Still open (asked again on 27 October 2026, in plainer words)
-7. Money. OpenRouter is pay-first, like a prepaid card: it can't spend more than what's on it,
-   and with $0 on it only free AIs work. Putting $10 on it once raises the free AIs from 50 to
-   1,000 requests a day, and the $10 stays there to spend.
-   - 7a. When there's money on it, may Auto spend some on harder jobs (a smarter AI, better web
-     search)? a) yes b) no, free only unless he picks a paid AI himself
-   - 7b. Should a job stop and ask once it has cost a set amount? a) yes, at $1 b) yes, at $__
-     c) no
-16. Two things on his GitHub: a private repo, "MAIPA-G-data", that only he can see and that keeps
-    chats, memories, agents and workflows safe across reinstalls; and one small file added to a
-    repo the first time he uses Autonomous on it. OK?
-
 ## Build order (agreed, one build each)
 1. Home screen, Connect GitHub, the repo and branch pickers, Sign in with OpenRouter and the AI
    picker (Auto, thinking), a chat that can read and search a repo, the side menu.
@@ -208,9 +222,15 @@ H. Safety, code, order
 - **Where things live:** secrets in the Keychain. Chats, memories, agents, workflows and settings
   are JSON on the phone, synced to the private `MAIPA-G-data` repo (answer 16). That repo runs
   no Actions. Specs go in the project's `.kiro/specs/`.
-- **AI (Auto):** `openrouter/free` when there's no money or paid use isn't allowed;
-  `openrouter/auto` or a smarter model when it is; Apple FoundationModels for tiny jobs. Reasoning
-  effort starts on medium. Streaming, tool calls, prompt caching, and cost from the usage numbers.
+- **AI (Auto):**
+  - $0 balance: `openrouter/free`. Check the balance with OpenRouter's key and credits endpoints.
+  - Money on it: `openrouter/auto`, with `cost_tier` chosen per task: low for chat and small
+    jobs, medium for normal coding, high for planning, hard debugging and reviews. (Its default
+    with no tier is low.) Use `session_id` so a chat stays on one model.
+  - Apple FoundationModels for tiny jobs.
+  - Reasoning effort starts on medium.
+  - Streaming, tool calls, prompt caching, and cost from the usage numbers. The optional "stop
+    and ask at $__" check runs on every step.
 - **Phone agent tools:**
   - files: list, read and search; edit, create and delete; save (commit through the Git Data
     API); undo (revert the last save);
@@ -238,5 +258,11 @@ H. Safety, code, order
   the app tells him when the AI saves one.
 - **Workflows:** like Kiro's: steps with agents, repeat loops (a maximum, then pause), stop-and-ask
   steps, and parallel steps. The Workflow maker turns his words into a workflow for him to approve.
-- **Saving changes:** either straight to the chosen branch, or a side branch plus a PR that the
-  app squash-merges and deletes on Keep, or deletes on Throw away.
+- **Saving changes:** follows Kiro's default branch policy.
+  - If the chat's branch is the default branch, make a new branch. Otherwise use the picked
+    branch.
+  - Open a PR into the default branch. "Add it" squash-merges the PR and deletes the branch;
+    "Throw away" closes it and deletes the branch.
+  - If the PR from an earlier session was merged or closed, start a new branch.
+  - The per-repo option saves straight to the branch. A repo's own rules files override the
+    default.

@@ -21,6 +21,14 @@ because I don't understand how they work".
 - Never ask the owner to do anything with branches or PRs. If they come up, explain them in
   plain words: a branch is a side copy, and a PR is the request to fold it into the main copy.
 
+## "However you do it" means Kiro's factory defaults
+Owner, 27 October 2026, correcting answer 11: "the way you normally are programmed, like the way
+Amazon or whoever made you", not "the way I want you to do it".
+- When he leaves a MAIPA-G choice to Kiro, MAIPA-G copies how Kiro works out of the box.
+- Never copy his personal rules for Kiro (no branches, one build per batch, .ipa links, and so
+  on) into MAIPA-G's own behaviour.
+- A repo's own rules files still apply on top, the same as they do for Kiro.
+
 ## Plan first
 Owner, 27 October 2026: "Obviously Plan First", and "Ask as many questions as you need. I want
 this done right."
