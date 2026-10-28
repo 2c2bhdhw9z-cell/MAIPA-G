@@ -21,6 +21,7 @@ final class SyncCoordinator {
 
     @ObservationIgnored weak var app: AppModel?
     @ObservationIgnored private var engine: DataRepoSync?
+    @ObservationIgnored private var setup: (client: GitHubClient, owner: String, installationID: Int)?
     @ObservationIgnored private var scheduled: Task<Void, Never>?
     @ObservationIgnored private var isRunning = false
     @ObservationIgnored private var runAgain = false
@@ -32,20 +33,12 @@ final class SyncCoordinator {
 
     var repoURL: URL? { repo?.webURL }
 
-    /// Finds (or makes) MAIPA-G-data and brings this phone up to date with it.
+    /// Sets saving up for a connected account and brings this phone up to date with GitHub.
     func configure(client: GitHubClient, owner: String, installationID: Int) async {
-        let engine = DataRepoSync(github: client, dataDirectory: paths.data, stateURL: paths.syncState)
-        self.engine = engine
-        status = .saving
-        do {
-            repo = try await engine.ensureRepository(owner: owner) { repositoryID in
-                try await client.addRepositoryToInstallation(installationID: installationID, repositoryID: repositoryID)
-            }
-            status = .idle
-            await syncNow()
-        } catch {
-            status = .failed(Self.describe(error))
-        }
+        engine = DataRepoSync(github: client, dataDirectory: paths.data, stateURL: paths.syncState)
+        setup = (client, owner, installationID)
+        repo = nil
+        await syncNow()
     }
 
     /// Saves in a few seconds; more changes in the meantime wait for the same save.
@@ -60,7 +53,7 @@ final class SyncCoordinator {
     }
 
     func syncNow() async {
-        guard let engine else { return }
+        guard let engine, let setup else { return }
         if isRunning {
             runAgain = true
             return
@@ -71,6 +64,14 @@ final class SyncCoordinator {
             runAgain = false
             status = .saving
             do {
+                // Finds (or makes) MAIPA-G-data the first time, and again after a failed try, for
+                // example when the phone was offline when the app opened.
+                if repo == nil {
+                    let client = setup.client, installationID = setup.installationID
+                    repo = try await engine.ensureRepository(owner: setup.owner) { repositoryID in
+                        try await client.addRepositoryToInstallation(installationID: installationID, repositoryID: repositoryID)
+                    }
+                }
                 let report = try await engine.sync()
                 lastSaved = Date()
                 status = .idle
@@ -95,6 +96,7 @@ final class SyncCoordinator {
         scheduled?.cancel()
         await engine?.reset()
         engine = nil
+        setup = nil
         repo = nil
         status = .off
     }
@@ -103,7 +105,7 @@ final class SyncCoordinator {
         if let error = error as? DataRepoSync.Failure {
             switch error {
             case .notSetUp: return "Saving isn't set up yet."
-            case .repoNotVisible: return "MAIPA-G can't see your MAIPA-G-data repo. Let MAIPA-G into it on GitHub (Settings, GitHub, Choose repos)."
+            case .repoNotVisible: return "MAIPA-G can't see your MAIPA-G-data repo. Let MAIPA-G into it on GitHub (Settings, Choose which repos MAIPA-G can use)."
             }
         }
         if let error = error as? GitHubAPIError {
@@ -112,6 +114,7 @@ final class SyncCoordinator {
         }
         if let error = error as? HTTPError, error.isOffline { return "Offline. Your chats are safe on the phone and will be saved when you're back online." }
         if case GitHubAppSession.Failure.userSignInExpired = error { return "Your GitHub sign-in ran out. Sign in again in Settings." }
+        if case GitHubAppSession.Failure.noUserToken = error { return "MAIPA-G needs you to sign in to GitHub once more to make your MAIPA-G-data repo. Tap Sign in to GitHub again in Settings." }
         return "Couldn't save to GitHub just now. It'll try again."
     }
 }

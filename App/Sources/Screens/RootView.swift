@@ -27,19 +27,14 @@ struct RootView: View {
                     .frame(width: proxy.size.width)
                     .clipShape(RoundedRectangle(cornerRadius: progress * 28, style: .continuous))
                     .shadow(color: .black.opacity(0.25 * progress), radius: 20, x: -4)
+                    // Watches swipes alongside everything else, so it never blocks a tap, a scroll
+                    // or the menu button; only a sideways swipe from the left edge opens the menu.
+                    .simultaneousGesture(openDrag(width: width), including: app.isMenuOpen ? .subviews : .all)
                     .overlay {
                         if app.isMenuOpen {
                             Color.black.opacity(0.001)
                                 .onTapGesture { close() }
                                 .gesture(closeDrag(width: width))
-                        }
-                    }
-                    .overlay(alignment: .leading) {
-                        if !app.isMenuOpen {
-                            Color.clear
-                                .frame(width: 22)
-                                .contentShape(Rectangle())
-                                .gesture(openDrag(width: width))
                         }
                     }
                     .offset(x: offset)
@@ -74,9 +69,14 @@ struct RootView: View {
     }
 
     private func openDrag(width: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 8)
-            .onChanged { value in drag = max(0, value.translation.width) }
+        DragGesture(minimumDistance: 12, coordinateSpace: .global)
+            .onChanged { value in
+                guard !app.isMenuOpen, value.startLocation.x < 30,
+                      value.translation.width > abs(value.translation.height) else { return }
+                drag = max(0, value.translation.width)
+            }
             .onEnded { value in
+                guard drag > 0 else { return }
                 withAnimation(.snappy(duration: 0.3)) {
                     app.isMenuOpen = value.translation.width + value.predictedEndTranslation.width * 0.3 > width * 0.35
                     drag = 0

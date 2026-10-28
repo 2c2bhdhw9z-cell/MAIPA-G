@@ -60,21 +60,43 @@ xcrun simctl bootstatus "$UDID" -b
 xcrun simctl status_bar "$UDID" override --time "9:41" --dataNetwork wifi --wifiBars 3 --cellularBars 4 --batteryState charged --batteryLevel 100 || true
 xcrun simctl install "$UDID" "$APP"
 
+# A crash leaves a report here; one that appears during a scene is a real crash, and is printed.
+REPORTS="$HOME/Library/Logs/DiagnosticReports"
+mkdir -p "$REPORTS"
+crash_reports() { ls "$REPORTS" 2>/dev/null | grep -i "MAIPA-G" || true; }
+known_reports="$(crash_reports)"
+
+# A screenshot taken while the app is still starting shows only the plain launch colour, which
+# compresses to a small file. Real screens are several times bigger.
+size_of() { stat -f%z "$1" 2>/dev/null || echo 0; }
+
 failures=0
 for appearance in dark light; do
   xcrun simctl ui "$UDID" appearance "$appearance"
+  sleep 2
   for scene in $SCENES; do
     xcrun simctl terminate "$UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
+    sleep 1
     xcrun simctl launch "$UDID" "$BUNDLE_ID" -preview "$scene" >/dev/null
-    # Long enough for sheets to slide up and the list of AIs to download.
-    if [ "$scene" = "models" ]; then sleep 9; else sleep 4; fi
-    # A crash at launch shows up as the app no longer running.
-    if ! xcrun simctl spawn "$UDID" launchctl list | grep -q "$BUNDLE_ID"; then
-      echo "::error::MAIPA-G was not running after opening the '$scene' scene ($appearance); it probably crashed"
+    # Long enough for sheets to slide up and the list of AIs to download, then retried while
+    # the screen still looks empty (a slow launch on a busy machine).
+    if [ "$scene" = "models" ]; then sleep 9; else sleep 5; fi
+    shot="$OUT/$appearance-$scene.png"
+    for attempt in 1 2 3 4 5 6; do
+      xcrun simctl io "$UDID" screenshot "$shot" >/dev/null 2>&1 || true
+      [ "$(size_of "$shot")" -gt 150000 ] && break
+      sleep 3
+    done
+    new_reports="$(comm -13 <(echo "$known_reports" | sort) <(crash_reports | sort))"
+    if [ -n "$new_reports" ]; then
+      echo "::error::MAIPA-G crashed in the '$scene' scene ($appearance)"
+      for report in $new_reports; do head -n 80 "$REPORTS/$report"; done
+      known_reports="$(crash_reports)"
       failures=$((failures + 1))
+    elif [ "$(size_of "$shot")" -le 150000 ]; then
+      echo "::warning::the '$scene' scene ($appearance) still looked empty after waiting"
     fi
-    xcrun simctl io "$UDID" screenshot "$OUT/$appearance-$scene.png" >/dev/null
-    echo "    $appearance-$scene.png"
+    echo "    $appearance-$scene.png ($(size_of "$shot") bytes)"
   done
 done
 

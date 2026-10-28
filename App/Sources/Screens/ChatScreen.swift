@@ -145,7 +145,13 @@ struct ChatScreen: View {
     }
 
     private func modelName(_ id: String) -> String {
-        app.openRouter.modelsByID[id]?.shortName ?? id.split(separator: "/").last.map(String.init) ?? id
+        if let name = app.openRouter.modelsByID[id]?.shortName { return name }
+        // Not in the list (yet): "anthropic/claude-sonnet-5.5:free" reads as "Claude Sonnet 5.5".
+        let base = id.split(separator: "/").last.map(String.init) ?? id
+        let plain = base.split(separator: ":").first.map(String.init) ?? base
+        return plain.split(separator: "-").map { word in
+            word.first.map { $0.isLetter ? $0.uppercased() + word.dropFirst() : String(word) } ?? ""
+        }.joined(separator: " ")
     }
 
     private var actions: TurnActions {

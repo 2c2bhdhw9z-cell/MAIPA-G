@@ -18,6 +18,7 @@ final class ChatSession: Identifiable {
     @ObservationIgnored private var pendingTurn: AssistantTurn?
     @ObservationIgnored private var flushScheduled = false
     @ObservationIgnored private var saveTask: Task<Void, Never>?
+    @ObservationIgnored private var lastSaved = Date()
 
     init(chat: Chat, app: AppModel?) {
         self.id = chat.id
@@ -294,13 +295,16 @@ final class ChatSession: Identifiable {
         saveSoon()
     }
 
-    /// Saves now, or within a second while a reply is streaming in.
+    /// Saves within a second, gathering quick changes into one save, but never leaves more than
+    /// three seconds of a long reply unsaved.
     func saveSoon(immediately: Bool = false) {
         saveTask?.cancel()
-        let delay: UInt64 = immediately ? 0 : 800_000_000
+        let overdue = Date().timeIntervalSince(lastSaved) > 3
+        let delay: UInt64 = immediately || overdue ? 0 : 800_000_000
         saveTask = Task { [weak self] in
             if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
             guard !Task.isCancelled, let self, let app = self.app else { return }
+            self.lastSaved = Date()
             await app.library.save(self.chat)
         }
     }

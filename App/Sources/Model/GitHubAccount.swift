@@ -122,7 +122,7 @@ final class GitHubAccount {
     /// True when the six-month GitHub sign-in has run out. MAIPA-G still reads and saves without
     /// it; it's only needed to make new repos.
     var needsSignInAgain: Bool {
-        guard isConnected else { return false }
+        guard isConnected, !PreviewScenes.isActive else { return false }
         guard let token = Keychain.value(GitHubUserToken.self, for: .githubUserToken) else { return true }
         return !token.isFresh() && !token.canRefresh()
     }

@@ -132,7 +132,7 @@ struct ModelPicker: View {
                     HStack(spacing: 6) {
                         Text(price(model))
                         if !model.thinkingLevels.isEmpty { Label("Thinks", systemImage: "brain").labelStyle(.titleAndIcon) }
-                        if let context = model.contextLength { Text("\(context / 1000)K") }
+                        if let context = model.contextLength { Text("holds \(Self.tokens(context))") }
                         if cantReadRepo { Text("Can't read repos").foregroundStyle(Theme.danger) }
                     }
                     .font(.caption)
@@ -144,6 +144,16 @@ struct ModelPicker: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// "128K", "1M", "1.5M": how much a model can read at once.
+    static func tokens(_ count: Int) -> String {
+        if count >= 1_000_000 {
+            let millions = Double(count) / 1_000_000
+            let text = String(format: "%.1f", millions)
+            return (text.hasSuffix(".0") ? String(text.dropLast(2)) : text) + "M"
+        }
+        return "\(max(1, count / 1000))K"
     }
 
     /// Dollars per million tokens (about 750,000 words), in and out.

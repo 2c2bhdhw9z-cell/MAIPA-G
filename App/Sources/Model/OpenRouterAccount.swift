@@ -92,7 +92,7 @@ final class OpenRouterAccount {
     // MARK: Money
 
     func refreshKeyInfo() async {
-        guard isSignedIn else { return }
+        guard isSignedIn, !PreviewScenes.isActive else { return }
         do {
             let info = try await client.keyInfo()
             keyInfo = info
