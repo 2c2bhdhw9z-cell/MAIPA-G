@@ -168,7 +168,8 @@ final class ChatSession: Identifiable {
         }
         let catalogue = app.openRouter.modelsByID
         let thinking = chat.thinking
-        let route = ModelRouter.route(choice: chat.model, difficulty: difficulty, thinking: thinking, account: app.openRouter.accountState, catalogue: catalogue)
+        let judgedDifficulty = difficulty
+        let route = ModelRouter.route(choice: chat.model, difficulty: judgedDifficulty, thinking: thinking, account: app.openRouter.accountState, catalogue: catalogue)
         let input = AgentTurnInput(
             chat: chat,
             route: route,
@@ -181,7 +182,7 @@ final class ChatSession: Identifiable {
         let environment = AgentEnvironment(
             openRouter: OpenRouterClient(transport: app.transport, apiKey: apiKey),
             freeRoute: {
-                ModelRouter.route(choice: .free, difficulty: difficulty, thinking: thinking, account: AccountState(), catalogue: catalogue)
+                ModelRouter.route(choice: .free, difficulty: judgedDifficulty, thinking: thinking, account: AccountState(), catalogue: catalogue)
             },
             onOutOfCredits: { await account.markOutOfCredits() }
         )

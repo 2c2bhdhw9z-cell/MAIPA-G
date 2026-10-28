@@ -20,7 +20,7 @@ struct MessageRow: View, Equatable {
     var modelName: (String) -> String
     var actions: TurnActions
 
-    static func == (lhs: MessageRow, rhs: MessageRow) -> Bool {
+    nonisolated static func == (lhs: MessageRow, rhs: MessageRow) -> Bool {
         lhs.message == rhs.message && lhs.isLatest == rhs.isLatest
     }
 

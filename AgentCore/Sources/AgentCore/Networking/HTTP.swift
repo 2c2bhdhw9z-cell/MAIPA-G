@@ -305,26 +305,19 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate, @unchec
         return entries.removeValue(forKey: id)
     }
 
-    func urlSession(
-        _ session: URLSession,
-        dataTask: URLSessionDataTask,
-        didReceive response: URLResponse,
-        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
-    ) {
-        if let http = response as? HTTPURLResponse {
-            takeHead(dataTask.taskIdentifier)?.resume(returning: http)
-            completionHandler(.allow)
-        } else {
-            takeHead(dataTask.taskIdentifier)?.resume(throwing: HTTPError.transport("Not an HTTP response", isOffline: false))
-            completionHandler(.cancel)
-        }
-    }
+    // The response head is delivered with the first piece of the body (by then the task has its
+    // response), or at the end for an empty body. This deliberately avoids the "did receive
+    // response" delegate method: its completion handler is declared differently on Apple's SDKs
+    // and on Linux, and a method that doesn't match exactly is silently never called, which
+    // would leave every stream waiting forever.
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        deliverHead(for: dataTask)
         body(dataTask.taskIdentifier)?.yield(data)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if error == nil { deliverHead(for: task) }
         guard let entry = remove(task.taskIdentifier) else { return }
         if let error {
             let mapped = URLSessionTransport.transportError(error)
@@ -333,6 +326,15 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate, @unchec
         } else {
             entry.head?.resume(throwing: HTTPError.transport("The server closed the connection early", isOffline: false))
             entry.body.finish()
+        }
+    }
+
+    private func deliverHead(for task: URLSessionTask) {
+        guard let head = takeHead(task.taskIdentifier) else { return }
+        if let http = task.response as? HTTPURLResponse {
+            head.resume(returning: http)
+        } else {
+            head.resume(throwing: HTTPError.transport("Not an HTTP response", isOffline: false))
         }
     }
 }
