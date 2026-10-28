@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Connect GitHub to MAIPA-G</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body>
+  <main>
+    <div class="mark" aria-hidden="true"></div>
+    <h1>Making your MAIPA-G app on GitHub…</h1>
+    <p>GitHub will ask you to confirm. Tap <strong>Create GitHub App</strong>.</p>
+    <form id="create" method="post" action="https://github.com/settings/apps/new">
+      <input type="hidden" name="manifest" id="manifest">
+      <button class="button" type="submit">Continue to GitHub</button>
+    </form>
+    <p class="small">If GitHub asks you to sign in first and then shows an empty form, go back to
+      MAIPA-G and tap Connect GitHub again. It works the second time.</p>
+  </main>
+  <script>
+    // The recipe for the user's own GitHub app. GitHub registers it under their account, and the
+    // keys come back only to the MAIPA-G app on their phone. Change permissions here only with a
+    // matching change in the app: existing apps keep the permissions they were made with.
+    (function () {
+      var params = new URLSearchParams(window.location.search);
+      var state = (params.get("state") || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 100);
+      var name = (params.get("name") || "MAIPA-G").replace(/[^A-Za-z0-9 ._-]/g, "").slice(0, 34) || "MAIPA-G";
+      var site = new URL("../../", window.location.href);
+      var manifest = {
+        name: name,
+        url: "https://github.com/2c2bhdhw9z-cell/MAIPA-G",
+        description: "MAIPA-G, the AI helper on your iPhone. It reads your repos, and changes them when you ask it to.",
+        public: false,
+        redirect_url: new URL("github/created/", site).href,
+        callback_urls: [new URL("github/authorized/", site).href],
+        request_oauth_on_install: true,
+        hook_attributes: { url: site.href, active: false },
+        default_events: [],
+        // What each one is for (an app keeps the permissions it was made with, so the later
+        // builds' needs are asked for now, once):
+        //   contents, pull_requests: read repos; save changes on a side branch and request to add them
+        //   issues: read and answer issues and pull request comments
+        //   actions, workflows, checks, statuses: start and check builds; set up Autonomous jobs
+        //   secrets: give an Autonomous job its keys
+        //   repository_creation: make new repos, and the private MAIPA-G-data repo. This is the
+        //     narrow permission GitHub added on 13 October 2026; "administration" would also allow
+        //     deleting and transferring repos, which MAIPA-G never needs.
+        default_permissions: {
+          metadata: "read",
+          contents: "write",
+          pull_requests: "write",
+          issues: "write",
+          actions: "write",
+          workflows: "write",
+          checks: "read",
+          statuses: "read",
+          secrets: "write",
+          repository_creation: "write"
+        }
+      };
+      var form = document.getElementById("create");
+      form.action = "https://github.com/settings/apps/new?state=" + encodeURIComponent(state);
+      document.getElementById("manifest").value = JSON.stringify(manifest);
+      form.submit();
+    })();
+  </script>
+</body>
+</html>

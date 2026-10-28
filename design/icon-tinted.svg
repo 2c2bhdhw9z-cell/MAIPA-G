@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- The tinted icon: greys only. iOS turns brightness into the colour the person picks for tinted
+       icons, so the shape is bright on black and the eyes are dark. -->
+  <defs>
+    <linearGradient id="body" x1="0.18" y1="0.04" x2="0.82" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#b8b8b8"/>
+    </linearGradient>
+    <radialGradient id="spark" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.4" stop-color="#e6e6e6"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <path id="bodyShape" d="M512 300 C 690 300, 812 420, 812 578 C 812 736, 690 832, 512 832 C 452 832, 400 824, 356 806 C 330 840, 290 870, 236 884 C 262 846, 270 808, 262 778 C 228 724, 212 654, 212 578 C 212 420, 334 300, 512 300 Z"/>
+  </defs>
+  <rect width="1024" height="1024" fill="#000000"/>
+  <path d="M512 304 C 512 262, 532 220, 574 196" fill="none" stroke="#d9d9d9" stroke-width="26" stroke-linecap="round"/>
+  <circle cx="586" cy="186" r="64" fill="url(#spark)"/>
+  <circle cx="586" cy="186" r="24" fill="#ffffff"/>
+  <use href="#bodyShape" fill="url(#body)"/>
+  <ellipse cx="424" cy="566" rx="46" ry="64" fill="#000000"/>
+  <ellipse cx="600" cy="566" rx="46" ry="64" fill="#000000"/>
+  <circle cx="440" cy="540" r="15" fill="#ffffff"/>
+  <circle cx="616" cy="540" r="15" fill="#ffffff"/>
+  <path d="M478 668 C 496 684, 528 684, 546 668" fill="none" stroke="#000000" stroke-width="16" stroke-linecap="round"/>
+</svg>
