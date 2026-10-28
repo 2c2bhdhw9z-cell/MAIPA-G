@@ -81,6 +81,10 @@ final class AppModel {
     func start() async {
         guard !started else { return }
         started = true
+        if let scene = PreviewScenes.scene {
+            await showPreview(scene)
+            return
+        }
         openRouter.restore()
         github.restore()
         await library.load()
@@ -111,6 +115,7 @@ final class AppModel {
     }
 
     func scenePhaseChanged(_ phase: ScenePhase) {
+        guard !PreviewScenes.isActive else { return }
         switch phase {
         case .background:
             let grace = BackgroundGrace(name: "MAIPA-G save") {}
@@ -146,6 +151,7 @@ final class AppModel {
         guard copy != settings else { return }
         copy.updatedAt = Date()
         settings = copy
+        guard !PreviewScenes.isActive else { return }
         let store = library.store
         Task {
             try? await store.saveDocument(copy, at: AppSettings.fileName)
@@ -247,6 +253,39 @@ final class AppModel {
             updateSettings { $0.lastRepo = repo }
         case .chat(let id):
             library.session(id)?.setRepo(repo)
+        }
+    }
+
+    // MARK: Screenshots
+
+    /// Sets up one made-up scene for the build check's screenshots (see PreviewScenes).
+    private func showPreview(_ scene: String) async {
+        if scene != "home-new" && scene != "connect" {
+            openRouter.previewSignedIn()
+            github.previewConnected()
+            sync.previewSaved()
+            home.repo = ChatRepo(ref: RepoRef(owner: "2c2bhdhw9z-cell", name: "MAIPA-G"), branch: "main", defaultBranch: "main", isPrivate: false)
+        }
+        let summaries = PreviewScenes.sampleSummaries()
+        switch scene {
+        case "chat": library.preview(summaries: summaries, open: PreviewScenes.sampleChat())
+        case "questions": library.preview(summaries: summaries, open: PreviewScenes.questionChat())
+        case "working": library.preview(summaries: summaries, open: PreviewScenes.workingChat())
+        case "menu":
+            library.preview(summaries: summaries, open: nil)
+            isMenuOpen = true
+        case "settings":
+            library.preview(summaries: summaries, open: nil)
+            sheet = .settings
+        case "connect":
+            library.preview(summaries: [], open: nil)
+            sheet = .connectGitHub
+        case "models":
+            library.preview(summaries: summaries, open: nil)
+            await openRouter.loadModels(force: true)
+            sheet = .models(.home)
+        default:
+            library.preview(summaries: scene == "home-new" ? [] : summaries, open: nil)
         }
     }
 

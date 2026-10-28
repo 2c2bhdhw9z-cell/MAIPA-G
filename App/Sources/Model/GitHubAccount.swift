@@ -86,13 +86,56 @@ final class GitHubAccount {
         )
     }
 
-    /// Fills in who the user is and their repos. Called after restoring and after connecting.
+    /// Fills in who the user is and their repos, and notices if the app was deleted or uninstalled
+    /// on GitHub's website. Called after restoring and after connecting.
     func refresh() async {
-        guard isConnected else { return }
-        if user == nil, let client {
+        guard let credentials, let signer = try? SecurityRS256Signer(pem: credentials.privateKeyPEM) else { return }
+        guard await GitHubConnect.appStillWorks(credentials: credentials, signer: signer, transport: transport) else {
+            forget()
+            lastError = "Your MAIPA-G app is no longer on GitHub. Connect GitHub again to make a new one."
+            return
+        }
+        guard isConnected, let client else { return }
+        do {
+            repos = try await client.installationRepositories()
+            reposError = nil
+        } catch let error as GitHubAPIError where error.status == 401 || error.status == 404 {
+            // The app exists but may have been uninstalled from the account.
+            if let installations = try? await GitHubConnect.installations(credentials: credentials, signer: signer, transport: transport), installations.isEmpty {
+                Keychain.remove(.githubInstallation)
+                installationID = nil
+                session = nil
+                repos = []
+                phase = .needsInstall
+                lastError = "MAIPA-G was taken off your GitHub account. Tap Let MAIPA-G in to add it back."
+                return
+            }
+            reposError = describe(error)
+        } catch {
+            reposError = describe(error)
+        }
+        if user == nil {
             user = try? await client.authenticatedUser()
         }
-        await loadRepos()
+    }
+
+    /// True when the six-month GitHub sign-in has run out. MAIPA-G still reads and saves without
+    /// it; it's only needed to make new repos.
+    var needsSignInAgain: Bool {
+        guard isConnected else { return false }
+        guard let token = Keychain.value(GitHubUserToken.self, for: .githubUserToken) else { return true }
+        return !token.isFresh() && !token.canRefresh()
+    }
+
+    private func forget() {
+        for item in [Keychain.Item.githubApp, .githubInstallation, .githubUserToken] { Keychain.remove(item) }
+        credentials = nil
+        installationID = nil
+        user = nil
+        repos = []
+        session = nil
+        branchCache = [:]
+        phase = .notConnected
     }
 
     // MARK: Connecting
@@ -208,19 +251,26 @@ final class GitHubAccount {
         if let credentials, let installationID, let signer = try? SecurityRS256Signer(pem: credentials.privateKeyPEM) {
             try? await GitHubConnect.uninstall(installationID: installationID, credentials: credentials, signer: signer, transport: transport)
         }
-        for item in [Keychain.Item.githubApp, .githubInstallation, .githubUserToken] { Keychain.remove(item) }
-        credentials = nil
-        installationID = nil
-        user = nil
-        repos = []
-        session = nil
-        branchCache = [:]
-        phase = .notConnected
+        forget()
+    }
+
+    /// Screenshots only: looks connected, with made-up repos and nothing saved anywhere.
+    func previewConnected() {
+        credentials = GitHubAppCredentials(appID: 1, slug: "maipa-g", name: "MAIPA-G", clientID: "preview", clientSecret: "", privateKeyPEM: "", ownerLogin: "2c2bhdhw9z-cell", htmlURL: "https://github.com/apps/maipa-g")
+        installationID = 1
+        phase = .connected
+        let names = ["MAIPA-G", "Continuum-", "snes-tas-studio", "CultivationMMO", "nightreap-survivors"]
+        repos = names.enumerated().map { index, name in
+            GitHubRepo(id: index, name: name, fullName: "2c2bhdhw9z-cell/\(name)", ownerLogin: "2c2bhdhw9z-cell", isPrivate: index == 3,
+                       defaultBranch: name == "Continuum-" ? "master" : "main", pushedAt: Date().addingTimeInterval(Double(-index) * 40_000),
+                       language: ["Swift", "Rust", "Swift", "Rust", "TypeScript"][index], htmlURL: "https://github.com/2c2bhdhw9z-cell/\(name)")
+        }
     }
 
     // MARK: Repos
 
     func loadRepos() async {
+        guard !PreviewScenes.isActive else { return }
         guard let client else { return }
         isLoadingRepos = true
         defer { isLoadingRepos = false }

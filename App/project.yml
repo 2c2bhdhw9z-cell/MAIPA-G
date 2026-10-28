@@ -77,6 +77,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.maipag.app
         PRODUCT_NAME: MAIPA-G
         PRODUCT_MODULE_NAME: MAIPAG
+        # iPhone only. Set on the target because XcodeGen's own target default is iPhone and iPad.
+        TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: NO
         # Without this the icon catalogue compiles but no icon is assigned, and the app installs
         # as a blank square. The name must match the .appiconset folder.

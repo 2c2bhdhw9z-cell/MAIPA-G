@@ -84,6 +84,13 @@ final class SyncCoordinator {
         } while runAgain
     }
 
+    /// Screenshots only.
+    func previewSaved() {
+        status = .idle
+        lastSaved = Date().addingTimeInterval(-90)
+        repo = RepoRef(owner: "2c2bhdhw9z-cell", name: DataRepoSync.repoName)
+    }
+
     func reset() async {
         scheduled?.cancel()
         await engine?.reset()

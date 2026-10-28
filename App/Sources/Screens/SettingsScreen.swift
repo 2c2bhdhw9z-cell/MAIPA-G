@@ -90,6 +90,11 @@ struct SettingsScreen: View {
                 if let url = app.github.installationSettingsURL {
                     Button("Choose which repos MAIPA-G can use") { openURL(url) }
                 }
+                if app.github.needsSignInAgain {
+                    Button("Sign in to GitHub again") {
+                        Task { await app.github.reauthorize() }
+                    }
+                }
                 Button("Disconnect GitHub", role: .destructive) { confirmDisconnect = true }
             } else {
                 Button {

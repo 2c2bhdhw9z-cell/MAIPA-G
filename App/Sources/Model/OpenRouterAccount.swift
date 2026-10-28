@@ -75,6 +75,12 @@ final class OpenRouterAccount {
         }
     }
 
+    /// Screenshots only: looks signed in, with nothing saved anywhere.
+    func previewSignedIn() {
+        apiKey = "preview"
+        keyInfo = OpenRouterKeyInfo(label: "MAIPA-G", usage: 1.42, usageDaily: 0.08, isFreeTier: false, freeRequestsUsedToday: 3, freeRequestsLimitToday: 50, freeRequestsLeftToday: 47)
+    }
+
     func signOut() {
         Keychain.remove(.openRouterKey)
         apiKey = nil

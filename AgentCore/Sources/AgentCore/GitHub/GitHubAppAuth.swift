@@ -313,13 +313,17 @@ public enum GitHubConnect {
     }
 
     /// Whether the user's MAIPA-G app still exists on GitHub and its saved key still works.
-    /// Network trouble counts as yes, so a bad connection never makes MAIPA-G forget the app.
+    /// Only a clear answer from GitHub counts as no: the app is gone, or the key was deleted.
+    /// Network trouble, or a phone clock so far off that GitHub refuses the token's times, counts as
+    /// yes, so MAIPA-G never forgets a working connection by mistake.
     public static func appStillWorks(credentials: GitHubAppCredentials, signer: any RS256Signer, transport: any HTTPTransport) async -> Bool {
         guard let jwt = try? GitHubAppJWT.make(clientID: credentials.clientID, signer: signer) else { return false }
         let client = GitHubClient(transport: transport, tokens: nil)
         do {
             let response = try await client.send("GET", "/app", auth: .bearer(jwt), allow: [401, 404])
-            return response.isSuccess
+            if response.isSuccess { return true }
+            let message = (JSONValue.parse(response.body)?["message"]?.stringValue ?? "").lowercased()
+            return !(response.status == 404 || message.contains("not found") || message.contains("could not be decoded"))
         } catch {
             return true
         }

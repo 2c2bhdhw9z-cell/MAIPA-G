@@ -40,6 +40,11 @@ struct ConnectGitHubSheet: View {
         let github = app.github
         let needsInstall = github.phase == .needsInstall
         return VStack(alignment: .leading, spacing: 16) {
+            if let error = github.lastError, !triedOnce {
+                Label(error, systemImage: "info.circle")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.secondaryText)
+            }
             Text("MAIPA-G gets its own app on your GitHub, so everything it does shows up under its own name. Two quick steps:")
                 .foregroundStyle(Theme.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)

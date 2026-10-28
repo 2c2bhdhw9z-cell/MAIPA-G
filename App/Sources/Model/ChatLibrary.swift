@@ -47,6 +47,17 @@ final class ChatLibrary {
         self.store = store
     }
 
+    /// Screenshots only: shows these chats, and opens one, without reading or writing any file.
+    func preview(summaries: [ChatSummary], open chat: Chat?) {
+        self.summaries = summaries
+        isLoaded = true
+        if let chat {
+            let session = ChatSession(chat: chat, app: app)
+            sessions[chat.id] = session
+            openSession = session
+        }
+    }
+
     func load() async {
         let chats = await store.loadAll()
         var fixed: [Chat] = []
@@ -127,6 +138,7 @@ final class ChatLibrary {
     // MARK: Changes
 
     func save(_ chat: Chat) async {
+        guard !PreviewScenes.isActive else { return }
         do {
             try await store.save(chat)
         } catch {

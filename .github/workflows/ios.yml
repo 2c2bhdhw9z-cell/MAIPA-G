@@ -50,6 +50,33 @@ jobs:
       - name: Tests
         run: swift test --package-path AgentCore
 
+  # Each screen, opened in the iPhone simulator with made-up content, photographed in Dark and Light,
+  # so the look is checked before a build reaches the phone. Pull requests and manual runs only.
+  screens:
+    name: Screenshots (simulator)
+    needs: checks
+    if: github.event_name != 'push'
+    runs-on: macos-26
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Take the screenshots
+        run: |
+          chmod +x scripts/screenshots.sh
+          scripts/screenshots.sh
+      - name: Upload the screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: MAIPA-G-screenshots-${{ github.run_number }}
+          path: App/build/screenshots/*.png
+          if-no-files-found: warn
+          retention-days: 14
+
   ipa:
     name: iPhone app
     needs: checks
