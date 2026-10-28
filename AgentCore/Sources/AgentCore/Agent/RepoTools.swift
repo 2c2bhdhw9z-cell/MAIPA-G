@@ -17,9 +17,9 @@ public enum FileRead: Sendable, Hashable {
 /// ready and fetches single files otherwise; searching needs the local copy and makes it on first
 /// use (it is usually ready, because it starts downloading when the chat begins).
 public actor RepoWorkspace {
-    public let repo: RepoRef
-    public let branch: String
-    public let commit: String
+    public nonisolated let repo: RepoRef
+    public nonisolated let branch: String
+    public nonisolated let commit: String
     private let github: GitHubClient
     private let store: SnapshotStore
     private var treeTask: Task<GitTree, Error>?

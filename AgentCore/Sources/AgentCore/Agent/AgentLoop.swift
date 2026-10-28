@@ -46,18 +46,43 @@ public enum AgentEvent: Sendable {
     case updated(AssistantTurn, milestone: Bool)
 }
 
+/// One running turn. `cancel()` stops it the gentle way: whatever the AI already wrote is kept,
+/// unfinished tools are marked as stopped, and a last event with the final state still arrives
+/// before `events` ends.
+public struct AgentRun: Sendable {
+    public let events: AsyncStream<AgentEvent>
+    private let task: Task<Void, Never>
+
+    init(events: AsyncStream<AgentEvent>, task: Task<Void, Never>) {
+        self.events = events
+        self.task = task
+    }
+
+    public func cancel() {
+        task.cancel()
+    }
+}
+
 /// The agent loop: ask the model, run the tools it asks for, give it the results, and repeat
 /// until it answers, needs the user, or is stopped.
 public enum AgentLoop {
-    public static func run(_ input: AgentTurnInput, environment: AgentEnvironment) -> AsyncStream<AgentEvent> {
-        AsyncStream(bufferingPolicy: .bufferingNewest(64)) { continuation in
-            let task = Task {
-                var runner = Runner(input: input, environment: environment, continuation: continuation)
-                await runner.run()
-                continuation.finish()
-            }
-            continuation.onTermination = { _ in task.cancel() }
+    public static func start(_ input: AgentTurnInput, environment: AgentEnvironment) -> AgentRun {
+        // Every event carries the whole turn, so if the reader falls behind, dropping older ones
+        // loses nothing.
+        let (events, continuation) = AsyncStream<AgentEvent>.makeStream(bufferingPolicy: .bufferingNewest(256))
+        let task = Task {
+            var runner = Runner(input: input, environment: environment, continuation: continuation)
+            await runner.run()
+            continuation.finish()
         }
+        continuation.onTermination = { reason in
+            if case .cancelled = reason { task.cancel() }
+        }
+        return AgentRun(events: events, task: task)
+    }
+
+    public static func run(_ input: AgentTurnInput, environment: AgentEnvironment) -> AsyncStream<AgentEvent> {
+        start(input, environment: environment).events
     }
 }
 
@@ -192,10 +217,13 @@ private struct Runner {
                 for try await chunk in stream {
                     accumulator.apply(chunk)
                     if let error = chunk.error { throw error }
+                    let changed = turn.steps[index].text != accumulator.text || turn.steps[index].reasoning != accumulator.reasoning
                     turn.steps[index].text = accumulator.text
                     turn.steps[index].reasoning = accumulator.reasoning
                     if let model = accumulator.model { turn.steps[index].model = model }
-                    if Date().timeIntervalSince(lastEmit) > 0.06 { emit(milestone: false) }
+                    // Every new piece of text goes out at once, so words never wait for the next
+                    // ones (a model can pause mid-reply). The app draws at most once a frame.
+                    if changed { emit(milestone: false) }
                 }
                 try Task.checkCancellation()
                 guard accumulator.hasOutput || !accumulator.reasoning.isEmpty || accumulator.finishReason != nil else {

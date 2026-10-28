@@ -4,3 +4,4 @@ DerivedData/
 *.xcodeproj/
 App/build/
 .DS_Store
+App/Info.plist

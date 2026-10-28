@@ -220,6 +220,40 @@ struct AgentLoopTests {
         #expect(finished?.steps.last?.text == "Done.")
     }
 
+    @Test func stoppingKeepsWhatWasWrittenAndSendsAFinalState() async throws {
+        /// Streams a few words, then waits until cancelled.
+        final class SlowTransport: HTTPTransport, @unchecked Sendable {
+            func send(_ request: HTTPRequest) async throws -> HTTPResponse { HTTPResponse(status: 404) }
+            func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse {
+                let first = Data("data: \(AgentLoopTests.text("Partial answer"))\n\n".utf8)
+                return HTTPStreamResponse(status: 200, headers: [:], body: AsyncThrowingStream { continuation in
+                    continuation.yield(first)
+                    let waiter = Task {
+                        try? await Task.sleep(nanoseconds: 30_000_000_000)
+                        continuation.finish()
+                    }
+                    continuation.onTermination = { _ in waiter.cancel() }
+                })
+            }
+        }
+        let environment = AgentEnvironment(
+            openRouter: OpenRouterClient(transport: SlowTransport(), apiKey: "sk"),
+            freeRoute: { ModelRouter.route(choice: .free, difficulty: .normal, thinking: .medium, account: AccountState(), catalogue: [:]) },
+            onOutOfCredits: {}
+        )
+        let run = AgentLoop.start(AgentTurnInput(chat: Self.newChat("hi"), route: Self.route(), systemPrompt: "s", tools: []), environment: environment)
+        var last: AssistantTurn?
+        for await event in run.events {
+            guard case .updated(let turn, _) = event else { continue }
+            last = turn
+            if turn.steps.first?.text == "Partial answer", turn.status == .running { run.cancel() }
+        }
+        let stopped = try #require(last)
+        #expect(stopped.status == .stopped)
+        #expect(stopped.steps.first?.text == "Partial answer")
+        #expect(stopped.steps.first?.finishedAt != nil)
+    }
+
     @Test func noToolsForModelsThatCantUseThem() async throws {
         let transport = ScriptedTransport([.events([Self.text("Hi."), Self.done])])
         let environment = AgentEnvironment(

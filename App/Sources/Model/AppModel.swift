@@ -1,0 +1,262 @@
+import AgentCore
+import Foundation
+import Observation
+import SwiftUI
+
+/// Which message box a picker is choosing for: the home screen's, or an open chat's.
+enum ComposerTarget: Hashable, Sendable {
+    case home
+    case chat(UUID)
+}
+
+enum AppSheet: Identifiable, Hashable {
+    case settings
+    case connectGitHub
+    case signInOpenRouter
+    case models(ComposerTarget)
+    case repos(ComposerTarget)
+    case branches(ComposerTarget)
+
+    var id: String {
+        switch self {
+        case .settings: return "settings"
+        case .connectGitHub: return "github"
+        case .signInOpenRouter: return "openrouter"
+        case .models(let target): return "models-\(target)"
+        case .repos(let target): return "repos-\(target)"
+        case .branches(let target): return "branches-\(target)"
+        }
+    }
+}
+
+/// What's in the home screen's box before a chat starts.
+@MainActor
+@Observable
+final class HomeDraft {
+    var text = ""
+    /// New chats start on Auto.
+    var model: ModelChoice = .auto
+    var thinking: ThinkingLevel = .default
+    var repo: ChatRepo?
+}
+
+/// The app's state, shared by every screen.
+@MainActor
+@Observable
+final class AppModel {
+    let paths: AppPaths
+    let transport: URLSessionTransport
+    let github: GitHubAccount
+    let openRouter: OpenRouterAccount
+    let library: ChatLibrary
+    let sync: SyncCoordinator
+    let updates: UpdateChecker
+    let snapshots: SnapshotStore
+    let home = HomeDraft()
+    private(set) var settings: AppSettings
+
+    var isMenuOpen = false
+    var sheet: AppSheet?
+    @ObservationIgnored private var started = false
+
+    init() {
+        let paths = AppPaths.make()
+        self.paths = paths
+        let transport = URLSessionTransport()
+        self.transport = transport
+        github = GitHubAccount(transport: transport)
+        openRouter = OpenRouterAccount(transport: transport, paths: paths)
+        library = ChatLibrary(store: ChatStore(dataDirectory: paths.data))
+        sync = SyncCoordinator(paths: paths)
+        updates = UpdateChecker()
+        snapshots = SnapshotStore(root: paths.repoCopies)
+        settings = Self.readSettings(paths)
+        library.app = self
+        sync.app = self
+        home.repo = settings.lastRepo
+    }
+
+    // MARK: Starting up
+
+    func start() async {
+        guard !started else { return }
+        started = true
+        openRouter.restore()
+        github.restore()
+        await library.load()
+        async let models: Void = openRouter.loadModels()
+        async let key: Void = openRouter.refreshKeyInfo()
+        await github.refresh()
+        await startSaving()
+        await updates.check(using: github.publicClient)
+        _ = await (models, key)
+    }
+
+    /// Called when the connect sheet finishes.
+    func githubDidConnect() async {
+        await github.refresh()
+        await startSaving()
+    }
+
+    private func startSaving() async {
+        guard github.isConnected, let client = github.client, let installation = github.installationID, let owner = github.login else { return }
+        await sync.configure(client: client, owner: owner, installationID: installation)
+    }
+
+    func disconnectGitHub() async {
+        await sync.syncNow()
+        await sync.reset()
+        await github.disconnect()
+        home.repo = nil
+    }
+
+    func scenePhaseChanged(_ phase: ScenePhase) {
+        switch phase {
+        case .background:
+            let grace = BackgroundGrace(name: "MAIPA-G save") {}
+            Task {
+                await sync.syncNow()
+                grace.end()
+            }
+        case .active:
+            guard started else { return }
+            Task {
+                await openRouter.refreshKeyInfo()
+                await updates.check(using: github.publicClient)
+                sync.request(after: 1)
+            }
+        default:
+            break
+        }
+    }
+
+    // MARK: Settings
+
+    private static func readSettings(_ paths: AppPaths) -> AppSettings {
+        let url = paths.data.appendingPathComponent(AppSettings.fileName)
+        guard let data = try? Data(contentsOf: url), let settings = try? JSONCoding.decoder().decode(AppSettings.self, from: data) else {
+            return AppSettings()
+        }
+        return settings
+    }
+
+    func updateSettings(_ change: (inout AppSettings) -> Void) {
+        var copy = settings
+        change(&copy)
+        guard copy != settings else { return }
+        copy.updatedAt = Date()
+        settings = copy
+        let store = library.store
+        Task {
+            try? await store.saveDocument(copy, at: AppSettings.fileName)
+            sync.request()
+        }
+    }
+
+    /// A save brought newer chats or settings from GitHub (another phone, or a reinstall).
+    func dataChangedFromGitHub(_ report: DataRepoSync.Report) async {
+        if report.downloaded.contains(AppSettings.fileName) {
+            settings = Self.readSettings(paths)
+            if home.repo == nil { home.repo = settings.lastRepo }
+        }
+        if (report.downloaded + report.deletedHere).contains(where: { $0.hasPrefix("chats/") }) {
+            await library.reloadFromDisk()
+        }
+    }
+
+    // MARK: Chats
+
+    func sendFromHome() {
+        let text = home.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        guard openRouter.isSignedIn else {
+            sheet = .signInOpenRouter
+            return
+        }
+        library.startChat(text: text, repo: home.repo, model: home.model, thinking: home.thinking)
+        home.text = ""
+        home.model = .auto
+        home.thinking = .default
+        let repo = home.repo
+        updateSettings { $0.lastRepo = repo }
+        Haptics.tap(enabled: true)
+    }
+
+    func newChat() {
+        library.showHome()
+        isMenuOpen = false
+    }
+
+    func turnFinished(in session: ChatSession) {
+        Task { await openRouter.refreshKeyInfo() }
+        sync.request()
+        if session.lastTurn?.status == .done || session.lastTurn?.status == .waitingForUser {
+            Haptics.success()
+        }
+    }
+
+    // MARK: Pickers
+
+    func repo(for target: ComposerTarget) -> ChatRepo? {
+        switch target {
+        case .home: return home.repo
+        case .chat(let id): return library.session(id)?.chat.repo
+        }
+    }
+
+    func model(for target: ComposerTarget) -> ModelChoice {
+        switch target {
+        case .home: return home.model
+        case .chat(let id): return library.session(id)?.chat.model ?? .auto
+        }
+    }
+
+    func choose(model: ModelChoice, for target: ComposerTarget) {
+        switch target {
+        case .home:
+            home.model = model
+            let levels = openRouter.thinkingLevels(for: model)
+            if !levels.isEmpty, let nearest = home.thinking.nearest(in: levels) { home.thinking = nearest }
+        case .chat(let id):
+            library.session(id)?.setModel(model)
+        }
+    }
+
+    func choose(thinking: ThinkingLevel, for target: ComposerTarget) {
+        switch target {
+        case .home: home.thinking = thinking
+        case .chat(let id): library.session(id)?.setThinking(thinking)
+        }
+    }
+
+    func choose(repo: GitHubRepo?, for target: ComposerTarget) {
+        let chosen = repo.map { ChatRepo(ref: $0.ref, branch: $0.defaultBranch, defaultBranch: $0.defaultBranch, isPrivate: $0.isPrivate) }
+        set(chosen, for: target)
+    }
+
+    func choose(branch: String, for target: ComposerTarget) {
+        guard var repo = repo(for: target) else { return }
+        repo.branch = branch
+        set(repo, for: target)
+    }
+
+    private func set(_ repo: ChatRepo?, for target: ComposerTarget) {
+        switch target {
+        case .home:
+            home.repo = repo
+            updateSettings { $0.lastRepo = repo }
+        case .chat(let id):
+            library.session(id)?.setRepo(repo)
+        }
+    }
+
+    // MARK: Look
+
+    var preferredColorScheme: ColorScheme? {
+        switch settings.appearance {
+        case .dark: return .dark
+        case .light: return .light
+        case .system: return nil
+        }
+    }
+}

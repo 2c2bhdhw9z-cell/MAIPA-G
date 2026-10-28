@@ -287,16 +287,54 @@ public enum GitHubConnect {
         URL(string: "https://github.com/apps/\(GitHubClient.escape(slug))/installations/new")!
     }
 
+    /// The page where the user lets their MAIPA-G app act for them. GitHub sends them back to the
+    /// app's first callback address (the "authorized" bounce page) with a code.
+    public static func authorizeURL(clientID: String, state: String, pkce: PKCE) -> URL {
+        var components = URLComponents(string: "https://github.com/login/oauth/authorize")!
+        components.queryItems = [
+            URLQueryItem(name: "client_id", value: clientID),
+            URLQueryItem(name: "state", value: state),
+            URLQueryItem(name: "code_challenge", value: pkce.challenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
+        ]
+        return components.url!
+    }
+
     /// Swaps the code GitHub sends after the user authorizes the app for a user token.
-    public static func exchangeAuthorizationCode(_ code: String, credentials: GitHubAppCredentials, transport: any HTTPTransport) async throws -> GitHubUserToken {
-        try await requestUserToken(
-            parameters: [
-                "client_id": credentials.clientID,
-                "client_secret": credentials.clientSecret,
-                "code": code,
-            ],
-            transport: transport
-        )
+    /// `verifier` is the PKCE secret when the sign-in was started with `authorizeURL`.
+    public static func exchangeAuthorizationCode(_ code: String, credentials: GitHubAppCredentials, verifier: String? = nil, transport: any HTTPTransport) async throws -> GitHubUserToken {
+        var parameters = [
+            "client_id": credentials.clientID,
+            "client_secret": credentials.clientSecret,
+            "code": code,
+        ]
+        if let verifier { parameters["code_verifier"] = verifier }
+        return try await requestUserToken(parameters: parameters, transport: transport)
+    }
+
+    /// Whether the user's MAIPA-G app still exists on GitHub and its saved key still works.
+    /// Network trouble counts as yes, so a bad connection never makes MAIPA-G forget the app.
+    public static func appStillWorks(credentials: GitHubAppCredentials, signer: any RS256Signer, transport: any HTTPTransport) async -> Bool {
+        guard let jwt = try? GitHubAppJWT.make(clientID: credentials.clientID, signer: signer) else { return false }
+        let client = GitHubClient(transport: transport, tokens: nil)
+        do {
+            let response = try await client.send("GET", "/app", auth: .bearer(jwt), allow: [401, 404])
+            return response.isSuccess
+        } catch {
+            return true
+        }
+    }
+
+    /// Takes MAIPA-G's app off the user's account (the app itself stays, for connecting again).
+    public static func uninstall(installationID: Int, credentials: GitHubAppCredentials, signer: any RS256Signer, transport: any HTTPTransport) async throws {
+        let jwt = try GitHubAppJWT.make(clientID: credentials.clientID, signer: signer)
+        let client = GitHubClient(transport: transport, tokens: nil)
+        _ = try await client.send("DELETE", "/app/installations/\(installationID)", auth: .bearer(jwt), allow: [404])
+    }
+
+    /// A page of MAIPA-G's Pages site, such as "openrouter/".
+    public static func page(_ path: String) -> URL {
+        URL(string: path, relativeTo: pagesBase)!.absoluteURL
     }
 
     static func requestUserToken(parameters: [String: String], transport: any HTTPTransport) async throws -> GitHubUserToken {
