@@ -1,6 +1,8 @@
 import AgentCore
 import Foundation
 import PhotosUI
+// PhotosPickerItem lives in the part of PhotosUI that only appears when SwiftUI is imported too.
+import SwiftUI
 import UniformTypeIdentifiers
 
 @MainActor

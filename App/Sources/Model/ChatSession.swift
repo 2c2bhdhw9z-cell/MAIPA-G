@@ -255,11 +255,12 @@ final class ChatSession: Identifiable {
                 let rules = await service.resolveRules(in: workspace, directSaveSetting: app.settings.savesDirectly(to: repo.ref))
                 let saves = changeSession ?? ChangeSession(receipts: chat.saveReceipts ?? [])
                 changeSession = saves
-                tools.append(contentsOf: [
+                let repoTools: [any AgentTool] = [
                     ListFilesTool(workspace: workspace), SearchCodeTool(workspace: workspace), ReadFileTool(workspace: workspace), ReadRepoFileTool(github: github),
                     CreateFileTool(workspace: changes, authorization: changeAuthorization, rules: rules), EditFileTool(workspace: changes, authorization: changeAuthorization, rules: rules), DeleteFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
                     SaveChangesTool(workspace: changes, service: service, session: saves, selectedBranch: workingBranch, defaultBranch: repo.defaultBranch, rules: rules),
-                ])
+                ]
+                tools.append(contentsOf: repoTools)
                 repoContext = SystemPrompt.RepoContext(
                     ref: repo.ref,
                     branch: workingBranch,
