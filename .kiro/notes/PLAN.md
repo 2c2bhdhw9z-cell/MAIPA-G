@@ -78,8 +78,8 @@ Kiro can read errors itself).
 - Connectors: 36 refresh OAuth tokens before expiry and reconnect after a restart; 37 send only
   enabled tools, with per-connector tool switches (some connectors expose 50+).
 - iPhone: 38 long chats render lazily, with downsampled images; 39 resume an interrupted turn
-  when the app comes back; 40 read `embedded.mobileprovision`, show the signing expiry and remind
-  a few days before.
+  when the app comes back; (40, the signing-expiry reminder, was removed by the owner on
+  29 October: "No 40".)
 - Safety: 41 deleting, direct saves to the default branch, risky commands and spending always ask,
   whatever the wording; 42 tool, web and connector text is data, never orders (prompt-injection
   guard); 43 redact tokens from saved chats (including build 25's clone URL).
