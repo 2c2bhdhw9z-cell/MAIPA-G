@@ -98,6 +98,22 @@ entries. Next: he tests build 25.**
    arrow, inside the bar). Long titles still shorten in the middle when they reach the screen
    edge.
 
+## Build 25 test reports (29 October 2026, held until he says he's done testing)
+5. **1:46-2:01 PM: the line count works but is slow and fumbles.** In two chats, the free
+   Nemotron model answered 27,819 and 27,396 lines after a dozen-plus tool calls each. Cause
+   (MAIPA-G's, not the computer's): Sprites' exec tool starts the program directly, not through a
+   shell, so `cd`, pipes, redirects, `&&` and wildcards fail unless wrapped in `bash -c`. Our
+   prompt never says so, and our own setup line `curl ... | bash` is itself a pipe, so the tool
+   setup never ran; the AI then installed PyPI's `cloc` instead of the real one. The AI also has
+   to create the machine and clone the repo itself. He showed Kiro's automatic "Session setup /
+   Cloning repository" step for comparison. Fix: MAIPA-G's own `run_command` tool, like Kiro's,
+   that takes a normal command and runs it as `bash -lc` in the repo folder on the chosen computer
+   through a provider adapter (for Sprites, its exec tool, with the argument names read from the
+   tool's schema). Before the first command MAIPA-G itself creates the machine, runs the setup
+   script and clones or updates the repo. Private repos use the read-only token, which is then
+   never shown to the model or saved in the chat. The raw Sprites tools are hidden from the model
+   while Sprites is the chat computer.
+
 Technical notes for the logo fix (for Kiro):
 - iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
   `style="mask-type:alpha"`, plus Gaussian-blur filters). Pre-render every logo to exact-size @2x
