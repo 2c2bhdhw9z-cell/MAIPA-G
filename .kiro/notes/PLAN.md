@@ -166,6 +166,14 @@ entries. Next: he tests build 25.**
     screenshot of Settings → Saving after "Save now". Fix: find why saving stopped; never dispatch
     a job before its record is saved; have the phone check the run's own result and show
     failures; make save failures obvious.
+    3:17 PM, his screenshot: "Chats and settings: Not saved yet" and "Couldn't save to GitHub just
+    now. It'll try again." That's the catch-all in `SyncCoordinator.describe`
+    (`App/Sources/Model/SyncCoordinator.swift:104-118`), so it isn't a GitHub API refusal, being
+    offline or a sign-in problem. It's another error inside `DataRepoSync.sync()` on the phone,
+    such as a transport timeout, a decode error or a file error, and the message hides it. I
+    couldn't run the sync here: the sandbox's gh token only works through its proxy (401 from
+    URLSession). Fix: show the real error text, then fix its cause. Told him to install the next
+    build over the top, without deleting the app first, so today's chats stay on the phone.
 12. **The chat AI can't see Autonomous jobs.** Asked about "active ongoing jobs", it listed
     Sprites instead.
 
