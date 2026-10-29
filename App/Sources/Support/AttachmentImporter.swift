@@ -14,6 +14,10 @@ enum AttachmentImporter {
         return try await store.importData(data, name: "Photo.\(ext)", mimeType: type.preferredMIMEType ?? "image/jpeg", kind: .image)
     }
 
+    static func importCameraPhoto(_ data: Data, store: AttachmentStore) async throws -> AttachmentReference {
+        try await store.importData(data, name: "Camera Photo.jpg", mimeType: "image/jpeg", kind: .image)
+    }
+
     static func importFile(_ url: URL, store: AttachmentStore) async throws -> AttachmentReference {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }

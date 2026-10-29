@@ -48,6 +48,8 @@ struct Composer: View {
     @Environment(AppModel.self) private var app
     @Environment(\.theme) private var theme
     @State private var photoItem: PhotosPickerItem?
+    @State private var choosingPhoto = false
+    @State private var takingPhoto = false
     @State private var choosingFile = false
     @State private var importError: String?
 
@@ -82,76 +84,31 @@ struct Composer: View {
                         }
                     }
                 }
-                HStack(spacing: 8) {
-                    Chip(title: modelLabel, systemImage: modelLabel == "Auto" ? "wand.and.stars" : "cpu", showsChevron: true, tint: theme.accent, action: onPickModel)
-                    if !thinkingLevels.isEmpty {
-                        Menu {
-                            Section("Thinking") {
-                                ForEach(thinkingLevels.reversed(), id: \.self) { level in
-                                    Button {
-                                        onPickThinking(level)
-                                    } label: {
-                                        if level == thinking {
-                                            Label(level.label, systemImage: "checkmark")
-                                        } else {
-                                            Text(level.label)
-                                        }
-                                    }
-                                }
-                            }
-                        } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: "brain")
-                                    .font(.footnote.weight(.semibold))
-                                    .foregroundStyle(theme.accent)
-                                Text(thinking.label)
-                                    .font(.footnote.weight(.medium))
-                                Image(systemName: "chevron.down")
-                                    .font(.caption2.weight(.bold))
-                                    .foregroundStyle(Theme.secondaryText)
-                            }
-                            .padding(.horizontal, 11)
-                            .padding(.vertical, 7)
-                            .background(Theme.raised.opacity(0.9), in: Capsule())
-                            .overlay(Capsule().strokeBorder(Theme.stroke))
-                        }
-                        .foregroundStyle(.primary)
-                        .accessibilityLabel("Thinking: \(thinking.label)")
-                    }
+                HStack(spacing: 6) {
                     Spacer(minLength: 0)
+                    compactModelButton
+                    if !thinkingLevels.isEmpty { compactThinkingMenu }
                     sendButton
                 }
             }
             .padding(12)
             .glassPanel(cornerRadius: 26)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    Button(action: onSpec) { Label("Spec", systemImage: "list.clipboard").font(.caption.weight(.semibold)) }
-                    Button(action: onPickGroup) { Label(groupName ?? "Group", systemImage: "folder.badge.plus").font(.caption.weight(.semibold)) }
-                    Button { webEnabled.toggle() } label: {
-                        Label("Web", systemImage: webEnabled ? "globe" : "globe.badge.chevron.backward")
-                            .font(.caption.weight(.semibold))
-                            .padding(.horizontal, 10).padding(.vertical, 7)
-                            .background(webEnabled ? theme.accent.opacity(0.16) : Theme.raised, in: Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(webEnabled ? "Web tools on" : "Web tools off")
-                    Toggle("Autonomous", isOn: $autonomous)
-                        .toggleStyle(.button)
-                        .buttonStyle(.bordered)
-                        .buttonBorderShape(.capsule)
-                        .font(.caption.weight(.semibold))
-                        .accessibilityHint("Runs repo work on GitHub's computer")
-                    PhotosPicker(selection: $photoItem, matching: .images) {
-                        Label("Photo", systemImage: "photo").font(.caption.weight(.semibold))
-                    }
-                    Button(action: onPicture) { Label("Make picture", systemImage: "paintbrush").font(.caption.weight(.semibold)) }
-                    if repo != nil { Button(action: onPreview) { Label("Preview", systemImage: "safari").font(.caption.weight(.semibold)) } }
-                    Button { choosingFile = true } label: { Label("File", systemImage: "paperclip").font(.caption.weight(.semibold)) }
-                    Spacer()
-                }
+            FlowLayout(spacing: 7, lineSpacing: 6) {
+                attachmentMenu
+                webButton
+                Button(action: onSpec) { Label("Spec", systemImage: "list.clipboard").font(.caption.weight(.semibold)) }
+                Button(action: onPickGroup) { Label(groupName ?? "Group", systemImage: "folder.badge.plus").font(.caption.weight(.semibold)) }
+                Toggle("Autonomous", isOn: $autonomous)
+                    .toggleStyle(.button)
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    .font(.caption.weight(.semibold))
+                    .accessibilityHint("Runs repo work on GitHub's computer")
+                Button(action: onPicture) { Label("Make picture", systemImage: "paintbrush").font(.caption.weight(.semibold)) }
+                if repo != nil { Button(action: onPreview) { Label("Preview", systemImage: "safari").font(.caption.weight(.semibold)) } }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 4)
 
             HStack(spacing: 8) {
@@ -175,6 +132,16 @@ struct Composer: View {
             }
             .padding(.horizontal, 4)
         }
+        .photosPicker(isPresented: $choosingPhoto, selection: $photoItem, matching: .images)
+        .fullScreenCover(isPresented: $takingPhoto) {
+            CameraPicker(isPresented: $takingPhoto) { data in
+                Task {
+                    do { attachments.append(try await AttachmentImporter.importCameraPhoto(data, store: app.attachmentStore)) }
+                    catch { importError = "Couldn't add that photo." }
+                }
+            }
+            .ignoresSafeArea()
+        }
         .onChange(of: photoItem) { _, item in
             guard let item else { return }
             Task {
@@ -193,6 +160,96 @@ struct Composer: View {
         .alert("Attachment", isPresented: Binding(get: { importError != nil }, set: { if !$0 { importError = nil } })) {
             Button("OK") {}
         } message: { Text(importError ?? "") }
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") { focused = false }
+                    .fontWeight(.semibold)
+            }
+        }
+        .onChange(of: isRunning) { _, running in
+            if running { focused = false }
+        }
+    }
+
+    private var compactModelButton: some View {
+        Button(action: onPickModel) {
+            HStack(spacing: 3) {
+                Image(systemName: modelLabel == "Auto" ? "wand.and.stars" : "cpu")
+                    .foregroundStyle(theme.accent)
+                Text(modelLabel).lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Theme.secondaryText)
+            }
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Theme.raised.opacity(0.9), in: Capsule())
+            .overlay(Capsule().strokeBorder(Theme.stroke))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("AI: \(modelLabel)")
+    }
+
+    private var compactThinkingMenu: some View {
+        Menu {
+            Section("Thinking") {
+                ForEach(thinkingLevels.reversed(), id: \.self) { level in
+                    Button {
+                        onPickThinking(level)
+                    } label: {
+                        if level == thinking { Label(level.label, systemImage: "checkmark") }
+                        else { Text(level.label) }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "brain").foregroundStyle(theme.accent)
+                Text(thinking.label)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Theme.secondaryText)
+            }
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Theme.raised.opacity(0.9), in: Capsule())
+            .overlay(Capsule().strokeBorder(Theme.stroke))
+        }
+        .foregroundStyle(.primary)
+        .accessibilityLabel("Thinking: \(thinking.label)")
+    }
+
+    private var attachmentMenu: some View {
+        Menu {
+            Button { choosingFile = true } label: { Label("File", systemImage: "doc") }
+            Button { choosingPhoto = true } label: { Label("Photo Library", systemImage: "photo.on.rectangle") }
+            Button {
+                if CameraPicker.isAvailable { takingPhoto = true }
+                else { importError = "The camera isn't available." }
+            } label: { Label("Take Photo", systemImage: "camera") }
+        } label: {
+            Image(systemName: "plus")
+                .font(.caption.weight(.bold))
+                .frame(width: 28, height: 28)
+                .background(Theme.raised.opacity(0.9), in: Circle())
+                .overlay(Circle().strokeBorder(Theme.stroke))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Add file or photo")
+    }
+
+    private var webButton: some View {
+        Button { webEnabled.toggle() } label: {
+            Label("Web", systemImage: webEnabled ? "globe" : "globe.badge.chevron.backward")
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 9).padding(.vertical, 6)
+                .background(webEnabled ? theme.accent.opacity(0.16) : Theme.raised, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(webEnabled ? "Web tools on" : "Web tools off")
     }
 
     @ViewBuilder
@@ -211,6 +268,7 @@ struct Composer: View {
         } else {
             Button {
                 guard canSend else { return }
+                focused = false
                 onSend()
             } label: {
                 Image(systemName: "arrow.up")
