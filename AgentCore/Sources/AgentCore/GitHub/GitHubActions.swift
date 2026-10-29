@@ -1,14 +1,21 @@
 import Foundation
 import ZIPFoundation
 
+public enum GitHubCheckDiscovery: String, Sendable, Hashable {
+    case observed, confirmedNoChecks, timedOut
+}
+
 public struct GitHubRunWatchResult: Sendable, Hashable {
     public var runs: [GitHubWorkflowRun]
     public var checks: [GitHubCheckRun]
     public var statuses: [GitHubCommitStatus]
     public var failedLogs: String
+    public var discovery: GitHubCheckDiscovery
 
     public var succeeded: Bool {
-        runs.allSatisfy { ["success", "neutral", "skipped"].contains($0.conclusion ?? "") }
+        if discovery == .confirmedNoChecks { return true }
+        guard discovery == .observed, !runs.isEmpty || !checks.isEmpty || !statuses.isEmpty else { return false }
+        return runs.allSatisfy { ["success", "neutral", "skipped"].contains($0.conclusion ?? "") }
             && checks.allSatisfy { ["success", "neutral", "skipped"].contains($0.conclusion ?? "") }
             && statuses.allSatisfy { $0.state == "success" }
     }
@@ -22,16 +29,23 @@ public struct GitHubRunWatcher: Sendable {
     private let sleeper: Sleeper
     private let maximumPolls: Int
 
-    public init(github: GitHubClient, maximumPolls: Int = 90, sleeper: @escaping Sleeper = {
+    /// How long to look for checks to appear at all. GitHub starts runs within seconds of a push;
+    /// workflows filtered by branch or path never start, and that must not read as passed or failed.
+    private let discoveryPolls: Int
+
+    public init(github: GitHubClient, maximumPolls: Int = 90, discoveryPolls: Int = 15, sleeper: @escaping Sleeper = {
         try await Task.sleep(nanoseconds: 20_000_000_000)
     }) {
         self.github = github; self.maximumPolls = max(1, maximumPolls); self.sleeper = sleeper
+        self.discoveryPolls = max(1, min(discoveryPolls, self.maximumPolls))
     }
 
-    public func wait(repo: RepoRef, commit: String, excludingRunID: Int? = nil, redacting logger: RedactingLogger) async throws -> GitHubRunWatchResult {
+    public func wait(repo: RepoRef, commit: String, branch: String = "main", excludingRunID: Int? = nil, redacting logger: RedactingLogger) async throws -> GitHubRunWatchResult {
         var matched: [GitHubWorkflowRun] = []
         var checks: [GitHubCheckRun] = []
         var statuses: [GitHubCommitStatus] = []
+        var discovery: GitHubCheckDiscovery = .timedOut
+        var expectsChecks: Bool?
         for poll in 0..<maximumPolls {
             matched = try await github.workflowRuns(repo, limit: 100).filter { $0.headSHA == commit && $0.id != excludingRunID }
             checks = (try? await github.checkRuns(repo, ref: commit)) ?? []
@@ -40,10 +54,20 @@ public struct GitHubRunWatcher: Sendable {
             let runsDone = matched.allSatisfy { $0.status == "completed" }
             let checksDone = checks.allSatisfy { $0.status == "completed" }
             let statusesDone = statuses.allSatisfy { $0.state != "pending" }
-            if discovered && runsDone && checksDone && statusesDone { break }
-            // A repository with no automatic checks must not remain stuck for the full run limit.
-            if !discovered && poll >= 2 { return GitHubRunWatchResult(runs: [], checks: [], statuses: [], failedLogs: "") }
-            try await sleeper()
+            if discovered {
+                discovery = .observed
+                if runsDone && checksDone && statusesDone { break }
+            } else if poll >= 2 {
+                if expectsChecks == nil { expectsChecks = try await github.expectsAutomaticChecks(repo, commit: commit, branch: branch) }
+                if expectsChecks == false {
+                    return GitHubRunWatchResult(runs: [], checks: [], statuses: [], failedLogs: "", discovery: .confirmedNoChecks)
+                }
+                // Nothing started in the discovery window: report that honestly (not passed, not failed).
+                if poll + 1 >= discoveryPolls {
+                    return GitHubRunWatchResult(runs: [], checks: [], statuses: [], failedLogs: "", discovery: .timedOut)
+                }
+            }
+            if poll + 1 < maximumPolls { try await sleeper() }
         }
         var logText = ""
         for run in matched where !["success", "neutral", "skipped"].contains(run.conclusion ?? "") {
@@ -51,7 +75,7 @@ public struct GitHubRunWatcher: Sendable {
                 logText += Self.readLogs(archive) + "\n"
             }
         }
-        return GitHubRunWatchResult(runs: matched, checks: checks, statuses: statuses, failedLogs: logger.redact(String(logText.prefix(160_000))))
+        return GitHubRunWatchResult(runs: matched, checks: checks, statuses: statuses, failedLogs: logger.redact(String(logText.prefix(160_000))), discovery: discovery)
     }
 
     static func readLogs(_ data: Data) -> String {
@@ -117,6 +141,40 @@ public extension GitHubClient {
 
     func commitStatuses(_ repo: RepoRef, ref: String) async throws -> [GitHubCommitStatus] {
         try await get([GitHubCommitStatus].self, Self.path(repo, "/commits/\(Self.escapePath(ref))/statuses"))
+    }
+
+    /// Positively identifies repositories where this commit cannot have automatic Actions or
+    /// required status checks. Unknown workflow syntax is treated as expected work, never success.
+    func expectsAutomaticChecks(_ repo: RepoRef, commit: String, branch: String) async throws -> Bool {
+        let protection = try await send(
+            "GET", Self.path(repo, "/branches/\(Self.escapePath(branch))/protection/required_status_checks"),
+            allow: [404]
+        )
+        if protection.status != 404, let value = JSONValue.parse(protection.body) {
+            let contexts = value["contexts"]?.arrayValue ?? []
+            let checks = value["checks"]?.arrayValue ?? []
+            if !contexts.isEmpty || !checks.isEmpty { return true }
+        }
+
+        let listing = try await send(
+            "GET", Self.path(repo, "/contents/.github/workflows"),
+            query: ["ref": commit], allow: [404]
+        )
+        guard listing.status != 404, let entries = JSONValue.parse(listing.body)?.arrayValue else { return false }
+        for entry in entries {
+            guard let path = entry["path"]?.stringValue,
+                  ["yml", "yaml"].contains(URL(fileURLWithPath: path).pathExtension.lowercased()) else { continue }
+            guard let data = try? await fileContents(repo, path: path, ref: commit),
+                  let yaml = String(data: data, encoding: .utf8) else { return true }
+            let normalized = yaml.lowercased().replacingOccurrences(of: "\r\n", with: "\n")
+            if normalized.range(of: #"(?m)^\s*(push|pull_request|pull_request_target|merge_group)\s*:"#, options: .regularExpression) != nil
+                || normalized.range(of: #"(?m)^\s*["']?on["']?\s*:\s*\[[^\]]*(push|pull_request|merge_group)"#, options: .regularExpression) != nil
+                || normalized.range(of: #"(?m)^\s*["']?on["']?\s*:\s*["']?(push|pull_request|pull_request_target|merge_group)["']?\s*$"#, options: .regularExpression) != nil
+                || normalized.range(of: #"(?m)^\s*-\s*(push|pull_request|pull_request_target|merge_group)\s*$"#, options: .regularExpression) != nil {
+                return true
+            }
+        }
+        return false
     }
 
     func issueComments(_ repo: RepoRef, number: Int) async throws -> [JSONValue] {

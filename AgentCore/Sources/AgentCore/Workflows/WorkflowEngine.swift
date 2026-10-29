@@ -22,7 +22,7 @@ public struct WorkflowOutput: Codable, Sendable, Hashable {
 }
 
 public struct WorkflowCheckpoint: Codable, Sendable, Hashable {
-    public static let currentFormat = 1
+    public static let currentFormat = 2
     public var format = currentFormat
     public var workflowID: String
     public var request: String
@@ -31,6 +31,8 @@ public struct WorkflowCheckpoint: Codable, Sendable, Hashable {
     public var answers: [String: String]
     public var outputs: [WorkflowOutput]
     public var pendingQuestion: WorkflowQuestion?
+    /// Opaque agent transcript keyed by node, retained only while that exact call is paused.
+    public var pendingAgentStates: [String: JSONValue]
     public var cumulativeCost: Double
     public var approvedSpendUpTo: Double?
     public var isCancelled: Bool
@@ -38,8 +40,30 @@ public struct WorkflowCheckpoint: Codable, Sendable, Hashable {
 
     public init(workflowID: String, request: String) {
         self.workflowID = workflowID; self.request = request; statuses = [:]
-        repeatIterations = [:]; answers = [:]; outputs = []; cumulativeCost = 0
+        repeatIterations = [:]; answers = [:]; outputs = []; pendingAgentStates = [:]; cumulativeCost = 0
         approvedSpendUpTo = nil; isCancelled = false; updatedAt = Date()
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case format, workflowID, request, statuses, repeatIterations, answers, outputs
+        case pendingQuestion, pendingAgentStates, cumulativeCost, approvedSpendUpTo, isCancelled, updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        format = try c.decodeIfPresent(Int.self, forKey: .format) ?? 1
+        workflowID = try c.decode(String.self, forKey: .workflowID)
+        request = try c.decodeIfPresent(String.self, forKey: .request) ?? ""
+        statuses = try c.decodeIfPresent([String: WorkflowNodeStatus].self, forKey: .statuses) ?? [:]
+        repeatIterations = try c.decodeIfPresent([String: Int].self, forKey: .repeatIterations) ?? [:]
+        answers = try c.decodeIfPresent([String: String].self, forKey: .answers) ?? [:]
+        outputs = try c.decodeIfPresent([WorkflowOutput].self, forKey: .outputs) ?? []
+        pendingQuestion = try c.decodeIfPresent(WorkflowQuestion.self, forKey: .pendingQuestion)
+        pendingAgentStates = try c.decodeIfPresent([String: JSONValue].self, forKey: .pendingAgentStates) ?? [:]
+        cumulativeCost = try c.decodeIfPresent(Double.self, forKey: .cumulativeCost) ?? 0
+        approvedSpendUpTo = try c.decodeIfPresent(Double.self, forKey: .approvedSpendUpTo)
+        isCancelled = try c.decodeIfPresent(Bool.self, forKey: .isCancelled) ?? false
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date(timeIntervalSince1970: 0)
     }
 }
 
@@ -157,27 +181,49 @@ public actor WorkflowEngine {
         if let goalCondition, !goalCondition.isEmpty {
             task += "\n\nRepeat goal: \(goalCondition)\nEnd with a line containing exactly GOAL_MET only when current evidence proves this goal is met. Otherwise end with GOAL_NOT_MET."
         }
-        let helpers = try node.children.map { helper -> AgentInvocation in
+        let staticHelpers = try node.children.map { helper -> AgentInvocation in
             guard let helperID = helper.agentID, let definition = agents[helperID] else { throw WorkflowEngineError.unknownAgent(helper.agentID ?? "") }
             return AgentInvocation(definition: definition, task: helper.instruction ?? helper.title, context: context)
         }
-        let result = try await executor.execute(
+        let lead = agents[agentID]!
+        let dynamicLimit = max(0, lead.maximumHelpers - staticHelpers.count)
+        let helperCoordinator = AgentHelperCoordinator(
+            lead: AgentDefinition(
+                id: lead.id, name: lead.name, summary: lead.summary, instructions: lead.instructions,
+                allowedTools: lead.allowedTools, difficulty: lead.difficulty, modelPolicy: lead.modelPolicy,
+                behavior: lead.behavior, maximumHelpers: dynamicLimit, isBuiltIn: lead.isBuiltIn
+            ),
+            definitions: Array(agents.values), context: context, spendLimit: remainingBudget,
+            runner: { try await self.executor.run($0) }
+        )
+        let helperTools: [any AgentTool] = dynamicLimit > 0 ? [LaunchHelpersTool(lead: lead, definitions: Array(agents.values), coordinator: helperCoordinator)] : []
+        var result = try await executor.execute(
             agentID: agentID,
             task: task,
             context: context,
-            helpers: helpers,
+            helpers: staticHelpers,
             primaryModel: state.outputs.last?.model,
-            spendLimit: remainingBudget
+            spendLimit: remainingBudget,
+            resumeState: state.pendingAgentStates[node.id],
+            answer: state.answers[node.id],
+            tools: helperTools
         )
+        result.helpers += await helperCoordinator.results()
         if state.isCancelled { throw CancellationError() }
-        for (index, helper) in result.helpers.enumerated() where index < node.children.count {
-            let helperNode = node.children[index]
-            state.outputs.append(WorkflowOutput(nodeID: helperNode.id, title: helperNode.title, text: helper.output, model: helper.model))
-            state.statuses[helperNode.id] = .completed
+        for (index, helper) in result.helpers.enumerated() {
+            let helperNode = index < node.children.count ? node.children[index] : nil
+            state.outputs.append(WorkflowOutput(
+                nodeID: helperNode?.id ?? "\(node.id).helper.\(index - node.children.count + 1)",
+                title: helperNode?.title ?? helper.name,
+                text: helper.output,
+                model: helper.model
+            ))
+            if let helperNode { state.statuses[helperNode.id] = .completed }
         }
         state.outputs.append(WorkflowOutput(nodeID: node.id, title: node.title, text: result.output, model: result.model))
         state.cumulativeCost += result.cost
         if let pending = result.pendingQuestion {
+            if let resumeState = result.resumeState { state.pendingAgentStates[node.id] = resumeState }
             state.statuses[node.id] = .waiting
             let question = WorkflowQuestion(nodeID: node.id, text: pending.text, options: pending.options)
             state.pendingQuestion = question
@@ -185,12 +231,15 @@ public actor WorkflowEngine {
             throw Pause(question: question)
         }
         if result.needsSpendingApproval {
+            if let resumeState = result.resumeState { state.pendingAgentStates[node.id] = resumeState }
             state.statuses[node.id] = .waiting
             let question = WorkflowQuestion(nodeID: node.id, text: "This workflow has cost $\(String(format: "%.2f", state.cumulativeCost)). Keep going?", options: ["Keep going", "Stop"])
             state.pendingQuestion = question
             try await save()
             throw Pause(question: question)
         }
+        state.pendingAgentStates[node.id] = nil
+        state.answers[node.id] = nil
         state.statuses[node.id] = .completed; try await save()
         return result.goalMet
     }

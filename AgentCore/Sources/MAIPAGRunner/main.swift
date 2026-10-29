@@ -36,6 +36,7 @@ enum MAIPAGRunnerMain {
             let idText = environment["MAIPAG_JOB_ID"], let id = UUID(uuidString: idText),
             let repoText = environment["GITHUB_REPOSITORY"], let repo = RepoRef(fullName: repoText),
             let workspace = environment["GITHUB_WORKSPACE"],
+            let runnerRoot = environment["MAIPAG_RUNNER_ROOT"],
             let targetToken = targetSecret, !targetToken.isEmpty,
             let dataToken = dataSecret, !dataToken.isEmpty,
             let dataOwner = environment["MAIPAG_DATA_OWNER"],
@@ -47,6 +48,14 @@ enum MAIPAGRunnerMain {
             exit(2)
         }
         let connectorSecrets: [String: String] = (try? JSONDecoder().decode([String: String].self, from: Data(mcpSecretText.utf8))) ?? [:]
+        let workspaceURL = URL(fileURLWithPath: workspace, isDirectory: true).standardizedFileURL
+        let runnerURL = URL(fileURLWithPath: runnerRoot, isDirectory: true).standardizedFileURL
+        guard !runnerURL.path.hasPrefix(workspaceURL.path + "/"),
+              let ipaChecker = try? Data(contentsOf: CloudToolAssembly.ipaCheckerURL(in: runnerURL)),
+              !ipaChecker.isEmpty else {
+            FileHandle.standardError.write(Data("MAIPAGRunner: trusted runner files must be outside the target workspace.\n".utf8))
+            exit(2)
+        }
         // Secret files are deleted above and only nonsecret file-path variables remain in the
         // inherited environment before any model-directed shell or third-party MCP child starts.
         for key in ["MAIPAG_TARGET_TOKEN_FILE", "MAIPAG_DATA_TOKEN_FILE", "OPENROUTER_API_KEY_FILE", "MAIPAG_MCP_SECRETS_FILE", "GH_TOKEN", "GITHUB_TOKEN"] {
@@ -55,7 +64,9 @@ enum MAIPAGRunnerMain {
         let configuration = CloudRunnerConfiguration(
             jobID: id,
             targetRepository: repo,
-            workspace: URL(fileURLWithPath: workspace, isDirectory: true),
+            workspace: workspaceURL,
+            trustedRunnerDirectory: runnerURL,
+            ipaChecker: ipaChecker,
             targetToken: targetToken,
             dataToken: dataToken,
             dataRepository: RepoRef(owner: dataOwner, name: dataRepoName),

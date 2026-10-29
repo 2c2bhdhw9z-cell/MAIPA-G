@@ -40,11 +40,16 @@ final class ChatSession: Identifiable {
     func send(_ text: String, attachments: [AttachmentReference] = []) {
         let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (!message.isEmpty || !attachments.isEmpty), !isRunning else { return }
-        if attachments.isEmpty, let repo = chat.repo, let app,
-           app.jobs.shouldRunAutonomously(request: message, repo: repo, explicitlyEnabled: autonomous) {
-            autonomous = false
-            Task { await app.jobs.start(request: message, repo: repo) }
-            return
+        if attachments.isEmpty, let repo = chat.repo, let app {
+            if autonomous {
+                autonomous = false
+                Task { await app.jobs.start(request: message, repo: repo) }
+                return
+            }
+            if let workflow = app.jobs.routedWorkflow(request: message, repo: repo) {
+                Task { await app.jobs.start(request: message, repo: repo, workflow: workflow) }
+                return
+            }
         }
         settleWaitingTurn()
         chat.messages.append(.user(message, attachments: attachments))

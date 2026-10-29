@@ -274,20 +274,28 @@ public actor MCPConnectorSession {
 public actor AutonomousStdioConnector {
     private let configuration: ConnectorConfiguration
     private let client = Client(name: "MAIPAGRunner", version: "0.1.0")
+    private let isolationDirectory: URL
+    private let broker: ConnectorWorkspaceBroker
     private var process: Process?
 
-    public init(configuration: ConnectorConfiguration) { self.configuration = configuration }
+    public init(configuration: ConnectorConfiguration, workspace: URL) {
+        self.configuration = configuration
+        isolationDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-mcp-\(UUID().uuidString)", isDirectory: true)
+        broker = ConnectorWorkspaceBroker(workspace: workspace)
+    }
 
     public func connect(environment: [String: String] = [:]) async throws -> [ConnectorToolDefinition] {
         guard configuration.kind == .stdio, let package = configuration.package else { throw ToolInputError("This is not a stdio connector.") }
         let supplied = configuration.launchValues.merging(environment) { _, secret in secret }
         let command = try Self.command(for: package, values: supplied)
+        try FileManager.default.createDirectory(at: isolationDirectory.appendingPathComponent("tmp", isDirectory: true), withIntermediateDirectories: true)
+        let workspaceState = try await broker.snapshot()
         let process = Process()
         let input = Pipe(), output = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = command
+        process.currentDirectoryURL = isolationDirectory
         process.standardInput = input; process.standardOutput = output; process.standardError = FileHandle.nullDevice
-        let inherited = BoundedProcess.sanitizedEnvironment(ProcessInfo.processInfo.environment)
         let declaredEnvironment = Dictionary(uniqueKeysWithValues: package.environmentVariables.compactMap { input -> (String, String)? in
             let value = supplied[input.name] ?? input.defaultValue
             return value.map { (input.name, $0) }
@@ -300,30 +308,55 @@ public actor AutonomousStdioConnector {
                 throw ToolInputError("\(input.name) must use a declared choice.")
             }
         }
-        process.environment = inherited.merging(declaredEnvironment) { _, supplied in supplied }
+        // Third-party package code gets its own home folder and only the variables its Registry entry
+        // declares: no tokens, no GITHUB_WORKSPACE, and no way in through the working directory.
+        process.environment = BoundedProcess.minimalChildEnvironment(home: isolationDirectory, additions: declaredEnvironment)
         try process.run()
+        self.process = process
         let transport = StdioTransport(
             input: FileDescriptor(rawValue: output.fileHandleForReading.fileDescriptor),
             output: FileDescriptor(rawValue: input.fileHandleForWriting.fileDescriptor)
         )
-        _ = try await client.connect(transport: transport)
-        self.process = process
         var definitions: [ConnectorToolDefinition] = []
-        var cursor: String?
-        repeat {
-            let page = try await client.listTools(cursor: cursor)
-            definitions += page.tools.map { tool in
-                let schema = (try? JSONValue.parse(JSONEncoder().encode(tool.inputSchema))) ?? ["type": "object"]
-                return ConnectorToolDefinition(serverID: configuration.serverID, serverName: configuration.displayName, originalName: tool.name, title: tool.title, description: tool.description ?? "", inputSchema: schema)
-            }
-            cursor = page.nextCursor
-        } while cursor != nil
+        do {
+            _ = try await client.connect(transport: transport)
+            var cursor: String?
+            repeat {
+                let page = try await client.listTools(cursor: cursor)
+                definitions += page.tools.map { tool in
+                    let schema = (try? JSONValue.parse(JSONEncoder().encode(tool.inputSchema))) ?? ["type": "object"]
+                    return ConnectorToolDefinition(serverID: configuration.serverID, serverName: configuration.displayName, originalName: tool.name, title: tool.title, description: tool.description ?? "", inputSchema: schema)
+                }
+                cursor = page.nextCursor
+            } while cursor != nil
+        } catch {
+            try? await broker.finish(workspaceState)
+            await disconnect()
+            throw error
+        }
+        do {
+            try await broker.finish(workspaceState)
+        } catch {
+            await disconnect()
+            throw error
+        }
         return definitions
     }
 
+    /// Every call is bracketed by a snapshot of the target repo: anything the package changed there
+    /// is put back and the call fails, so only MAIPA-G's own guarded tools can change files.
     public func call(tool: String, arguments: JSONValue) async throws -> String {
-        let result = try await client.callTool(name: tool, arguments: try MCP.Value(arguments).objectValue ?? [:])
-        return result.content.map(String.init(describing:)).joined(separator: "\n")
+        let before = try await broker.snapshot()
+        let content: [Tool.Content]
+        do {
+            let (returned, _) = try await client.callTool(name: tool, arguments: try MCP.Value(arguments).objectValue ?? [:])
+            content = returned
+        } catch {
+            try? await broker.finish(before)
+            throw error
+        }
+        try await broker.finish(before)
+        return content.map(String.init(describing:)).joined(separator: "\n")
     }
 
     public func disconnect() async {
@@ -364,7 +397,10 @@ public struct AutonomousMCPTool: AgentTool {
 
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         progress("Waiting for \(definition.serverName)…")
-        let response = try await connector.call(tool: definition.originalName, arguments: arguments)
+        let connector = self.connector, name = definition.originalName
+        let response = try await WorkspaceTurnstile.shared.run {
+            try await connector.call(tool: name, arguments: arguments)
+        }
         return ToolOutput(forModel: response, summary: "Used \(definition.serverName) · \(definition.title)", detail: response)
     }
 }

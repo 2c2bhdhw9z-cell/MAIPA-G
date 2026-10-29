@@ -19,6 +19,7 @@ public enum BoundedProcess {
         arguments: [String],
         directory: URL,
         environment: [String: String] = [:],
+        replacingEnvironment: Bool = false,
         stdin: Data? = nil,
         timeout: TimeInterval = 600,
         outputLimit: Int = 80_000
@@ -40,8 +41,12 @@ public enum BoundedProcess {
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.currentDirectoryURL = directory
-        let inherited = sanitizedEnvironment(ProcessInfo.processInfo.environment)
-        process.environment = inherited.merging(environment) { _, supplied in supplied }
+        if replacingEnvironment {
+            process.environment = environment
+        } else {
+            let inherited = sanitizedEnvironment(ProcessInfo.processInfo.environment)
+            process.environment = inherited.merging(environment) { _, supplied in supplied }
+        }
         process.standardOutput = output
         process.standardError = errors
         if let stdin {
@@ -83,6 +88,18 @@ public enum BoundedProcess {
             let upper = key.uppercased()
             return !upper.contains("TOKEN") && !upper.contains("SECRET") && !upper.contains("PASSWORD") && !upper.contains("PRIVATE_KEY") && key != "OPENROUTER_API_KEY" && key != "GH_TOKEN" && key != "GITHUB_TOKEN"
         }
+    }
+
+    static func minimalChildEnvironment(home: URL, additions: [String: String] = [:]) -> [String: String] {
+        let inherited = ProcessInfo.processInfo.environment
+        var values = [
+            "PATH": inherited["PATH"] ?? "/usr/local/bin:/usr/bin:/bin",
+            "HOME": home.path,
+            "TMPDIR": home.appendingPathComponent("tmp", isDirectory: true).path,
+            "LANG": inherited["LANG"] ?? "C.UTF-8",
+        ]
+        values.merge(additions) { _, supplied in supplied }
+        return values
     }
 
     private static func read(_ url: URL, limit: Int) -> String {
@@ -194,6 +211,14 @@ public struct ProcessTool: AgentTool {
     }
 
     private func execute(arguments: JSONValue, approved: Bool, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        // One workspace-changing tool at a time: the before/after check must only ever see this
+        // command's own changes, never a parallel tool's.
+        try await WorkspaceTurnstile.shared.run {
+            try await executeAlone(arguments: arguments, approved: approved, progress: progress)
+        }
+    }
+
+    private func executeAlone(arguments: JSONValue, approved: Bool, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let command = try arguments.requiredString("command")
         guard !command.contains("\u{0}") else { throw ProcessFailure.invalidCommand }
         let timeout = Double(arguments["timeout_seconds"]?.intValue ?? 600)
@@ -236,7 +261,28 @@ public struct ProcessTool: AgentTool {
     }
 }
 
-private struct WorkspaceState: Sendable {
+/// Lets one workspace-changing operation run at a time, in arrival order. A model can ask for
+/// several tools in one step and they normally run side by side; anything that checks the repo
+/// before and after itself (shell commands, connector calls, publishing) goes through here.
+public actor WorkspaceTurnstile {
+    public static let shared = WorkspaceTurnstile()
+    private var busy = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    public func run<T: Sendable>(_ body: @Sendable () async throws -> T) async throws -> T {
+        if busy {
+            await withCheckedContinuation { waiting.append($0) }
+        } else {
+            busy = true
+        }
+        defer {
+            if waiting.isEmpty { busy = false } else { waiting.removeFirst().resume() }
+        }
+        return try await body()
+    }
+}
+
+struct WorkspaceState: Sendable {
     var head: String
     var paths: Set<String>
     var buildFiles: [String: Data]
@@ -276,6 +322,10 @@ private struct WorkspaceState: Sendable {
         }
     }
 
+    func isSameRepositoryState(as other: WorkspaceState) -> Bool {
+        head == other.head && paths == other.paths && buildFiles == other.buildFiles && patch == other.patch
+    }
+
     func restore(in directory: URL) async throws {
         let reset = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["reset", "--hard", head], directory: directory, timeout: 120)
         guard reset.exitCode == 0 else { throw CloudRunnerError.commandFailed }
@@ -287,6 +337,23 @@ private struct WorkspaceState: Sendable {
             directory: directory, stdin: patch, timeout: 120
         )
         guard apply.exitCode == 0 else { throw CloudRunnerError.commandFailed }
+    }
+}
+
+/// Guards the target repository while untrusted connector code runs elsewhere. Connector
+/// packages never receive repository access; if one reaches the workspace by an absolute path,
+/// every change is restored and the call fails before publication.
+struct ConnectorWorkspaceBroker: Sendable {
+    private let workspace: URL
+    init(workspace: URL) { self.workspace = workspace.standardizedFileURL }
+
+    func snapshot() async throws -> WorkspaceState { try await WorkspaceState.capture(in: workspace) }
+
+    func finish(_ before: WorkspaceState) async throws {
+        let after = try await WorkspaceState.capture(in: workspace)
+        guard !before.isSameRepositoryState(as: after) else { return }
+        try await before.restore(in: workspace)
+        throw ToolInputError("Connector packages cannot change repository files directly. Use the repository tools so MAIPA-G can enforce its rules and approvals.")
     }
 }
 
@@ -336,10 +403,29 @@ public struct StdioMCPTool: AgentTool {
         ]
         let input = Data((request.jsonString() + "\n").utf8)
         progress("Using \(server.id)…")
-        let result = try await BoundedProcess.run(
-            executable: server.executable, arguments: server.arguments, directory: directory,
-            environment: server.environment, stdin: input, timeout: 120, outputLimit: 80_000
-        )
+        // Same isolation as Registry connectors: its own folder, only its declared variables, and
+        // anything it changes in the repo is put back before the call can count.
+        let server = self.server, workspace = directory
+        let result = try await WorkspaceTurnstile.shared.run { () async throws -> ProcessResult in
+            let isolation = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-mcp-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: isolation.appendingPathComponent("tmp", isDirectory: true), withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: isolation) }
+            let broker = ConnectorWorkspaceBroker(workspace: workspace)
+            let before = try await broker.snapshot()
+            let result: ProcessResult
+            do {
+                result = try await BoundedProcess.run(
+                    executable: server.executable, arguments: server.arguments, directory: isolation,
+                    environment: BoundedProcess.minimalChildEnvironment(home: isolation, additions: server.environment),
+                    replacingEnvironment: true, stdin: input, timeout: 120, outputLimit: 80_000
+                )
+            } catch {
+                try? await broker.finish(before)
+                throw error
+            }
+            try await broker.finish(before)
+            return result
+        }
         guard !result.timedOut else { throw ProcessFailure.timedOut }
         let detail = [result.stdout, result.stderr].filter { !$0.isEmpty }.joined(separator: "\n")
         return ToolOutput(forModel: detail, summary: result.exitCode == 0 ? "Used \(server.id)" : "\(server.id) failed", detail: detail, isError: result.exitCode != 0)

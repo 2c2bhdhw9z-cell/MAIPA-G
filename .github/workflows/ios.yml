@@ -48,9 +48,9 @@ jobs:
       - name: Compile independent IPA checker
         run: python3 -m py_compile scripts/check-ipa.py
 
+  # Starts at once, alongside the Linux checks, so a Mac-only compile error shows up early.
   screens:
     name: Complete Dark and Light screenshots
-    needs: checks
     runs-on: macos-26
     timeout-minutes: 60
     steps:

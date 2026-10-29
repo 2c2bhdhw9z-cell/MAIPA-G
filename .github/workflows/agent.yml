@@ -71,17 +71,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Check out the shared runner
-        uses: actions/checkout@v5
-        with:
-          repository: 2c2bhdhw9z-cell/MAIPA-G
-          ref: main
-          path: .maipag-runner
-          persist-credentials: false
-
-      - name: Keep runner files outside target changes
+      - name: Check out the shared runner outside the target repo
         shell: bash
-        run: printf '/.maipag-runner/\n' >> .git/info/exclude
+        run: git clone --depth 1 --branch main https://github.com/2c2bhdhw9z-cell/MAIPA-G.git "$RUNNER_TEMP/maipag-runner"
 
       - name: Run the private job
         shell: bash
@@ -110,7 +102,8 @@ jobs:
           export MAIPAG_DATA_TOKEN_FILE="$data_file"
           export OPENROUTER_API_KEY_FILE="$openrouter_file"
           export MAIPAG_MCP_SECRETS_FILE="$mcp_file"
-          exec swift run --package-path .maipag-runner/AgentCore -c release MAIPAGRunner
+          export MAIPAG_RUNNER_ROOT="$RUNNER_TEMP/maipag-runner"
+          exec swift run --package-path "$MAIPAG_RUNNER_ROOT/AgentCore" -c release MAIPAGRunner
 
       - name: Check for a dedicated preview artifact
         id: preview

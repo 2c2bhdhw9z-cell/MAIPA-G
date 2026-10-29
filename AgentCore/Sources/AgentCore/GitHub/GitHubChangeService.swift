@@ -122,14 +122,15 @@ public actor GitHubChangeService {
         guard let selectedHead else { throw GitHubChangeFailure.noHead }
         guard selectedHead == workspace.base.commit else { throw ChangeWorkspaceError.staleHead(expected: workspace.base.commit, actual: selectedHead) }
 
-        let usePR = continuing != nil || (!rules.directSave && selectedBranch == defaultBranch)
+        let usePR = continuing != nil || !rules.directSave
         let targetBranch: String
         if let continuing {
             targetBranch = continuing.branch
-        } else if usePR {
+        } else if usePR && selectedBranch == defaultBranch {
             targetBranch = Self.branchName(title)
             try await github.createBranch(repo, branch: targetBranch, from: selectedHead)
         } else {
+            // A selected non-default branch is the working branch, not permission to bypass review.
             targetBranch = selectedBranch
         }
 
@@ -156,7 +157,7 @@ public actor GitHubChangeService {
         if let continuing {
             pullRequest = continuing.pullRequest
         } else if usePR {
-            pullRequest = try await github.openPullRequest(repo, title: title, body: body, head: targetBranch, base: defaultBranch)
+            pullRequest = try await github.openOrReusePullRequest(repo, title: title, body: body, head: targetBranch, base: defaultBranch)
         }
         await workspace.discardAll()
         return SaveReceipt(repo: repo, branch: targetBranch, baseCommit: selectedHead, savedCommit: commit, files: states, pullRequest: pullRequest)
@@ -167,14 +168,14 @@ public actor GitHubChangeService {
         let current = try await github.pullRequest(receipt.repo, number: pull.number)
         guard current.state == "open" else { throw GitHubChangeFailure.pullRequestClosed }
         try await github.mergePullRequest(receipt.repo, number: pull.number, title: pull.title)
-        try await github.deleteBranch(receipt.repo, branch: receipt.branch)
+        try await github.deleteBranchIfMAIPAG(receipt.repo, branch: receipt.branch)
     }
 
     public func throwAway(_ receipt: SaveReceipt) async throws {
         guard let pull = receipt.pullRequest else { return }
         let current = try await github.pullRequest(receipt.repo, number: pull.number)
         if current.state == "open" { _ = try await github.closePullRequest(receipt.repo, number: pull.number) }
-        try await github.deleteBranch(receipt.repo, branch: receipt.branch)
+        try await github.deleteBranchIfMAIPAG(receipt.repo, branch: receipt.branch)
     }
 
     /// Reverses the receipt only while its save is still the branch head.

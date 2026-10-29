@@ -99,11 +99,16 @@ public enum CloudToolAssembly {
         Set(names.union(["inspect_workspace", "run_shell"]).filter { agent.permits(tool: $0) })
     }
 
+    public static func ipaCheckerURL(in trustedRunnerDirectory: URL) -> URL {
+        trustedRunnerDirectory.appendingPathComponent("scripts/check-ipa.py").standardizedFileURL
+    }
+
     public static func make(
         github: GitHubClient,
         repo: RepoRef,
         ref: String,
         workspace: URL,
+        ipaChecker: Data,
         defaultBranch: String,
         directSave: Bool,
         buildExplicitlyRequested: Bool,
@@ -112,6 +117,7 @@ public enum CloudToolAssembly {
     ) -> [any AgentTool] {
         names.sorted().map {
             CloudGitHubTool(name: $0, github: github, repo: repo, ref: ref, workspace: workspace,
+                            ipaChecker: ipaChecker,
                             defaultBranch: defaultBranch, directSave: directSave,
                             buildExplicitlyRequested: buildExplicitlyRequested, results: results, logger: logger)
         }
@@ -124,6 +130,7 @@ private struct CloudGitHubTool: AgentTool {
     let repo: RepoRef
     let ref: String
     let workspace: URL
+    let ipaChecker: Data
     let defaultBranch: String
     let directSave: Bool
     let buildExplicitlyRequested: Bool
@@ -219,8 +226,9 @@ private struct CloudGitHubTool: AgentTool {
             defer { try? FileManager.default.removeItem(at: root) }
             try PreviewArtifactExtractor.extract(archive, to: root)
             guard let ipa = Self.firstFile(withExtension: "ipa", under: root) else { throw ToolInputError("That artifact does not contain an IPA.") }
-            let checker = workspace.appendingPathComponent(".maipag-runner/scripts/check-ipa.py")
-            guard FileManager.default.fileExists(atPath: checker.path) else { throw ToolInputError("The independent IPA checker is unavailable.") }
+            guard !ipaChecker.isEmpty else { throw ToolInputError("The independent IPA checker is unavailable outside the target workspace.") }
+            let checker = root.appendingPathComponent("check-ipa.py")
+            try ipaChecker.write(to: checker, options: .atomic)
             let checked = try await BoundedProcess.run(executable: "/usr/bin/python3", arguments: [checker.path, ipa.path], directory: workspace, timeout: 180)
             let detail = [checked.stdout, checked.stderr].filter { !$0.isEmpty }.joined(separator: "\n")
             guard checked.exitCode == 0 else { throw ToolInputError(detail.isEmpty ? "The IPA check failed." : detail) }
@@ -242,9 +250,12 @@ private struct CloudGitHubTool: AgentTool {
         case "create_pull_request":
             guard !directSave else { throw ToolInputError("Repository rules require a direct save, so no pull request may be opened.") }
             let title = try arguments.requiredString("title")
-            _ = try await GitHubWorkspacePublisher(github: github, repo: repo, workspace: workspace)
-                .publish(branch: ref, baseRef: defaultBranch, message: title)
-            let pull = try await github.openPullRequest(repo, title: title, body: arguments.optionalString("body") ?? "Changes made and checked by MAIPA-G Autonomous.", head: ref, base: arguments.optionalString("base") ?? defaultBranch)
+            let publisher = GitHubWorkspacePublisher(github: github, repo: repo, workspace: workspace)
+            let branch = ref, base = defaultBranch
+            _ = try await WorkspaceTurnstile.shared.run {
+                try await publisher.publish(branch: branch, baseRef: base, message: title)
+            }
+            let pull = try await github.openOrReusePullRequest(repo, title: title, body: arguments.optionalString("body") ?? "Changes made and checked by MAIPA-G Autonomous.", head: ref, base: arguments.optionalString("base") ?? defaultBranch)
             await results.record(pullRequest: pull)
             return output("Opened pull request #\(pull.number)", pull.htmlURL)
         case "reply_to_review_comment":

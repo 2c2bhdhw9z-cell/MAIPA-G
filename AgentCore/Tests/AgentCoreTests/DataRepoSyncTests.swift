@@ -80,6 +80,9 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
             guard let ref = body?["ref"]?.stringValue, let sha = body?["sha"]?.stringValue else { return json(["message": "bad"], status: 422) }
             branchHeads[String(ref.dropFirst("refs/heads/".count))] = sha
             return json(["ref": .string(ref), "object": ["sha": .string(sha)]], status: 201)
+        case ("GET", prefix + "/pulls"):
+            // No request is open yet for the branch being saved.
+            return json([])
         case ("POST", prefix + "/pulls"):
             pullState = "open"
             return json(["number": 1, "title": body?["title"] ?? "Changes", "state": "open", "html_url": "https://github.com/octo/MAIPA-G-data/pull/1", "head": ["ref": body?["head"] ?? "branch"], "base": ["ref": body?["base"] ?? "main"], "merged": false], status: 201)

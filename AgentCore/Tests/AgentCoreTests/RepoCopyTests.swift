@@ -263,7 +263,11 @@ struct RepoCopyTests {
 
         let worktree = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let reusable = try String(contentsOf: worktree.appendingPathComponent(".github/workflows/agent.yml"), encoding: .utf8)
-        #expect(reusable.components(separatedBy: "persist-credentials: false").count == 3)
+        // The target checkout keeps no credential, and the trusted runner is cloned outside the
+        // target repo, where commands the AI runs in that repo can't swap its files.
+        #expect(reusable.components(separatedBy: "persist-credentials: false").count == 2)
+        #expect(reusable.contains("\"$RUNNER_TEMP/maipag-runner\""))
+        #expect(!reusable.contains("path: .maipag-runner"))
         #expect(!reusable.contains("GH_TOKEN:"))
         #expect(reusable.contains("MAIPAG_TARGET_TOKEN"))
         #expect(reusable.contains("MAIPAG_DATA_TOKEN"))

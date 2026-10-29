@@ -253,6 +253,15 @@ public struct JobRecord: ProductRecord, Hashable {
         ]
     }
 
+    /// The setup workflow is committed on the default branch. A first job aimed at that branch
+    /// must check out the new head rather than the pre-setup commit it recorded earlier.
+    public mutating func recordAutonomousSetupCommit(_ commit: String) {
+        guard (targetRef ?? defaultBranch) == defaultBranch else { return }
+        var object = state.objectValue ?? [:]
+        object["targetCommit"] = .string(commit)
+        state = .object(object)
+    }
+
     enum CodingKeys: String, CodingKey {
         case format, id, status, title, state, targetRepo, targetRef, defaultBranch, dataRepo
         case dataBranch, dataInstallationID, directSave

@@ -4,6 +4,10 @@ public struct CloudRunnerConfiguration: Sendable {
     public var jobID: UUID
     public var targetRepository: RepoRef
     public var workspace: URL
+    /// Immutable shared-runner checkout. It must not be inside the model-controlled target repo.
+    public var trustedRunnerDirectory: URL
+    /// Captured before untrusted work begins, so later target commands cannot replace it.
+    public var ipaChecker: Data
     public var targetToken: String
     public var dataToken: String
     public var dataRepository: RepoRef
@@ -13,8 +17,11 @@ public struct CloudRunnerConfiguration: Sendable {
     public var runID: Int?
     public var handoverAfter: TimeInterval
 
-    public init(jobID: UUID, targetRepository: RepoRef, workspace: URL, targetToken: String, dataToken: String, dataRepository: RepoRef, dataBranch: String = "main", connectorSecrets: [String: String] = [:], openRouterKey: String, runID: Int? = nil, handoverAfter: TimeInterval = 5.5 * 60 * 60) {
+    public init(jobID: UUID, targetRepository: RepoRef, workspace: URL, trustedRunnerDirectory: URL? = nil, ipaChecker: Data? = nil, targetToken: String, dataToken: String, dataRepository: RepoRef, dataBranch: String = "main", connectorSecrets: [String: String] = [:], openRouterKey: String, runID: Int? = nil, handoverAfter: TimeInterval = 5.5 * 60 * 60) {
         self.jobID = jobID; self.targetRepository = targetRepository; self.workspace = workspace
+        let runnerDirectory = trustedRunnerDirectory ?? workspace.deletingLastPathComponent().appendingPathComponent("maipag-trusted-runner", isDirectory: true)
+        self.trustedRunnerDirectory = runnerDirectory
+        self.ipaChecker = ipaChecker ?? ((try? Data(contentsOf: CloudToolAssembly.ipaCheckerURL(in: runnerDirectory))) ?? Data())
         self.targetToken = targetToken; self.dataToken = dataToken; self.dataRepository = dataRepository; self.dataBranch = dataBranch
         self.connectorSecrets = connectorSecrets; self.openRouterKey = openRouterKey; self.runID = runID
         self.handoverAfter = handoverAfter
@@ -29,6 +36,7 @@ public enum CloudRunnerError: Error, Sendable, Equatable {
     case noDifferentModel
     case checksFailed
     case handoverRequired
+    case missingWorkflowIdentity
 }
 
 private struct StaticTokenProvider: GitHubTokenProvider {
@@ -197,6 +205,7 @@ public struct CloudRunner: Sendable {
             tools.append(contentsOf: CloudToolAssembly.make(
                 github: github, repo: configuration.targetRepository, ref: workBranch,
                 workspace: configuration.workspace,
+                ipaChecker: configuration.ipaChecker,
                 defaultBranch: job.defaultBranch ?? "main", directSave: job.directSave,
                 buildExplicitlyRequested: job.state["buildExplicitlyRequested"]?.boolValue == true,
                 results: toolResults,
@@ -249,12 +258,7 @@ public struct CloudRunner: Sendable {
                 job.handoverGeneration += 1
                 job.updatedAt = Date()
                 try await store.save(job)
-                try await github.dispatchWorkflow(
-                    configuration.targetRepository,
-                    workflow: "maipa-g.yml",
-                    ref: job.defaultBranch ?? "main",
-                    inputs: job.autonomousWorkflowInputs ?? [:]
-                )
+                try await Self.dispatchHandover(job, github: github, repo: configuration.targetRepository)
                 logger.progress("Checkpoint saved. A fresh runner will continue the job.")
                 return
             }
@@ -308,6 +312,7 @@ public struct CloudRunner: Sendable {
         tools.append(contentsOf: CloudToolAssembly.make(
             github: github, repo: configuration.targetRepository, ref: branch,
             workspace: configuration.workspace,
+            ipaChecker: configuration.ipaChecker,
             defaultBranch: job.defaultBranch ?? "main", directSave: job.directSave,
             buildExplicitlyRequested: workflowBuildAuthorized(job: job),
             results: toolResults,
@@ -342,9 +347,24 @@ public struct CloudRunner: Sendable {
         let workflowTools = tools
         let spendLimit = job.state["spendLimit"]?.doubleValue
         let runner: AgentExecutor.Runner = { invocation in
-            var chat = Chat(title: invocation.definition.name)
-            let prompt = [invocation.definition.prompt(task: invocation.task), invocation.context].filter { !$0.isEmpty }.joined(separator: "\n\nContext:\n")
-            chat.messages = [.user(prompt), ChatMessage(body: .assistant(AssistantTurn()))]
+            var chat: Chat
+            if let value = invocation.resumeState,
+               let saved = try? decode(Chat.self, from: value) {
+                chat = saved
+                if let answer = invocation.answer, var turn = chat.lastAssistantTurn {
+                    if let pending = turn.pendingQuestions {
+                        turn.steps[pending.stepIndex].toolCalls[pending.callIndex].questions?.answers = [answer]
+                    } else if answer == "Keep going", let spent = turn.spendCheck {
+                        turn.approvedSpendUpTo = spent + max(invocation.spendLimit ?? 1, 0.01)
+                        turn.spendCheck = nil
+                    }
+                    chat.messages[chat.messages.count - 1].assistantTurn = turn
+                }
+            } else {
+                chat = Chat(title: invocation.definition.name)
+                let prompt = [invocation.definition.prompt(task: invocation.task), invocation.context].filter { !$0.isEmpty }.joined(separator: "\n\nContext:\n")
+                chat.messages = [.user(prompt), ChatMessage(body: .assistant(AssistantTurn()))]
+            }
             let route: Route
             if invocation.definition.modelPolicy == .differentFromPrimary {
                 guard let distinct = ModelRouter.distinctRoute(avoiding: invocation.avoidModel, difficulty: invocation.definition.difficulty, thinking: .medium, account: accountState, catalogue: catalogue) else {
@@ -357,7 +377,7 @@ public struct CloudRunner: Sendable {
             let input = AgentTurnInput(
                 chat: chat, route: route,
                 systemPrompt: SystemPrompt.make(userLogin: nil, repo: repoContext, agent: invocation.definition, workflowContext: invocation.context),
-                tools: workflowTools, spendLimit: invocation.spendLimit, agent: invocation.definition
+                tools: workflowTools + invocation.tools, spendLimit: invocation.spendLimit, agent: invocation.definition
             )
             var final: AssistantTurn?
             let agentRun = AgentLoop.start(input, environment: environment)
@@ -374,7 +394,12 @@ public struct CloudRunner: Sendable {
             guard let turn = final, turn.status != .failed else { throw CloudRunnerError.commandFailed }
             let output = turn.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n")
             let pending = turn.pendingQuestions?.questions.questions.first.map { AgentExecutionQuestion(text: $0.text, options: $0.options) }
-            return AgentExecutionResult(output: output, model: turn.steps.last?.model, goalOutcome: AgentGoalOutcome.parse(output), cost: turn.usage.cost ?? 0, needsSpendingApproval: turn.spendCheck != nil, pendingQuestion: pending)
+            return AgentExecutionResult(
+                output: output, model: turn.steps.last?.model,
+                goalOutcome: AgentGoalOutcome.parse(output), cost: turn.usage.cost ?? 0,
+                needsSpendingApproval: turn.spendCheck != nil, pendingQuestion: pending,
+                resumeState: pending != nil || turn.spendCheck != nil ? encode(chat) : nil
+            )
         }
         let engine = WorkflowEngine(definition: definition, checkpoint: savedCheckpoint, agents: definitions, spendLimit: spendLimit, runner: runner) { checkpoint in
             try await sink.save(checkpoint)
@@ -390,12 +415,7 @@ public struct CloudRunner: Sendable {
             job.handoverGeneration += 1
             job.updatedAt = Date()
             try await store.save(job)
-            try await github.dispatchWorkflow(
-                configuration.targetRepository,
-                workflow: "maipa-g.yml",
-                ref: job.defaultBranch ?? "main",
-                inputs: ["job_id": job.id.uuidString.lowercased()]
-            )
+            try await Self.dispatchHandover(job, github: github, repo: configuration.targetRepository)
             logger.progress("Workflow checkpoint saved. A fresh runner will continue the job.")
             return
         }
@@ -503,15 +523,17 @@ public struct CloudRunner: Sendable {
         let selected = job.targetRef ?? job.defaultBranch ?? "main"
         let defaultBranch = job.defaultBranch ?? "main"
         let effectiveRules = try await localWriteRules(for: job)
-        let savesDirectly = effectiveRules.directSave || selected != defaultBranch
+        let savesDirectly = effectiveRules.directSave
         job.directSave = savesDirectly
         var state = job.state.objectValue ?? [:]
         state["effectiveDirectSave"] = .bool(savesDirectly)
         state["repoRuleReason"] = effectiveRules.reason.map(JSONValue.string)
         let existing = state["workBranch"]?.stringValue
-        let branch = existing ?? (effectiveRules.directSave || selected != defaultBranch
+        let branch = existing ?? (effectiveRules.directSave
             ? selected
-            : "maipa-g/\(Self.slug(job.title))-\(job.id.uuidString.lowercased().prefix(8))")
+            : (selected != defaultBranch
+                ? selected
+                : "maipa-g/\(Self.slug(job.title))-\(job.id.uuidString.lowercased().prefix(8))"))
         let botName = state["botName"]?.stringValue ?? "maipa-g[bot]"
         let botSlug = botName.replacingOccurrences(of: "[bot]", with: "")
         try await git(["config", "user.name", botName])
@@ -548,14 +570,15 @@ public struct CloudRunner: Sendable {
 
     private func finishRepository(job: JobRecord, branch: String, github: GitHubClient, toolResults: CloudToolResults, chat: Chat? = nil, summaryOverride: String? = nil) async throws -> JobResult {
         let effectiveRules = try await localWriteRules(for: job)
-        let destination = effectiveRules.directSave ? (job.targetRef ?? job.defaultBranch ?? "main") : branch
-        let baseRef = job.targetRef ?? job.defaultBranch ?? "main"
+        let selected = job.targetRef ?? job.defaultBranch ?? "main"
+        let destination = effectiveRules.directSave ? selected : branch
+        let baseRef = effectiveRules.directSave ? selected : (job.defaultBranch ?? "main")
         let commit = try await GitHubWorkspacePublisher(github: github, repo: configuration.targetRepository, workspace: configuration.workspace)
             .publish(branch: destination, baseRef: baseRef, message: job.title)
 
         var pullRequest = await toolResults.pullRequest
         if pullRequest == nil, !effectiveRules.directSave, branch != (job.defaultBranch ?? "main") {
-            pullRequest = try await github.openPullRequest(
+            pullRequest = try await github.openOrReusePullRequest(
                 configuration.targetRepository,
                 title: job.title,
                 body: "Changes made and checked by MAIPA-G Autonomous.",
@@ -576,7 +599,12 @@ public struct CloudRunner: Sendable {
             }
         }
         if buildURL == nil { buildURL = successfulRuns.last?.htmlURL }
-        let summary = summaryOverride ?? chat?.lastAssistantTurn?.steps.last(where: { !$0.text.isEmpty })?.text ?? "Finished the requested work."
+        var summary = summaryOverride ?? chat?.lastAssistantTurn?.steps.last(where: { !$0.text.isEmpty })?.text ?? "Finished the requested work."
+        switch verified.report.discovery {
+        case .observed: summary += "\n\nGitHub's automatic checks passed."
+        case .confirmedNoChecks: summary += "\n\nThis repo has no automatic checks for this change."
+        case .timedOut: summary += "\n\nGitHub didn't start any automatic checks for this change, so nothing was checked automatically."
+        }
         return JobResult(summary: summary, pullRequest: pullRequest, commit: verifiedCommit, buildURL: buildURL, artifactURL: artifactURL)
     }
 
@@ -592,14 +620,18 @@ public struct CloudRunner: Sendable {
         var repairContext = ""
         let watcher = GitHubRunWatcher(github: github)
         for attempt in 0...2 {
-            let report = try await watcher.wait(repo: configuration.targetRepository, commit: commit, excludingRunID: configuration.runID, redacting: logger)
+            let report = try await watcher.wait(repo: configuration.targetRepository, commit: commit, branch: branch, excludingRunID: configuration.runID, redacting: logger)
             if report.succeeded { return (commit, report) }
+            // No check ever started (for example, the repo's builds only run on main or on certain
+            // folders). There is nothing to repair; the result says plainly that nothing was checked.
+            if report.discovery == .timedOut { return (commit, report) }
             guard attempt < 2 else { throw CloudRunnerError.checksFailed }
             repairContext = [repairContext, report.failedLogs].filter { !$0.isEmpty }.joined(separator: "\n\n")
             let rules = try await localWriteRules(for: job)
             let tools: [any AgentTool] = [WorkspaceInspectTool(directory: configuration.workspace), ProcessTool(directory: configuration.workspace, authorization: ChangeAuthorization(request: job.state["request"]?.stringValue ?? job.title), rules: rules)]
                 + CloudToolAssembly.make(
                     github: github, repo: configuration.targetRepository, ref: branch, workspace: configuration.workspace,
+                    ipaChecker: configuration.ipaChecker,
                     defaultBranch: job.defaultBranch ?? "main", directSave: rules.directSave,
                     buildExplicitlyRequested: false, results: toolResults, logger: logger
                 )
@@ -668,17 +700,7 @@ public struct CloudRunner: Sendable {
     private func localWriteRules(for job: JobRecord) async throws -> RepoWriteRules {
         let directSave = job.directSave || job.state["effectiveDirectSave"]?.boolValue == true
         let directReason = job.state["repoRuleReason"]?.stringValue
-        let manager = FileManager.default
-        guard let values = manager.enumerator(at: configuration.workspace, includingPropertiesForKeys: [.isRegularFileKey], options: []) else { return RepoWriteRules() }
-        var documents: [(String, String)] = []
-        for case let url as URL in values {
-            let relative = String(url.path.dropFirst(configuration.workspace.path.count + 1))
-            if relative == ".git" || relative.hasPrefix(".git/") { continue }
-            let lower = relative.lowercased()
-            guard lower == "agents.md" || lower.hasSuffix("/agents.md") || lower.contains(".kiro/steering/") || lower.hasSuffix("owner-rules.md") else { continue }
-            guard documents.count < 100, let data = try? Data(contentsOf: url), data.count <= 1_000_000, let text = String(data: data, encoding: .utf8) else { continue }
-            documents.append((relative, text))
-        }
+        var documents = Self.ruleDocuments(in: configuration.workspace)
         documents.sort {
             let leftDepth = $0.0.split(separator: "/").count, rightDepth = $1.0.split(separator: "/").count
             return leftDepth == rightDepth ? $0.0 < $1.0 : leftDepth < rightDepth
@@ -686,6 +708,26 @@ public struct CloudRunner: Sendable {
         var resolved = RepoWriteRules.resolve(documents: documents, directSaveSetting: directSave)
         if directSave, let directReason { resolved.reason = directReason }
         return resolved
+    }
+
+    /// The repo's own rules files (AGENTS.md, .kiro/steering, owner-rules.md). Synchronous on
+    /// purpose: Apple's folder enumerator can't be looped over inside async code.
+    static func ruleDocuments(in workspace: URL) -> [(String, String)] {
+        guard let values = FileManager.default.enumerator(at: workspace, includingPropertiesForKeys: [.isRegularFileKey], options: []) else { return [] }
+        var documents: [(String, String)] = []
+        while let url = values.nextObject() as? URL {
+            let relative = String(url.path.dropFirst(workspace.path.count + 1))
+            let name = url.lastPathComponent
+            if name == ".git" || name == "node_modules" || name == ".build" {
+                values.skipDescendants()
+                continue
+            }
+            let lower = relative.lowercased()
+            guard lower == "agents.md" || lower.hasSuffix("/agents.md") || lower.contains(".kiro/steering/") || lower.hasSuffix("owner-rules.md") else { continue }
+            guard documents.count < 100, let data = try? Data(contentsOf: url), data.count <= 1_000_000, let text = String(data: data, encoding: .utf8) else { continue }
+            documents.append((relative, text))
+        }
+        return documents
     }
 
     private func runPreviewBuild(job: inout JobRecord, branch: String, store: RemoteJobStore) async throws {
@@ -722,7 +764,7 @@ public struct CloudRunner: Sendable {
         var tools: [any AgentTool] = []
         for value in job.state["stdioConnectors"]?.arrayValue ?? [] {
             guard let configuration = try? decode(ConnectorConfiguration.self, from: value), configuration.kind == .stdio else { continue }
-            let connector = AutonomousStdioConnector(configuration: configuration)
+            let connector = AutonomousStdioConnector(configuration: configuration, workspace: self.configuration.workspace)
             let prefix = configuration.id.uuidString.lowercased() + "."
             let secrets = self.configuration.connectorSecrets.reduce(into: [String: String]()) { values, item in
                 if item.key.hasPrefix(prefix) { values[String(item.key.dropFirst(prefix.count))] = item.value }
@@ -764,6 +806,16 @@ public struct CloudRunner: Sendable {
         guard let index = chat.messages.indices.last, chat.messages[index].assistantTurn != nil else { return }
         chat.messages[index].assistantTurn = turn
         chat.updatedAt = Date()
+    }
+
+    public static func dispatchHandover(_ job: JobRecord, github: GitHubClient, repo: RepoRef) async throws {
+        guard let inputs = job.autonomousWorkflowInputs else { throw CloudRunnerError.missingWorkflowIdentity }
+        try await github.dispatchWorkflow(
+            repo,
+            workflow: "maipa-g.yml",
+            ref: job.defaultBranch ?? "main",
+            inputs: inputs
+        )
     }
 
     private static func hasPassingMarker(_ text: String) -> Bool {

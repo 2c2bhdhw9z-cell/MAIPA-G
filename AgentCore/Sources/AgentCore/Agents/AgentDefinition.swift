@@ -61,6 +61,7 @@ public struct AgentDefinition: Codable, Sendable, Hashable, Identifiable {
     ]
 
     public func permits(tool name: String) -> Bool {
+        if name == "launch_helpers" { return maximumHelpers > 0 }
         guard allowedTools.contains(name) else { return false }
         if behavior == .reportOnly || behavior == .review {
             return !Self.mutatingTools.contains(name)

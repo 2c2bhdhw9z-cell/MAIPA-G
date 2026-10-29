@@ -61,6 +61,34 @@ public enum BuiltInWorkflows {
     public static var byID: [String: WorkflowDefinition] { Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) }) }
     public static func named(_ id: String) -> WorkflowDefinition? { byID[id] }
 
+    public enum RoutingMode: Sendable { case whenAsked, bigJobs, everything }
+
+    /// Chooses a concrete built-in workflow for Settings-driven routing. The separate composer
+    /// Autonomous switch deliberately bypasses this selector and starts one ordinary cloud agent.
+    public static func routed(request: String, mode: RoutingMode, difficulty: TaskDifficulty) -> WorkflowDefinition? {
+        let text = request.lowercased()
+        let named: WorkflowDefinition?
+        if text.contains("build") && text.contains("ipa") { named = self.named("build-ipa") }
+        else if text.contains("two-ai") || text.contains("two ai") || text.contains("second opinion") { named = self.named("two-ai-review") }
+        else if text.contains("checklist") { named = self.named("checklist") }
+        else if text.contains("experiment") { named = self.named("experiment") }
+        else if text.contains("until") && (text.contains("goal") || text.contains("done")) { named = self.named("keep-going") }
+        else if text.contains("pull request") && text.contains("review") { named = self.named("side-copy-review") }
+        else if text.contains("investigate") || text.contains("look into") { named = self.named("look-into-something") }
+        else if text.contains("full feature") { named = self.named("full-feature") }
+        else { named = nil }
+
+        let explicitlyAsked = named != nil || text.contains("use a workflow") || text.contains("run a workflow")
+        switch mode {
+        case .whenAsked:
+            return explicitlyAsked ? (named ?? self.named("full-feature")) : nil
+        case .bigJobs:
+            return explicitlyAsked || difficulty == .hard ? (named ?? self.named("full-feature")) : nil
+        case .everything:
+            return named ?? self.named("full-feature")
+        }
+    }
+
     private static func workflow(_ id: String, _ name: String, _ summary: String, _ steps: [WorkflowNode]) -> WorkflowDefinition {
         WorkflowDefinition(id: id, name: name, summary: summary, steps: steps, isBuiltIn: true)
     }

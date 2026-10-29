@@ -42,15 +42,21 @@ final class JobCoordinator {
         app?.sheet = .jobs
     }
 
-    /// Repo-less work deliberately returns false and stays in the existing on-phone chat.
-    func shouldRunAutonomously(request: String, repo: ChatRepo?, explicitlyEnabled: Bool) -> Bool {
-        guard repo != nil, let app else { return false }
-        if explicitlyEnabled { return true }
+    /// Settings-driven routing always chooses a concrete workflow. The separate composer switch
+    /// still starts one ordinary Autonomous agent, and repo-less work stays on this phone.
+    func routedWorkflow(request: String, repo: ChatRepo?) -> WorkflowDefinition? {
+        guard repo != nil, let app else { return nil }
+        let mode: BuiltInWorkflows.RoutingMode
         switch app.settings.workflowPolicy {
-        case .whenAsked: return false
-        case .everything: return true
-        case .bigJobs: return TaskDifficulty.estimate(request, hasRepo: true) == .hard
+        case .whenAsked: mode = .whenAsked
+        case .bigJobs: mode = .bigJobs
+        case .everything: mode = .everything
         }
+        return BuiltInWorkflows.routed(
+            request: request,
+            mode: mode,
+            difficulty: TaskDifficulty.estimate(request, hasRepo: true)
+        )
     }
 
     @discardableResult
@@ -175,9 +181,25 @@ final class JobCoordinator {
         let login = app.github.login
         let recordStore = store
         let runner: AgentExecutor.Runner = { invocation in
-            var chat = Chat(title: invocation.definition.name)
-            let completeTask = [invocation.definition.prompt(task: invocation.task), invocation.context].filter { !$0.isEmpty }.joined(separator: "\n\nContext:\n")
-            chat.messages = [.user(completeTask), ChatMessage(body: .assistant(AssistantTurn()))]
+            var chat: Chat
+            if let value = invocation.resumeState,
+               let data = try? JSONCoding.encoder().encode(value),
+               let saved = try? JSONCoding.decoder().decode(Chat.self, from: data) {
+                chat = saved
+                if let answer = invocation.answer, var turn = chat.lastAssistantTurn {
+                    if let pending = turn.pendingQuestions {
+                        turn.steps[pending.stepIndex].toolCalls[pending.callIndex].questions?.answers = [answer]
+                    } else if answer == "Keep going", let spent = turn.spendCheck {
+                        turn.approvedSpendUpTo = spent + max(invocation.spendLimit ?? 1, 0.01)
+                        turn.spendCheck = nil
+                    }
+                    chat.messages[chat.messages.count - 1].assistantTurn = turn
+                }
+            } else {
+                chat = Chat(title: invocation.definition.name)
+                let completeTask = [invocation.definition.prompt(task: invocation.task), invocation.context].filter { !$0.isEmpty }.joined(separator: "\n\nContext:\n")
+                chat.messages = [.user(completeTask), ChatMessage(body: .assistant(AssistantTurn()))]
+            }
             let difficulty: TaskDifficulty = invocation.definition.modelPolicy == .fast ? .quick : invocation.definition.difficulty
             let route: Route
             if invocation.definition.modelPolicy == .differentFromPrimary {
@@ -192,7 +214,7 @@ final class JobCoordinator {
                 chat: chat,
                 route: route,
                 systemPrompt: SystemPrompt.make(userLogin: login, repo: nil, agent: invocation.definition, workflowContext: invocation.context),
-                tools: [WebSearchTool(transport: transport), ReadWebPageTool(transport: transport)],
+                tools: [WebSearchTool(transport: transport), ReadWebPageTool(transport: transport)] + invocation.tools,
                 spendLimit: invocation.spendLimit,
                 agent: invocation.definition
             )
@@ -209,10 +231,12 @@ final class JobCoordinator {
             let text = turn.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n")
             if turn.status == .failed { throw ToolInputError(turn.failure?.message ?? "The agent did not finish.") }
             let pending = turn.pendingQuestions?.questions.questions.first.map { AgentExecutionQuestion(text: $0.text, options: $0.options) }
+            let resumeState = (try? JSONCoding.encoder().encode(chat)).flatMap(JSONValue.parse)
             return AgentExecutionResult(
                 output: text, model: turn.steps.last?.model,
                 goalOutcome: AgentGoalOutcome.parse(text), cost: turn.usage.cost ?? 0,
-                needsSpendingApproval: turn.spendCheck != nil, pendingQuestion: pending
+                needsSpendingApproval: turn.spendCheck != nil, pendingQuestion: pending,
+                resumeState: pending != nil || turn.spendCheck != nil ? resumeState : nil
             )
         }
         let restored = await store.workflowCheckpoint(jobID)
@@ -307,11 +331,12 @@ final class JobCoordinator {
                 "OPENROUTER_API_KEY": openRouterKey,
             ]
             if let connectorSecrets = app.connectors.autonomousSecretsJSON() { setupSecrets["MAIPAG_MCP_SECRETS"] = connectorSecrets }
-            _ = try await setup.install(
+            let setupCommit = try await setup.install(
                 in: repo,
                 branch: job.defaultBranch ?? "main",
                 secrets: setupSecrets
             )
+            job.recordAutonomousSetupCommit(setupCommit)
             job.status = .queued
             job.steps = [JobStepRecord(title: "Waiting for GitHub", status: .pending)]
             job = try await store.checkpoint(job)
@@ -394,8 +419,10 @@ final class JobCoordinator {
               let repo = job.targetRepo, let pull = job.result?.pullRequest else { return }
         do {
             try await github.mergePullRequest(repo, number: pull.number, title: pull.title)
-            try await github.deleteBranch(repo, branch: pull.headBranch)
-            job.result?.summary += "\n\nAdded the pull request and removed its side branch."
+            try await github.deleteBranchIfMAIPAG(repo, branch: pull.headBranch)
+            job.result?.summary += GitHubClient.isMAIPAGBranch(pull.headBranch)
+                ? "\n\nAdded the pull request and removed its side branch."
+                : "\n\nAdded the pull request. Your branch \(pull.headBranch) was kept."
             job.result?.pullRequest = nil
             _ = try await store.checkpoint(job)
             await reloadAndSync()
@@ -407,8 +434,10 @@ final class JobCoordinator {
               let repo = job.targetRepo, let pull = job.result?.pullRequest else { return }
         do {
             _ = try await github.closePullRequest(repo, number: pull.number)
-            try await github.deleteBranch(repo, branch: pull.headBranch)
-            job.result?.summary += "\n\nClosed the pull request and removed its side branch."
+            try await github.deleteBranchIfMAIPAG(repo, branch: pull.headBranch)
+            job.result?.summary += GitHubClient.isMAIPAGBranch(pull.headBranch)
+                ? "\n\nClosed the pull request and removed its side branch."
+                : "\n\nClosed the pull request. Your branch \(pull.headBranch) was kept."
             job.result?.pullRequest = nil
             _ = try await store.checkpoint(job)
             await reloadAndSync()

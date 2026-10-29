@@ -349,6 +349,27 @@ public struct GitHubClient: Sendable {
         _ = try await send("DELETE", Self.path(repo, "/git/refs/heads/\(Self.escapePath(branch))"), allow: [404])
     }
 
+    /// Side branches MAIPA-G made itself. Only these are ever deleted: a branch the user picked
+    /// keeps everything on it when its request is added or thrown away.
+    public static func isMAIPAGBranch(_ name: String) -> Bool { name.hasPrefix("maipa-g/") }
+
+    /// Deletes the branch only when MAIPA-G created it.
+    public func deleteBranchIfMAIPAG(_ repo: RepoRef, branch: String) async throws {
+        guard Self.isMAIPAGBranch(branch) else { return }
+        try await deleteBranch(repo, branch: branch)
+    }
+
+    /// The open pull request from `head` into `base`, opening one only when there is none yet.
+    /// A branch the user picked may already have its own request; saves then join it.
+    public func openOrReusePullRequest(_ repo: RepoRef, title: String, body text: String, head: String, base: String) async throws -> GitHubPullRequest {
+        let existing = try await get(
+            [GitHubPullRequest].self, Self.path(repo, "/pulls"),
+            query: ["state": "open", "head": "\(repo.owner):\(head)", "base": base, "per_page": "5"]
+        )
+        if let open = existing.first(where: { $0.headBranch == head && $0.baseBranch == base }) { return open }
+        return try await openPullRequest(repo, title: title, body: text, head: head, base: base)
+    }
+
     public func openPullRequest(_ repo: RepoRef, title: String, body text: String, head: String, base: String) async throws -> GitHubPullRequest {
         let body: JSONValue = ["title": .string(title), "body": .string(text), "head": .string(head), "base": .string(base)]
         return try await send("POST", Self.path(repo, "/pulls"), body: body).decode(GitHubPullRequest.self)
