@@ -67,6 +67,13 @@ them go into one batch and one build.**
    swappable providers (Sprites first, then E2B, Daytona, GitHub's free computer and others),
    chosen and changed in Settings at any time. The repo on GitHub stays the source of truth, so
    switching only means the new computer copies the repo again.
+   11:51 AM: the Sprites test worked in build 24. Through the connector the AI created `mcp-test`,
+   cloned MAIPA-G to `/home/MAIPA-G` (204 tracked files) and ran `git ls-files | xargs wc -l`:
+   28,925 (that includes binary files; text files alone are about 27,065). Model: Nemotron 3.5
+   Super VL (free), $0.00. He had to say "use Sprites". **Requirement (owner): once the computer
+   is set, the AI must use it by itself whenever a task needs it, like Kiro, with no "do this on
+   the computer" from him.** So the fix sets up the chat's computer automatically (private repos
+   included, without exposing his GitHub token to the model) and tells the AI it has it.
 
 Technical notes for the logo fix (for Kiro):
 - iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
