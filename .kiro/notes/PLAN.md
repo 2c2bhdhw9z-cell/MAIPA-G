@@ -62,6 +62,11 @@ them go into one batch and one build.**
    MAIPA-G's `mcp/client.json` is live, so build 24's custom connector (+ in Connectors) should
    sign in. Gave him steps to test it on the public MAIPA-G repo (27,065 lines in 200 text files
    at `0f1160d`).
+   **Requirement (owner, 29 October 2026): "I might change the docker/vm/sandbox at any time."**
+   The chat computer must not be tied to one company. Build it as one computer interface with
+   swappable providers (Sprites first, then E2B, Daytona, GitHub's free computer and others),
+   chosen and changed in Settings at any time. The repo on GitHub stays the source of truth, so
+   switching only means the new computer copies the repo again.
 
 Technical notes for the logo fix (for Kiro):
 - iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
