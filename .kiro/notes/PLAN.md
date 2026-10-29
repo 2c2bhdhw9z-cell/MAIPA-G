@@ -33,6 +33,12 @@ them go into one batch and one build.**
    script runner (JavaScriptCore) over the repo copy for quick jobs like counting lines, which
    also works in chats with no repo (GitHub's terms rule out runners for repo-less work). Works
    now in build 24: switch Autonomous on before asking (a few minutes' wait).
+   For comparison (29 October): Arena's Agent Mode computer, measured by the owner in Arena, has
+   2 cores, 1.9 GiB memory, no swap and 25 GB disk. It is an E2B Firecracker microVM that starts
+   almost at once and pauses/resumes with files and running programs kept. Kiro's sandbox: 8 cores,
+   30 GB, 125 GB. GitHub's free Linux computer: 4 cores, 16 GB, 14 GB (public repos) or 2 cores,
+   8 GB, 14 GB (private). So power is not the gap; start-up time and keeping work between visits
+   are.
 
 Technical notes for the logo fix (for Kiro):
 - iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
