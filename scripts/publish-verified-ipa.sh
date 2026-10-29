@@ -16,7 +16,13 @@ RUN="$(gh api "repos/$REPO/actions/runs/$RUN_ID")"
 RUN_SHA="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["head_sha"])' <<<"$RUN")"
 RUN_NUMBER="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["run_number"])' <<<"$RUN")"
 [ "$RUN_SHA" = "$PR_HEAD" ] || { echo "error: run did not check the PR head" >&2; exit 1; }
-[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("conclusion"))' <<<"$RUN")" = "success" ] || { echo "error: run is not green" >&2; exit 1; }
+# The two jobs that make and check the app must be green. The screenshot job only checks the look
+# and may still be running or have been stopped.
+JOBS="$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=20")"
+for job in "AgentCore tests (Linux)" "iPhone release candidate"; do
+  [ "$(python3 -c 'import json,sys; jobs=json.load(sys.stdin)["jobs"]; print(next((j.get("conclusion") for j in jobs if j["name"]==sys.argv[1]), None))' "$job" <<<"$JOBS")" = "success" ] \
+    || { echo "error: '$job' did not pass on run $RUN_ID" >&2; exit 1; }
+done
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 ARTIFACT_ID="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[] | select(.name|startswith("MAIPA-G-ipa-")) | .id' | head -n1)"
