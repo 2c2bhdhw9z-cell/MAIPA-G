@@ -8,12 +8,17 @@ public struct ToolOutput: Sendable, Hashable {
     /// More to show when the line is tapped open.
     public var detail: String?
     public var isError: Bool
+    public var generatedImages: [GeneratedImageResult]
+    /// Cost incurred by a tool outside the chat-completion request, such as image generation.
+    public var billedCost: Double
 
-    public init(forModel: String, summary: String, detail: String? = nil, isError: Bool = false) {
+    public init(forModel: String, summary: String, detail: String? = nil, isError: Bool = false, generatedImages: [GeneratedImageResult] = [], billedCost: Double = 0) {
         self.forModel = forModel
         self.summary = summary
         self.detail = detail
         self.isError = isError
+        self.generatedImages = generatedImages
+        self.billedCost = billedCost
     }
 }
 
@@ -23,7 +28,36 @@ public protocol AgentTool: Sendable {
     var spec: ToolSpec { get }
     /// The line shown while the tool runs, such as "Reading README.md…".
     func runningSummary(for arguments: JSONValue) -> String
+    /// A destructive or build-setup change can pause for explicit approval before it runs.
+    func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest?
     func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput
+    /// Called after the person approves this exact tool call. Most tools run identically; shell
+    /// tools use the flag to accept a workspace delta that could only be known after execution.
+    func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput
+}
+
+public extension AgentTool {
+    func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? { nil }
+    func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        try await run(arguments: arguments, progress: progress)
+    }
+}
+
+public struct ToolApprovalRequest: Sendable, Hashable {
+    public var question: String
+    public var allowLabel: String
+    public init(question: String, allowLabel: String = "Allow") {
+        self.question = question
+        self.allowLabel = allowLabel
+    }
+}
+
+/// A tool raises this only after restoring a sensitive speculative workspace delta. The agent
+/// loop turns it into the same durable approval pause used by preflight approvals, then calls
+/// `runApproved` with the original arguments if the person allows it.
+public struct ToolApprovalRequired: Error, Sendable, Hashable {
+    public var request: ToolApprovalRequest
+    public init(_ request: ToolApprovalRequest) { self.request = request }
 }
 
 /// Thrown by a tool when the AI asked for something impossible. The message goes back to the

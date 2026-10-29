@@ -11,6 +11,7 @@ struct ChatSummary: Identifiable, Hashable, Sendable {
     var repoName: String?
     var preview: String
     var firstMessage: String
+    var groupID: UUID?
 
     init(_ chat: Chat) {
         id = chat.id
@@ -20,6 +21,7 @@ struct ChatSummary: Identifiable, Hashable, Sendable {
         repoName = chat.repo?.ref.fullName
         preview = chat.preview
         firstMessage = chat.firstUserText ?? ""
+        groupID = chat.groupID
     }
 
     func matches(_ query: String) -> Bool {
@@ -113,12 +115,12 @@ final class ChatLibrary {
     }
 
     /// Starts a chat from the home screen's box.
-    func startChat(text: String, repo: ChatRepo?, model: ModelChoice, thinking: ThinkingLevel) {
-        let chat = Chat(repo: repo, model: model, thinking: thinking)
+    func startChat(text: String, attachments: [AttachmentReference] = [], repo: ChatRepo?, model: ModelChoice, thinking: ThinkingLevel, groupID: UUID? = nil, memories: [String] = []) {
+        let chat = Chat(repo: repo, model: model, thinking: thinking, groupID: groupID, memoryContext: memories)
         let session = ChatSession(chat: chat, app: app)
         sessions[chat.id] = session
         openSession = session
-        session.send(text)
+        session.send(text, attachments: attachments)
         upsert(session.chat)
         dropIdleSessions()
     }
@@ -182,7 +184,17 @@ final class ChatLibrary {
         app?.sync.request()
     }
 
+    func removeGroup(_ groupID: UUID) async {
+        _ = try? await store.clearGroup(groupID)
+        for session in sessions.values where session.chat.groupID == groupID { session.setGroup(nil) }
+        await reloadFromDisk()
+    }
+
     func session(_ id: UUID) -> ChatSession? { sessions[id] }
+
+    func generatedImage(_ id: UUID) -> GeneratedImageResult? {
+        openSession?.chat.messages.compactMap(\.assistantTurn).flatMap(\.steps).flatMap { $0.generatedImages ?? [] }.first { $0.id == id }
+    }
 
     var runningCount: Int { sessions.values.filter(\.isRunning).count }
 }

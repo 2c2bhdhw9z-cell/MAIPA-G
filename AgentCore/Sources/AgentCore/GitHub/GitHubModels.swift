@@ -315,6 +315,43 @@ public struct GitHubUserToken: Codable, Sendable, Hashable {
     }
 }
 
+public struct GitHubPullRequest: Codable, Sendable, Hashable, Identifiable {
+    public var number: Int
+    public var title: String
+    public var state: String
+    public var htmlURL: String
+    public var headBranch: String
+    public var baseBranch: String
+    public var isMerged: Bool
+    public var id: Int { number }
+
+    enum CodingKeys: String, CodingKey { case number, title, state, head, base, merged; case htmlURL = "html_url" }
+    struct RefValue: Codable { var ref: String }
+
+    public init(number: Int, title: String, state: String = "open", htmlURL: String, headBranch: String, baseBranch: String, isMerged: Bool = false) {
+        self.number = number; self.title = title; self.state = state; self.htmlURL = htmlURL
+        self.headBranch = headBranch; self.baseBranch = baseBranch; self.isMerged = isMerged
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        number = try c.decode(Int.self, forKey: .number)
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? "Changes from MAIPA-G"
+        state = try c.decodeIfPresent(String.self, forKey: .state) ?? "open"
+        htmlURL = try c.decodeIfPresent(String.self, forKey: .htmlURL) ?? ""
+        headBranch = try c.decodeIfPresent(RefValue.self, forKey: .head)?.ref ?? ""
+        baseBranch = try c.decodeIfPresent(RefValue.self, forKey: .base)?.ref ?? "main"
+        isMerged = try c.decodeIfPresent(Bool.self, forKey: .merged) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(number, forKey: .number); try c.encode(title, forKey: .title); try c.encode(state, forKey: .state)
+        try c.encode(htmlURL, forKey: .htmlURL); try c.encode(RefValue(ref: headBranch), forKey: .head)
+        try c.encode(RefValue(ref: baseBranch), forKey: .base); try c.encode(isMerged, forKey: .merged)
+    }
+}
+
 /// A published MAIPA-G build, for "a new build is out".
 public struct GitHubRelease: Codable, Sendable, Hashable {
     public var tagName: String
@@ -345,4 +382,88 @@ public struct GitHubRelease: Codable, Sendable, Hashable {
         guard parts.count >= 2, parts[0] == "build" else { return nil }
         return Int(parts[1])
     }
+}
+
+public struct GitHubWorkflowRun: Codable, Sendable, Hashable, Identifiable {
+    public var id: Int
+    public var name: String
+    public var status: String
+    public var conclusion: String?
+    public var event: String
+    public var headBranch: String?
+    public var headSHA: String
+    public var htmlURL: String
+    public var runNumber: Int
+    public var createdAt: Date
+    public var updatedAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, status, conclusion, event
+        case headBranch = "head_branch"
+        case headSHA = "head_sha"
+        case htmlURL = "html_url"
+        case runNumber = "run_number"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
+public struct GitHubWorkflowJob: Codable, Sendable, Hashable, Identifiable {
+    public struct Step: Codable, Sendable, Hashable {
+        public var name: String
+        public var status: String
+        public var conclusion: String?
+        public var number: Int
+    }
+    public var id: Int
+    public var name: String
+    public var status: String
+    public var conclusion: String?
+    public var htmlURL: String
+    public var steps: [Step]
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, status, conclusion, steps
+        case htmlURL = "html_url"
+    }
+}
+
+public struct GitHubArtifact: Codable, Sendable, Hashable, Identifiable {
+    public var id: Int
+    public var name: String
+    public var sizeInBytes: Int
+    public var archiveDownloadURL: String
+    public var expired: Bool
+    public var createdAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, expired
+        case sizeInBytes = "size_in_bytes"
+        case archiveDownloadURL = "archive_download_url"
+        case createdAt = "created_at"
+    }
+}
+
+public struct GitHubCheckRun: Codable, Sendable, Hashable, Identifiable {
+    public var id: Int
+    public var name: String
+    public var status: String
+    public var conclusion: String?
+    public var htmlURL: String?
+    enum CodingKeys: String, CodingKey { case id, name, status, conclusion; case htmlURL = "html_url" }
+}
+
+public struct GitHubCommitStatus: Codable, Sendable, Hashable, Identifiable {
+    public var id: Int
+    public var state: String
+    public var context: String
+    public var description: String?
+    public var targetURL: String?
+    enum CodingKeys: String, CodingKey { case id, state, context, description; case targetURL = "target_url" }
+}
+
+public struct GitHubActionsPublicKey: Codable, Sendable, Hashable {
+    public var keyID: String
+    public var key: String
+    enum CodingKeys: String, CodingKey { case keyID = "key_id"; case key }
 }

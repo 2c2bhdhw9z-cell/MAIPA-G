@@ -43,6 +43,33 @@ enum Keychain {
         SecItemDelete(baseQuery(item) as CFDictionary)
     }
 
+    static func data(account: String) -> Data? {
+        var query = baseQuery(account)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
+        return result as? Data
+    }
+
+    static func set(_ data: Data, account: String) {
+        let query = baseQuery(account)
+        let attributes: [String: Any] = [kSecValueData as String: data, kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
+        if SecItemUpdate(query as CFDictionary, attributes as CFDictionary) == errSecItemNotFound {
+            var add = query; attributes.forEach { add[$0.key] = $0.value }; SecItemAdd(add as CFDictionary, nil)
+        }
+    }
+
+    static func remove(account: String) { SecItemDelete(baseQuery(account) as CFDictionary) }
+
+    static func value<T: Decodable>(_ type: T.Type, account: String) -> T? {
+        data(account: account).flatMap { try? JSONDecoder().decode(type, from: $0) }
+    }
+
+    static func setValue<T: Encodable>(_ value: T, account: String) {
+        if let data = try? JSONEncoder().encode(value) { set(data, account: account) }
+    }
+
     static func string(_ item: Item) -> String? {
         data(item).map { String(decoding: $0, as: UTF8.self) }
     }
@@ -61,11 +88,13 @@ enum Keychain {
         set(data, for: item)
     }
 
-    private static func baseQuery(_ item: Item) -> [String: Any] {
+    private static func baseQuery(_ item: Item) -> [String: Any] { baseQuery(item.rawValue) }
+
+    private static func baseQuery(_ account: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: item.rawValue,
+            kSecAttrAccount as String: account,
         ]
     }
 }

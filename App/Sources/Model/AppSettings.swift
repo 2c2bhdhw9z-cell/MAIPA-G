@@ -43,6 +43,20 @@ struct Effects: Codable, Equatable, Sendable {
     }
 }
 
+enum WorkflowPolicy: String, Codable, CaseIterable, Sendable, Identifiable {
+    case whenAsked
+    case bigJobs
+    case everything
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .whenAsked: return "When asked"
+        case .bigJobs: return "Big jobs too"
+        case .everything: return "Everything"
+        }
+    }
+}
+
 /// Everything set in Settings. Saved as settings.json and kept in MAIPA-G-data with the chats, so
 /// deleting the app loses none of it. Fields added in later builds get their defaults when an
 /// older file is read.
@@ -57,6 +71,14 @@ struct AppSettings: Codable, Equatable, Sendable {
     var spendLimit: Double = 1
     /// The repo the last new chat used, so the next one starts there too.
     var lastRepo: ChatRepo?
+    /// Local finish/needs-answer notifications start on.
+    var notificationsOn = true
+    /// Repos whose changes save straight to the selected branch.
+    var directSaveRepos: [String: Bool] = [:]
+    /// When work moves to an Autonomous GitHub runner. Big jobs too is the factory default.
+    var workflowPolicy: WorkflowPolicy = .bigJobs
+    /// Master switch for adding enabled memories to newly started chats.
+    var memoriesOn = true
 
     init() {}
 
@@ -69,7 +91,13 @@ struct AppSettings: Codable, Equatable, Sendable {
         spendLimitOn = try c.decodeIfPresent(Bool.self, forKey: .spendLimitOn) ?? false
         spendLimit = try c.decodeIfPresent(Double.self, forKey: .spendLimit) ?? 1
         lastRepo = try? c.decodeIfPresent(ChatRepo.self, forKey: .lastRepo)
+        notificationsOn = try c.decodeIfPresent(Bool.self, forKey: .notificationsOn) ?? true
+        directSaveRepos = try c.decodeIfPresent([String: Bool].self, forKey: .directSaveRepos) ?? [:]
+        workflowPolicy = (try? c.decodeIfPresent(WorkflowPolicy.self, forKey: .workflowPolicy)) ?? .bigJobs
+        memoriesOn = try c.decodeIfPresent(Bool.self, forKey: .memoriesOn) ?? true
     }
+
+    func savesDirectly(to repo: RepoRef) -> Bool { directSaveRepos[repo.fullName] ?? false }
 
     static let fileName = "settings.json"
 }

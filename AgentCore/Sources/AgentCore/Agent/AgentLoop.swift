@@ -14,8 +14,14 @@ public struct AgentTurnInput: Sendable {
     public var maxSteps: Int
     /// "Stop and ask when a job has cost $__", in dollars, or nil when that setting is off.
     public var spendLimit: Double?
+    /// Bytes for image/PDF references in the chat, loaded only for the active request.
+    public var attachmentData: [UUID: Data]
+    /// OpenRouter-run paid tools, offered alongside local tools.
+    public var serverTools: [ToolSpec]
+    /// Fixed role and tool policy when this turn belongs to a named agent.
+    public var agent: AgentDefinition?
 
-    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 40, spendLimit: Double? = nil) {
+    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 40, spendLimit: Double? = nil, attachmentData: [UUID: Data] = [:], serverTools: [ToolSpec] = [], agent: AgentDefinition? = nil) {
         self.chat = chat
         self.route = route
         self.systemPrompt = systemPrompt
@@ -23,6 +29,9 @@ public struct AgentTurnInput: Sendable {
         self.allowTools = allowTools
         self.maxSteps = maxSteps
         self.spendLimit = spendLimit
+        self.attachmentData = attachmentData
+        self.serverTools = serverTools
+        self.agent = agent
     }
 }
 
@@ -95,6 +104,7 @@ private struct Runner {
     let specs: [ToolSpec]
     let maxSteps: Int
     let spendLimit: Double?
+    let attachmentData: [UUID: Data]
     let environment: AgentEnvironment
     let continuation: AsyncStream<AgentEvent>.Continuation
     var switchedToFree = false
@@ -109,13 +119,20 @@ private struct Runner {
         route = input.route
         systemPrompt = input.systemPrompt
         var byName: [String: any AgentTool] = [:]
+        var localSpecs: [ToolSpec] = []
         if input.allowTools {
-            for tool in input.tools { byName[tool.name] = tool }
+            for tool in input.tools where input.agent?.permits(tool: tool.name) ?? true {
+                byName[tool.name] = tool
+                localSpecs.append(tool.spec)
+            }
         }
         tools = byName
-        specs = input.allowTools ? input.tools.map(\.spec) + [AskUserTool.spec] : []
+        let serverSpecs = input.serverTools.filter { input.agent?.permits(tool: $0.function.name) ?? true }
+        let mayAsk = input.agent?.permits(tool: AskUserTool.name) ?? true
+        specs = input.allowTools ? localSpecs + serverSpecs + (mayAsk ? [AskUserTool.spec] : []) : []
         maxSteps = input.maxSteps
         spendLimit = input.spendLimit.flatMap { $0 > 0 ? $0 : nil }
+        attachmentData = input.attachmentData
         self.environment = environment
         self.continuation = continuation
     }
@@ -195,7 +212,7 @@ private struct Runner {
         while true {
             attempt += 1
             chat.messages[chat.messages.count - 1].assistantTurn = turn
-            let (messages, trimmed) = Transcript.fit(Transcript.messages(for: chat, systemPrompt: systemPrompt), budget: route.contextBudget)
+            let (messages, trimmed) = Transcript.fit(Transcript.messages(for: chat, systemPrompt: systemPrompt, attachmentData: attachmentData), budget: route.contextBudget)
             let request = ChatCompletionRequest(
                 model: route.model,
                 messages: messages,
@@ -277,6 +294,7 @@ private struct Runner {
         step.model = accumulator.model ?? step.model
         step.usage = accumulator.usage
         step.finishReason = accumulator.finishReason
+        step.citations = accumulator.citations.isEmpty ? nil : accumulator.citations
         if keepToolCalls {
             step.toolCalls = accumulator.toolCalls.map { call in
                 let arguments = JSONValue.parse(call.function.arguments) ?? .object([:])
@@ -322,7 +340,7 @@ private struct Runner {
     /// questions that still need answers.
     mutating func runTools(inStep stepIndex: Int) async throws -> Bool {
         var waiting = false
-        var jobs: [(callIndex: Int, tool: any AgentTool, arguments: JSONValue)] = []
+        var jobs: [(callIndex: Int, tool: any AgentTool, arguments: JSONValue, approved: Bool)] = []
 
         for callIndex in turn.steps[stepIndex].toolCalls.indices {
             let call = turn.steps[stepIndex].toolCalls[callIndex]
@@ -357,9 +375,35 @@ private struct Runner {
                 fail(stepIndex, callIndex, message: "Error: the arguments were not a valid JSON object: \(call.arguments.prefix(200))", summary: tool.runningSummary(for: .object([:])).replacingOccurrences(of: "…", with: "") + " · didn't work")
                 continue
             }
+            let wasApproved: Bool
+            if let questions = call.questions {
+                guard let answer = questions.answers?.first else {
+                    waiting = true
+                    continue
+                }
+                let allowed = questions.questions.first?.options.first == answer
+                guard allowed else {
+                    turn.steps[stepIndex].toolCalls[callIndex].result = "The person did not approve this change."
+                    turn.steps[stepIndex].toolCalls[callIndex].status = .done
+                    turn.steps[stepIndex].toolCalls[callIndex].summary = "Change not approved"
+                    turn.steps[stepIndex].toolCalls[callIndex].finishedAt = Date()
+                    continue
+                }
+                wasApproved = true
+            } else if let approval = await tool.approvalRequest(for: arguments) {
+                turn.steps[stepIndex].toolCalls[callIndex].questions = QuestionSet(questions: [
+                    .init(text: approval.question, options: [approval.allowLabel, "Don't allow"]),
+                ])
+                turn.steps[stepIndex].toolCalls[callIndex].status = .waitingForUser
+                turn.steps[stepIndex].toolCalls[callIndex].summary = "Needs your approval"
+                waiting = true
+                continue
+            } else {
+                wasApproved = false
+            }
             turn.steps[stepIndex].toolCalls[callIndex].status = .running
             turn.steps[stepIndex].toolCalls[callIndex].summary = tool.runningSummary(for: arguments)
-            jobs.append((callIndex, tool, arguments))
+            jobs.append((callIndex, tool, arguments, wasApproved))
         }
         emit(milestone: true)
 
@@ -376,9 +420,17 @@ private struct Runner {
                     group.addTask {
                         let result: Result<ToolOutput, Error>
                         do {
-                            result = .success(try await job.tool.run(arguments: job.arguments) { message in
-                                sink.yield(.progress(job.callIndex, message))
-                            })
+                            let output: ToolOutput
+                            if job.approved {
+                                output = try await job.tool.runApproved(arguments: job.arguments) { message in
+                                    sink.yield(.progress(job.callIndex, message))
+                                }
+                            } else {
+                                output = try await job.tool.run(arguments: job.arguments) { message in
+                                    sink.yield(.progress(job.callIndex, message))
+                                }
+                            }
+                            result = .success(output)
                         } catch {
                             if error is CancellationError || Task.isCancelled { throw CancellationError() }
                             result = .failure(error)
@@ -395,7 +447,16 @@ private struct Runner {
                             if Date().timeIntervalSince(lastEmit) > 0.25 { emit(milestone: false) }
                         }
                     case .finished(let callIndex, let result):
-                        apply((callIndex, result), stepIndex: stepIndex)
+                        if case .failure(let error) = result, let approval = error as? ToolApprovalRequired {
+                            turn.steps[stepIndex].toolCalls[callIndex].status = .waitingForUser
+                            turn.steps[stepIndex].toolCalls[callIndex].summary = "Needs your approval"
+                            turn.steps[stepIndex].toolCalls[callIndex].questions = QuestionSet(questions: [
+                                .init(text: approval.request.question, options: [approval.request.allowLabel, "Don't allow"]),
+                            ])
+                            waiting = true
+                        } else {
+                            apply((callIndex, result), stepIndex: stepIndex)
+                        }
                         emit(milestone: true)
                         remaining -= 1
                     }
@@ -420,6 +481,16 @@ private struct Runner {
             record.result = Self.capped(output.forModel)
             record.finishedAt = Date()
             turn.steps[stepIndex].toolCalls[callIndex] = record
+            if !output.generatedImages.isEmpty {
+                turn.steps[stepIndex].generatedImages = (turn.steps[stepIndex].generatedImages ?? []) + output.generatedImages
+            }
+            if !output.isError, callIndex < turn.steps[stepIndex].toolCalls.count {
+                if record.name == "add_memory", !turn.notices.contains("Saved a memory: \(output.detail ?? output.summary)") {
+                    turn.notices.append("Saved a memory: \(output.detail ?? output.summary)")
+                } else if record.name == "edit_memory", !turn.notices.contains("Updated a memory: \(output.detail ?? output.summary)") {
+                    turn.notices.append("Updated a memory: \(output.detail ?? output.summary)")
+                }
+            }
         case .failure(let error):
             let base = turn.steps[stepIndex].toolCalls[callIndex].summary.replacingOccurrences(of: "…", with: "")
             let message: String

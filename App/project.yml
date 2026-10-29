@@ -72,6 +72,12 @@ targets:
         UIRequiredDeviceCapabilities:
           - arm64
         UIStatusBarStyle: UIStatusBarStyleDefault
+        UIBackgroundModes:
+          - processing
+          - fetch
+        BGTaskSchedulerPermittedIdentifiers:
+          - dev.maipag.app.refresh
+          - dev.maipag.app.autonomous
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.maipag.app

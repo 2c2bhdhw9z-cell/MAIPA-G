@@ -1,6 +1,47 @@
+import Clibsodium
 import Foundation
 import Testing
 @testable import AgentCore
+
+private struct FixedGitHubToken: GitHubTokenProvider {
+    func installationToken() async throws -> String { "token" }
+    func userToken() async throws -> String { "token" }
+}
+
+private final class ActionsTransport: HTTPTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var requestsStorage: [HTTPRequest] = []
+    var publicKey: [UInt8]
+    var secretKey: [UInt8]
+
+    init() {
+        publicKey = [UInt8](repeating: 0, count: Int(crypto_box_publickeybytes()))
+        secretKey = [UInt8](repeating: 0, count: Int(crypto_box_secretkeybytes()))
+        _ = sodium_init()
+        _ = crypto_box_keypair(&publicKey, &secretKey)
+    }
+
+    var requests: [HTTPRequest] { lock.withLock { requestsStorage } }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        lock.withLock { requestsStorage.append(request) }
+        let path = request.url.path
+        if path.hasSuffix("/actions/secrets/public-key") {
+            let body: JSONValue = ["key_id": "key-1", "key": .string(Data(publicKey).base64EncodedString())]
+            return HTTPResponse(status: 200, body: try JSONCoding.encoder().encode(body))
+        }
+        if path.contains("/actions/secrets/") { return HTTPResponse(status: 201) }
+        if path.hasSuffix("/actions/workflows/maipa-g.yml/dispatches") { return HTTPResponse(status: 204) }
+        if path.hasSuffix("/actions/runs") {
+            return HTTPResponse(status: 200, body: Data(#"{"workflow_runs":[{"id":7,"name":"iOS","status":"completed","conclusion":"success","event":"push","head_branch":"main","head_sha":"abc","html_url":"https://example.test/run/7","run_number":12,"created_at":"2026-10-28T00:00:00Z","updated_at":"2026-10-28T00:01:00Z"}]}"#.utf8))
+        }
+        return HTTPResponse(status: 404, body: Data(#"{"message":"missing"}"#.utf8))
+    }
+
+    func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse {
+        HTTPStreamResponse(status: 404, headers: [:], body: AsyncThrowingStream { $0.finish() })
+    }
+}
 
 @Suite("Repo copies and search")
 struct RepoCopyTests {
@@ -98,6 +139,89 @@ struct RepoCopyTests {
         }
     }
 
+    @Test func stagedSaveAndUndoProtectAgainstInterveningChanges() async throws {
+        let github = FakeGitHub()
+        github.commitRemotely(["README.md": Data("old\n".utf8)])
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-change-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let head = try #require(github.head)
+        let repo = RepoRef(owner: "octo", name: "MAIPA-G-data")
+        let base = RepoWorkspace(repo: repo, branch: "main", commit: head, github: github.client, store: SnapshotStore(root: root))
+        let changes = ChangeWorkspace(base: base)
+        try await changes.edit(path: "README.md", text: "new\n")
+        try await changes.create(path: "Sources/New.swift", text: "let value = 1\n")
+        await #expect(throws: ChangeWorkspaceError.self) { try await changes.delete(path: "README.md") }
+
+        let service = GitHubChangeService(github: github.client)
+        let receipt = try await service.save(changes, selectedBranch: "main", defaultBranch: "main", rules: RepoWriteRules(directSave: true), title: "Update files")
+        #expect(github.remoteFile("README.md") == Data("new\n".utf8))
+        #expect(github.remoteFile("Sources/New.swift") != nil)
+        _ = try await service.undo(receipt)
+        #expect(github.remoteFile("README.md") == Data("old\n".utf8))
+        #expect(github.remoteFile("Sources/New.swift") == nil)
+
+        let secondBase = RepoWorkspace(repo: repo, branch: "main", commit: try #require(github.head), github: github.client, store: SnapshotStore(root: root))
+        let secondChanges = ChangeWorkspace(base: secondBase)
+        try await secondChanges.edit(path: "README.md", text: "again\n")
+        let second = try await service.save(secondChanges, selectedBranch: "main", defaultBranch: "main", rules: RepoWriteRules(directSave: true), title: "Again")
+        github.commitRemotely(["OTHER.md": Data("intervening".utf8)])
+        await #expect(throws: ChangeWorkspaceError.self) { _ = try await service.undo(second) }
+        #expect(github.remoteFile("OTHER.md") != nil)
+    }
+
+    @Test func defaultBranchSaveOpensAndResolvesPullRequest() async throws {
+        let github = FakeGitHub()
+        github.commitRemotely(["README.md": Data("old\n".utf8)])
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-pr-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let base = RepoWorkspace(repo: RepoRef(owner: "octo", name: "MAIPA-G-data"), branch: "main", commit: try #require(github.head), github: github.client, store: SnapshotStore(root: root))
+        let changes = ChangeWorkspace(base: base)
+        try await changes.edit(path: "README.md", text: "new\n")
+        let service = GitHubChangeService(github: github.client)
+        let receipt = try await service.save(changes, selectedBranch: "main", defaultBranch: "main", rules: RepoWriteRules(), title: "Update readme")
+        #expect(receipt.branch.hasPrefix("maipa-g/update-readme-"))
+        #expect(receipt.pullRequest?.number == 1)
+        #expect(github.branchHeads[receipt.branch] == receipt.savedCommit)
+        try await service.addIt(receipt)
+        #expect(github.pullState == "merged")
+        #expect(github.branchHeads[receipt.branch] == nil)
+    }
+
+    @Test func laterSaveAppendsToTheOpenPullRequestBranch() async throws {
+        let github = FakeGitHub()
+        github.commitRemotely(["README.md": Data("old\n".utf8)])
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-pr-append-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = RepoRef(owner: "octo", name: "MAIPA-G-data")
+        let firstBase = RepoWorkspace(repo: repo, branch: "main", commit: try #require(github.head), github: github.client, store: SnapshotStore(root: root))
+        let firstChanges = ChangeWorkspace(base: firstBase)
+        try await firstChanges.edit(path: "README.md", text: "first\n")
+        let service = GitHubChangeService(github: github.client)
+        let first = try await service.save(firstChanges, selectedBranch: "main", defaultBranch: "main", rules: RepoWriteRules(), title: "Update readme")
+
+        let secondBase = RepoWorkspace(repo: repo, branch: first.branch, commit: first.savedCommit, github: github.client, store: SnapshotStore(root: root))
+        let secondChanges = ChangeWorkspace(base: secondBase)
+        try await secondChanges.edit(path: "README.md", text: "second\n")
+        let second = try await service.save(secondChanges, selectedBranch: first.branch, defaultBranch: "main", rules: RepoWriteRules(), title: "Continue update", activeReceipt: first)
+        #expect(second.branch == first.branch)
+        #expect(second.pullRequest?.number == first.pullRequest?.number)
+        #expect(github.commits[second.savedCommit]?.parent == first.savedCommit)
+        #expect(github.branchHeads[first.branch] == second.savedCommit)
+    }
+
+    @Test func repositoryRulesForceDirectSaving() {
+        let rules = RepoWriteRules.resolve(documents: [
+            (".kiro/steering/owner-rules.md", "Commit directly to main. Do not change build setup."),
+            ("Sources/Generated/AGENTS.md", "Never delete files in this folder."),
+        ], directSaveSetting: false)
+        #expect(rules.directSave)
+        #expect(rules.reason?.contains("owner-rules.md") == true)
+        #expect(!rules.permitsBuildSetup(at: "Package.swift"))
+        #expect(!rules.permitsDeletion(at: "Sources/Generated/Old.swift"))
+        #expect(rules.permitsDeletion(at: "Sources/Keep.swift"))
+        #expect(rules.promptText.contains("Sources/Generated/AGENTS.md"))
+    }
+
     @Test func linkHeaderPagination() {
         let header = #"<https://api.github.com/installation/repositories?per_page=100&page=2>; rel="next", <https://api.github.com/installation/repositories?per_page=100&page=5>; rel="last""#
         #expect(GitHubClient.nextPage(from: header)?.absoluteString == "https://api.github.com/installation/repositories?per_page=100&page=2")
@@ -107,6 +231,54 @@ struct RepoCopyTests {
     @Test func pathEscapingKeepsSlashes() {
         #expect(GitHubClient.escapePath("docs/My File#1.md") == "docs/My%20File%231.md")
         #expect(GitHubClient.escape("feature/x") == "feature%2Fx")
+    }
+
+    @Test func actionsRequestsDispatchRunsAndEncryptedSecrets() async throws {
+        let transport = ActionsTransport()
+        let client = GitHubClient(transport: transport, tokens: FixedGitHubToken())
+        let repo = RepoRef(owner: "octo", name: "repo")
+        try await client.dispatchWorkflow(repo, workflow: "maipa-g.yml", ref: "main", inputs: ["job_id": "opaque-id"])
+        let runs = try await client.workflowRuns(repo)
+        #expect(runs.first?.runNumber == 12)
+        let watched = try await GitHubRunWatcher(github: client, maximumPolls: 1, sleeper: {}).wait(repo: repo, commit: "abc", redacting: RedactingLogger(secrets: ["secret-token"]))
+        #expect(watched.succeeded)
+        #expect(watched.runs.allSatisfy { $0.headSHA == "abc" })
+        try await client.putActionsSecret(repo, name: "OPENROUTER_API_KEY", value: "private-value")
+
+        let dispatch = try #require(transport.requests.first { $0.url.path.hasSuffix("/dispatches") })
+        let dispatchBody = try #require(dispatch.body.flatMap(JSONValue.parse))
+        #expect(dispatchBody["inputs"]?["job_id"] == "opaque-id")
+        let upload = try #require(transport.requests.first { $0.url.path.hasSuffix("/actions/secrets/OPENROUTER_API_KEY") })
+        let uploadBody = try #require(upload.body.flatMap(JSONValue.parse))
+        #expect(uploadBody["key_id"] == "key-1")
+        #expect(uploadBody["encrypted_value"] != "private-value")
+        let encrypted = try #require(uploadBody["encrypted_value"]?.stringValue)
+        let cipher = try #require(Data(base64Encoded: encrypted))
+        var clear = [UInt8](repeating: 0, count: cipher.count - Int(crypto_box_sealbytes()))
+        let opened = cipher.withUnsafeBytes { bytes in
+            crypto_box_seal_open(&clear, bytes.bindMemory(to: UInt8.self).baseAddress!, UInt64(cipher.count), &transport.publicKey, &transport.secretKey)
+        }
+        #expect(opened == 0)
+        #expect(String(decoding: clear, as: UTF8.self) == "private-value")
+
+        let worktree = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let reusable = try String(contentsOf: worktree.appendingPathComponent(".github/workflows/agent.yml"), encoding: .utf8)
+        // The target checkout keeps no credential, and the trusted runner is cloned outside the
+        // target repo, where commands the AI runs in that repo can't swap its files.
+        #expect(reusable.components(separatedBy: "persist-credentials: false").count == 2)
+        #expect(reusable.contains("\"$RUNNER_TEMP/maipag-runner\""))
+        #expect(!reusable.contains("path: .maipag-runner"))
+        #expect(!reusable.contains("GH_TOKEN:"))
+        #expect(reusable.contains("MAIPAG_TARGET_TOKEN"))
+        #expect(reusable.contains("MAIPAG_DATA_TOKEN"))
+    }
+
+    @Test func buildInspectionDoesNotDispatch() async throws {
+        let transport = ActionsTransport()
+        let client = GitHubClient(transport: transport, tokens: FixedGitHubToken())
+        let inspector = GitHubBuildInspector(github: client)
+        try await inspector.dispatch(repo: RepoRef(owner: "octo", name: "repo"), workflow: "ios.yml", ref: "main", explicitlyRequested: false)
+        #expect(transport.requests.isEmpty)
     }
 }
 

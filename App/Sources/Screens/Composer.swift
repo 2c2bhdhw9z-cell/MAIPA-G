@@ -1,5 +1,7 @@
 import AgentCore
+import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
 
 extension ThinkingLevel {
     var label: String {
@@ -19,10 +21,14 @@ extension ThinkingLevel {
 /// chats) the repo and branch pickers under it.
 struct Composer: View {
     @Binding var text: String
+    @Binding var attachments: [AttachmentReference]
+    @Binding var webEnabled: Bool
+    @Binding var autonomous: Bool
     var modelLabel: String
     var thinking: ThinkingLevel
     var thinkingLevels: [ThinkingLevel]
     var repo: ChatRepo?
+    var groupName: String?
     var isGitHubConnected: Bool
     var isRunning: Bool
     var canStop: Bool
@@ -33,12 +39,20 @@ struct Composer: View {
     var onPickRepo: () -> Void
     var onPickBranch: () -> Void
     var onClearRepo: () -> Void
+    var onPickGroup: () -> Void
+    var onSpec: () -> Void
+    var onPicture: () -> Void
+    var onPreview: () -> Void
 
     @FocusState private var focused: Bool
+    @Environment(AppModel.self) private var app
     @Environment(\.theme) private var theme
+    @State private var photoItem: PhotosPickerItem?
+    @State private var choosingFile = false
+    @State private var importError: String?
 
     private var canSend: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isRunning
+        (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) && !isRunning
     }
 
     var body: some View {
@@ -51,6 +65,23 @@ struct Composer: View {
                     .submitLabel(.return)
                     .padding(.horizontal, 4)
                     .padding(.top, 2)
+                if !attachments.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 7) {
+                            ForEach(attachments) { attachment in
+                                HStack(spacing: 5) {
+                                    Image(systemName: attachment.kind == .image ? "photo" : attachment.kind == .pdf ? "doc.richtext" : "doc")
+                                    Text(attachment.name).lineLimit(1)
+                                    Button { attachments.removeAll { $0.id == attachment.id } } label: { Image(systemName: "xmark") }
+                                        .buttonStyle(.plain)
+                                }
+                                .font(.caption)
+                                .padding(.horizontal, 9).padding(.vertical, 6)
+                                .background(Theme.raised, in: Capsule())
+                            }
+                        }
+                    }
+                }
                 HStack(spacing: 8) {
                     Chip(title: modelLabel, systemImage: modelLabel == "Auto" ? "wand.and.stars" : "cpu", showsChevron: true, tint: theme.accent, action: onPickModel)
                     if !thinkingLevels.isEmpty {
@@ -94,6 +125,35 @@ struct Composer: View {
             .padding(12)
             .glassPanel(cornerRadius: 26)
 
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    Button(action: onSpec) { Label("Spec", systemImage: "list.clipboard").font(.caption.weight(.semibold)) }
+                    Button(action: onPickGroup) { Label(groupName ?? "Group", systemImage: "folder.badge.plus").font(.caption.weight(.semibold)) }
+                    Button { webEnabled.toggle() } label: {
+                        Label("Web", systemImage: webEnabled ? "globe" : "globe.badge.chevron.backward")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 10).padding(.vertical, 7)
+                            .background(webEnabled ? theme.accent.opacity(0.16) : Theme.raised, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(webEnabled ? "Web tools on" : "Web tools off")
+                    Toggle("Autonomous", isOn: $autonomous)
+                        .toggleStyle(.button)
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.capsule)
+                        .font(.caption.weight(.semibold))
+                        .accessibilityHint("Runs repo work on GitHub's computer")
+                    PhotosPicker(selection: $photoItem, matching: .images) {
+                        Label("Photo", systemImage: "photo").font(.caption.weight(.semibold))
+                    }
+                    Button(action: onPicture) { Label("Make picture", systemImage: "paintbrush").font(.caption.weight(.semibold)) }
+                    if repo != nil { Button(action: onPreview) { Label("Preview", systemImage: "safari").font(.caption.weight(.semibold)) } }
+                    Button { choosingFile = true } label: { Label("File", systemImage: "paperclip").font(.caption.weight(.semibold)) }
+                    Spacer()
+                }
+            }
+            .padding(.horizontal, 4)
+
             HStack(spacing: 8) {
                 if let repo {
                     Chip(title: repo.ref.name, systemImage: repo.isPrivate ? "lock" : "chevron.left.forwardslash.chevron.right", showsChevron: true, action: onPickRepo)
@@ -115,6 +175,24 @@ struct Composer: View {
             }
             .padding(.horizontal, 4)
         }
+        .onChange(of: photoItem) { _, item in
+            guard let item else { return }
+            Task {
+                do { attachments.append(try await AttachmentImporter.importPhoto(item, store: app.attachmentStore)) }
+                catch { importError = "Couldn't add that photo." }
+                photoItem = nil
+            }
+        }
+        .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.item]) { result in
+            guard case .success(let url) = result else { return }
+            Task {
+                do { attachments.append(try await AttachmentImporter.importFile(url, store: app.attachmentStore)) }
+                catch { importError = "Couldn't add that file." }
+            }
+        }
+        .alert("Attachment", isPresented: Binding(get: { importError != nil }, set: { if !$0 { importError = nil } })) {
+            Button("OK") {}
+        } message: { Text(importError ?? "") }
     }
 
     @ViewBuilder

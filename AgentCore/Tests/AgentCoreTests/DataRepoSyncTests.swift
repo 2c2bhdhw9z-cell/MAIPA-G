@@ -10,6 +10,8 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
     var trees: [String: [String: String]] = [:]
     var commits: [String: (tree: String, parent: String?)] = [:]
     var head: String?
+    var branchHeads: [String: String] = [:]
+    var pullState = "open"
     /// Runs once, just before the next branch update, to simulate another phone saving first.
     var beforeNextUpdate: (() -> Void)?
 
@@ -74,6 +76,24 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
         case ("GET", prefix + "/git/ref/heads/main"):
             guard let head else { return json(["message": "Git Repository is empty."], status: 409) }
             return json(["object": ["sha": .string(head)]])
+        case ("POST", prefix + "/git/refs"):
+            guard let ref = body?["ref"]?.stringValue, let sha = body?["sha"]?.stringValue else { return json(["message": "bad"], status: 422) }
+            branchHeads[String(ref.dropFirst("refs/heads/".count))] = sha
+            return json(["ref": .string(ref), "object": ["sha": .string(sha)]], status: 201)
+        case ("GET", prefix + "/pulls"):
+            // No request is open yet for the branch being saved.
+            return json([])
+        case ("POST", prefix + "/pulls"):
+            pullState = "open"
+            return json(["number": 1, "title": body?["title"] ?? "Changes", "state": "open", "html_url": "https://github.com/octo/MAIPA-G-data/pull/1", "head": ["ref": body?["head"] ?? "branch"], "base": ["ref": body?["base"] ?? "main"], "merged": false], status: 201)
+        case ("GET", prefix + "/pulls/1"):
+            return json(["number": 1, "title": "Changes", "state": .string(pullState), "html_url": "https://github.com/octo/MAIPA-G-data/pull/1", "head": ["ref": "maipa-g/test"], "base": ["ref": "main"], "merged": .bool(pullState == "merged")])
+        case ("PATCH", prefix + "/pulls/1"):
+            pullState = body?["state"]?.stringValue ?? pullState
+            return json(["number": 1, "title": "Changes", "state": .string(pullState), "html_url": "https://github.com/octo/MAIPA-G-data/pull/1", "head": ["ref": "maipa-g/test"], "base": ["ref": "main"], "merged": false])
+        case ("PUT", prefix + "/pulls/1/merge"):
+            pullState = "merged"
+            return json(["merged": true])
         case ("PATCH", prefix + "/git/refs/heads/main"):
             if let hook = beforeNextUpdate {
                 beforeNextUpdate = nil
@@ -104,6 +124,22 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
             commits[id] = (body?["tree"]?.stringValue ?? "", body?["parents"]?.arrayValue?.first?.stringValue)
             return json(["sha": .string(id)], status: 201)
         default:
+            if request.method == "GET", path.hasPrefix(prefix + "/git/ref/heads/") {
+                let branch = String(path.dropFirst((prefix + "/git/ref/heads/").count)).removingPercentEncoding ?? ""
+                guard let sha = branchHeads[branch] else { return json(["message": "Not Found"], status: 404) }
+                return json(["object": ["sha": .string(sha)]])
+            }
+            if request.method == "PATCH", path.hasPrefix(prefix + "/git/refs/heads/") {
+                let branch = String(path.dropFirst((prefix + "/git/refs/heads/").count)).removingPercentEncoding ?? ""
+                guard let sha = body?["sha"]?.stringValue, let commit = commits[sha], commit.parent == branchHeads[branch] else { return json(["message": "Update is not a fast forward"], status: 422) }
+                branchHeads[branch] = sha
+                return json(["object": ["sha": .string(sha)]])
+            }
+            if request.method == "DELETE", path.hasPrefix(prefix + "/git/refs/heads/") {
+                let branch = String(path.dropFirst((prefix + "/git/refs/heads/").count)).removingPercentEncoding ?? ""
+                branchHeads[branch] = nil
+                return HTTPResponse(status: 204)
+            }
             if request.method == "GET", path.hasPrefix(prefix + "/git/commits/") {
                 let id = String(path.dropFirst((prefix + "/git/commits/").count))
                 guard let commit = commits[id] else { return json(["message": "Not Found"], status: 404) }
@@ -111,7 +147,8 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
             }
             if request.method == "GET", path.hasPrefix(prefix + "/git/trees/") {
                 let id = String(path.dropFirst((prefix + "/git/trees/").count))
-                guard let tree = trees[id] else { return json(["message": "Not Found"], status: 404) }
+                let treeID = commits[id]?.tree ?? id
+                guard let tree = trees[treeID] else { return json(["message": "Not Found"], status: 404) }
                 let entries: [JSONValue] = tree.sorted { $0.key < $1.key }.map { ["path": .string($0.key), "mode": "100644", "type": "blob", "sha": .string($0.value), "size": .number(Double(blobs[$0.value]?.count ?? 0))] }
                 return json(["sha": .string(id), "tree": .array(entries), "truncated": false])
             }
@@ -229,6 +266,40 @@ struct DataRepoSyncTests {
         #expect(github.remoteFile(ChatStore.relativePath(for: mine.id)) != nil)
         #expect(github.remoteFile(otherPath) != nil)
         #expect(await setup.store.load(other.id)?.title == "other phone")
+    }
+
+    @Test func syncsProductDocumentsAndAttachmentBlobs() async throws {
+        let setup = try await Setup()
+        defer { try? FileManager.default.removeItem(at: setup.directory) }
+        let product = ProductStore<MemoryRecord>(dataDirectory: setup.store.dataDirectory, folder: "memories")
+        let agents = ProductStore<CustomAgentRecord>(dataDirectory: setup.store.dataDirectory, folder: "agents")
+        let workflows = ProductStore<WorkflowRecord>(dataDirectory: setup.store.dataDirectory, folder: "workflows")
+        let groups = ProductStore<ChatGroupRecord>(dataDirectory: setup.store.dataDirectory, folder: "groups")
+        let specs = ProductStore<SpecRecord>(dataDirectory: setup.store.dataDirectory, folder: "specs")
+        let memory = MemoryRecord(text: "Keep answers short")
+        let agent = CustomAgentRecord(name: "Reader", instructions: "Read and report.", allowedTools: ["read_file"], behavior: .reportOnly)
+        let workflow = WorkflowRecord(name: "Read twice", steps: [
+            .agent(title: "Read", agent: agent.definition.id, instruction: "Read the requested file.")
+        ], isApproved: true)
+        let group = ChatGroupRecord(name: "Project")
+        let spec = SpecRecord(repo: RepoRef(owner: "octo", name: "app"), slug: "feature", title: "Feature")
+        try await product.save(memory)
+        try await agents.save(agent)
+        try await workflows.save(workflow)
+        try await groups.save(group)
+        try await specs.save(spec)
+        let attachmentPath = "attachments/abc/photo.jpg"
+        try await setup.store.saveBlob(Data([1, 2, 3, 4]), at: attachmentPath)
+
+        let report = try await setup.sync.sync()
+        #expect(report.uploaded.contains("memories/\(memory.id.uuidString.lowercased()).json"))
+        #expect(report.uploaded.contains("agents/\(agent.id.uuidString.lowercased()).json"))
+        #expect(report.uploaded.contains("workflows/\(workflow.id.uuidString.lowercased()).json"))
+        #expect(report.uploaded.contains("groups/\(group.id.uuidString.lowercased()).json"))
+        #expect(report.uploaded.contains("specs/\(spec.id.uuidString.lowercased()).json"))
+        #expect(report.uploaded.contains(attachmentPath))
+        #expect(setup.github.remoteFile(attachmentPath) == Data([1, 2, 3, 4]))
+        #expect(setup.github.remoteFile("README.md") != nil)
     }
 
     @Test func commitMessagesAreReadable() {

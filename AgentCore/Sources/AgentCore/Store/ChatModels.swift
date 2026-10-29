@@ -57,7 +57,7 @@ public struct ChatRepo: Codable, Sendable, Hashable {
 
 /// One conversation. Saved as one JSON file, on the phone and in the user's private data repo.
 public struct Chat: Codable, Sendable, Identifiable, Hashable {
-    public static let currentFormat = 1
+    public static let currentFormat = 3
 
     public var format: Int
     public var id: UUID
@@ -70,6 +70,16 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
     public var model: ModelChoice
     public var thinking: ThinkingLevel
     public var messages: [ChatMessage]
+    /// Optional user-created group. nil keeps Build 1 chats ungrouped.
+    public var groupID: UUID?
+    /// Receipts for saves made from this chat. The last eligible receipt powers Undo.
+    public var saveReceipts: [SaveReceipt]?
+    /// Durable links used by later job, workflow and spec coordinators.
+    public var activeJobID: UUID?
+    public var workflowID: UUID?
+    public var specID: UUID?
+    /// Enabled memories captured when this chat began. Existing chats do not change underneath the user.
+    public var memoryContext: [String]
 
     public init(
         id: UUID = UUID(),
@@ -78,7 +88,9 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         repo: ChatRepo? = nil,
         model: ModelChoice = .auto,
         thinking: ThinkingLevel = .default,
-        messages: [ChatMessage] = []
+        messages: [ChatMessage] = [],
+        groupID: UUID? = nil,
+        memoryContext: [String] = []
     ) {
         self.format = Self.currentFormat
         self.id = id
@@ -90,11 +102,45 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         self.model = model
         self.thinking = thinking
         self.messages = messages
+        self.groupID = groupID
+        self.saveReceipts = nil
+        self.activeJobID = nil
+        self.workflowID = nil
+        self.specID = nil
+        self.memoryContext = memoryContext
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case format, id, title, titleIsCustom, createdAt, updatedAt, repo, model, thinking, messages
+        case groupID, saveReceipts, activeJobID, workflowID, specID, memoryContext
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        format = try c.decodeIfPresent(Int.self, forKey: .format) ?? 1
+        id = try c.decode(UUID.self, forKey: .id)
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
+        titleIsCustom = try c.decodeIfPresent(Bool.self, forKey: .titleIsCustom) ?? false
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+        repo = try c.decodeIfPresent(ChatRepo.self, forKey: .repo)
+        model = try c.decodeIfPresent(ModelChoice.self, forKey: .model) ?? .auto
+        thinking = try c.decodeIfPresent(ThinkingLevel.self, forKey: .thinking) ?? .default
+        messages = try c.decodeIfPresent([ChatMessage].self, forKey: .messages) ?? []
+        groupID = try c.decodeIfPresent(UUID.self, forKey: .groupID)
+        saveReceipts = try c.decodeIfPresent([SaveReceipt].self, forKey: .saveReceipts)
+        activeJobID = try c.decodeIfPresent(UUID.self, forKey: .activeJobID)
+        workflowID = try c.decodeIfPresent(UUID.self, forKey: .workflowID)
+        specID = try c.decodeIfPresent(UUID.self, forKey: .specID)
+        memoryContext = try c.decodeIfPresent([String].self, forKey: .memoryContext) ?? []
     }
 
     /// Everything the chat has cost so far, in dollars, as OpenRouter reported it.
     public var totalUsage: Usage {
-        messages.compactMap(\.assistantTurn).flatMap(\.steps).compactMap(\.usage).reduce(Usage(), +)
+        var usage = messages.compactMap(\.assistantTurn).flatMap(\.steps).compactMap(\.usage).reduce(Usage(), +)
+        let imageCosts = messages.compactMap(\.assistantTurn).flatMap(\.steps).flatMap { $0.generatedImages ?? [] }.compactMap(\.cost)
+        if !imageCosts.isEmpty { usage.cost = (usage.cost ?? 0) + imageCosts.reduce(0, +) }
+        return usage
     }
 
     public var lastAssistantTurn: AssistantTurn? {
@@ -127,15 +173,27 @@ public struct ChatMessage: Codable, Sendable, Identifiable, Hashable {
     public var id: UUID
     public var createdAt: Date
     public var body: Body
+    public var starredMemoryID: UUID?
 
-    public init(id: UUID = UUID(), createdAt: Date = Date(), body: Body) {
+    public init(id: UUID = UUID(), createdAt: Date = Date(), body: Body, starredMemoryID: UUID? = nil) {
         self.id = id
         self.createdAt = createdAt
         self.body = body
+        self.starredMemoryID = starredMemoryID
     }
 
-    public static func user(_ text: String) -> ChatMessage {
-        ChatMessage(body: .user(UserMessage(text: text)))
+    enum CodingKeys: String, CodingKey { case id, createdAt, body, starredMemoryID }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        body = try c.decode(Body.self, forKey: .body)
+        starredMemoryID = try c.decodeIfPresent(UUID.self, forKey: .starredMemoryID)
+    }
+
+    public static func user(_ text: String, attachments: [AttachmentReference] = []) -> ChatMessage {
+        ChatMessage(body: .user(UserMessage(text: text, attachments: attachments)))
     }
 
     public var userText: String? {
@@ -154,9 +212,47 @@ public struct ChatMessage: Codable, Sendable, Identifiable, Hashable {
     }
 }
 
+public enum AttachmentKind: String, Codable, Sendable, Hashable {
+    case image, pdf, text, file
+}
+
+/// A durable attachment. `path` is relative to MAIPA-G's mirrored data folder.
+public struct AttachmentReference: Codable, Sendable, Hashable, Identifiable {
+    public var id: UUID
+    public var name: String
+    public var mimeType: String
+    public var kind: AttachmentKind
+    public var path: String
+    public var bytes: Int
+    public var createdAt: Date
+
+    public init(id: UUID = UUID(), name: String, mimeType: String, kind: AttachmentKind, path: String, bytes: Int, createdAt: Date = Date()) {
+        self.id = id
+        self.name = name
+        self.mimeType = mimeType
+        self.kind = kind
+        self.path = path
+        self.bytes = bytes
+        self.createdAt = createdAt
+    }
+}
+
 public struct UserMessage: Codable, Sendable, Hashable {
     public var text: String
-    public init(text: String) { self.text = text }
+    public var attachments: [AttachmentReference]
+
+    public init(text: String, attachments: [AttachmentReference] = []) {
+        self.text = text
+        self.attachments = attachments
+    }
+
+    enum CodingKeys: String, CodingKey { case text, attachments }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        text = try c.decode(String.self, forKey: .text)
+        attachments = try c.decodeIfPresent([AttachmentReference].self, forKey: .attachments) ?? []
+    }
 }
 
 /// Everything the AI did in answer to one user message: one step per request to the model.
@@ -200,7 +296,12 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
         return seen
     }
 
-    public var usage: Usage { steps.compactMap(\.usage).reduce(Usage(), +) }
+    public var usage: Usage {
+        var usage = steps.compactMap(\.usage).reduce(Usage(), +)
+        let imageCosts = steps.flatMap { $0.generatedImages ?? [] }.compactMap(\.cost)
+        if !imageCosts.isEmpty { usage.cost = (usage.cost ?? 0) + imageCosts.reduce(0, +) }
+        return usage
+    }
 
     /// The question set the AI is waiting on, if any.
     public var pendingQuestions: (stepIndex: Int, callIndex: Int, questions: QuestionSet)? {
@@ -239,6 +340,27 @@ public struct TurnFailure: Codable, Sendable, Hashable {
     }
 }
 
+public struct SourceCitation: Codable, Sendable, Hashable, Identifiable {
+    public var url: String
+    public var title: String?
+    public var id: String { url }
+    public init(url: String, title: String? = nil) { self.url = url; self.title = title }
+}
+
+public struct GeneratedImageResult: Codable, Sendable, Hashable, Identifiable {
+    public var id: UUID { attachment.id }
+    public var attachment: AttachmentReference
+    public var prompt: String
+    public var model: String
+    public var aspectRatio: String
+    public var quality: String
+    public var cost: Double?
+    public init(attachment: AttachmentReference, prompt: String, model: String, aspectRatio: String, quality: String, cost: Double? = nil) {
+        self.attachment = attachment; self.prompt = prompt; self.model = model
+        self.aspectRatio = aspectRatio; self.quality = quality; self.cost = cost
+    }
+}
+
 /// One request to the model and what came back.
 public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
     public var id: UUID
@@ -253,6 +375,10 @@ public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
     public var toolCalls: [ToolCallRecord]
     public var usage: Usage?
     public var finishReason: String?
+    /// Web sources returned by OpenRouter server tools.
+    public var citations: [SourceCitation]?
+    /// Real generated media saved under media/, retained through chat sync.
+    public var generatedImages: [GeneratedImageResult]?
 
     public init(id: UUID = UUID(), startedAt: Date = Date()) {
         self.id = id
@@ -265,6 +391,8 @@ public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
         self.toolCalls = []
         self.usage = nil
         self.finishReason = nil
+        self.citations = nil
+        self.generatedImages = nil
     }
 
     /// How long the model thought, when it shared its thinking.

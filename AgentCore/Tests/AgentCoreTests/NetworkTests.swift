@@ -6,6 +6,18 @@ import Testing
 /// run with MAIPAG_NETWORK_TESTS=1 to try a real repo end to end.
 @Suite("Network", .enabled(if: ProcessInfo.processInfo.environment["MAIPAG_NETWORK_TESTS"] == "1"))
 struct NetworkTests {
+    @Test func readsAPublicWebPageSafely() async throws {
+        let page = try await WebPageReader(transport: URLSessionTransport()).read(URL(string: "https://example.com")!)
+        #expect(page.text.localizedCaseInsensitiveContains("example domain"))
+        #expect(page.url.host == "example.com")
+    }
+
+    @Test func searchesOfficialMCPRegistry() async throws {
+        let page = try await MCPRegistryClient(transport: URLSessionTransport()).page(search: "github", limit: 5)
+        #expect(!page.servers.isEmpty)
+        #expect(page.servers.allSatisfy { !$0.name.isEmpty })
+    }
+
     @Test func unpacksAndSearchesARealRepo() async throws {
         let repo = ProcessInfo.processInfo.environment["MAIPAG_TEST_REPO"] ?? "2c2bhdhw9z-cell/Continuum-"
         let ref = ProcessInfo.processInfo.environment["MAIPAG_TEST_REF"] ?? "master"

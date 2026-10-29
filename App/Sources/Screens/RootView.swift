@@ -98,6 +98,7 @@ struct RootView: View {
 
 /// Every sheet the app shows.
 struct SheetContent: View {
+    @Environment(AppModel.self) private var app
     var sheet: AppSheet
 
     var body: some View {
@@ -108,6 +109,37 @@ struct SheetContent: View {
         case .models(let target): ModelPicker(target: target)
         case .repos(let target): RepoPicker(target: target)
         case .branches(let target): BranchPicker(target: target)
+        case .files(let repo, let target): FilesScreen(repo: repo, target: target)
+        case .jobs: JobsScreen()
+        case .agents: AgentsScreen()
+        case .agentEditor(let id):
+            NavigationStack {
+                AgentEditorScreen(
+                    record: id.flatMap { value in app.automations.customAgents.first { $0.definition.id == value } },
+                    template: id.flatMap { value in app.automations.agents.first { $0.id == value } }
+                )
+            }
+        case .workflows: WorkflowsScreen()
+        case .workflowEditor(let id):
+            NavigationStack {
+                WorkflowEditorScreen(
+                    record: id.flatMap { value in app.automations.customWorkflows.first { $0.definition.id == value } },
+                    template: id.flatMap { value in app.automations.workflows.first { $0.id == value } }
+                )
+            }
+        case .workflowMaker: NavigationStack { WorkflowMakerScreen() }
+        case .memories: MemoriesScreen()
+        case .memoryEditor(let id):
+            NavigationStack { MemoryEditorScreen(record: id.flatMap { value in app.memories.memories.first { $0.id == value } }) }
+        case .groups(let target): GroupPicker(target: target)
+        case .specs(let repo): SpecsScreen(repo: repo)
+        case .specReview(let id): NavigationStack { SpecReviewScreen(specID: id) }
+        case .connectors: ConnectorsScreen()
+        case .connectorDetail(let id): ConnectorDetailScreen(connectorID: id, serverID: nil)
+        case .connectorCatalogDetail(let id): ConnectorDetailScreen(connectorID: nil, serverID: id)
+        case .pictureGenerator(let target): PictureViewer(target: target, result: nil)
+        case .picture(let id): PictureViewer(target: nil, result: app.library.generatedImage(id))
+        case .webPreview(let repo): WebPreviewScreen(repo: repo)
         }
     }
 }

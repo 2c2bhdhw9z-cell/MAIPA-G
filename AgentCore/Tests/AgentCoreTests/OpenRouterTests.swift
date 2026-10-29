@@ -133,6 +133,46 @@ struct OpenRouterTests {
         #expect(info.limit == nil)
     }
 
+    @Test func multipartAttachmentsAndServerToolsEncode() throws {
+        let image = Data([1, 2, 3])
+        var chat = Chat()
+        let reference = AttachmentReference(name: "photo.jpg", mimeType: "image/jpeg", kind: .image, path: "attachments/x/photo.jpg", bytes: image.count)
+        chat.messages = [.user("What is this?", attachments: [reference])]
+        let messages = Transcript.messages(for: chat, systemPrompt: "s", attachmentData: [reference.id: image])
+        let request = ChatCompletionRequest(model: "openrouter/auto", messages: messages, tools: OpenRouterWebTools.paid)
+        let json = try #require(JSONValue.parse(try JSONEncoder().encode(request)))
+        let content = try #require(json["messages"]?.arrayValue?[1]["content"]?.arrayValue)
+        #expect(content[0]["type"] == "text")
+        #expect(content[1]["type"] == "image_url")
+        #expect(content[1]["image_url"]?["url"]?.stringValue?.hasPrefix("data:image/jpeg;base64,") == true)
+        #expect(json["tools"]?.arrayValue?.map { $0["type"]?.stringValue ?? "" } == ["openrouter:web_search", "openrouter:web_fetch"])
+    }
+
+    @Test func streamedCitationsAreRetained() {
+        var accumulator = StreamAccumulator()
+        accumulator.apply(chunk(#"{"choices":[{"delta":{"content":"Source","annotations":[{"type":"url_citation","url_citation":{"url":"https://example.com/a","title":"Example"}}]}}]}"#))
+        #expect(accumulator.citations == [SourceCitation(url: "https://example.com/a", title: "Example")])
+    }
+
+    @Test func imageGenerationParsesBytesOptionsAndCost() async throws {
+        final class ImageTransport: HTTPTransport, @unchecked Sendable {
+            let lock = NSLock(); var request: HTTPRequest?
+            func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+                lock.withLock { self.request = request }
+                return HTTPResponse(status: 200, body: Data(#"{"data":[{"b64_json":"AQID","mime_type":"image/png","revised_prompt":"A clearer prompt"}],"usage":{"cost":0.04}}"#.utf8))
+            }
+            func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse { HTTPStreamResponse(status: 404, headers: [:], body: AsyncThrowingStream { $0.finish() }) }
+        }
+        let transport = ImageTransport()
+        let options = ImageGenerationOptions(aspectRatio: .wide, quality: .high)
+        let images = try await OpenRouterClient(transport: transport, apiKey: "key").generateImages(prompt: "A robot", model: "image/model", options: options)
+        #expect(images.count == 1 && images[0].data == Data([1, 2, 3]))
+        #expect(images[0].cost == 0.04 && images[0].revisedPrompt == "A clearer prompt")
+        let body = try #require(transport.request?.body.flatMap(JSONValue.parse))
+        #expect(body["aspect_ratio"] == "16:9" && body["quality"] == "high")
+        #expect(transport.request?.url.path == "/api/v1/images")
+    }
+
     @Test func signInURLCarriesPKCE() {
         let pkce = PKCE(verifier: "dBjftJeZ4CVP-mJ92K9rIn2ky-qD9-kOaeH-SiUpY4U")
         let url = OpenRouterClient.signInURL(callback: URL(string: "https://example.github.io/MAIPA-G/openrouter/")!, pkce: pkce, state: "s1")

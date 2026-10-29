@@ -51,11 +51,13 @@ public struct HTTPResponse: Sendable {
     public var status: Int
     public var headers: [String: String]
     public var body: Data
+    public var finalURL: URL?
 
-    public init(status: Int, headers: [String: String] = [:], body: Data = Data()) {
+    public init(status: Int, headers: [String: String] = [:], body: Data = Data(), finalURL: URL? = nil) {
         self.status = status
         self.headers = Dictionary(headers.map { ($0.key.lowercased(), $0.value) }, uniquingKeysWith: { _, last in last })
         self.body = body
+        self.finalURL = finalURL
     }
 
     public func header(_ name: String) -> String? { headers[name.lowercased()] }
@@ -196,7 +198,7 @@ public final class URLSessionTransport: HTTPTransport, @unchecked Sendable {
             guard let http = response as? HTTPURLResponse else {
                 throw HTTPError.transport("Not an HTTP response", isOffline: false)
             }
-            return HTTPResponse(status: http.statusCode, headers: Self.headers(of: http), body: data)
+            return HTTPResponse(status: http.statusCode, headers: Self.headers(of: http), body: data, finalURL: http.url)
         } catch let error as HTTPError {
             throw error
         } catch {

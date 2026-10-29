@@ -391,7 +391,7 @@ public actor SnapshotStore {
     }
 
     /// A path inside the repo that cannot escape it: relative, no "..", no empty parts.
-    static func isSafeRelativePath(_ path: String) -> Bool {
+    public static func isSafeRelativePath(_ path: String) -> Bool {
         guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("\0") else { return false }
         let parts = path.split(separator: "/", omittingEmptySubsequences: false)
         return !parts.contains { $0.isEmpty || $0 == ".." || $0 == "." }

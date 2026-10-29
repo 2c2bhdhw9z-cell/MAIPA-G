@@ -105,7 +105,7 @@ public struct OpenRouterClient: Sendable {
     public static let appURL = "https://github.com/2c2bhdhw9z-cell/MAIPA-G"
     public static let appTitle = "MAIPA-G"
 
-    private let transport: any HTTPTransport
+    let transport: any HTTPTransport
     private let apiKey: String?
 
     public init(transport: any HTTPTransport, apiKey: String?) {
@@ -113,7 +113,7 @@ public struct OpenRouterClient: Sendable {
         self.apiKey = apiKey
     }
 
-    private var headers: [String: String] {
+    var headers: [String: String] {
         var headers = [
             "HTTP-Referer": Self.appURL,
             "X-OpenRouter-Title": Self.appTitle,
@@ -145,6 +145,15 @@ public struct OpenRouterClient: Sendable {
             throw HTTPError.undecodable(status: response.status, type: "key info", detail: "not JSON", body: response.text)
         }
         return OpenRouterKeyInfo(response: json)
+    }
+
+    /// Account-wide purchased credit and usage. Some OAuth keys are not allowed to read it.
+    public func credits() async throws -> OpenRouterCredits {
+        let request = HTTPRequest(url: Self.apiBase.appendingPathComponent("credits"), headers: headers, idleTimeout: 30)
+        let response = try await withRetries(.standard, retryAfter: defaultRetryDelay) { try await transport.send(request) }
+        guard response.isSuccess else { throw OpenRouterAPIError(status: response.status, body: response.body, headers: response.headers) }
+        guard let json = JSONValue.parse(response.body) else { throw HTTPError.undecodable(status: response.status, type: "credits", detail: "not JSON", body: response.text) }
+        return OpenRouterCredits(response: json)
     }
 
     /// Sends a chat request and returns its reply as it streams in. Errors before the reply starts

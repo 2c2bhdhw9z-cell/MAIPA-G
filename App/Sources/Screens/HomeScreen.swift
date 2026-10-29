@@ -19,14 +19,45 @@ struct HomeScreen: View {
                     .multilineTextAlignment(.center)
                     .padding(.top, 6)
                 Spacer(minLength: 24)
+                if app.openRouter.isSignedIn {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            Button { app.sheet = app.github.isConnected ? .repos(.home) : .connectGitHub } label: {
+                                Label(app.github.isConnected ? "GitHub ✓" : "GitHub", systemImage: "link")
+                            }
+                            Button { app.sheet = .specs(home.repo) } label: { Label("Specs", systemImage: "list.clipboard") }
+                            Button { app.sheet = .workflows } label: { Label("Workflows", systemImage: "point.3.connected.trianglepath.dotted") }
+                            Button { app.sheet = .agents } label: { Label("Agents", systemImage: "person.crop.circle") }
+                            Button { app.sheet = .connectors } label: { Label("Connectors", systemImage: "puzzlepiece.extension") }
+                            if let balance = app.openRouter.balance { Label(balance.dollars, systemImage: "creditcard") }
+                            else { Label("OpenRouter ✓", systemImage: "sparkles") }
+                            if let free = app.openRouter.freeRequestsLeft { Label("\(free) free", systemImage: "sparkles") }
+                            if let repo = home.repo {
+                                Button { app.sheet = .files(repo, .home) } label: { Label("Files", systemImage: "folder") }
+                            }
+                            if !app.jobs.jobs.isEmpty {
+                                Button { app.jobs.show() } label: {
+                                    Label(app.jobs.activeCount > 0 ? "\(app.jobs.activeCount) working" : "Jobs", systemImage: "gearshape.2")
+                                }
+                            }
+                        }
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.secondaryText)
+                    .padding(.bottom, 10)
+                }
                 SetupCards()
                     .padding(.bottom, 12)
                 Composer(
                     text: $home.text,
+                    attachments: $home.attachments,
+                    webEnabled: $home.webEnabled,
+                    autonomous: $home.autonomous,
                     modelLabel: app.openRouter.label(for: home.model),
                     thinking: home.thinking,
                     thinkingLevels: app.openRouter.thinkingLevels(for: home.model),
                     repo: home.repo,
+                    groupName: app.groups.name(for: home.groupID),
                     isGitHubConnected: app.github.isConnected,
                     isRunning: false,
                     canStop: false,
@@ -36,7 +67,11 @@ struct HomeScreen: View {
                     onPickThinking: { app.choose(thinking: $0, for: .home) },
                     onPickRepo: { app.sheet = app.github.isConnected ? .repos(.home) : .connectGitHub },
                     onPickBranch: { app.sheet = .branches(.home) },
-                    onClearRepo: { app.choose(repo: nil, for: .home) }
+                    onClearRepo: { app.choose(repo: nil, for: .home) },
+                    onPickGroup: { app.sheet = .groups(.home) },
+                    onSpec: { app.sheet = .specs(home.repo) },
+                    onPicture: { app.sheet = .pictureGenerator(.home) },
+                    onPreview: { if let repo = home.repo { app.sheet = .webPreview(repo) } }
                 )
             }
             .padding(.horizontal, 14)

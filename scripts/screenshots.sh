@@ -12,7 +12,7 @@ APP_DIR="$ROOT/App"
 OUT="$APP_DIR/build/screenshots"
 DERIVED="$APP_DIR/build/SimulatorDerivedData"
 DEVICE_NAME="${MAIPAG_SIMULATOR:-iPhone 17 Pro Max}"
-SCENES="${MAIPAG_SCENES:-home-new home chat questions working thinking menu settings connect models}"
+SCENES="${MAIPAG_SCENES:-home-new home chat questions working thinking menu settings connect models files jobs job-needs-you agents agent-editor workflows workflow-editor workflow-maker specs spec-requirements spec-design spec-tasks memories memory-editor chat-memory menu-agents menu-workflows menu-memories groups connectors connector-detail connector-auth chat-connector photo-input picture-generating picture-result preview preview-error files-web}"
 BUNDLE_ID="dev.maipag.app"
 
 mkdir -p "$OUT"
@@ -50,7 +50,14 @@ xcodebuild \
   -skipPackagePluginValidation \
   -skipMacroValidation \
   CODE_SIGNING_ALLOWED=NO \
-  build | tail -n 20
+  build > "$OUT/build-log.txt" 2>&1 || {
+    # Every compile error, not just the last lines: nobody on this project has a Mac to look.
+    echo "::error::the app didn't compile for the simulator"
+    grep -E ': (fatal )?error:' "$OUT/build-log.txt" | sed 's#^.*/MAIPA-G/MAIPA-G/##' | sort -u | head -n 300
+    tail -n 25 "$OUT/build-log.txt"
+    exit 65
+  }
+tail -n 5 "$OUT/build-log.txt"
 
 APP="$DERIVED/Build/Products/Release-iphonesimulator/MAIPA-G.app"
 [ -d "$APP" ] || { echo "error: no simulator app at $APP" >&2; exit 1; }
@@ -66,9 +73,32 @@ mkdir -p "$REPORTS"
 crash_reports() { ls "$REPORTS" 2>/dev/null | grep -i "MAIPA-G" || true; }
 known_reports="$(crash_reports)"
 
-# A screenshot taken while the app is still starting shows only the plain launch colour, which
-# compresses to a small file. Real screens are several times bigger.
 size_of() { stat -f%z "$1" 2>/dev/null || echo 0; }
+
+# Whether a screenshot shows a real screen. While the app is still starting, everything under the
+# status bar is one flat launch colour; any MAIPA-G screen adds text, icons and edges, so many more
+# colours. (File size can't tell: a simple screen like an empty list compresses very small.)
+drew() {
+  local png="$1" bmp="$OUT/.probe.bmp"
+  [ -s "$png" ] || return 1
+  sips -s format bmp "$png" --out "$bmp" >/dev/null 2>&1 || return 1
+  python3 - "$bmp" <<'PY'
+import struct, sys
+data = open(sys.argv[1], "rb").read()
+offset = struct.unpack_from("<I", data, 10)[0]
+width, height = struct.unpack_from("<ii", data, 18)
+step = struct.unpack_from("<H", data, 28)[0] // 8
+row = (width * step + 3) & ~3
+top_down, height = height < 0, abs(height)
+colours = set()
+for y in range(int(height * 0.08), height, 12):
+    r = y if top_down else height - 1 - y
+    base = offset + r * row
+    for x in range(0, width, 12):
+        colours.add(data[base + x * step:base + x * step + 3])
+sys.exit(0 if len(colours) >= 12 else 1)
+PY
+}
 
 failures=0
 for appearance in dark light; do
@@ -84,7 +114,7 @@ for appearance in dark light; do
     shot="$OUT/$appearance-$scene.png"
     for attempt in 1 2 3 4 5 6; do
       xcrun simctl io "$UDID" screenshot "$shot" >/dev/null 2>&1 || true
-      [ "$(size_of "$shot")" -gt 150000 ] && break
+      drew "$shot" && break
       sleep 3
     done
     new_reports="$(comm -13 <(echo "$known_reports" | sort) <(crash_reports | sort))"
@@ -93,7 +123,7 @@ for appearance in dark light; do
       for report in $new_reports; do head -n 80 "$REPORTS/$report"; done
       known_reports="$(crash_reports)"
       failures=$((failures + 1))
-    elif [ "$(size_of "$shot")" -le 150000 ]; then
+    elif ! drew "$shot"; then
       # Still the plain launch colour: the app is stuck before drawing its first screen. Simulator
       # apps are ordinary Mac processes, so `sample` can show exactly where it is stuck.
       echo "::error::the '$scene' scene ($appearance) never drew anything"
@@ -114,6 +144,7 @@ for appearance in dark light; do
   done
 done
 
+rm -f "$OUT/.probe.bmp"
 xcrun simctl shutdown "$UDID" || true
 echo "==> screenshots in $OUT"
 [ "$failures" -eq 0 ] || exit 1

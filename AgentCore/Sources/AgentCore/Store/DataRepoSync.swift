@@ -10,7 +10,8 @@ import Foundation
 /// else moved the branch first; if someone did, the sync starts over with their changes included.
 public actor DataRepoSync {
     public static let repoName = "MAIPA-G-data"
-    static let managedPrefixes = ["chats/", "memories/", "agents/", "workflows/"]
+    static let managedJSONPrefixes = ["chats/", "memories/", "agents/", "workflows/", "groups/", "jobs/", "connectors/", "specs/", "receipts/"]
+    static let managedBlobPrefixes = ["attachments/", "media/"]
     static let managedFiles: Set<String> = ["settings.json"]
 
     public struct State: Codable, Sendable, Hashable {
@@ -59,7 +60,10 @@ public actor DataRepoSync {
     }
 
     static func isManaged(_ path: String) -> Bool {
-        managedFiles.contains(path) || (path.hasSuffix(".json") && managedPrefixes.contains { path.hasPrefix($0) } && SnapshotStore.isSafeRelativePath(path))
+        guard SnapshotStore.isSafeRelativePath(path) else { return false }
+        if managedFiles.contains(path) { return true }
+        if path.hasSuffix(".json"), managedJSONPrefixes.contains(where: path.hasPrefix) { return true }
+        return managedBlobPrefixes.contains(where: path.hasPrefix)
     }
 
     private func saveState() {

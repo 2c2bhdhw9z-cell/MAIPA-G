@@ -1,0 +1,144 @@
+import AgentCore
+import SwiftUI
+
+struct ConnectorDetailScreen: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.dismiss) private var dismiss
+    let connectorID: UUID?
+    let serverID: String?
+    @State private var showingDelete = false
+    @State private var launchValues: [String: String] = [:]
+    @State private var secretValues: [String: String] = [:]
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let connector {
+                    savedSections(connector)
+                } else if let server {
+                    registrySections(server)
+                } else {
+                    ContentUnavailableView("Connector not found", systemImage: "puzzlepiece.extension")
+                }
+            }
+            .navigationTitle(connector?.displayName ?? server?.displayName ?? "Connector")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
+            .confirmationDialog("Remove this connector?", isPresented: $showingDelete) { if let connector { Button("Remove", role: .destructive) { Task { await app.connectors.remove(connector); dismiss() } } } }
+        }
+    }
+
+    // Split into pieces so the compiler can check each one quickly.
+
+    @ViewBuilder
+    private func savedSections(_ connector: ConnectorConfiguration) -> some View {
+        Section {
+            LabeledContent("Runs on", value: connector.kind == .remote ? "iPhone" : "Autonomous")
+            if let endpoint = connector.endpoint { LabeledContent("Server", value: endpoint.host ?? endpoint.absoluteString) }
+            LabeledContent("Status", value: stateText)
+        }
+        if let error = app.connectors.errors[connector.id] {
+            Section("What happened") { Text(error).foregroundStyle(Theme.danger) }
+        }
+        if let tools = app.connectors.toolDefinitions[connector.id], !tools.isEmpty {
+            Section("Tools") {
+                ForEach(tools) { tool in ConnectorToolRow(tool: tool) }
+            }
+        }
+        Section {
+            if app.connectors.states[connector.id] != .connected, connector.kind == .remote {
+                Button("Sign in and connect") { Task { await app.connectors.authorize(connector) } }
+                    .buttonStyle(.borderedProminent)
+                Button("Use dynamic registration") { Task { await app.connectors.authorize(connector, dynamicRegistration: true) } }
+            }
+            if app.connectors.states[connector.id] == .connected {
+                Button("Reauthorize permissions") { Task { await app.connectors.reauthorize(connector, scopes: connector.scopes) } }
+            }
+            Button("Disconnect") { Task { await app.connectors.disconnect(connector) } }
+            Button("Remove connector", role: .destructive) { showingDelete = true }
+        }
+    }
+
+    @ViewBuilder
+    private func registrySections(_ server: RegistryServer) -> some View {
+        Section {
+            Text(server.description)
+            LabeledContent("Version", value: server.version)
+            LabeledContent("Phone", value: server.supportsPhone ? "Yes" : "No")
+            LabeledContent("Autonomous", value: server.supportsAutonomous ? "Yes" : "No")
+        }
+        if let package = autonomousPackage, !package.launchInputs.isEmpty {
+            Section {
+                ForEach(package.launchInputs) { input in launchInputField(input) }
+            } header: {
+                Text("Autonomous setup")
+            } footer: {
+                Text("Secret values stay in this iPhone's Keychain and are encrypted before GitHub receives them. Other setup values sync with the connector.")
+            }
+        }
+        Section {
+            if server.supportsPhone {
+                Button("Add to iPhone") { Task { await app.connectors.add(server); moveToSaved(server) } }
+                    .buttonStyle(.borderedProminent)
+            }
+            if server.supportsAutonomous {
+                Button("Add for Autonomous") {
+                    Task { await app.connectors.add(server, preferPhone: false, launchValues: launchValues, secretValues: secretValues); moveToSaved(server) }
+                }
+                .disabled(!autonomousInputsComplete)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func launchInputField(_ input: RegistryServer.LaunchInput) -> some View {
+        if !input.choices.isEmpty {
+            Picker(input.name, selection: valueBinding(input.name, secret: input.isSecret)) {
+                Text("Choose…").tag("")
+                ForEach(input.choices, id: \.self) { Text($0).tag($0) }
+            }
+        } else if input.isSecret {
+            SecureField(input.name, text: valueBinding(input.name, secret: true))
+        } else {
+            TextField(input.name, text: valueBinding(input.name, secret: false))
+        }
+        if !input.description.isEmpty {
+            Text(input.description).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var connector: ConnectorConfiguration? { connectorID.flatMap { id in app.connectors.connected.first { $0.id == id } } }
+    private var server: RegistryServer? { serverID.flatMap { id in app.connectors.catalog.first { $0.name == id } } }
+    private var autonomousPackage: RegistryServer.Package? { server?.packages.first(where: \.isAutonomousCompatible) }
+    private var autonomousInputsComplete: Bool {
+        autonomousPackage?.launchInputs.filter(\.isRequired).allSatisfy { input in
+            let value = input.isSecret ? secretValues[input.name] : launchValues[input.name]
+            return value?.isEmpty == false || input.defaultValue != nil
+        } ?? false
+    }
+    private func valueBinding(_ name: String, secret: Bool) -> Binding<String> {
+        Binding(
+            get: {
+                let fallback = autonomousPackage?.launchInputs.first { $0.name == name }?.defaultValue ?? ""
+                return secret ? secretValues[name] ?? fallback : launchValues[name] ?? fallback
+            },
+            set: { if secret { secretValues[name] = $0 } else { launchValues[name] = $0 } }
+        )
+    }
+    private var stateText: String { String(describing: connector.flatMap { app.connectors.states[$0.id] } ?? .disconnected).replacingOccurrences(of: "authorizationNeeded", with: "Sign in needed") }
+    private func moveToSaved(_ server: RegistryServer) { if let item = app.connectors.connected.last { app.sheet = .connectorDetail(item.id) } }
+}
+
+/// One tool a connected connector offers: its name and what it does.
+private struct ConnectorToolRow: View {
+    let tool: ConnectorToolDefinition
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(tool.title)
+            Text(tool.description)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+}

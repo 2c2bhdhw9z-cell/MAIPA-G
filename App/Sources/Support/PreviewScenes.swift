@@ -1,5 +1,6 @@
 import AgentCore
 import Foundation
+import UIKit
 
 /// For checking how the app looks without a phone. The build check launches the app in Apple's
 /// iPhone simulator with `-preview <scene>` and takes a screenshot of each scene. A preview shows
@@ -65,6 +66,13 @@ enum PreviewScenes {
         return chat
     }
 
+    static func pictureChat() -> Chat {
+        var chat = Chat(title: "A picture for the launch page")
+        var step = AssistantStep(); step.finishedAt = Date(); step.text = "I made the picture and saved it with this chat."; step.generatedImages = [sampleGeneratedImage()]
+        chat.messages = [.user("Make a friendly MAIPA-G launch picture"), ChatMessage(body: .assistant(AssistantTurn(status: .done, steps: [step], routeLabel: "Image AI")))]
+        return chat
+    }
+
     /// A chat where the AI is waiting on numbered questions.
     static func questionChat() -> Chat {
         var chat = Chat(title: "Plan the settings screen")
@@ -113,6 +121,76 @@ enum PreviewScenes {
         return chat
     }
 
+    static func sampleJobs(needsYou: Bool) -> [JobRecord] {
+        let repo = RepoRef(owner: "2c2bhdhw9z-cell", name: "MAIPA-G")
+        var active = JobRecord(
+            status: needsYou ? .needsApproval : .running,
+            title: "Finish the settings screen",
+            targetRepo: repo,
+            targetRef: "main",
+            defaultBranch: "main",
+            steps: [
+                JobStepRecord(title: "Read the project", detail: "Found the existing settings and tests", status: .done, startedAt: Date().addingTimeInterval(-300), finishedAt: Date().addingTimeInterval(-260)),
+                JobStepRecord(title: "Update the app", detail: needsYou ? "Needs approval before changing the build setup" : "Editing SettingsScreen.swift", status: needsYou ? .waiting : .running, startedAt: Date().addingTimeInterval(-250)),
+                JobStepRecord(title: "Check the work"),
+            ],
+            cumulativeCost: 0.18,
+            workflowRunID: 123,
+            workflowRunURL: "https://github.com/2c2bhdhw9z-cell/MAIPA-G/actions/runs/123",
+            logsURL: "https://github.com/2c2bhdhw9z-cell/MAIPA-G/actions/runs/123"
+        )
+        if needsYou {
+            active.questions = [JobQuestion(text: "Allow this command to change the repo's build setup?", options: ["Allow", "Don't allow"], isApproval: true)]
+        }
+        var done = JobRecord(status: .done, title: "Fix the launch crash", targetRepo: repo, targetRef: "main", defaultBranch: "main", cumulativeCost: 0.09)
+        done.steps = [JobStepRecord(title: "Fix and test", detail: "All checks passed", status: .done, startedAt: Date().addingTimeInterval(-3_600), finishedAt: Date().addingTimeInterval(-3_200))]
+        done.result = JobResult(summary: "Fixed the launch crash and checked the app.")
+        return [active, done]
+    }
+
+    static let previewGroupID = UUID(uuidString: "00000000-0000-0000-0000-000000000041")!
+
+    static func sampleMemories() -> [MemoryRecord] {
+        let now = Date()
+        return [
+            MemoryRecord(text: "Keep explanations plain and short.", source: .user, createdAt: now.addingTimeInterval(-86_400)),
+            MemoryRecord(text: "Continuum saves changes straight to master.", source: .star, createdAt: now.addingTimeInterval(-3_600)),
+            MemoryRecord(text: "Check an IPA before calling an iPhone build done.", isEnabled: false, source: .ai, createdAt: now.addingTimeInterval(-600)),
+        ]
+    }
+
+    static func sampleGroups() -> [ChatGroupRecord] {
+        [ChatGroupRecord(id: previewGroupID, name: "MAIPA-G", order: 0)]
+    }
+
+    static func sampleSpecs() -> [SpecRecord] {
+        let repo = RepoRef(owner: "2c2bhdhw9z-cell", name: "MAIPA-G")
+        var spec = SpecRecord(repo: repo, slug: "memory-library", title: "Memory library", request: "Add memories", stage: .tasks)
+        spec.requirements = "# Requirements\n\n1. Memories start empty.\n2. Enabled memories enter new chats."
+        spec.design = "# Design\n\nUse the shared product store."
+        spec.checkedDesign = spec.design + "\n\nChecked against every requirement."
+        spec.tasksDocument = "- [ ] Add the shared record\n- [ ] Add the iPhone screens\n- [ ] Check persistence"
+        spec.approvedStages = [.requirements, .design, .checkedDesign]
+        return [spec]
+    }
+
+    static func sampleGeneratedImage() -> GeneratedImageResult {
+        GeneratedImageResult(
+            attachment: AttachmentReference(name: "maipa-g-picture.png", mimeType: "image/png", kind: .image, path: "media/preview/picture.png", bytes: 100),
+            prompt: "A tiny friendly robot planning an app at a desk, soft violet light",
+            model: "google/gemini-image", aspectRatio: "1:1", quality: "high", cost: 0.04
+        )
+    }
+
+    static func pictureImage() -> UIImage {
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 900, height: 900))
+        return renderer.image { context in
+            UIColor(red: 0.12, green: 0.08, blue: 0.22, alpha: 1).setFill(); context.fill(CGRect(x: 0, y: 0, width: 900, height: 900))
+            let text = "✦\nMAIPA-G" as NSString
+            text.draw(in: CGRect(x: 100, y: 260, width: 700, height: 380), withAttributes: [.font: UIFont.systemFont(ofSize: 105, weight: .bold), .foregroundColor: UIColor.white, .paragraphStyle: { let p = NSMutableParagraphStyle(); p.alignment = .center; return p }()])
+        }
+    }
+
     static func sampleSummaries() -> [ChatSummary] {
         let titles: [(String, String?, Double)] = [
             ("How saving chats works", "2c2bhdhw9z-cell/MAIPA-G", -60),
@@ -122,8 +200,9 @@ enum PreviewScenes {
             ("Explain the GameCube cache", "2c2bhdhw9z-cell/Continuum-", -300_000),
             ("Ideas for the snes TAS tool", "2c2bhdhw9z-cell/snes-tas-studio", -900_000),
         ]
-        return titles.map { title, repo, offset in
-            var chat = Chat(title: title, repo: repo.flatMap(RepoRef.init(fullName:)).map { ChatRepo(ref: $0, branch: "main", defaultBranch: "main", isPrivate: false) })
+        return titles.enumerated().map { index, value in
+            let (title, repo, offset) = value
+            var chat = Chat(title: title, repo: repo.flatMap(RepoRef.init(fullName:)).map { ChatRepo(ref: $0, branch: "main", defaultBranch: "main", isPrivate: false) }, groupID: index < 2 ? previewGroupID : nil)
             chat.messages = [.user(title)]
             chat.updatedAt = Date().addingTimeInterval(offset)
             return ChatSummary(chat)

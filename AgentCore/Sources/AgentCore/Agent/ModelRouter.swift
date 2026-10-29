@@ -100,8 +100,24 @@ public enum ModelRouter {
         thinking: ThinkingLevel,
         account: AccountState,
         catalogue: [String: ModelInfo],
+        requiresImageInput: Bool = false,
         now: Date = Date()
     ) -> Route {
+        if requiresImageInput {
+            switch choice {
+            case .auto:
+                let paid = account.paidAllowed(at: now)
+                if let model = imageInputModel(in: catalogue, freeOnly: !paid) {
+                    return route(choice: .model(model.id), difficulty: difficulty, thinking: thinking, account: account, catalogue: catalogue, requiresImageInput: false, now: now)
+                }
+            case .free:
+                if let model = imageInputModel(in: catalogue, freeOnly: true) {
+                    return route(choice: .model(model.id), difficulty: difficulty, thinking: thinking, account: account, catalogue: catalogue, requiresImageInput: false, now: now)
+                }
+            case .model:
+                break
+            }
+        }
         switch choice {
         case .auto where account.paidAllowed(at: now):
             let routerLevels = catalogue[ModelChoice.autoID]?.thinkingLevels ?? [.low, .medium, .high]
@@ -137,6 +153,34 @@ public enum ModelRouter {
                 contextBudget: min(Int(Double(context) * 0.75), 300_000)
             )
         }
+    }
+
+    public static func distinctRoute(
+        avoiding modelID: String?,
+        difficulty: TaskDifficulty,
+        thinking: ThinkingLevel,
+        account: AccountState,
+        catalogue: [String: ModelInfo]
+    ) -> Route? {
+        let freeOnly = !account.paidAllowed()
+        let candidates = catalogue.values.filter {
+            $0.id != modelID && $0.isChatModel && $0.supportsTools && !$0.isRouter && (!freeOnly || $0.isFree)
+        }.sorted {
+            if $0.isFree != $1.isFree { return freeOnly ? $0.isFree : !$0.isFree }
+            if ($0.created ?? .distantPast) != ($1.created ?? .distantPast) { return ($0.created ?? .distantPast) > ($1.created ?? .distantPast) }
+            return $0.id < $1.id
+        }
+        guard let selected = candidates.first else { return nil }
+        return route(choice: .model(selected.id), difficulty: difficulty, thinking: thinking, account: account, catalogue: catalogue)
+    }
+
+    static func imageInputModel(in catalogue: [String: ModelInfo], freeOnly: Bool) -> ModelInfo? {
+        catalogue.values.filter { $0.isChatModel && $0.acceptsImages && $0.supportsTools && (!freeOnly || $0.isFree) }
+            .sorted {
+                if $0.isFree != $1.isFree { return freeOnly ? $0.isFree : !$0.isFree }
+                if ($0.created ?? .distantPast) != ($1.created ?? .distantPast) { return ($0.created ?? .distantPast) > ($1.created ?? .distantPast) }
+                return $0.id < $1.id
+            }.first
     }
 
     static func freeRoute(thinking: ThinkingLevel, catalogue: [String: ModelInfo]) -> Route {

@@ -64,20 +64,41 @@ struct ChatScreen: View {
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                Composer(
+                VStack(spacing: 4) {
+                    if let receipt = session.chat.saveReceipts?.last {
+                        HStack(spacing: 10) {
+                            if receipt.pullRequest != nil, receipt.resolution == nil {
+                                Button("Add it") { Task { await session.addLastSave() } }.buttonStyle(.borderedProminent)
+                                Button("Throw away", role: .destructive) { Task { await session.throwAwayLastSave() } }.buttonStyle(.bordered)
+                            }
+                            if receipt.undoneAt == nil, receipt.resolution == nil {
+                                Button("Undo") { Task { await session.undoLastSave() } }.buttonStyle(.bordered)
+                            }
+                            Spacer()
+                        }
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 16)
+                    }
+                    Composer(
                     text: $session.draft,
+                    attachments: $session.draftAttachments,
+                    webEnabled: $session.webEnabled,
+                    autonomous: $session.autonomous,
                     modelLabel: app.openRouter.label(for: session.chat.model),
                     thinking: session.chat.thinking,
                     thinkingLevels: app.openRouter.thinkingLevels(for: session.chat.model),
                     repo: session.chat.repo,
+                    groupName: app.groups.name(for: session.chat.groupID),
                     isGitHubConnected: app.github.isConnected,
                     isRunning: session.isRunning,
                     canStop: true,
                     onSend: {
                         let text = session.draft
+                        let attachments = session.draftAttachments
                         session.draft = ""
+                        session.draftAttachments = []
                         followsBottom = true
-                        session.send(text)
+                        session.send(text, attachments: attachments)
                         Haptics.tap()
                     },
                     onStop: { session.stop() },
@@ -85,7 +106,11 @@ struct ChatScreen: View {
                     onPickThinking: { session.setThinking($0) },
                     onPickRepo: { app.sheet = app.github.isConnected ? .repos(.chat(session.id)) : .connectGitHub },
                     onPickBranch: { app.sheet = .branches(.chat(session.id)) },
-                    onClearRepo: { session.setRepo(nil) }
+                    onClearRepo: { session.setRepo(nil) },
+                    onPickGroup: { app.sheet = .groups(.chat(session.id)) },
+                    onSpec: { app.sheet = .specs(session.chat.repo) },
+                    onPicture: { app.sheet = .pictureGenerator(.chat(session.id)) },
+                    onPreview: { if let repo = session.chat.repo { app.sheet = .webPreview(repo) } }
                 )
                 .padding(.horizontal, 12)
                 .padding(.bottom, 6)
@@ -93,6 +118,7 @@ struct ChatScreen: View {
                 .background(alignment: .bottom) {
                     LinearGradient(colors: [Theme.background.opacity(0), Theme.background], startPoint: .top, endPoint: .center)
                         .ignoresSafeArea()
+                }
                 }
             }
         }
@@ -119,8 +145,15 @@ struct ChatScreen: View {
                 .accessibilityHint("Rename this chat")
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Button { app.newChat() } label: { Image(systemName: "square.and.pencil") }
-                    .accessibilityLabel("New chat")
+                HStack(spacing: 12) {
+                    if let cost = session.chat.totalUsage.cost { Text(cost.dollars).font(.caption.monospacedDigit()).foregroundStyle(Theme.secondaryText) }
+                    if let repo = session.chat.repo {
+                        Button { app.sheet = .files(repo, .chat(session.id)) } label: { Image(systemName: "folder") }
+                            .accessibilityLabel("Files")
+                    }
+                    Button { app.newChat() } label: { Image(systemName: "square.and.pencil") }
+                        .accessibilityLabel("New chat")
+                }
             }
         }
         .alert("Rename chat", isPresented: $renaming) {
@@ -175,7 +208,8 @@ struct ChatScreen: View {
                     app.sheet = .signInOpenRouter
                 }
             },
-            openURL: { openURL($0) }
+            openURL: { openURL($0) },
+            toggleStar: { session.toggleStar($0) }
         )
     }
 }
