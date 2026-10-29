@@ -315,6 +315,67 @@ struct GitHubAuthTests {
         #expect(throws: PEM.Failure.self) { try PEM.rsaPrivateKeyPKCS1("not a key") }
     }
 
+    @Test func readOnlyTokenIsNarrowedToOneRepoAndKeptOutOfTheCache() async throws {
+        final class TokenTransport: HTTPTransport, @unchecked Sendable {
+            private let lock = NSLock()
+            private var sent: [HTTPRequest] = []
+            var requests: [HTTPRequest] { lock.withLock { sent } }
+
+            func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+                let count = lock.withLock { sent.append(request); return sent.count }
+                return HTTPResponse(status: 201, body: Data(#"{"token":"ghs_\#(count)","expires_at":"2030-01-02T03:04:05Z"}"#.utf8))
+            }
+
+            func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse {
+                HTTPStreamResponse(status: 404, headers: [:], body: AsyncThrowingStream { $0.finish() })
+            }
+        }
+        let transport = TokenTransport()
+        let credentials = GitHubAppCredentials(appID: 1, slug: "maipa-g", name: "MAIPA-G", clientID: "Iv23abc", clientSecret: "", privateKeyPEM: "", ownerLogin: "octo", htmlURL: "https://github.com/apps/maipa-g")
+        let session = GitHubAppSession(credentials: credentials, installationID: 42, userToken: nil, signer: FakeSigner(), transport: transport, onUserTokenChange: { _ in })
+
+        let narrowed = try await session.readOnlyToken(forRepository: "secret-repo")
+        #expect(narrowed.token == "ghs_1")
+        #expect(narrowed.expiresAt == ISO8601.date(from: "2030-01-02T03:04:05Z"))
+        let request = try #require(transport.requests.first)
+        #expect(request.method == "POST")
+        #expect(request.url.path == "/app/installations/42/access_tokens")
+        #expect(request.headers["Authorization"]?.hasPrefix("Bearer ") == true)
+        #expect(request.body.flatMap(JSONValue.parse) == ["repositories": ["secret-repo"], "permissions": ["contents": "read"]])
+
+        // The bot's own token is still made separately, with no narrowing.
+        #expect(try await session.installationToken() == "ghs_2")
+        #expect(transport.requests.count == 2)
+        #expect(transport.requests[1].body == nil)
+        #expect(try await session.readOnlyToken(forRepository: "secret-repo").token == "ghs_3", "read-only tokens are never cached")
+    }
+
+    @Test func computerSectionTellsTheAIToUseItsComputerAndKeepTokensOff() {
+        let none = SystemPrompt.make(userLogin: nil, repo: nil)
+        #expect(!none.contains("real Linux computer"))
+
+        let plain = SystemPrompt.make(userLogin: nil, repo: nil, computer: SystemPrompt.ComputerContext(service: "Sprites", machine: "mcp-maipa-g"))
+        #expect(plain.contains("This chat has a real Linux computer through the Sprites connector."))
+        #expect(plain.contains("`mcp-maipa-g`"))
+        #expect(plain.contains("curl -fsSL \(SystemPrompt.computerSetupURL) | bash"))
+        #expect(!plain.contains("git clone"))
+
+        let open = SystemPrompt.make(userLogin: nil, repo: nil, computer: SystemPrompt.ComputerContext(
+            service: "Sprites", machine: "mcp-maipa-g", repoFullName: "octo/app", cloneURL: "https://github.com/octo/app.git",
+            branch: "main", commit: "0123456789abcdef", repoPath: "$HOME/repos/octo/app"
+        ))
+        #expect(open.contains("Keep a copy of octo/app at `$HOME/repos/octo/app` on the branch main at commit 0123456."))
+        #expect(open.contains("`git clone https://github.com/octo/app.git $HOME/repos/octo/app`"))
+        #expect(!open.contains("remote set-url"))
+
+        let secret = SystemPrompt.make(userLogin: nil, repo: nil, computer: SystemPrompt.ComputerContext(
+            service: "Sprites", machine: "mcp-maipa-g", repoFullName: "octo/app", cloneURL: "https://x-access-token:ghs_abc@github.com/octo/app.git",
+            branch: "main", commit: "0123456789abcdef", repoPath: "$HOME/repos/octo/app"
+        ))
+        #expect(secret.contains("`git -C $HOME/repos/octo/app remote set-url origin https://github.com/octo/app.git`"))
+        #expect(secret.contains("Never print, echo or repeat the clone URL's token outside those git commands."))
+    }
+
     #if canImport(Security)
     @Test func securitySignerMakesVerifiableRS256() throws {
         let attributes: [CFString: Any] = [kSecAttrKeyType: kSecAttrKeyTypeRSA, kSecAttrKeySizeInBits: 2048]

@@ -296,6 +296,14 @@ final class GitHubAccount {
         repos.first { $0.fullName.caseInsensitiveCompare(fullName) == .orderedSame }
     }
 
+    /// A token that can only read `repo`'s files and lasts about an hour, for cloning a private repo
+    /// onto a chat's computer. Public repos don't need one. It is made fresh each time and isn't
+    /// kept here; the chat that asked keeps it until it is nearly used up.
+    func readOnlyToken(for repo: RepoRef) async throws -> (token: String, expiresAt: Date) {
+        guard let session else { throw GitHubAPIError(status: 401, message: "GitHub isn't connected") }
+        return try await session.readOnlyToken(forRepository: repo.name)
+    }
+
     /// GitHub's page where the user picks which repos MAIPA-G may use.
     var installationSettingsURL: URL? {
         installationID.map { URL(string: "https://github.com/settings/installations/\($0)")! }

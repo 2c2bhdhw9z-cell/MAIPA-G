@@ -36,9 +36,16 @@ final class ConnectorLibrary {
         guard !isLoading else { return }
         isLoading = true; defer { isLoading = false }
         do {
-            let page = try await MCPRegistryClient(transport: transport).page(search: query, cursor: reset ? nil : nextCursor)
-            catalog = (reset ? page.servers : catalog + page.servers).reduce(into: [String: RegistryServer]()) { $0[$1.name] = $1 }.values.sorted(by: MCPRegistryClient.catalogOrder)
-            nextCursor = page.nextCursor
+            let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            if reset {
+                let found = try await firstPages(for: text)
+                catalog = Self.ranked(Self.unique(found.servers), for: text)
+                nextCursor = found.nextCursor
+            } else {
+                let page = try await MCPRegistryClient(transport: transport).page(search: query, cursor: nextCursor)
+                catalog = Self.ranked(Self.unique(catalog + page.servers), for: text)
+                nextCursor = page.nextCursor
+            }
             try? JSONCoding.encoder().encode(catalog).write(to: cacheURL, options: .atomic)
         } catch { if catalog.isEmpty { errors[UUID()] = String(describing: error) } }
     }
@@ -46,10 +53,73 @@ final class ConnectorLibrary {
     /// Looks up one familiar service without replacing the screen's current catalogue/search.
     /// The UI uses this behind a normal Connect button; the source remains the official Registry.
     func lookup(_ search: String) async throws -> [RegistryServer] {
-        let page = try await MCPRegistryClient(transport: transport).page(search: search, limit: 100)
-        catalog = (catalog + page.servers).reduce(into: [String: RegistryServer]()) { $0[$1.name] = $1 }.values.sorted(by: MCPRegistryClient.catalogOrder)
+        let text = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pages = try await firstPages(for: text)
+        let found = Self.ranked(Self.unique(pages.servers), for: text)
+        catalog = Self.ranked(Self.unique(catalog + found), for: query.trimmingCharacters(in: .whitespacesAndNewlines))
         try? JSONCoding.encoder().encode(catalog).write(to: cacheURL, options: .atomic)
-        return page.servers
+        return found
+    }
+
+    /// The Registry's `search` only matches server names as a substring, so "Hugging Face" finds
+    /// nothing while "huggingface" finds `co.huggingface/hf-mcp-server`. This asks for the first
+    /// page of up to three spellings at once: as typed, without spaces, and with words joined by
+    /// "-". Only the as-typed request has to succeed, and "Load more" continues from its cursor.
+    private func firstPages(for text: String) async throws -> (servers: [RegistryServer], nextCursor: String?) {
+        let client = MCPRegistryClient(transport: transport)
+        let spellings = Self.spellings(of: text)
+        async let extra = ConnectorLibrary.bestEffortPages(Array(spellings.dropFirst()), client: client)
+        let typed = try await client.page(search: spellings[0], limit: 100)
+        let others = await extra
+        return (typed.servers + others, typed.nextCursor)
+    }
+
+    /// The text as typed first (even when empty, which lists everything), then the other spellings.
+    nonisolated static func spellings(of text: String) -> [String] {
+        let words = text.split(whereSeparator: \.isWhitespace).map(String.init)
+        var spellings = [text]
+        for candidate in [words.joined(), words.joined(separator: "-")] where !candidate.isEmpty && !spellings.contains(candidate) {
+            spellings.append(candidate)
+        }
+        return spellings
+    }
+
+    nonisolated private static func bestEffortPages(_ spellings: [String], client: MCPRegistryClient) async -> [RegistryServer] {
+        await withTaskGroup(of: [RegistryServer].self, returning: [RegistryServer].self) { group in
+            for spelling in spellings {
+                group.addTask { (try? await client.page(search: spelling, limit: 100))?.servers ?? [] }
+            }
+            var servers: [RegistryServer] = []
+            for await page in group { servers += page }
+            return servers
+        }
+    }
+
+    /// One entry per server name; a later copy replaces an earlier one.
+    nonisolated private static func unique(_ servers: [RegistryServer]) -> [RegistryServer] {
+        Array(servers.reduce(into: [String: RegistryServer]()) { $0[$1.name] = $1 }.values)
+    }
+
+    /// Entries titled exactly like the query come first (ignoring case, spaces and punctuation),
+    /// then the publisher's own entries ("co.huggingface/…" for "Hugging Face"), then the rest,
+    /// each group in the Registry's usual order. Among exact titles, the publisher's own entry
+    /// leads, so an untitled `io.github.someone/huggingface-mcp` can't push ahead of it.
+    nonisolated static func ranked(_ servers: [RegistryServer], for query: String) -> [RegistryServer] {
+        let title = compacted(query)
+        let publisherQuery = query.filter { !$0.isWhitespace }.lowercased()
+        func rank(_ server: RegistryServer) -> Int {
+            let publisher = server.name.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false).first.map { $0.lowercased() } ?? ""
+            let ownPublisher = !publisherQuery.isEmpty && publisher.contains(publisherQuery)
+            if !title.isEmpty, compacted(server.displayName) == title { return ownPublisher ? 0 : 1 }
+            return ownPublisher ? 2 : 3
+        }
+        return servers.map { (rank: rank($0), server: $0) }
+            .sorted { $0.rank != $1.rank ? $0.rank < $1.rank : MCPRegistryClient.catalogOrder($0.server, $1.server) }
+            .map(\.server)
+    }
+
+    nonisolated private static func compacted(_ text: String) -> String {
+        text.lowercased().filter { $0.isLetter || $0.isNumber }
     }
 
     func add(_ server: RegistryServer, preferPhone: Bool = true, launchValues: [String: String] = [:], secretValues: [String: String] = [:]) async {

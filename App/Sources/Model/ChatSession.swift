@@ -24,6 +24,8 @@ final class ChatSession: Identifiable {
     @ObservationIgnored private var flushScheduled = false
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored private var lastSaved = Date()
+    /// The read-only token for cloning this chat's private repo onto its computer.
+    @ObservationIgnored private var computerToken: (repo: RepoRef, token: String, expiresAt: Date)?
 
     init(chat: Chat, app: AppModel?) {
         self.id = chat.id
@@ -296,6 +298,7 @@ final class ChatSession: Identifiable {
                 return
             }
         }
+        let computer = await computerContext(app: app, repo: repoContext)
 
         let hasRepo = chat.repo != nil
         var difficulty = TaskDifficulty.estimate(lastMessage, hasRepo: hasRepo)
@@ -321,7 +324,7 @@ final class ChatSession: Identifiable {
         let input = AgentTurnInput(
             chat: chat,
             route: route,
-            systemPrompt: SystemPrompt.make(userLogin: app.github.login, repo: repoContext, memories: chat.memoryContext),
+            systemPrompt: SystemPrompt.make(userLogin: app.github.login, repo: repoContext, computer: computer, memories: chat.memoryContext),
             tools: tools,
             allowTools: app.openRouter.supportsTools(chat.model),
             spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil,
@@ -420,6 +423,57 @@ final class ChatSession: Identifiable {
         let fresh = RepoWorkspace(repo: repo.ref, branch: repo.branch, commit: commit, github: github, store: store)
         workspace = fresh
         return fresh
+    }
+
+    // MARK: The chat's computer
+
+    /// The connector that gives chats a Linux computer, as chosen in Settings: none when it's off,
+    /// the chosen one, or for Automatic the first one on sprites.dev. Only a connector that is
+    /// connected right now counts, as only those give the AI their tools.
+    private func computerConnector(_ app: AppModel) -> ConnectorConfiguration? {
+        guard !app.settings.chatComputerOff else { return nil }
+        let ready = app.connectors.connected.filter { app.connectors.states[$0.id] == .connected }
+        if let chosen = app.settings.chatComputerServer {
+            return ready.first { $0.serverID == chosen }
+        }
+        return ready.first { connector in
+            guard let host = connector.endpoint?.host?.lowercased() else { return false }
+            return host == "sprites.dev" || host.hasSuffix(".sprites.dev")
+        }
+    }
+
+    /// What the AI is told about this chat's computer, or nil when the chat has none.
+    private func computerContext(app: AppModel, repo: SystemPrompt.RepoContext?) async -> SystemPrompt.ComputerContext? {
+        guard app.openRouter.supportsTools(chat.model), let connector = computerConnector(app) else { return nil }
+        let machine = app.settings.chatComputerMachineName
+        guard let repo else { return SystemPrompt.ComputerContext(service: connector.displayName, machine: machine) }
+        let owner = repo.ref.owner
+        let name = repo.ref.name
+        var cloneURL = "https://github.com/\(owner)/\(name).git"
+        if repo.isPrivate, let token = await readOnlyCloneToken(for: repo.ref, app: app) {
+            cloneURL = "https://x-access-token:\(token)@github.com/\(owner)/\(name).git"
+        }
+        return SystemPrompt.ComputerContext(
+            service: connector.displayName,
+            machine: machine,
+            repoFullName: repo.ref.fullName,
+            cloneURL: cloneURL,
+            branch: repo.branch,
+            commit: repo.commit,
+            repoPath: "$HOME/repos/\(owner)/\(name)"
+        )
+    }
+
+    /// A token that can only read this chat's private repo, kept until five minutes before it runs
+    /// out. Nil when GitHub won't make one; the plain address is used then.
+    private func readOnlyCloneToken(for repo: RepoRef, app: AppModel) async -> String? {
+        if let cached = computerToken, cached.repo == repo, cached.expiresAt.timeIntervalSinceNow > 5 * 60 {
+            return cached.token
+        }
+        computerToken = nil
+        guard let fresh = try? await app.github.readOnlyToken(for: repo) else { return nil }
+        computerToken = (repo: repo, token: fresh.token, expiresAt: fresh.expiresAt)
+        return fresh.token
     }
 
     // MARK: Titles and saving

@@ -278,7 +278,6 @@ struct ToolCallsFold: View {
                         .font(.caption2.weight(.bold))
                         .foregroundStyle(Theme.secondaryText)
                         .rotationEffect(.degrees(open ? 90 : 0))
-                    Spacer(minLength: 4)
                     if isRunning { ProgressView().controlSize(.mini) }
                 }
                 .padding(.vertical, 6)
@@ -288,6 +287,8 @@ struct ToolCallsFold: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("\(title), \(open ? "collapse" : "expand")")
+            // The bar ends after its chevron; the free space stays outside it, so taps there do nothing.
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             if open {
                 ForEach(calls) { call in ToolLine(call: call) }
@@ -341,7 +342,6 @@ struct ToolLine: View {
                             .foregroundStyle(Theme.secondaryText)
                             .rotationEffect(.degrees(open ? 90 : 0))
                     }
-                    Spacer(minLength: 4)
                     if call.status == .running {
                         ProgressView().controlSize(.mini)
                     }
@@ -352,6 +352,7 @@ struct ToolLine: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
             if open, let detail = call.detail ?? call.result {
                 ScrollView([.horizontal, .vertical]) {
                     Text(detail)

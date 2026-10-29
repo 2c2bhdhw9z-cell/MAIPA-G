@@ -20,11 +20,41 @@ public enum SystemPrompt {
         }
     }
 
+    /// The Linux computer a chat runs commands on, reached through a connector such as Sprites.
+    /// The repo fields are set only when the chat has a repo.
+    public struct ComputerContext: Sendable, Hashable {
+        /// The connector's name, as the person sees it in Connectors.
+        public var service: String
+        /// The machine to use, created with exactly this name when it doesn't exist yet.
+        public var machine: String
+        public var repoFullName: String?
+        /// Where to clone the repo from. For a private repo it carries a short-lived read-only token.
+        public var cloneURL: String?
+        public var branch: String?
+        public var commit: String?
+        /// Where the repo's copy lives on the machine, such as `$HOME/repos/owner/name`.
+        public var repoPath: String?
+
+        public init(service: String, machine: String, repoFullName: String? = nil, cloneURL: String? = nil, branch: String? = nil, commit: String? = nil, repoPath: String? = nil) {
+            self.service = service
+            self.machine = machine
+            self.repoFullName = repoFullName
+            self.cloneURL = cloneURL
+            self.branch = branch
+            self.commit = commit
+            self.repoPath = repoPath
+        }
+
+        /// True when the clone URL has a token in it, which must not stay on the machine.
+        var cloneURLHasToken: Bool { cloneURL?.contains("@") == true }
+    }
+
     public static func make(
         now: Date = Date(),
         timeZone: TimeZone = .current,
         userLogin: String?,
         repo: RepoContext?,
+        computer: ComputerContext? = nil,
         agent: AgentDefinition? = nil,
         workflowContext: String? = nil,
         memories: [String] = []
@@ -74,6 +104,10 @@ public enum SystemPrompt {
             """)
         }
 
+        if let computer {
+            parts.append(computerSection(computer))
+        }
+
         if let agent {
             parts.append(agent.prompt(task: workflowContext ?? "Complete the assigned step."))
         } else if let workflowContext, !workflowContext.isEmpty {
@@ -89,5 +123,36 @@ public enum SystemPrompt {
         with short numbered questions and a few clear choices. Don't ask about anything you can work out.
         """)
         return parts.joined(separator: "\n\n")
+    }
+
+    /// Where the computer setup script lives. The AI runs it once per machine.
+    public static let computerSetupURL = "https://raw.githubusercontent.com/2c2bhdhw9z-cell/MAIPA-G/main/docs/computer/setup.sh"
+
+    static func computerSection(_ computer: ComputerContext) -> String {
+        var steps = [
+            "- The machine is named `\(computer.machine)`. List the machines, and if it doesn't exist, create it with exactly that name.",
+            "- The first time you use it, check for `$HOME/.maipa-g/ready`. If it's missing, run `curl -fsSL \(computerSetupURL) | bash` " +
+                "to install the usual tools. It's safe to run again if it stops part way. If a tool it installed isn't found, " +
+                "start the command with `. $HOME/.maipa-g/env.sh &&`.",
+        ]
+        if let fullName = computer.repoFullName, let cloneURL = computer.cloneURL, let path = computer.repoPath {
+            let branch = computer.branch.map { " on the branch \($0)" } ?? ""
+            let commit = computer.commit.map { " at commit \($0.prefix(7))" } ?? ""
+            steps.append("- Keep a copy of \(fullName) at `\(path)`\(branch)\(commit). If it's missing, clone it with `git clone \(cloneURL) \(path)`. Otherwise fetch and check out that commit.")
+            if computer.cloneURLHasToken {
+                steps.append(
+                    "- Right after cloning, run `git -C \(path) remote set-url origin https://github.com/\(fullName).git` so no token stays on the machine. " +
+                        "Later fetches still need the token, so fetch from the clone URL rather than origin. Never print, echo or repeat the clone URL's token outside those git commands."
+                )
+            }
+            steps.append("- The copy on the computer is for running and checking. To change the repo, still use create_file, edit_file, delete_file and save_changes, and make the same edits on the computer when you need to test them.")
+        }
+        steps.append("- Report command output honestly. Never claim a command ran if it didn't.")
+        return """
+        This chat has a real Linux computer through the \(computer.service) connector. Its tools start with mcp_. \
+        Use it on your own, without waiting to be asked, whenever a task needs running commands, counting, \
+        building, testing, installing or running code.
+        \(steps.joined(separator: "\n"))
+        """
     }
 }
