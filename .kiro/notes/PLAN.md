@@ -30,7 +30,14 @@ invoke_sub_agent, disclose_context, introspect): **"Whatever tools it doesn't ha
      a fresh context.
   6. **load_context** (disclose_context): load `.kiro/steering` files and `.kiro/skills/*/SKILL.md`
      on demand, honouring always/auto/manual inclusion.
-  7. **introspect**: answer questions about MAIPA-G itself from its own bundled help.
+  7. **introspect**: answer questions about MAIPA-G itself. Owner picked option 1 (4:40 PM): help
+     pages plus live app status. (a) Help pages built into the app, one per screen, button and
+     setting, plus how saving, jobs, connectors and the computer work, updated in every build so
+     they match the installed version; the tool searches and reads them. (b) A read-only
+     live-status tool: what's connected (GitHub, OpenRouter credit, each connector's state), the
+     chosen AI, the chat computer setting, saving status with its real error, and the jobs list
+     (status, step, run link, failure reason). Never shows tokens or secrets. This also fixes
+     report 12.
   8. **Regex search** (grep_search): check that search_code takes regular expressions; add them
      if not. List and search respect .gitignore and .kiroignore.
 
@@ -201,7 +208,7 @@ invoke_sub_agent, disclose_context, introspect): **"Whatever tools it doesn't ha
     URLSession). Fix: show the real error text, then fix its cause. Told him to install the next
     build over the top, without deleting the app first, so today's chats stay on the phone.
 12. **The chat AI can't see Autonomous jobs.** Asked about "active ongoing jobs", it listed
-    Sprites instead.
+    Sprites instead. Fix: the live-status tool in "Tools MAIPA-G must have", item 7.
     Worked (3:26-3:37 PM): web search (current answer with Apple and MacRumors sources), and the
     Spec requirements step.
 13. **A sentence about notes made the whole MAIPA-G repo save straight to main.** "Add a line
