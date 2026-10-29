@@ -1,11 +1,13 @@
 # MAIPA-G plan
 
-**Status (29 October 2026, 5:35 AM Eastern): the whole plan is built and on main. Build 17
-(`build-17-26eabee`, 4.4 MB) is the one to install: smaller right-aligned AI/thinking selectors; a
-+ menu with File, Photo Library and real Take Photo; Web beside +; no horizontal tool scrolling;
-and a keyboard Done button, close-on-Send and first-swipe chat dismissal. Its Linux checks, Mac
-checks, iPhone build and all 78 Dark/Light screenshots passed. Downloaded and checked: 0.1.0 (17),
-iPhone only, arm64, camera permission present. Next: he tests these changes on his iPhone.**
+**Status (29 October 2026, 6:30 AM Eastern): the whole plan is built and on main. Build 19
+(`build-19-c619474`, 4.4 MB) is the one to install: + and Web sit inside the message box at lower
+left; smaller AI, Thinking and Send sit at lower right; the top shortcut/status row wraps instead
+of scrolling; File uses Continuum's proven retained UIKit/asCopy picker; and tool calls and ran
+commands start folded. Linux checks, Mac tests, the iPhone build and IPA checks passed; the
+remaining screenshot job was stopped after the app passed so he could have it immediately.
+Downloaded and checked: 0.1.0 (19), iPhone only, arm64, 18 complete zip entries. Next: he tests
+build 19 on his iPhone.**
 
 ## What it is
 An iPhone app (.ipa) for AI agents and workflows, with GitHub built in, like Kiro (app.kiro.dev)
