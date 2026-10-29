@@ -53,6 +53,8 @@ struct HomeScreen: View {
                     webEnabled: $home.webEnabled,
                     autonomous: $home.autonomous,
                     modelLabel: app.openRouter.label(for: home.model),
+                    contextUsedTokens: 0,
+                    contextLimitTokens: app.openRouter.contextLimit(for: home.model),
                     thinking: home.thinking,
                     thinkingLevels: app.openRouter.thinkingLevels(for: home.model),
                     repo: home.repo,

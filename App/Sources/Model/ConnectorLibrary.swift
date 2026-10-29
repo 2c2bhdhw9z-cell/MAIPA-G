@@ -43,6 +43,15 @@ final class ConnectorLibrary {
         } catch { if catalog.isEmpty { errors[UUID()] = String(describing: error) } }
     }
 
+    /// Looks up one familiar service without replacing the screen's current catalogue/search.
+    /// The UI uses this behind a normal Connect button; the source remains the official Registry.
+    func lookup(_ search: String) async throws -> [RegistryServer] {
+        let page = try await MCPRegistryClient(transport: transport).page(search: search, limit: 100)
+        catalog = (catalog + page.servers).reduce(into: [String: RegistryServer]()) { $0[$1.name] = $1 }.values.sorted(by: MCPRegistryClient.catalogOrder)
+        try? JSONCoding.encoder().encode(catalog).write(to: cacheURL, options: .atomic)
+        return page.servers
+    }
+
     func add(_ server: RegistryServer, preferPhone: Bool = true, launchValues: [String: String] = [:], secretValues: [String: String] = [:]) async {
         if preferPhone, let remote = server.preferredRemote { await addRemote(name: server.displayName, serverID: server.name, endpoint: remote.url) }
         else if let package = server.packages.first(where: \.isAutonomousCompatible) {

@@ -41,6 +41,7 @@ struct MessageRow: View, Equatable {
                         .padding(7)
                 }
                 .buttonStyle(.plain)
+                .padding(.top, 6)
                 .accessibilityLabel(message.starredMemoryID == nil ? "Save as memory" : "Remove memory")
             }
         }
@@ -273,12 +274,12 @@ struct ToolCallsFold: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .shimmer(isRunning && theme.thinkingShimmer)
-                    Spacer(minLength: 4)
-                    if isRunning { ProgressView().controlSize(.mini) }
                     Image(systemName: "chevron.right")
                         .font(.caption2.weight(.bold))
                         .foregroundStyle(Theme.secondaryText)
                         .rotationEffect(.degrees(open ? 90 : 0))
+                    Spacer(minLength: 4)
+                    if isRunning { ProgressView().controlSize(.mini) }
                 }
                 .padding(.vertical, 6)
                 .padding(.horizontal, 10)
@@ -334,14 +335,15 @@ struct ToolLine: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .shimmer(call.status == .running && theme.thinkingShimmer)
-                    Spacer(minLength: 4)
-                    if call.status == .running {
-                        ProgressView().controlSize(.mini)
-                    } else if hasDetail {
+                    if hasDetail {
                         Image(systemName: "chevron.right")
                             .font(.caption2.weight(.bold))
                             .foregroundStyle(Theme.secondaryText)
                             .rotationEffect(.degrees(open ? 90 : 0))
+                    }
+                    Spacer(minLength: 4)
+                    if call.status == .running {
+                        ProgressView().controlSize(.mini)
                     }
                 }
                 .padding(.vertical, 6)

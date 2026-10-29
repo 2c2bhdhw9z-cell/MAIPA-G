@@ -287,6 +287,8 @@ public struct CloudRunner: Sendable {
             logger.progress("MAIPA-G Autonomous checkpointed \(job.status.rawValue).")
         } catch {
             job.status = .failed
+            let reason = logger.redact(String(describing: error))
+            job.result = JobResult(summary: "The job stopped safely: \(reason)")
             job.updatedAt = Date()
             try? await store.save(job)
             logger.progress("MAIPA-G Autonomous stopped safely with an error.")
@@ -573,8 +575,13 @@ public struct CloudRunner: Sendable {
         let selected = job.targetRef ?? job.defaultBranch ?? "main"
         let destination = effectiveRules.directSave ? selected : branch
         let baseRef = effectiveRules.directSave ? selected : (job.defaultBranch ?? "main")
-        let commit = try await GitHubWorkspacePublisher(github: github, repo: configuration.targetRepository, workspace: configuration.workspace)
-            .publish(branch: destination, baseRef: baseRef, message: job.title)
+        let publisher = GitHubWorkspacePublisher(github: github, repo: configuration.targetRepository, workspace: configuration.workspace)
+        guard try await publisher.hasChanges() else {
+            var summary = summaryOverride ?? chat?.lastAssistantTurn?.steps.last(where: { !$0.text.isEmpty })?.text ?? "Finished the requested work."
+            summary += "\n\nNo files needed changing."
+            return JobResult(summary: summary, commit: job.state["targetCommit"]?.stringValue)
+        }
+        let commit = try await publisher.publish(branch: destination, baseRef: baseRef, message: job.title)
 
         var pullRequest = await toolResults.pullRequest
         if pullRequest == nil, !effectiveRules.directSave, branch != (job.defaultBranch ?? "main") {

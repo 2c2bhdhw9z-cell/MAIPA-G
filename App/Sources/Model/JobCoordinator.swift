@@ -392,6 +392,32 @@ final class JobCoordinator {
         } catch { lastError = String(describing: error) }
     }
 
+    func delete(_ id: UUID) async {
+        guard let app, let job = jobs.first(where: { $0.id == id }) else { return }
+        localRuns[id]?.cancel()
+        localRuns[id] = nil
+        do {
+            if ![.done, .failed, .stopped].contains(job.status) {
+                _ = try await store.stop(id)
+                await reloadAndSync()
+                if let runID = job.workflowRunID, let repo = job.targetRepo, let github = app.github.client {
+                    try? await github.cancelWorkflowRun(repo, runID: runID)
+                    // Let GitHub stop the runner before deleting the shared record, otherwise its
+                    // final checkpoint could bring the deleted job straight back.
+                    for _ in 0..<20 {
+                        if let run = try? await github.workflowRun(repo, runID: runID), run.status == "completed" { break }
+                        try? await Task.sleep(nanoseconds: 500_000_000)
+                    }
+                }
+            }
+            try await store.delete(id)
+            if selectedJobID == id { selectedJobID = nil }
+            jobs = await store.all()
+            app.sync.request(after: 0)
+            await app.sync.syncNow()
+        } catch { lastError = String(describing: error) }
+    }
+
     func resume(_ id: UUID) async {
         guard let app else { return }
         if let job = jobs.first(where: { $0.id == id }), job.targetRepo == nil,
@@ -475,12 +501,27 @@ final class JobCoordinator {
         }
         let dispatchRef = job.state["previewBuild"]?.boolValue == true ? (job.targetRef ?? job.defaultBranch ?? "main") : (job.defaultBranch ?? "main")
         guard let inputs = job.autonomousWorkflowInputs else { throw ToolInputError("This job is missing its private data-repository identity.") }
-        try await github.dispatchWorkflow(
-            repo,
-            workflow: "maipa-g.yml",
-            ref: dispatchRef,
-            inputs: inputs
-        )
+        var dispatched = false
+        var lastDispatchError: Error?
+        // A caller workflow committed during first-use setup takes a few seconds to appear in
+        // GitHub's workflow index. Retry that exact temporary 404/422 instead of leaving a job
+        // looking stuck until someone manually resumes it.
+        for attempt in 1...10 {
+            do {
+                try await github.dispatchWorkflow(
+                    repo,
+                    workflow: "maipa-g.yml",
+                    ref: dispatchRef,
+                    inputs: inputs
+                )
+                dispatched = true
+                break
+            } catch let error as GitHubAPIError where [404, 422].contains(error.status) {
+                lastDispatchError = error
+                if attempt < 10 { try await Task.sleep(nanoseconds: UInt64(min(attempt, 4)) * 1_000_000_000) }
+            }
+        }
+        if !dispatched { throw lastDispatchError ?? ToolInputError("GitHub did not start this job.") }
         var updated = job
         updated.status = .running
         updated.steps = [JobStepRecord(title: "Starting on GitHub", status: .running, startedAt: Date())]
