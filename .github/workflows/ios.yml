@@ -90,8 +90,11 @@ jobs:
         run: |
           brew install xcodegen
           xcodegen --version
+      # Run under a pseudo-terminal so each test's progress shows in the log as it happens, and
+      # stop after 15 minutes: the whole suite takes seconds, so anything longer is a stuck test.
       - name: AgentCore tests (macOS)
-        run: swift test --package-path AgentCore
+        timeout-minutes: 15
+        run: script -q /dev/null swift test --package-path AgentCore
       - name: Build and package the IPA
         env:
           MAIPAG_BUILD_NUMBER: ${{ github.run_number }}

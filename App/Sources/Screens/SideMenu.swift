@@ -160,8 +160,10 @@ struct SideMenu: View {
                             Label(memory.source.label, systemImage: memory.source.icon).font(.caption).foregroundStyle(Theme.secondaryText)
                         }
                     }.buttonStyle(.plain)
+                    .listRowBackground(Color.clear)
                 }
                 Button { app.sheet = .memories; app.isMenuOpen = false } label: { Label("Manage memories", systemImage: "slider.horizontal.3") }
+                    .listRowBackground(Color.clear)
             }
             .listStyle(.plain).scrollContentBackground(.hidden)
         }
@@ -178,6 +180,7 @@ struct SideMenu: View {
                         VStack(alignment: .leading, spacing: 2) { Text(workflow.name); Text(workflow.summary).font(.caption).foregroundStyle(Theme.secondaryText).lineLimit(2) }
                     }
                 }.buttonStyle(.plain)
+                .listRowBackground(Color.clear)
             }
         }.listStyle(.plain).scrollContentBackground(.hidden)
     }
