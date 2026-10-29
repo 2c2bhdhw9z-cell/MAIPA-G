@@ -48,7 +48,14 @@ them go into one batch and one build.**
    own computer: Kiro's sandbox can't be borrowed by other apps, but MAIPA-G could rent the same
    Amazon EC2 m6a.2xlarge (8 vCPU, 32 GiB) for about $0.3456/h on demand while running, plus EBS
    storage (gp3 about $0.08/GB-month, billed even when stopped), with a slower start than E2B and
-   an AWS account needed. Offered as choice (d). Waiting on his answer.
+   an AWS account needed. Offered as choice (d). He then asked which other companies offer this.
+   Shortlist given (prices from Fly.io's and Upstash's comparisons of published rates, October
+   2026): E2B; Daytona (same rates as E2B, $200 credit, stopped = disk only); Fly.io Sprites
+   (8 vCPU, managed memory, 100 GB disk kept forever, pauses ~30 s after idle, warm wake
+   100-500 ms with processes kept, cold wake 1-2 s, bills only CPU/memory actually used, $30
+   trial, REST `PUT /v1/sprites/<name>` and `POST /v1/sprites/<name>/exec` with a bearer token);
+   Vercel Sandbox; Upstash Box; Modal; Amazon EC2. Kiro's pick: Fly.io Sprites, with GitHub's free
+   computer as the fallback for people without an account. Waiting on his answer.
 
 Technical notes for the logo fix (for Kiro):
 - iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
