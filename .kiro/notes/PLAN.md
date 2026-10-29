@@ -113,6 +113,16 @@ entries. Next: he tests build 25.**
    script and clones or updates the repo. Private repos use the read-only token, which is then
    never shown to the model or saved in the chat. The raw Sprites tools are hidden from the model
    while Sprites is the chat computer.
+6. **2:12 PM: he asked me to check the AI's list of nine "tool risks".** All nine are accurate,
+   with the right line numbers. These are deliberate: search_code downloads a repo copy on first
+   use; list_files stops at 400 lines; inspect_ipa needs the checker file. Two apply to Autonomous
+   only: one workspace-changing command at a time, and no commands that move git HEAD. Swift
+   missing on `mcp-maipa-g` is report 5 (setup never ran). Possible changes, asked him:
+   (a) read_file's 600-line/60,000-character pages could match Kiro's 2,000 lines; (b) free web
+   search depends on DuckDuckGo's page layout, so a second free source could back it up;
+   (c) approvals for deleting files or changing build setup come from keywords in his message
+   (delete, remove, change, edit, update, add, create, with "don't/never/without" handled), which
+   unusual wording can fool.
 
 Technical notes for the logo fix (for Kiro):
 - iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
