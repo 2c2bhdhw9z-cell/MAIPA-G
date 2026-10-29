@@ -147,6 +147,27 @@ entries. Next: he tests build 25.**
    picture?" then got "I don't see any images", because the first exchange was dropped. He expects
    nothing lost, like Kiro. So the fix also: when a chat really nears the model's limit, summarize
    the older part instead of silently dropping it, as Kiro does.
+   Easy tests he ran (2:48-3:10 PM): stop, switching AI, Airplane mode and big text worked.
+8. **The AI picker offers AIs MAIPA-G can't use.** "Inkling Small (free)" gave OpenRouter 403
+   "only available on agentic harnesses ... listed on openrouter.ai/apps". "Lyria 3 Pro Preview" is
+   a music model: it wrote a `music_gen` call, then 403 PROHIBITED_CONTENT. Fix: list only models
+   with text output that MAIPA-G may use (tools for repo chats), drop app-restricted ones after
+   such a 403, and explain errors in plain words.
+9. **No way to make a repo from a chat.** "Make me a new private repo called maipa-g-test" got
+   "I don't have a direct way". Plan answer 13 says it may create repos, and the GitHub App has
+   `repository_creation: write`. Fix: a create-repository tool that asks first.
+10. **A dropped connection leaves a cut-off answer with no note.** The answer stopped at "1" when
+    Airplane mode went on. Fix: mark it interrupted and offer Try again.
+11. **Saving to MAIPA-G-data stopped at 7:10 AM Eastern.** Its last commit is 11:10 UTC, and
+    `jobs/` has only the morning job. So the two "Give me a plan." Autonomous runs in Built-Helion
+    (40936883430 and 40937278405, 19:05 and 19:08 UTC) built the runner, found no job record and
+    exited in 0.4 s ("the job stopped safely"). They couldn't save the failure either, so the app
+    shows "Starting on GitHub" forever. Chats since 7:10 AM aren't backed up. Asked him for a
+    screenshot of Settings → Saving after "Save now". Fix: find why saving stopped; never dispatch
+    a job before its record is saved; have the phone check the run's own result and show
+    failures; make save failures obvious.
+12. **The chat AI can't see Autonomous jobs.** Asked about "active ongoing jobs", it listed
+    Sprites instead.
 
 Technical notes for the logo fix (for Kiro):
 - iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
