@@ -1,13 +1,16 @@
 # MAIPA-G plan
 
-**Status (29 October 2026, 6:30 AM Eastern): the whole plan is built and on main. Build 19
-(`build-19-c619474`, 4.4 MB) is the one to install: + and Web sit inside the message box at lower
-left; smaller AI, Thinking and Send sit at lower right; the top shortcut/status row wraps instead
-of scrolling; File uses Continuum's proven retained UIKit/asCopy picker; and tool calls and ran
-commands start folded. Linux checks, Mac tests, the iPhone build and IPA checks passed; the
-remaining screenshot job was stopped after the app passed so he could have it immediately.
-Downloaded and checked: 0.1.0 (19), iPhone only, arm64, 18 complete zip entries. Next: he tests
-build 19 on his iPhone.**
+**Status (29 October 2026, 8:35 AM Eastern): the whole plan is built and on main. Build 22
+(`build-22-b806f03`, 4.5 MB) is the one to install. The owner's real first Autonomous job on
+`snes-tas-studio` did run, inspect the repo and answer, then failed because the read-only job tried
+to open a pull request with no changes; fixed so no-change jobs finish normally, setup dispatches
+retry, failures save their reason, and Jobs can be stopped/deleted. Connectors now use normal
+My apps/Discover/All service cards and Connect buttons backed by live Registry lookup. A Kiro-style
+context ring shows used/available tokens. The top row wraps; tool/command arrows sit beside their
+labels; the star and full-size AI/Thinking controls moved only slightly down inside the composer.
+Run 22's Linux checks, Mac checks and iPhone build passed; run 20's complete Dark/Light screenshots
+verified the visible layout before the final invisible string conversion. Downloaded and checked:
+0.1.0 (22), iPhone only, arm64, 18 complete zip entries. Next: he tests build 22.**
 
 ## What it is
 An iPhone app (.ipa) for AI agents and workflows, with GitHub built in, like Kiro (app.kiro.dev)
