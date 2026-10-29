@@ -39,6 +39,12 @@ them go into one batch and one build.**
    30 GB, 125 GB. GitHub's free Linux computer: 4 cores, 16 GB, 14 GB (public repos) or 2 cores,
    8 GB, 14 GB (private). So power is not the gap; start-up time and keeping work between visits
    are.
+   Owner, 29 October: "I don't mind paying". Option: E2B, the company Arena uses. Hobby plan: free
+   plus a one-time $100 credit, billed per second only while a computer runs (paused ones are free
+   and kept indefinitely), templates up to 8 vCPU / 8 GiB / 10 GiB, 1-hour continuous runs that
+   pause/resume resets. About $0.10/h for 2 vCPU plus about $0.016/GiB/h of memory. Asked him:
+   (a) E2B, (b) GitHub's free computer, or (c) both, E2B when set up and GitHub otherwise (Kiro's
+   pick), and which size (2 cores/2 GB, 2 cores/4 GB or 4 cores/8 GB). Waiting on his answer.
 
 Technical notes for the logo fix (for Kiro):
 - iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
