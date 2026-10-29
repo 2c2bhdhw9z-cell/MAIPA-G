@@ -1,10 +1,11 @@
 # MAIPA-G plan
 
-**Status (29 October 2026, 4:10 AM Eastern): the whole plan (Builds 1 to 5) is built and on
-main. Build 15 (6.05 MB) arrived on his phone incomplete twice, in his own signing app and in
-ESign, though GitHub's copy was complete. Build 16 (`build-16-f3866e9`, 4.2 MB, the same app with its
-symbol table stripped, as App Store builds are) is the one to install. Checked: 0.1.0 (16), iPhone
-only, arm64. Next: he installs and tests build 16.**
+**Status (29 October 2026, 5:35 AM Eastern): the whole plan is built and on main. Build 17
+(`build-17-26eabee`, 4.4 MB) is the one to install: smaller right-aligned AI/thinking selectors; a
++ menu with File, Photo Library and real Take Photo; Web beside +; no horizontal tool scrolling;
+and a keyboard Done button, close-on-Send and first-swipe chat dismissal. Its Linux checks, Mac
+checks, iPhone build and all 78 Dark/Light screenshots passed. Downloaded and checked: 0.1.0 (17),
+iPhone only, arm64, camera permission present. Next: he tests these changes on his iPhone.**
 
 ## What it is
 An iPhone app (.ipa) for AI agents and workflows, with GitHub built in, like Kiro (app.kiro.dev)
