@@ -411,6 +411,8 @@ struct AgentLoopTests {
         #expect(prompt.contains("- Keep replies short"))
     }
 
+    // Autonomous shell commands run only on GitHub's Linux runners, so these run there.
+    #if os(Linux)
     @Test func shellDeltaGuardRestoresAndPausesForExactDeletionApproval() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-shell-guard-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -438,6 +440,7 @@ struct AgentLoopTests {
         #expect(second.0?.status == .done)
         #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("old.txt").path))
     }
+    #endif
 
     @Test func workflowUsesOneAggregateSpendAllowance() async throws {
         let recorder = WorkflowTestRecorder()
@@ -623,6 +626,8 @@ struct AgentLoopTests {
         #expect(AgentGoalOutcome.parse("GOAL_MET\nGOAL_NOT_MET") == .malformed)
     }
 
+    // Autonomous shell commands run only on GitHub's Linux runners, so these run there.
+    #if os(Linux)
     @Test func cloudShellCannotRetainACommitThatHidesGuardedChanges() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-shell-head-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -643,7 +648,10 @@ struct AgentLoopTests {
         #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("Package.swift").path))
         #expect(BoundedProcess.sanitizedEnvironment(["PATH": "/bin", "GITHUB_TOKEN": "secret", "MY_PASSWORD": "secret"])["GITHUB_TOKEN"] == nil)
     }
+    #endif
 
+    // Autonomous shell commands run only on GitHub's Linux runners, so these run there.
+    #if os(Linux)
     @Test func cloudShellIsBoundedAndLoggerRedacts() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-shell-basic-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -660,4 +668,5 @@ struct AgentLoopTests {
         let logger = RedactingLogger(secrets: ["secret-token"])
         #expect(logger.redact("value secret-token value") == "value *** value")
     }
+    #endif
 }
