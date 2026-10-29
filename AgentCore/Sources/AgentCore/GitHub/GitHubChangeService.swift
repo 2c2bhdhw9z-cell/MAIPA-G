@@ -1,21 +1,65 @@
 import Foundation
 
+public struct RepoRuleDocument: Sendable, Hashable {
+    public var path: String
+    public var scope: String
+    public var text: String
+
+    public init(path: String, text: String) {
+        self.path = path; self.text = text
+        let lower = path.lowercased()
+        if lower.hasSuffix("/agents.md") { scope = String(path.dropLast("AGENTS.md".count)).trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
+        else { scope = "" }
+    }
+
+    public func applies(to path: String) -> Bool { scope.isEmpty || path == scope || path.hasPrefix(scope + "/") }
+}
+
 public struct RepoWriteRules: Sendable, Hashable {
     public var directSave: Bool
     public var reason: String?
-    public init(directSave: Bool = false, reason: String? = nil) { self.directSave = directSave; self.reason = reason }
+    public var documents: [RepoRuleDocument]
+    public var deletionDeniedScopes: Set<String>
+    public var buildSetupDeniedScopes: Set<String>
 
-    public static func resolve(documents: [(path: String, text: String)], directSaveSetting: Bool) -> RepoWriteRules {
-        if directSaveSetting { return RepoWriteRules(directSave: true, reason: "Direct save is on for this repo.") }
+    public init(directSave: Bool = false, reason: String? = nil, documents: [RepoRuleDocument] = [], deletionDeniedScopes: Set<String> = [], buildSetupDeniedScopes: Set<String> = []) {
+        self.directSave = directSave; self.reason = reason; self.documents = documents
+        self.deletionDeniedScopes = deletionDeniedScopes; self.buildSetupDeniedScopes = buildSetupDeniedScopes
+    }
+
+    public func permitsDeletion(at path: String) -> Bool { !denied(path, scopes: deletionDeniedScopes) }
+    public func permitsBuildSetup(at path: String) -> Bool { !denied(path, scopes: buildSetupDeniedScopes) }
+    public var promptText: String {
+        documents.prefix(20).map { "Repository rule \($0.path) (scope: \($0.scope.isEmpty ? "whole repository" : $0.scope)):\n\(String($0.text.prefix(20_000)))" }.joined(separator: "\n\n")
+    }
+
+    private func denied(_ path: String, scopes: Set<String>) -> Bool {
+        scopes.contains("") || scopes.contains { path == $0 || path.hasPrefix($0 + "/") }
+    }
+
+    public static func resolve(documents values: [(path: String, text: String)], directSaveSetting: Bool) -> RepoWriteRules {
+        let documents = values.map(RepoRuleDocument.init)
+        var result = RepoWriteRules(directSave: directSaveSetting, reason: directSaveSetting ? "Direct save is on for this repo." : nil, documents: documents)
         for document in documents {
-            let lower = document.text.lowercased()
-            let forbidsBranches = lower.contains("no branches") || lower.contains("never create a branch") || lower.contains("do not create branches")
-            let forbidsPRs = lower.contains("no pull request") || lower.contains("no prs") || lower.contains("never open") && lower.contains("pull request")
-            if forbidsBranches || forbidsPRs {
-                return RepoWriteRules(directSave: true, reason: "\(document.path) requires direct saves.")
+            let lines = document.text.lowercased().components(separatedBy: .newlines)
+            let direct = lines.contains { line in
+                ["no branches", "do not create branches", "never create a branch", "without a branch", "commit directly", "push directly", "save directly", "straight to main", "straight to master"].contains(where: line.contains)
+            }
+            let noPR = lines.contains { line in
+                ["no pull requests", "no pull request", "do not open a pull request", "never open a pull request", "do not create a pr", "never create a pr"].contains(where: line.contains)
+            }
+            if direct || noPR {
+                result.directSave = true
+                result.reason = "\(document.path) requires direct saves."
+            }
+            if lines.contains(where: { line in ["do not delete", "never delete", "must not delete", "deletions are forbidden"].contains(where: line.contains) }) {
+                result.deletionDeniedScopes.insert(document.scope)
+            }
+            if lines.contains(where: { line in ["do not change build setup", "never change build setup", "must not change build setup", "build setup is read-only"].contains(where: line.contains) }) {
+                result.buildSetupDeniedScopes.insert(document.scope)
             }
         }
-        return RepoWriteRules()
+        return result
     }
 }
 
@@ -37,18 +81,20 @@ public actor GitHubChangeService {
     public init(github: GitHubClient) { self.github = github }
 
     public func resolveRules(in workspace: RepoWorkspace, directSaveSetting: Bool) async -> RepoWriteRules {
-        if directSaveSetting { return RepoWriteRules(directSave: true, reason: "Direct save is on for this repo.") }
-        guard let tree = try? await workspace.tree() else { return RepoWriteRules() }
+        guard let tree = try? await workspace.tree() else { return RepoWriteRules(directSave: directSaveSetting, reason: directSaveSetting ? "Direct save is on for this repo." : nil) }
         let candidates = tree.entries.filter { entry in
             let lower = entry.path.lowercased()
             return entry.isFile && (lower == "agents.md" || lower.hasSuffix("/agents.md") || lower.contains(".kiro/steering/") || lower.hasSuffix("owner-rules.md"))
-        }.prefix(20)
+        }.sorted {
+            let leftDepth = $0.path.split(separator: "/").count, rightDepth = $1.path.split(separator: "/").count
+            return leftDepth == rightDepth ? $0.path < $1.path : leftDepth < rightDepth
+        }.prefix(100)
         var documents: [(path: String, text: String)] = []
         for entry in candidates {
             guard case .text(let text, _) = try? await workspace.readFile(entry.path) else { continue }
             documents.append((entry.path, text))
         }
-        return RepoWriteRules.resolve(documents: documents, directSaveSetting: false)
+        return RepoWriteRules.resolve(documents: documents, directSaveSetting: directSaveSetting)
     }
 
     public func save(

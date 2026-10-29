@@ -8,13 +8,15 @@ public enum SystemPrompt {
         public var commit: String
         public var isPrivate: Bool
         public var summary: String?
+        public var ruleDocuments: [RepoRuleDocument]
 
-        public init(ref: RepoRef, branch: String, commit: String, isPrivate: Bool, summary: String?) {
+        public init(ref: RepoRef, branch: String, commit: String, isPrivate: Bool, summary: String?, ruleDocuments: [RepoRuleDocument] = []) {
             self.ref = ref
             self.branch = branch
             self.commit = commit
             self.isPrivate = isPrivate
             self.summary = summary
+            self.ruleDocuments = ruleDocuments
         }
     }
 
@@ -68,6 +70,7 @@ public enum SystemPrompt {
             each other. Never claim a change was saved until save_changes succeeds. Deleting a file and changing \
             build setup require the person's explicit approval; the app enforces that pause. Repo rules override \
             the normal side-branch and pull-request behavior.
+            \(repo.ruleDocuments.isEmpty ? "" : "\nApplicable repository instructions, scoped by their locations:\n" + repo.ruleDocuments.prefix(20).map { "--- \($0.path) (\($0.scope.isEmpty ? "whole repository" : $0.scope)) ---\n" + String($0.text.prefix(20_000)) }.joined(separator: "\n"))
             """)
         }
 

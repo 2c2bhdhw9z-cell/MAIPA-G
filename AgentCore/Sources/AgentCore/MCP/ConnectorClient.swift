@@ -141,16 +141,18 @@ public struct MCPOAuthClient: Sendable {
 /// A live remote MCP connection backed by the official Swift SDK's Streamable HTTP transport.
 public actor MCPConnectorSession {
     public typealias CredentialRefresher = @Sendable (ConnectorCredential) async throws -> ConnectorCredential
+    public typealias ScopeUpgrader = @Sendable (ConnectorCredential, Set<String>) async throws -> ConnectorCredential
 
     public let configuration: ConnectorConfiguration
     private var credential: ConnectorCredential?
     private let refreshCredential: CredentialRefresher?
+    private let upgradeScopes: ScopeUpgrader?
     private var client = Client(name: "MAIPA-G", version: "0.1.0", title: "MAIPA-G", websiteUrl: OpenRouterClient.appURL)
     private var transport: HTTPClientTransport?
     private var connected = false
 
-    public init(configuration: ConnectorConfiguration, credential: ConnectorCredential? = nil, refreshCredential: CredentialRefresher? = nil) {
-        self.configuration = configuration; self.credential = credential; self.refreshCredential = refreshCredential
+    public init(configuration: ConnectorConfiguration, credential: ConnectorCredential? = nil, refreshCredential: CredentialRefresher? = nil, upgradeScopes: ScopeUpgrader? = nil) {
+        self.configuration = configuration; self.credential = credential; self.refreshCredential = refreshCredential; self.upgradeScopes = upgradeScopes
     }
 
     public func connect() async throws {
@@ -171,9 +173,16 @@ public actor MCPConnectorSession {
 
     public func tools() async throws -> [ConnectorToolDefinition] {
         do { return try await listTools() }
-        catch where Self.isAuthorizationFailure(error) && credential?.refreshToken != nil {
-            try await refreshIfNeeded(force: true)
-            return try await listTools()
+        catch {
+            if let required = Self.requiredScopes(from: error), !required.isEmpty {
+                try await authorizeAdditionalScopes(required)
+                return try await listTools()
+            }
+            if Self.isAuthorizationFailure(error), credential?.refreshToken != nil {
+                try await refreshIfNeeded(force: true)
+                return try await listTools()
+            }
+            throw error
         }
     }
 
@@ -194,9 +203,16 @@ public actor MCPConnectorSession {
 
     public func call(tool name: String, arguments: JSONValue) async throws -> (text: String, isError: Bool) {
         do { return try await callOnce(tool: name, arguments: arguments) }
-        catch where Self.isAuthorizationFailure(error) && credential?.refreshToken != nil {
-            try await refreshIfNeeded(force: true)
-            return try await callOnce(tool: name, arguments: arguments)
+        catch {
+            if let required = Self.requiredScopes(from: error), !required.isEmpty {
+                try await authorizeAdditionalScopes(required)
+                return try await callOnce(tool: name, arguments: arguments)
+            }
+            if Self.isAuthorizationFailure(error), credential?.refreshToken != nil {
+                try await refreshIfNeeded(force: true)
+                return try await callOnce(tool: name, arguments: arguments)
+            }
+            throw error
         }
     }
 
@@ -214,6 +230,28 @@ public actor MCPConnectorSession {
             }
         }.joined(separator: "\n")
         return (rendered, result.isError == true)
+    }
+
+    private func authorizeAdditionalScopes(_ required: Set<String>) async throws {
+        guard let current = credential, let upgradeScopes else { throw MCPAuthorizationError.insufficientScope(required) }
+        if connected { await client.disconnect() }
+        connected = false; transport = nil
+        credential = try await upgradeScopes(current, current.scopes.union(required))
+        client = Client(name: "MAIPA-G", version: "0.1.0", title: "MAIPA-G", websiteUrl: OpenRouterClient.appURL)
+    }
+
+    public static func requiredScopes(from error: Error) -> Set<String>? {
+        let text = String(describing: error)
+        guard text.lowercased().contains("insufficient_scope") || text.lowercased().contains("insufficient scope") else { return nil }
+        let patterns = [#"scope\s*=\s*\"([^\"]+)\""#, #"required_scopes?[\"']?\s*[:=]\s*[\"']([^\"']+)"#]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+                  let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)), match.numberOfRanges > 1,
+                  let range = Range(match.range(at: 1), in: text) else { continue }
+            let values = text[range].split(whereSeparator: { $0.isWhitespace || $0 == "," }).map(String.init)
+            if !values.isEmpty { return Set(values) }
+        }
+        return []
     }
 
     private func refreshIfNeeded(force: Bool) async throws {
@@ -242,17 +280,27 @@ public actor AutonomousStdioConnector {
 
     public func connect(environment: [String: String] = [:]) async throws -> [ConnectorToolDefinition] {
         guard configuration.kind == .stdio, let package = configuration.package else { throw ToolInputError("This is not a stdio connector.") }
-        let command = try Self.command(for: package)
+        let supplied = configuration.launchValues.merging(environment) { _, secret in secret }
+        let command = try Self.command(for: package, values: supplied)
         let process = Process()
         let input = Pipe(), output = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = command
         process.standardInput = input; process.standardOutput = output; process.standardError = FileHandle.nullDevice
-        let inherited = ProcessInfo.processInfo.environment.filter { key, _ in
-            let upper = key.uppercased()
-            return !upper.contains("TOKEN") && !upper.contains("SECRET") && !upper.contains("PASSWORD") && !upper.contains("PRIVATE_KEY") && key != "OPENROUTER_API_KEY"
+        let inherited = BoundedProcess.sanitizedEnvironment(ProcessInfo.processInfo.environment)
+        let declaredEnvironment = Dictionary(uniqueKeysWithValues: package.environmentVariables.compactMap { input -> (String, String)? in
+            let value = supplied[input.name] ?? input.defaultValue
+            return value.map { (input.name, $0) }
+        })
+        for input in package.environmentVariables {
+            if input.isRequired && declaredEnvironment[input.name]?.isEmpty != false {
+                throw ToolInputError("\(input.name) is required to start this connector.")
+            }
+            if let value = declaredEnvironment[input.name], !input.choices.isEmpty, !input.choices.contains(value) {
+                throw ToolInputError("\(input.name) must use a declared choice.")
+            }
         }
-        process.environment = inherited.merging(environment) { _, supplied in supplied }
+        process.environment = inherited.merging(declaredEnvironment) { _, supplied in supplied }
         try process.run()
         let transport = StdioTransport(
             input: FileDescriptor(rawValue: output.fileHandleForReading.fileDescriptor),
@@ -283,12 +331,15 @@ public actor AutonomousStdioConnector {
         process?.terminate(); process = nil
     }
 
-    static func command(for package: RegistryServer.Package) throws -> [String] {
+    static func command(for package: RegistryServer.Package, values: [String: String] = [:]) throws -> [String] {
+        guard package.isAutonomousCompatible else { throw ToolInputError("Autonomous does not support this package transport or runtime.") }
         guard !package.identifier.isEmpty, !package.identifier.contains("\n"), !package.identifier.contains("\0") else { throw ToolInputError("The Registry package identifier is invalid.") }
         let versioned = package.version.map { "\(package.identifier)@\($0)" } ?? package.identifier
+        let runtimeArguments = try package.runtimeArguments.flatMap { try $0.rendered(values: values) }
+        let packageArguments = try package.packageArguments.flatMap { try $0.rendered(values: values) }
         switch package.registryType.lowercased() {
-        case "npm": return ["npx", "--yes", versioned]
-        case "pypi": return ["uvx", package.version.map { "\(package.identifier)==\($0)" } ?? package.identifier]
+        case "npm": return ["npx", "--yes"] + runtimeArguments + [versioned] + packageArguments
+        case "pypi": return ["uvx"] + runtimeArguments + [package.version.map { "\(package.identifier)==\($0)" } ?? package.identifier] + packageArguments
         default: throw ToolInputError("Autonomous does not support the \(package.registryType) package runtime.")
         }
     }

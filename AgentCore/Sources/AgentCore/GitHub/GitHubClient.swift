@@ -303,9 +303,11 @@ public struct GitHubClient: Sendable {
     public struct TreeChange: Sendable, Hashable {
         public var path: String
         public var blobSHA: String?
-        public init(path: String, blobSHA: String?) {
+        public var mode: String
+        public init(path: String, blobSHA: String?, mode: String = "100644") {
             self.path = path
             self.blobSHA = blobSHA
+            self.mode = mode
         }
     }
 
@@ -314,7 +316,7 @@ public struct GitHubClient: Sendable {
             "tree": .array(changes.map { change in
                 [
                     "path": .string(change.path),
-                    "mode": "100644",
+                    "mode": .string(change.mode),
                     "type": "blob",
                     "sha": change.blobSHA.map(JSONValue.string) ?? .null,
                 ]

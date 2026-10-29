@@ -8,13 +8,100 @@ public struct RegistryServer: Codable, Sendable, Hashable, Identifiable {
         public init(type: String, url: URL) { self.type = type; self.url = url }
     }
 
+    public struct LaunchInput: Codable, Sendable, Hashable, Identifiable {
+        public var name: String
+        public var description: String
+        public var defaultValue: String?
+        public var isRequired: Bool
+        public var isSecret: Bool
+        public var isRepeated: Bool
+        public var choices: [String]
+        public var id: String { name }
+
+        public init(name: String, description: String = "", defaultValue: String? = nil, isRequired: Bool = false, isSecret: Bool = false, isRepeated: Bool = false, choices: [String] = []) {
+            self.name = name; self.description = description; self.defaultValue = defaultValue
+            self.isRequired = isRequired; self.isSecret = isSecret; self.isRepeated = isRepeated; self.choices = choices
+        }
+    }
+
+    public struct LaunchArgument: Codable, Sendable, Hashable {
+        public var type: String
+        public var name: String?
+        public var value: String?
+        public var valueHint: String?
+        public var description: String
+        public var defaultValue: String?
+        public var isRequired: Bool
+        public var isRepeated: Bool
+        public var variables: [String: LaunchInput]
+
+        public init(type: String = "positional", name: String? = nil, value: String? = nil, valueHint: String? = nil, description: String = "", defaultValue: String? = nil, isRequired: Bool = false, isRepeated: Bool = false, variables: [String: LaunchInput] = [:]) {
+            self.type = type; self.name = name; self.value = value; self.valueHint = valueHint
+            self.description = description; self.defaultValue = defaultValue; self.isRequired = isRequired
+            self.isRepeated = isRepeated; self.variables = variables
+        }
+
+        public var inputs: [LaunchInput] {
+            if !variables.isEmpty { return variables.values.sorted { $0.name < $1.name } }
+            guard value == nil else { return [] }
+            let key = valueHint ?? name ?? "argument"
+            return [LaunchInput(name: key, description: description, defaultValue: defaultValue, isRequired: isRequired, isRepeated: isRepeated)]
+        }
+
+        func rendered(values: [String: String]) throws -> [String] {
+            var resolved = value
+            for input in variables.values {
+                let supplied = values[input.name] ?? input.defaultValue
+                if input.isRequired && (supplied?.isEmpty != false) { throw ToolInputError("\(input.name) is required to start this connector.") }
+                if let supplied, !input.choices.isEmpty, !input.choices.contains(supplied) { throw ToolInputError("\(input.name) must use a declared choice.") }
+                resolved = resolved?.replacingOccurrences(of: "{\(input.name)}", with: supplied ?? "")
+            }
+            if variables.isEmpty, value == nil, let input = inputs.first {
+                let supplied = values[input.name] ?? input.defaultValue
+                if input.isRequired && (supplied?.isEmpty != false) { throw ToolInputError("\(input.name) is required to start this connector.") }
+                if let supplied, !input.choices.isEmpty, !input.choices.contains(supplied) { throw ToolInputError("\(input.name) must use a declared choice.") }
+                resolved = supplied
+            }
+            guard let resolved, !resolved.isEmpty else { return [] }
+            let repetitions = isRepeated ? resolved.split(separator: "\n").map(String.init) : [resolved]
+            return repetitions.flatMap { item in type == "named" ? [name ?? "", item].filter { !$0.isEmpty } : [item] }
+        }
+    }
+
     public struct Package: Codable, Sendable, Hashable {
         public var registryType: String
         public var identifier: String
         public var version: String?
         public var runtimeHint: String?
-        public init(registryType: String, identifier: String, version: String? = nil, runtimeHint: String? = nil) {
+        public var transportType: String
+        public var runtimeArguments: [LaunchArgument]
+        public var packageArguments: [LaunchArgument]
+        public var environmentVariables: [LaunchInput]
+
+        public init(registryType: String, identifier: String, version: String? = nil, runtimeHint: String? = nil, transportType: String = "stdio", runtimeArguments: [LaunchArgument] = [], packageArguments: [LaunchArgument] = [], environmentVariables: [LaunchInput] = []) {
             self.registryType = registryType; self.identifier = identifier; self.version = version; self.runtimeHint = runtimeHint
+            self.transportType = transportType; self.runtimeArguments = runtimeArguments; self.packageArguments = packageArguments
+            self.environmentVariables = environmentVariables
+        }
+
+        public var isAutonomousCompatible: Bool {
+            transportType == "stdio" && ["npm", "pypi"].contains(registryType.lowercased())
+                && (runtimeHint == nil || ["npx", "uvx"].contains(runtimeHint!.lowercased()))
+        }
+        public var launchInputs: [LaunchInput] {
+            let arguments = (runtimeArguments + packageArguments).flatMap(\.inputs)
+            return Dictionary((environmentVariables + arguments).map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first }).values.sorted { $0.name < $1.name }
+        }
+
+        enum CodingKeys: String, CodingKey { case registryType, identifier, version, runtimeHint, transportType, runtimeArguments, packageArguments, environmentVariables }
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            registryType = try c.decode(String.self, forKey: .registryType); identifier = try c.decode(String.self, forKey: .identifier)
+            version = try c.decodeIfPresent(String.self, forKey: .version); runtimeHint = try c.decodeIfPresent(String.self, forKey: .runtimeHint)
+            transportType = try c.decodeIfPresent(String.self, forKey: .transportType) ?? "stdio"
+            runtimeArguments = try c.decodeIfPresent([LaunchArgument].self, forKey: .runtimeArguments) ?? []
+            packageArguments = try c.decodeIfPresent([LaunchArgument].self, forKey: .packageArguments) ?? []
+            environmentVariables = try c.decodeIfPresent([LaunchInput].self, forKey: .environmentVariables) ?? []
         }
     }
 
@@ -29,7 +116,7 @@ public struct RegistryServer: Codable, Sendable, Hashable, Identifiable {
     public var publishedAt: Date?
 
     public var supportsPhone: Bool { remotes.contains { $0.type == "streamable-http" && $0.url.scheme == "https" } }
-    public var supportsAutonomous: Bool { !packages.isEmpty }
+    public var supportsAutonomous: Bool { packages.contains(where: \.isAutonomousCompatible) }
     public var preferredRemote: Remote? { remotes.first { $0.type == "streamable-http" && $0.url.scheme == "https" } }
 
     public init(name: String, displayName: String? = nil, description: String = "", version: String = "", repositoryURL: URL? = nil, remotes: [Remote] = [], packages: [Package] = [], publishedAt: Date? = nil) {
@@ -56,10 +143,42 @@ public struct RegistryServer: Codable, Sendable, Hashable, Identifiable {
             guard let type = value["type"]?.stringValue, let text = value["url"]?.stringValue, let url = URL(string: text) else { return nil }
             return Remote(type: type, url: url)
         }
+        func launchInput(_ value: JSONValue, fallbackName: String? = nil) -> LaunchInput? {
+            guard let name = value["name"]?.stringValue ?? fallbackName else { return nil }
+            return LaunchInput(
+                name: name,
+                description: value["description"]?.stringValue ?? "",
+                defaultValue: value["default"]?.stringValue,
+                isRequired: value["isRequired"]?.boolValue ?? false,
+                isSecret: value["isSecret"]?.boolValue ?? false,
+                isRepeated: value["isRepeated"]?.boolValue ?? false,
+                choices: value["choices"]?.arrayValue?.compactMap(\.stringValue) ?? []
+            )
+        }
+        func launchArgument(_ value: JSONValue) -> LaunchArgument? {
+            guard let type = value["type"]?.stringValue else { return nil }
+            var variables: [String: LaunchInput] = [:]
+            for (key, item) in value["variables"]?.objectValue ?? [:] {
+                variables[key] = launchInput(item, fallbackName: key)
+            }
+            return LaunchArgument(
+                type: type, name: value["name"]?.stringValue, value: value["value"]?.stringValue,
+                valueHint: value["valueHint"]?.stringValue, description: value["description"]?.stringValue ?? "",
+                defaultValue: value["default"]?.stringValue, isRequired: value["isRequired"]?.boolValue ?? false,
+                isRepeated: value["isRepeated"]?.boolValue ?? false, variables: variables
+            )
+        }
         let packages = (server["packages"]?.arrayValue ?? []).compactMap { value -> Package? in
             guard let type = value["registryType"]?.stringValue ?? value["registry_type"]?.stringValue,
                   let identifier = value["identifier"]?.stringValue else { return nil }
-            return Package(registryType: type, identifier: identifier, version: value["version"]?.stringValue, runtimeHint: value["runtimeHint"]?.stringValue ?? value["runtime_hint"]?.stringValue)
+            return Package(
+                registryType: type, identifier: identifier, version: value["version"]?.stringValue,
+                runtimeHint: value["runtimeHint"]?.stringValue ?? value["runtime_hint"]?.stringValue,
+                transportType: value["transport"]?["type"]?.stringValue ?? "",
+                runtimeArguments: (value["runtimeArguments"]?.arrayValue ?? []).compactMap(launchArgument),
+                packageArguments: (value["packageArguments"]?.arrayValue ?? []).compactMap(launchArgument),
+                environmentVariables: (value["environmentVariables"]?.arrayValue ?? []).compactMap { launchInput($0) }
+            )
         }
         let date = official?["publishedAt"]?.stringValue.flatMap { ISO8601DateFormatter().date(from: $0) }
         self.init(
@@ -122,7 +241,7 @@ public struct MCPRegistryClient: Sendable {
         return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
     }
 
-    private static let wellKnown = ["github", "slack", "notion", "linear", "figma", "google drive", "dropbox", "atlassian", "stripe", "sentry"]
+    private static let wellKnown = ["github", "slack", "notion", "linear", "figma", "google drive", "google docs", "google sheets", "google slides", "gmail", "google calendar", "dropbox", "atlassian", "stripe", "sentry"]
     private static func wellKnownRank(_ server: RegistryServer) -> Int {
         let value = "\(server.name) \(server.displayName)".lowercased()
         return wellKnown.firstIndex(where: value.contains) ?? Int.max

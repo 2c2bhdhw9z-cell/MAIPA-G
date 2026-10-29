@@ -62,6 +62,22 @@ public actor AutonomousSetup {
             description: Private MAIPA-G job id
             required: true
             type: string
+          target_ref:
+            description: Target branch
+            required: true
+            type: string
+          data_owner:
+            description: Private data owner
+            required: true
+            type: string
+          data_repo:
+            description: Private data repository
+            required: true
+            type: string
+          data_branch:
+            description: Private data branch
+            required: true
+            type: string
 
     permissions:
       actions: write
@@ -75,6 +91,10 @@ public actor AutonomousSetup {
         uses: 2c2bhdhw9z-cell/MAIPA-G/.github/workflows/agent.yml@main
         with:
           job_id: ${{ inputs.job_id }}
+          target_ref: ${{ inputs.target_ref }}
+          data_owner: ${{ inputs.data_owner }}
+          data_repo: ${{ inputs.data_repo }}
+          data_branch: ${{ inputs.data_branch }}
         secrets: inherit
     """
 

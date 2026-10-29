@@ -43,9 +43,11 @@ final class ConnectorLibrary {
         } catch { if catalog.isEmpty { errors[UUID()] = String(describing: error) } }
     }
 
-    func add(_ server: RegistryServer, preferPhone: Bool = true) async {
+    func add(_ server: RegistryServer, preferPhone: Bool = true, launchValues: [String: String] = [:], secretValues: [String: String] = [:]) async {
         if preferPhone, let remote = server.preferredRemote { await addRemote(name: server.displayName, serverID: server.name, endpoint: remote.url) }
-        else if let package = server.packages.first { await addStdio(name: server.displayName, serverID: server.name, package: package) }
+        else if let package = server.packages.first(where: \.isAutonomousCompatible) {
+            await addStdio(name: server.displayName, serverID: server.name, package: package, launchValues: launchValues, secretValues: secretValues)
+        }
     }
 
     func addCustom(name: String, urlText: String) async throws {
@@ -58,8 +60,19 @@ final class ConnectorLibrary {
         await save(configuration); await restore(configuration)
     }
 
-    private func addStdio(name: String, serverID: String, package: RegistryServer.Package) async {
-        let configuration = ConnectorConfiguration(serverID: serverID, displayName: name, package: package)
+    private func addStdio(name: String, serverID: String, package: RegistryServer.Package, launchValues: [String: String], secretValues: [String: String]) async {
+        let required = package.launchInputs.filter(\.isRequired)
+        guard required.allSatisfy({ input in
+            let value = input.isSecret ? secretValues[input.name] : launchValues[input.name]
+            return value?.isEmpty == false || input.defaultValue != nil
+        }) else { return }
+        let configuration = ConnectorConfiguration(
+            serverID: serverID, displayName: name, package: package,
+            launchValues: launchValues, secretNames: Set(package.launchInputs.filter(\.isSecret).map(\.name))
+        )
+        for (key, value) in secretValues where !value.isEmpty {
+            Keychain.set(Data(value.utf8), account: stdioSecretKey(configuration.id, name: key))
+        }
         await save(configuration); states[configuration.id] = .disconnected
     }
 
@@ -75,10 +88,18 @@ final class ConnectorLibrary {
         guard configuration.kind == .remote else { return }
         states[configuration.id] = .connecting
         let credential = Keychain.value(ConnectorCredential.self, account: credentialKey(configuration.id))
-        let session = MCPConnectorSession(configuration: configuration, credential: credential) { [weak self] current in
-            guard let self else { throw MCPAuthorizationError.rejected("The connector is no longer available.") }
-            return try await self.refreshCredential(current, for: configuration)
-        }
+        let session = MCPConnectorSession(
+            configuration: configuration,
+            credential: credential,
+            refreshCredential: { [weak self] current in
+                guard let self else { throw MCPAuthorizationError.rejected("The connector is no longer available.") }
+                return try await self.refreshCredential(current, for: configuration)
+            },
+            upgradeScopes: { [weak self] current, scopes in
+                guard let self else { throw MCPAuthorizationError.rejected("The connector is no longer available.") }
+                return try await self.upgradeCredential(current, scopes: scopes, for: configuration)
+            }
+        )
         sessions[configuration.id] = session
         do {
             let tools = try await session.tools()
@@ -120,7 +141,12 @@ final class ConnectorLibrary {
         }
     }
 
-    func reauthorize(_ configuration: ConnectorConfiguration, scopes: Set<String>) async { await authorize(configuration, scopes: scopes) }
+    func reauthorize(_ configuration: ConnectorConfiguration, scopes: Set<String>) async {
+        guard let endpoint = configuration.endpoint else { return }
+        let discovered = try? await MCPOAuthClient(transport: transport).discover(endpoint: endpoint)
+        let available = discovered.map { $0.0.scopesSupported.union($0.1.scopesSupported) } ?? []
+        await authorize(configuration, scopes: configuration.scopes.union(scopes).union(available))
+    }
 
     func disconnect(_ configuration: ConnectorConfiguration) async {
         await sessions[configuration.id]?.disconnect(); sessions[configuration.id] = nil
@@ -130,7 +156,21 @@ final class ConnectorLibrary {
 
     func remove(_ configuration: ConnectorConfiguration) async {
         await disconnect(configuration); try? await store.delete(configuration.id)
+        for name in configuration.secretNames { Keychain.remove(account: stdioSecretKey(configuration.id, name: name)) }
         connected.removeAll { $0.id == configuration.id }; app?.sync.request()
+    }
+
+    func autonomousSecretsJSON() -> String? {
+        var values: [String: String] = [:]
+        for configuration in connected where configuration.kind == .stdio {
+            for name in configuration.secretNames {
+                if let data = Keychain.data(account: stdioSecretKey(configuration.id, name: name)) {
+                    values[configuration.id.uuidString.lowercased() + "." + name] = String(decoding: data, as: UTF8.self)
+                }
+            }
+        }
+        guard !values.isEmpty, let data = try? JSONEncoder().encode(values) else { return nil }
+        return String(decoding: data, as: UTF8.self)
     }
 
     func agentTools() -> [any AgentTool] {
@@ -138,6 +178,23 @@ final class ConnectorLibrary {
             guard states[configuration.id] == .connected, let session = sessions[configuration.id] else { return [] }
             return (toolDefinitions[configuration.id] ?? []).map { MCPTool(definition: $0, session: session) }
         }
+    }
+
+    private func upgradeCredential(_ credential: ConnectorCredential, scopes: Set<String>, for configuration: ConnectorConfiguration) async throws -> ConnectorCredential {
+        guard let endpoint = configuration.endpoint else { throw MCPAuthorizationError.insecureURL }
+        let oauth = MCPOAuthClient(transport: transport)
+        let client = MCPRegisteredClient(clientID: credential.clientID, clientSecret: credential.clientSecret)
+        let request = try await oauth.authorizationRequest(endpoint: endpoint, requestedScopes: credential.scopes.union(scopes), registeredClient: client)
+        let callback = try await WebSignIn.shared.open(request.url)
+        let values = WebSignIn.values(in: callback)
+        guard let code = values["code"] else { throw MCPAuthorizationError.rejected(values["error_description"] ?? "The connector did not grant the extra permission.") }
+        var updated = try await oauth.exchange(code: code, callbackState: values["state"], request: request)
+        if updated.refreshToken == nil { updated.refreshToken = credential.refreshToken }
+        Keychain.setValue(updated, account: credentialKey(configuration.id))
+        var copy = configuration
+        copy.scopes = updated.scopes
+        await save(copy)
+        return updated
     }
 
     private func refreshCredential(_ credential: ConnectorCredential, for configuration: ConnectorConfiguration) async throws -> ConnectorCredential {
@@ -155,6 +212,7 @@ final class ConnectorLibrary {
     }
 
     private func credentialKey(_ id: UUID) -> String { "mcp.\(id.uuidString.lowercased()).credential" }
+    private func stdioSecretKey(_ id: UUID, name: String) -> String { "mcp.\(id.uuidString.lowercased()).stdio.\(name)" }
 
     private static func configuration(_ record: ConnectorRecord) -> ConnectorConfiguration? {
         guard let data = try? JSONCoding.encoder().encode(record.configuration) else { return nil }

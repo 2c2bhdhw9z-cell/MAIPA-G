@@ -7,6 +7,8 @@ struct ConnectorDetailScreen: View {
     let connectorID: UUID?
     let serverID: String?
     @State private var showingDelete = false
+    @State private var launchValues: [String: String] = [:]
+    @State private var secretValues: [String: String] = [:]
 
     var body: some View {
         NavigationStack {
@@ -32,9 +34,30 @@ struct ConnectorDetailScreen: View {
                     }
                 } else if let server {
                     Section { Text(server.description); LabeledContent("Version", value: server.version); LabeledContent("Phone", value: server.supportsPhone ? "Yes" : "No"); LabeledContent("Autonomous", value: server.supportsAutonomous ? "Yes" : "No") }
+                    if let package = autonomousPackage, !package.launchInputs.isEmpty {
+                        Section("Autonomous setup") {
+                            ForEach(package.launchInputs) { input in
+                                if !input.choices.isEmpty {
+                                    Picker(input.name, selection: valueBinding(input.name, secret: input.isSecret)) {
+                                        Text("Choose…").tag("")
+                                        ForEach(input.choices, id: \.self) { Text($0).tag($0) }
+                                    }
+                                } else if input.isSecret {
+                                    SecureField(input.name, text: valueBinding(input.name, secret: true))
+                                } else {
+                                    TextField(input.name, text: valueBinding(input.name, secret: false))
+                                }
+                                if !input.description.isEmpty { Text(input.description).font(.caption).foregroundStyle(.secondary) }
+                            }
+                        } footer: { Text("Secret values stay in this iPhone's Keychain and are encrypted before GitHub receives them. Other setup values sync with the connector.") }
+                    }
                     Section {
                         if server.supportsPhone { Button("Add to iPhone") { Task { await app.connectors.add(server); moveToSaved(server) } }.buttonStyle(.borderedProminent) }
-                        if server.supportsAutonomous { Button("Add for Autonomous") { Task { await app.connectors.add(server, preferPhone: false); moveToSaved(server) } } }
+                        if server.supportsAutonomous {
+                            Button("Add for Autonomous") {
+                                Task { await app.connectors.add(server, preferPhone: false, launchValues: launchValues, secretValues: secretValues); moveToSaved(server) }
+                            }.disabled(!autonomousInputsComplete)
+                        }
                     }
                 } else { ContentUnavailableView("Connector not found", systemImage: "puzzlepiece.extension") }
             }
@@ -47,6 +70,22 @@ struct ConnectorDetailScreen: View {
 
     private var connector: ConnectorConfiguration? { connectorID.flatMap { id in app.connectors.connected.first { $0.id == id } } }
     private var server: RegistryServer? { serverID.flatMap { id in app.connectors.catalog.first { $0.name == id } } }
+    private var autonomousPackage: RegistryServer.Package? { server?.packages.first(where: \.isAutonomousCompatible) }
+    private var autonomousInputsComplete: Bool {
+        autonomousPackage?.launchInputs.filter(\.isRequired).allSatisfy { input in
+            let value = input.isSecret ? secretValues[input.name] : launchValues[input.name]
+            return value?.isEmpty == false || input.defaultValue != nil
+        } ?? false
+    }
+    private func valueBinding(_ name: String, secret: Bool) -> Binding<String> {
+        Binding(
+            get: {
+                let fallback = autonomousPackage?.launchInputs.first { $0.name == name }?.defaultValue ?? ""
+                return secret ? secretValues[name] ?? fallback : launchValues[name] ?? fallback
+            },
+            set: { if secret { secretValues[name] = $0 } else { launchValues[name] = $0 } }
+        )
+    }
     private var stateText: String { String(describing: connector.flatMap { app.connectors.states[$0.id] } ?? .disconnected).replacingOccurrences(of: "authorizationNeeded", with: "Sign in needed") }
     private func moveToSaved(_ server: RegistryServer) { if let item = app.connectors.connected.last { app.sheet = .connectorDetail(item.id) } }
 }

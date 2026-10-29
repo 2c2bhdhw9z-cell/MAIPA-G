@@ -40,10 +40,7 @@ public enum BoundedProcess {
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.currentDirectoryURL = directory
-        let inherited = ProcessInfo.processInfo.environment.filter { key, _ in
-            let upper = key.uppercased()
-            return !upper.contains("TOKEN") && !upper.contains("SECRET") && !upper.contains("PASSWORD") && !upper.contains("PRIVATE_KEY") && key != "OPENROUTER_API_KEY"
-        }
+        let inherited = sanitizedEnvironment(ProcessInfo.processInfo.environment)
         process.environment = inherited.merging(environment) { _, supplied in supplied }
         process.standardOutput = output
         process.standardError = errors
@@ -79,6 +76,13 @@ public enum BoundedProcess {
         #else
         throw ProcessFailure.unavailable
         #endif
+    }
+
+    static func sanitizedEnvironment(_ environment: [String: String]) -> [String: String] {
+        environment.filter { key, _ in
+            let upper = key.uppercased()
+            return !upper.contains("TOKEN") && !upper.contains("SECRET") && !upper.contains("PASSWORD") && !upper.contains("PRIVATE_KEY") && key != "OPENROUTER_API_KEY" && key != "GH_TOKEN" && key != "GITHUB_TOKEN"
+        }
     }
 
     private static func read(_ url: URL, limit: Int) -> String {
@@ -170,9 +174,11 @@ public struct ProcessTool: AgentTool {
 
     private let directory: URL
     private let authorization: ChangeAuthorization
-    public init(directory: URL, authorization: ChangeAuthorization = ChangeAuthorization(request: "")) {
+    private let rules: RepoWriteRules
+    public init(directory: URL, authorization: ChangeAuthorization = ChangeAuthorization(request: ""), rules: RepoWriteRules = RepoWriteRules()) {
         self.directory = directory
         self.authorization = authorization
+        self.rules = rules
     }
 
     public func runningSummary(for arguments: JSONValue) -> String { "Running a command…" }
@@ -198,9 +204,19 @@ public struct ProcessTool: AgentTool {
             timeout: timeout
         )
         let after = try await WorkspaceState.capture(in: directory)
+        if after.head != before.head {
+            try await before.restore(in: directory)
+            throw ToolInputError("Shell commands cannot commit, switch Git history, or push. MAIPA-G brokers those operations after policy checks.")
+        }
+        let ruleBlocked = before.paths.subtracting(after.paths).filter { !rules.permitsDeletion(at: $0) }
+            + before.buildFiles.changed(comparedWith: after.buildFiles).filter { !rules.permitsBuildSetup(at: $0) }
+        if !ruleBlocked.isEmpty {
+            try await before.restore(in: directory)
+            throw ToolInputError("Repository rules block changes to: \(Array(Set(ruleBlocked)).sorted().joined(separator: ", ")).")
+        }
         if !approved {
-            let deleted = authorization.deletion ? [] : before.paths.subtracting(after.paths).sorted()
-            let buildChanged = authorization.buildSetup ? [] : before.buildFiles.changed(comparedWith: after.buildFiles)
+            let deleted = before.paths.subtracting(after.paths).filter { !authorization.allows(.deletion, path: $0) }.sorted()
+            let buildChanged = before.buildFiles.changed(comparedWith: after.buildFiles).filter { !authorization.allows(.buildSetup, path: $0) }
             let blocked = Array(Set(deleted + buildChanged)).sorted()
             if !blocked.isEmpty {
                 try await before.restore(in: directory)
@@ -221,6 +237,7 @@ public struct ProcessTool: AgentTool {
 }
 
 private struct WorkspaceState: Sendable {
+    var head: String
     var paths: Set<String>
     var buildFiles: [String: Data]
     var patch: Data
@@ -250,7 +267,9 @@ private struct WorkspaceState: Sendable {
             guard diff.exitCode == 0 else { throw CloudRunnerError.commandFailed }
             let reset = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["reset"], directory: directory, timeout: 120)
             guard reset.exitCode == 0 else { throw CloudRunnerError.commandFailed }
-            return WorkspaceState(paths: paths, buildFiles: buildFiles, patch: Data(diff.stdout.utf8))
+            let headResult = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["rev-parse", "HEAD"], directory: directory, timeout: 60)
+            guard headResult.exitCode == 0 else { throw CloudRunnerError.commandFailed }
+            return WorkspaceState(head: headResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines), paths: paths, buildFiles: buildFiles, patch: Data(diff.stdout.utf8))
         } catch {
             _ = try? await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["reset"], directory: directory, timeout: 120)
             throw error
@@ -258,7 +277,7 @@ private struct WorkspaceState: Sendable {
     }
 
     func restore(in directory: URL) async throws {
-        let reset = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["reset", "--hard", "HEAD"], directory: directory, timeout: 120)
+        let reset = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["reset", "--hard", head], directory: directory, timeout: 120)
         guard reset.exitCode == 0 else { throw CloudRunnerError.commandFailed }
         let clean = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["clean", "-fd"], directory: directory, timeout: 120)
         guard clean.exitCode == 0 else { throw CloudRunnerError.commandFailed }

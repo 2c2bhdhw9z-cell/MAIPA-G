@@ -23,21 +23,44 @@ public struct AgentExecutionQuestion: Sendable, Hashable {
     public init(text: String, options: [String]) { self.text = text; self.options = options }
 }
 
+public enum AgentGoalOutcome: String, Codable, Sendable, Hashable {
+    case met, notMet, malformed
+
+    public static func parse(_ output: String) -> AgentGoalOutcome {
+        let markers = output.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0 == "GOAL_MET" || $0 == "GOAL_NOT_MET" }
+        guard markers.count == 1 else { return .malformed }
+        return markers[0] == "GOAL_MET" ? .met : .notMet
+    }
+}
+
+public struct AgentHelperResult: Sendable, Hashable {
+    public var agentID: String
+    public var name: String
+    public var output: String
+    public var model: String?
+    public var cost: Double
+}
+
 public struct AgentExecutionResult: Sendable, Hashable {
     public var output: String
     public var model: String?
-    public var goalMet: Bool
+    public var goalOutcome: AgentGoalOutcome
     public var cost: Double
     public var needsSpendingApproval: Bool
     public var pendingQuestion: AgentExecutionQuestion?
+    public var helpers: [AgentHelperResult]
 
-    public init(output: String, model: String? = nil, goalMet: Bool = false, cost: Double = 0, needsSpendingApproval: Bool = false, pendingQuestion: AgentExecutionQuestion? = nil) {
+    public var goalMet: Bool { goalOutcome == .met }
+
+    public init(output: String, model: String? = nil, goalMet: Bool = false, goalOutcome: AgentGoalOutcome? = nil, cost: Double = 0, needsSpendingApproval: Bool = false, pendingQuestion: AgentExecutionQuestion? = nil, helpers: [AgentHelperResult] = []) {
         self.output = output
         self.model = model
-        self.goalMet = goalMet
+        self.goalOutcome = goalOutcome ?? (goalMet ? .met : .notMet)
         self.cost = cost
         self.needsSpendingApproval = needsSpendingApproval
         self.pendingQuestion = pendingQuestion
+        self.helpers = helpers
     }
 }
 
@@ -93,14 +116,18 @@ public struct AgentExecutor: Sendable {
         }.joined(separator: "\n\n")
         let fullContext = [context, joined].filter { !$0.isEmpty }.joined(separator: "\n\nIndependent helper reports:\n")
         let helperCost = helperResults.compactMap { $0?.cost }.reduce(0, +)
+        let helperEvidence = helperResults.enumerated().compactMap { index, result -> AgentHelperResult? in
+            result.map { AgentHelperResult(agentID: helpers[index].definition.id, name: helpers[index].definition.name, output: $0.output, model: $0.model, cost: $0.cost) }
+        }
         if let paused = helperResults.compactMap({ $0 }).first(where: { $0.pendingQuestion != nil || $0.needsSpendingApproval }) {
-            return AgentExecutionResult(output: joined, model: paused.model, cost: helperCost, needsSpendingApproval: paused.needsSpendingApproval, pendingQuestion: paused.pendingQuestion)
+            return AgentExecutionResult(output: joined, model: paused.model, cost: helperCost, needsSpendingApproval: paused.needsSpendingApproval, pendingQuestion: paused.pendingQuestion, helpers: helperEvidence)
         }
         let leadSpendLimit = spendLimit.map { max(0.000_001, $0 - helperCost) }
         var invocation = AgentInvocation(definition: lead, task: task, context: fullContext, spendLimit: leadSpendLimit)
         if lead.modelPolicy == .differentFromPrimary { invocation.avoidModel = primaryModel }
         var result = try await runner(invocation)
         result.cost += helperCost
+        result.helpers = helperEvidence
         return result
     }
 }

@@ -194,7 +194,7 @@ public struct JobResult: Codable, Sendable, Hashable {
 /// A private, restartable Autonomous job. The whole record is checkpointed after each agent or
 /// tool step, so a fresh Actions run can continue the same assistant turn without repeating work.
 public struct JobRecord: ProductRecord, Hashable {
-    public static let currentFormat = 2
+    public static let currentFormat = 3
     public enum Status: String, Codable, Sendable {
         case queued, settingUp, running, needsApproval, needsAnswer, handingOver, done, stopped, failed
     }
@@ -207,6 +207,10 @@ public struct JobRecord: ProductRecord, Hashable {
     public var targetRepo: RepoRef?
     public var targetRef: String?
     public var defaultBranch: String?
+    /// The actual private checkpoint repository. It may have a different owner/installation than the target.
+    public var dataRepo: RepoRef?
+    public var dataBranch: String
+    public var dataInstallationID: Int?
     public var directSave: Bool
     public var steps: [JobStepRecord]
     public var questions: [JobQuestion]
@@ -222,22 +226,36 @@ public struct JobRecord: ProductRecord, Hashable {
     public init(
         id: UUID = UUID(), status: Status = .queued, title: String,
         state: JSONValue = .object([:]), targetRepo: RepoRef? = nil, targetRef: String? = nil,
-        defaultBranch: String? = nil, directSave: Bool = false,
+        defaultBranch: String? = nil, dataRepo: RepoRef? = nil, dataBranch: String = "main",
+        dataInstallationID: Int? = nil, directSave: Bool = false,
         steps: [JobStepRecord] = [], questions: [JobQuestion] = [], cumulativeCost: Double = 0,
         handoverGeneration: Int = 0, workflowRunID: Int? = nil, workflowRunURL: String? = nil,
         logsURL: String? = nil, result: JobResult? = nil, createdAt: Date = Date()
     ) {
         format = Self.currentFormat; self.id = id; self.status = status; self.title = title
         self.state = state; self.targetRepo = targetRepo; self.targetRef = targetRef
-        self.defaultBranch = defaultBranch; self.directSave = directSave; self.steps = steps
+        self.defaultBranch = defaultBranch; self.dataRepo = dataRepo; self.dataBranch = dataBranch
+        self.dataInstallationID = dataInstallationID; self.directSave = directSave; self.steps = steps
         self.questions = questions; self.cumulativeCost = cumulativeCost
         self.handoverGeneration = handoverGeneration; self.workflowRunID = workflowRunID
         self.workflowRunURL = workflowRunURL; self.logsURL = logsURL; self.result = result
         self.createdAt = createdAt; updatedAt = createdAt
     }
 
+    public var autonomousWorkflowInputs: [String: String]? {
+        guard let targetRef = targetRef ?? defaultBranch, let dataRepo else { return nil }
+        return [
+            "job_id": id.uuidString.lowercased(),
+            "target_ref": targetRef,
+            "data_owner": dataRepo.owner,
+            "data_repo": dataRepo.name,
+            "data_branch": dataBranch,
+        ]
+    }
+
     enum CodingKeys: String, CodingKey {
-        case format, id, status, title, state, targetRepo, targetRef, defaultBranch, directSave
+        case format, id, status, title, state, targetRepo, targetRef, defaultBranch, dataRepo
+        case dataBranch, dataInstallationID, directSave
         case steps, questions, cumulativeCost, handoverGeneration, workflowRunID, workflowRunURL
         case logsURL, result, createdAt, updatedAt
     }
@@ -252,6 +270,9 @@ public struct JobRecord: ProductRecord, Hashable {
         targetRepo = try c.decodeIfPresent(RepoRef.self, forKey: .targetRepo)
         targetRef = try c.decodeIfPresent(String.self, forKey: .targetRef)
         defaultBranch = try c.decodeIfPresent(String.self, forKey: .defaultBranch)
+        dataRepo = try c.decodeIfPresent(RepoRef.self, forKey: .dataRepo)
+        dataBranch = try c.decodeIfPresent(String.self, forKey: .dataBranch) ?? "main"
+        dataInstallationID = try c.decodeIfPresent(Int.self, forKey: .dataInstallationID)
         directSave = try c.decodeIfPresent(Bool.self, forKey: .directSave) ?? false
         steps = try c.decodeIfPresent([JobStepRecord].self, forKey: .steps) ?? []
         questions = try c.decodeIfPresent([JobQuestion].self, forKey: .questions) ?? []

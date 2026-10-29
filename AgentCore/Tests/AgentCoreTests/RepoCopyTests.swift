@@ -210,9 +210,16 @@ struct RepoCopyTests {
     }
 
     @Test func repositoryRulesForceDirectSaving() {
-        let rules = RepoWriteRules.resolve(documents: [(".kiro/steering/owner-rules.md", "Never create a branch or pull request for this repo.")], directSaveSetting: false)
+        let rules = RepoWriteRules.resolve(documents: [
+            (".kiro/steering/owner-rules.md", "Commit directly to main. Do not change build setup."),
+            ("Sources/Generated/AGENTS.md", "Never delete files in this folder."),
+        ], directSaveSetting: false)
         #expect(rules.directSave)
         #expect(rules.reason?.contains("owner-rules.md") == true)
+        #expect(!rules.permitsBuildSetup(at: "Package.swift"))
+        #expect(!rules.permitsDeletion(at: "Sources/Generated/Old.swift"))
+        #expect(rules.permitsDeletion(at: "Sources/Keep.swift"))
+        #expect(rules.promptText.contains("Sources/Generated/AGENTS.md"))
     }
 
     @Test func linkHeaderPagination() {
@@ -233,6 +240,9 @@ struct RepoCopyTests {
         try await client.dispatchWorkflow(repo, workflow: "maipa-g.yml", ref: "main", inputs: ["job_id": "opaque-id"])
         let runs = try await client.workflowRuns(repo)
         #expect(runs.first?.runNumber == 12)
+        let watched = try await GitHubRunWatcher(github: client, maximumPolls: 1, sleeper: {}).wait(repo: repo, commit: "abc", redacting: RedactingLogger(secrets: ["secret-token"]))
+        #expect(watched.succeeded)
+        #expect(watched.runs.allSatisfy { $0.headSHA == "abc" })
         try await client.putActionsSecret(repo, name: "OPENROUTER_API_KEY", value: "private-value")
 
         let dispatch = try #require(transport.requests.first { $0.url.path.hasSuffix("/dispatches") })
@@ -250,6 +260,13 @@ struct RepoCopyTests {
         }
         #expect(opened == 0)
         #expect(String(decoding: clear, as: UTF8.self) == "private-value")
+
+        let worktree = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let reusable = try String(contentsOf: worktree.appendingPathComponent(".github/workflows/agent.yml"), encoding: .utf8)
+        #expect(reusable.components(separatedBy: "persist-credentials: false").count == 3)
+        #expect(!reusable.contains("GH_TOKEN:"))
+        #expect(reusable.contains("MAIPAG_TARGET_TOKEN"))
+        #expect(reusable.contains("MAIPAG_DATA_TOKEN"))
     }
 
     @Test func buildInspectionDoesNotDispatch() async throws {

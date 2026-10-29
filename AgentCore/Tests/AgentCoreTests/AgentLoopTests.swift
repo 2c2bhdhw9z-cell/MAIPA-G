@@ -585,12 +585,74 @@ struct AgentLoopTests {
         #expect(!(await recorder.calls).contains("already"))
     }
 
+    @Test func authorizationIsAffirmativeOperationAndPathScoped() {
+        let negativeDelete = ChangeAuthorization(request: "Do not delete anything; inspect the workflow.")
+        #expect(!negativeDelete.allows(.deletion, path: "old.txt"))
+        #expect(!negativeDelete.allows(.buildSetup, path: ".github/workflows/ci.yml"))
+        let negativeBuild = ChangeAuthorization(request: "Inspect the workflow without changing it.")
+        #expect(!negativeBuild.allows(.buildSetup, path: ".github/workflows/ci.yml"))
+        let scoped = ChangeAuthorization(request: "Delete Sources/Old.swift\nUpdate Package.swift")
+        #expect(scoped.allows(.deletion, path: "Sources/Old.swift"))
+        #expect(!scoped.allows(.deletion, path: "Sources/Keep.swift"))
+        #expect(scoped.allows(.buildSetup, path: "Package.swift"))
+        #expect(!scoped.allows(.buildSetup, path: "project.yml"))
+    }
+
+    @Test func workflowAgentHelpersUseProductionEngineAndCheckpointSpend() async throws {
+        let recorder = WorkflowTestRecorder()
+        let definition = WorkflowDefinition(id: "helpers", name: "Helpers", summary: "", steps: [
+            .agent("lead", title: "Lead", agent: "planner", instruction: "combine", helpers: [
+                .agent("h1", title: "First helper", agent: "investigator", instruction: "slow evidence"),
+                .agent("h2", title: "Second helper", agent: "second-opinion", instruction: "other evidence"),
+            ]),
+        ], isApproved: true)
+        let engine = WorkflowEngine(definition: definition, spendLimit: 1, runner: { try await recorder.run($0) }, checkpointer: { await recorder.save($0) })
+        guard case .completed(let checkpoint) = await engine.run(request: "check") else { Issue.record("Expected helper workflow completion"); return }
+        #expect(checkpoint.outputs.map(\.nodeID) == ["h1", "h2", "lead"])
+        #expect(checkpoint.cumulativeCost == 0.03)
+        let helperLimits = await recorder.spendLimits
+        #expect(helperLimits.prefix(2).compactMap { $0 }.allSatisfy { $0 <= 1.0 / 3.0 })
+        #expect(helperLimits.compactMap { $0 }.last.map { $0 <= 1.0 } == true)
+        #expect((await recorder.calls).last == "combine")
+    }
+
+    @Test func goalOutcomeRequiresOneExactUncontradictedMarker() {
+        #expect(AgentGoalOutcome.parse("Evidence passes.\nGOAL_MET") == .met)
+        #expect(AgentGoalOutcome.parse("I cannot return GOAL_MET because tests fail") == .malformed)
+        #expect(AgentGoalOutcome.parse("GOAL_NOT_MET") == .notMet)
+        #expect(AgentGoalOutcome.parse("GOAL_MET\nGOAL_NOT_MET") == .malformed)
+    }
+
+    @Test func cloudShellCannotRetainACommitThatHidesGuardedChanges() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-shell-head-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["init"], directory: root)
+        _ = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["config", "user.name", "Test"], directory: root)
+        _ = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["config", "user.email", "test@example.com"], directory: root)
+        try Data("keep".utf8).write(to: root.appendingPathComponent("Package.swift"))
+        _ = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["add", "Package.swift"], directory: root)
+        _ = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["commit", "-m", "base"], directory: root)
+        let before = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["rev-parse", "HEAD"], directory: root)
+        let tool = ProcessTool(directory: root)
+        await #expect(throws: ToolInputError.self) {
+            _ = try await tool.run(arguments: ["command": "rm Package.swift && git add -A && git commit -m hidden"], progress: { _ in })
+        }
+        let after = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["rev-parse", "HEAD"], directory: root)
+        #expect(before.stdout == after.stdout)
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("Package.swift").path))
+        #expect(BoundedProcess.sanitizedEnvironment(["PATH": "/bin", "GITHUB_TOKEN": "secret", "MY_PASSWORD": "secret"])["GITHUB_TOKEN"] == nil)
+    }
+
     @Test func cloudShellIsBoundedAndLoggerRedacts() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-shell-basic-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let initialized = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["init"], directory: root)
         #expect(initialized.exitCode == 0)
+        _ = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["config", "user.name", "Test"], directory: root)
+        _ = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["config", "user.email", "test@example.com"], directory: root)
+        _ = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["commit", "--allow-empty", "-m", "base"], directory: root)
         let tool = ProcessTool(directory: root)
         #expect(await tool.approvalRequest(for: ["command": "rm old.txt"]) == nil)
         let output = try await tool.run(arguments: ["command": "printf cloud-runner"], progress: { _ in })

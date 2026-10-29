@@ -252,7 +252,7 @@ final class ChatSession: Identifiable {
                 changeSession = saves
                 tools.append(contentsOf: [
                     ListFilesTool(workspace: workspace), SearchCodeTool(workspace: workspace), ReadFileTool(workspace: workspace), ReadRepoFileTool(github: github),
-                    CreateFileTool(workspace: changes, authorization: changeAuthorization), EditFileTool(workspace: changes, authorization: changeAuthorization), DeleteFileTool(workspace: changes, authorization: changeAuthorization),
+                    CreateFileTool(workspace: changes, authorization: changeAuthorization, rules: rules), EditFileTool(workspace: changes, authorization: changeAuthorization, rules: rules), DeleteFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
                     SaveChangesTool(workspace: changes, service: service, session: saves, selectedBranch: workingBranch, defaultBranch: repo.defaultBranch, rules: rules),
                 ])
                 repoContext = SystemPrompt.RepoContext(
@@ -260,7 +260,8 @@ final class ChatSession: Identifiable {
                     branch: workingBranch,
                     commit: commit,
                     isPrivate: repo.isPrivate,
-                    summary: app.github.repo(named: repo.ref.fullName)?.summary
+                    summary: app.github.repo(named: repo.ref.fullName)?.summary,
+                    ruleDocuments: rules.documents
                 )
             } catch {
                 fail(.other, "Couldn't open \(repo.ref.fullName) on GitHub. \(app.github.describe(error))")

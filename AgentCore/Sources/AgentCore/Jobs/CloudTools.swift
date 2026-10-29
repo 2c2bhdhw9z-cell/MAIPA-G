@@ -1,5 +1,70 @@
 import Foundation
 
+/// Publishes a checked local workspace through GitHub's Git Data API. Untrusted shell and MCP
+/// children never receive a credential and cannot perform network Git operations themselves.
+public struct GitHubWorkspacePublisher: Sendable {
+    public let github: GitHubClient
+    public let repo: RepoRef
+    public let workspace: URL
+
+    public init(github: GitHubClient, repo: RepoRef, workspace: URL) {
+        self.github = github; self.repo = repo; self.workspace = workspace
+    }
+
+    public func publish(branch: String, baseRef: String, expectedRemoteHead: String? = nil, message: String) async throws -> String {
+        let localHead = try await git(["rev-parse", "HEAD"]).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseHead = try await github.branchHead(repo, branch: baseRef)
+        guard let baseHead else { throw GitHubChangeFailure.noHead }
+        let currentHead = try await github.branchHead(repo, branch: branch)
+        if let expectedRemoteHead {
+            guard currentHead == expectedRemoteHead else { throw ChangeWorkspaceError.staleHead(expected: expectedRemoteHead, actual: currentHead) }
+        } else if branch == baseRef {
+            guard currentHead == localHead else { throw ChangeWorkspaceError.staleHead(expected: localHead, actual: currentHead) }
+        } else if let currentHead, currentHead != localHead {
+            throw ChangeWorkspaceError.staleHead(expected: localHead, actual: currentHead)
+        }
+        if currentHead == nil, baseHead != localHead {
+            throw ChangeWorkspaceError.staleHead(expected: localHead, actual: baseHead)
+        }
+        let parent = currentHead ?? baseHead
+        _ = try await git(["add", "-A"])
+        defer { Task { _ = try? await git(["reset"]) } }
+        let names = try await git(["diff", "--cached", "--name-only", "-z", localHead, "--", "."], outputLimit: 20_000_000)
+            .stdout.split(separator: "\0").map(String.init)
+        guard !names.isEmpty else { return currentHead ?? baseHead }
+        var changes: [GitHubClient.TreeChange] = []
+        for path in names {
+            guard SnapshotStore.isSafeRelativePath(path) else { throw ToolInputError("A changed path is outside the repository.") }
+            let url = workspace.appendingPathComponent(path)
+            if FileManager.default.fileExists(atPath: url.path) {
+                let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+                let isSymlink = attributes[.type] as? FileAttributeType == .typeSymbolicLink
+                let data = isSymlink
+                    ? Data(try FileManager.default.destinationOfSymbolicLink(atPath: url.path).utf8)
+                    : try Data(contentsOf: url, options: .mappedIfSafe)
+                let blob = try await github.createBlob(repo, contents: data)
+                let modeLine = try await git(["ls-files", "-s", "--", path], allowFailure: true).stdout
+                let indexedMode = modeLine.split(separator: " ").first.map(String.init) ?? "100644"
+                let mode = isSymlink ? "120000" : indexedMode
+                changes.append(.init(path: path, blobSHA: blob, mode: ["100644", "100755", "120000"].contains(mode) ? mode : "100644"))
+            } else {
+                changes.append(.init(path: path, blobSHA: nil))
+            }
+        }
+        if currentHead == nil { try await github.createBranch(repo, branch: branch, from: baseHead) }
+        let tree = try await github.createTree(repo, base: try await github.commitTree(repo, commit: parent), changes: changes)
+        let commit = try await github.createCommit(repo, message: message, tree: tree, parents: [parent])
+        try await github.updateBranch(repo, branch: branch, to: commit)
+        return commit
+    }
+
+    private func git(_ arguments: [String], allowFailure: Bool = false, outputLimit: Int = 80_000) async throws -> ProcessResult {
+        let result = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: arguments, directory: workspace, timeout: 600, outputLimit: outputLimit)
+        if result.exitCode != 0 && !allowFailure { throw CloudRunnerError.commandFailed }
+        return result
+    }
+}
+
 public enum UserRequestPolicy {
     public static func explicitlyRequestsBuild(_ request: String) -> Bool {
         let text = request.lowercased()
@@ -12,11 +77,13 @@ public actor CloudToolResults {
     public private(set) var pullRequest: GitHubPullRequest?
     public private(set) var buildURL: String?
     public private(set) var artifactURL: String?
+    public private(set) var additionalCost: Double = 0
 
     public init() {}
     public func record(pullRequest: GitHubPullRequest) { self.pullRequest = pullRequest }
     public func record(buildURL: String?) { self.buildURL = buildURL }
     public func record(artifactURL: String?) { self.artifactURL = artifactURL }
+    public func add(cost: Double) { additionalCost += cost }
 }
 
 /// The GitHub capabilities supplied to built-in cloud agents. Keeping the names in one factory
@@ -40,12 +107,13 @@ public enum CloudToolAssembly {
         defaultBranch: String,
         directSave: Bool,
         buildExplicitlyRequested: Bool,
-        results: CloudToolResults
+        results: CloudToolResults,
+        logger: RedactingLogger = RedactingLogger()
     ) -> [any AgentTool] {
         names.sorted().map {
             CloudGitHubTool(name: $0, github: github, repo: repo, ref: ref, workspace: workspace,
                             defaultBranch: defaultBranch, directSave: directSave,
-                            buildExplicitlyRequested: buildExplicitlyRequested, results: results)
+                            buildExplicitlyRequested: buildExplicitlyRequested, results: results, logger: logger)
         }
     }
 }
@@ -60,6 +128,7 @@ private struct CloudGitHubTool: AgentTool {
     let directSave: Bool
     let buildExplicitlyRequested: Bool
     let results: CloudToolResults
+    let logger: RedactingLogger
 
     var spec: ToolSpec {
         let properties: JSONValue
@@ -128,11 +197,13 @@ private struct CloudGitHubTool: AgentTool {
             async let run = github.workflowRun(repo, runID: id)
             async let jobs = github.workflowJobs(repo, runID: id)
             let (runValue, jobValues) = try await (run, jobs)
+            let archive = (try? await github.workflowLogArchive(repo, runID: id)).map(GitHubRunWatcher.readLogs) ?? ""
             await results.record(buildURL: runValue.htmlURL)
-            let text = jobValues.map { job in
+            let summary = jobValues.map { job in
                 let steps = job.steps.map { "  \($0.name): \($0.conclusion ?? $0.status)" }.joined(separator: "\n")
                 return "\(job.name): \(job.conclusion ?? job.status)\n\(steps)\n\(job.htmlURL)"
             }.joined(separator: "\n\n")
+            let text = logger.redact([summary, archive].filter { !$0.isEmpty }.joined(separator: "\n\nActual redacted logs:\n"))
             return output("Read workflow run \(id)", text)
         case "list_artifacts":
             let artifacts = try await github.artifacts(repo, runID: arguments.optionalInt("run_id"))
@@ -171,12 +242,8 @@ private struct CloudGitHubTool: AgentTool {
         case "create_pull_request":
             guard !directSave else { throw ToolInputError("Repository rules require a direct save, so no pull request may be opened.") }
             let title = try arguments.requiredString("title")
-            let status = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["status", "--porcelain"], directory: workspace, timeout: 60)
-            if !status.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                _ = try await requireGit(["add", "-A"])
-                _ = try await requireGit(["commit", "-m", title])
-            }
-            _ = try await requireGit(["push", "origin", "HEAD:refs/heads/\(ref)"])
+            _ = try await GitHubWorkspacePublisher(github: github, repo: repo, workspace: workspace)
+                .publish(branch: ref, baseRef: defaultBranch, message: title)
             let pull = try await github.openPullRequest(repo, title: title, body: arguments.optionalString("body") ?? "Changes made and checked by MAIPA-G Autonomous.", head: ref, base: arguments.optionalString("base") ?? defaultBranch)
             await results.record(pullRequest: pull)
             return output("Opened pull request #\(pull.number)", pull.htmlURL)

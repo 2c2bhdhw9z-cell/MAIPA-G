@@ -319,7 +319,7 @@ struct CoreFormatTests {
                 if request.url.path == "/token" {
                     return HTTPResponse(status: 200, body: Data(#"{"access_token":"rotated","expires_in":3600}"#.utf8))
                 }
-                let body = #"{"servers":[{"server":{"name":"com.github/github-mcp","title":"GitHub","description":"GitHub tools","version":"1.0","remotes":[{"type":"streamable-http","url":"https://example.com/mcp"}],"packages":[{"registryType":"npm","identifier":"@modelcontextprotocol/server-github","version":"1.0"}]},"_meta":{"io.modelcontextprotocol.registry/official":{"status":"active","isLatest":true}}}],"metadata":{"nextCursor":"next:1","count":1}}"#
+                let body = #"{"servers":[{"server":{"name":"com.github/github-mcp","title":"GitHub","description":"GitHub tools","version":"1.0","remotes":[{"type":"streamable-http","url":"https://example.com/mcp"}],"packages":[{"registryType":"npm","identifier":"@modelcontextprotocol/server-github","version":"1.0","transport":{"type":"stdio"}}]},"_meta":{"io.modelcontextprotocol.registry/official":{"status":"active","isLatest":true}}}],"metadata":{"nextCursor":"next:1","count":1}}"#
                 return HTTPResponse(status: 200, body: Data(body.utf8))
             }
             func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse { HTTPStreamResponse(status: 404, headers: [:], body: AsyncThrowingStream { $0.finish() }) }
@@ -354,6 +354,46 @@ struct CoreFormatTests {
             try AutonomousStdioConnector.command(for: .init(registryType: "npm", identifier: "bad\npackage"))
         }
         #endif
+    }
+
+    @Test func registryLaunchSchemaDistinctReviewAndDataIdentityArePreserved() throws {
+        let input = RegistryServer.LaunchInput(name: "WORKSPACE_ROOT", description: "Folder", isRequired: true)
+        let secret = RegistryServer.LaunchInput(name: "GCS_BUCKET", isRequired: true, isSecret: true)
+        let fixed = RegistryServer.LaunchArgument(type: "positional", value: "serve")
+        let required = RegistryServer.LaunchArgument(type: "named", name: "--root", valueHint: "WORKSPACE_ROOT", isRequired: true)
+        let package = RegistryServer.Package(
+            registryType: "npm", identifier: "example-mcp", version: "2.0", transportType: "stdio",
+            runtimeArguments: [fixed], packageArguments: [required], environmentVariables: [secret]
+        )
+        #expect(package.isAutonomousCompatible)
+        #expect(Set(package.launchInputs.map(\.name)) == [input.name, secret.name])
+        #if os(Linux)
+        #expect(try AutonomousStdioConnector.command(for: package, values: ["WORKSPACE_ROOT": "/repo"]) == ["npx", "--yes", "serve", "example-mcp@2.0", "--root", "/repo"])
+        #expect(throws: ToolInputError.self) { try AutonomousStdioConnector.command(for: package) }
+        let unsupported = RegistryServer.Package(registryType: "oci", identifier: "image", transportType: "stdio")
+        #expect(!unsupported.isAutonomousCompatible)
+        #expect(throws: ToolInputError.self) { try AutonomousStdioConnector.command(for: unsupported) }
+        #endif
+
+        let freeA = ModelInfo(id: "maker/a:free", name: "A", promptPrice: 0, completionPrice: 0, supportedParameters: ["tools"], created: Date(timeIntervalSince1970: 2))
+        let freeB = ModelInfo(id: "maker/b:free", name: "B", promptPrice: 0, completionPrice: 0, supportedParameters: ["tools"], created: Date(timeIntervalSince1970: 1))
+        let distinct = ModelRouter.distinctRoute(avoiding: freeA.id, difficulty: .hard, thinking: .medium, account: AccountState(isFreeTier: true), catalogue: [freeA.id: freeA, freeB.id: freeB])
+        #expect(distinct?.model == freeB.id)
+        #expect(ModelRouter.distinctRoute(avoiding: freeA.id, difficulty: .hard, thinking: .medium, account: AccountState(isFreeTier: true), catalogue: [freeA.id: freeA]) == nil)
+
+        let job = JobRecord(title: "Org work", targetRepo: RepoRef(owner: "acme", name: "app"), targetRef: "develop", defaultBranch: "main", dataRepo: RepoRef(owner: "person", name: "MAIPA-G-data"), dataBranch: "saved", dataInstallationID: 42)
+        let roundTrip = try JSONCoding.decoder().decode(JobRecord.self, from: JSONCoding.encoder().encode(job))
+        #expect(roundTrip.dataRepo?.owner == "person")
+        #expect(roundTrip.dataBranch == "saved")
+        #expect(roundTrip.dataInstallationID == 42)
+        #expect(roundTrip.autonomousWorkflowInputs?["target_ref"] == "develop")
+
+        let scopes = MCPConnectorSession.requiredScopes(from: MCPAuthorizationError.rejected(#"insufficient_scope scope="files.read files.write""#))
+        #expect(scopes == ["files.read", "files.write"])
+        let gmail = RegistryServer(name: "com.google/gmail", displayName: "Gmail")
+        let calendar = RegistryServer(name: "com.google/calendar", displayName: "Google Calendar")
+        let ordinary = RegistryServer(name: "com.example/alpha", displayName: "Alpha")
+        #expect([ordinary, calendar, gmail].sorted(by: MCPRegistryClient.catalogOrder).map(\.displayName) == ["Gmail", "Google Calendar", "Alpha"])
     }
 
     @Test func pictureRoutingAndWebPreviewRejectTraversal() throws {

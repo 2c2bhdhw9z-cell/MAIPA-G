@@ -28,8 +28,8 @@ public struct WorkflowNode: Codable, Sendable, Hashable, Identifiable {
 
     public var flattenedNodes: [WorkflowNode] { [self] + children.flatMap(\.flattenedNodes) }
 
-    public static func agent(_ id: String = UUID().uuidString.lowercased(), title: String, agent: String, instruction: String) -> WorkflowNode {
-        WorkflowNode(id: id, kind: .agent, title: title, agentID: agent, instruction: instruction)
+    public static func agent(_ id: String = UUID().uuidString.lowercased(), title: String, agent: String, instruction: String, helpers: [WorkflowNode] = []) -> WorkflowNode {
+        WorkflowNode(id: id, kind: .agent, title: title, agentID: agent, instruction: instruction, children: helpers)
     }
 
     public static func repeatUntil(_ id: String = UUID().uuidString.lowercased(), title: String, maximum: Int, goal: String, steps: [WorkflowNode]) -> WorkflowNode {
@@ -69,6 +69,10 @@ public struct WorkflowDefinition: Codable, Sendable, Hashable, Identifiable {
             case .agent:
                 if node.agentID.map(agentIDs.contains) != true { errors.append("\(node.title) needs an agent.") }
                 if node.instruction?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false { errors.append("\(node.title) needs instructions.") }
+                if let leadID = node.agentID, let lead = (BuiltInAgents.all.first { $0.id == leadID }), node.children.count > lead.maximumHelpers {
+                    errors.append("\(node.title) has more than \(lead.maximumHelpers) helpers.")
+                }
+                if node.children.contains(where: { $0.kind != .agent }) { errors.append("Agent helpers must be agent steps.") }
             case .repeatUntil:
                 if !(1...50).contains(node.maximumIterations ?? 0) { errors.append("\(node.title) needs a repeat maximum from 1 to 50.") }
                 if node.successCondition?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false { errors.append("\(node.title) needs a success condition.") }

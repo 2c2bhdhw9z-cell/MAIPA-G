@@ -150,13 +150,31 @@ public actor WorkflowEngine {
     private func runAgent(_ node: WorkflowNode, goalCondition: String? = nil) async throws -> Bool {
         guard let agentID = node.agentID, agents[agentID] != nil else { throw WorkflowEngineError.unknownAgent(node.agentID ?? "") }
         try await ensureBudget(for: node)
-        state.statuses[node.id] = .running; try await save()
+        state.statuses[node.id] = .running
+        for helper in node.children { state.statuses[helper.id] = .running }
+        try await save()
         var task = node.instruction ?? node.title
         if let goalCondition, !goalCondition.isEmpty {
             task += "\n\nRepeat goal: \(goalCondition)\nEnd with a line containing exactly GOAL_MET only when current evidence proves this goal is met. Otherwise end with GOAL_NOT_MET."
         }
-        let result = try await executor.execute(agentID: agentID, task: task, context: context, spendLimit: remainingBudget)
+        let helpers = try node.children.map { helper -> AgentInvocation in
+            guard let helperID = helper.agentID, let definition = agents[helperID] else { throw WorkflowEngineError.unknownAgent(helper.agentID ?? "") }
+            return AgentInvocation(definition: definition, task: helper.instruction ?? helper.title, context: context)
+        }
+        let result = try await executor.execute(
+            agentID: agentID,
+            task: task,
+            context: context,
+            helpers: helpers,
+            primaryModel: state.outputs.last?.model,
+            spendLimit: remainingBudget
+        )
         if state.isCancelled { throw CancellationError() }
+        for (index, helper) in result.helpers.enumerated() where index < node.children.count {
+            let helperNode = node.children[index]
+            state.outputs.append(WorkflowOutput(nodeID: helperNode.id, title: helperNode.title, text: helper.output, model: helper.model))
+            state.statuses[helperNode.id] = .completed
+        }
         state.outputs.append(WorkflowOutput(nodeID: node.id, title: node.title, text: result.output, model: result.model))
         state.cumulativeCost += result.cost
         if let pending = result.pendingQuestion {
@@ -190,8 +208,10 @@ public actor WorkflowEngine {
         let runner = executor
         let operationBudget = remainingBudget.map { $0 / Double(max(resolved.count, 1)) }
         var results = Array<AgentExecutionResult?>(repeating: nil, count: resolved.count)
+        let primaryIndexes = resolved.indices.filter { resolved[$0].1.modelPolicy != .differentFromPrimary }
         try await withThrowingTaskGroup(of: (Int, AgentExecutionResult).self) { group in
-            for (index, item) in resolved.enumerated() {
+            for index in primaryIndexes {
+                let item = resolved[index]
                 group.addTask {
                     var task = item.0.instruction ?? item.0.title
                     if let goalCondition, !goalCondition.isEmpty {
@@ -201,6 +221,15 @@ public actor WorkflowEngine {
                 }
             }
             for try await (index, result) in group { results[index] = result }
+        }
+        let primaryModel = primaryIndexes.compactMap { results[$0]?.model }.first
+        for index in resolved.indices where resolved[index].1.modelPolicy == .differentFromPrimary {
+            let item = resolved[index]
+            var task = item.0.instruction ?? item.0.title
+            if let goalCondition, !goalCondition.isEmpty {
+                task += "\n\nRepeat goal: \(goalCondition)\nEnd with a line containing exactly GOAL_MET only when current evidence proves this goal is met. Otherwise end with GOAL_NOT_MET."
+            }
+            results[index] = try await runner.execute(agentID: item.1.id, task: task, context: baseContext, primaryModel: primaryModel, spendLimit: operationBudget)
         }
         var goalMet = false
         if state.isCancelled { throw CancellationError() }

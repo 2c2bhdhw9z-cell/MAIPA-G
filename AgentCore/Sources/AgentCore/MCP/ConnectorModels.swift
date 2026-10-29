@@ -10,17 +10,31 @@ public struct ConnectorConfiguration: Codable, Sendable, Hashable, Identifiable 
     public var kind: ConnectorKind
     public var endpoint: URL?
     public var package: RegistryServer.Package?
+    /// Nonsecret launch values may sync. Secret values are stored only in Keychain.
+    public var launchValues: [String: String]
+    public var secretNames: Set<String>
     public var scopes: Set<String>
     public var createdAt: Date
 
     public init(id: UUID = UUID(), serverID: String, displayName: String, endpoint: URL) {
         self.id = id; self.serverID = serverID; self.displayName = displayName; kind = .remote
-        self.endpoint = endpoint; package = nil; scopes = []; createdAt = Date()
+        self.endpoint = endpoint; package = nil; launchValues = [:]; secretNames = []; scopes = []; createdAt = Date()
     }
 
-    public init(id: UUID = UUID(), serverID: String, displayName: String, package: RegistryServer.Package) {
+    public init(id: UUID = UUID(), serverID: String, displayName: String, package: RegistryServer.Package, launchValues: [String: String] = [:], secretNames: Set<String> = []) {
         self.id = id; self.serverID = serverID; self.displayName = displayName; kind = .stdio
-        endpoint = nil; self.package = package; scopes = []; createdAt = Date()
+        endpoint = nil; self.package = package; self.launchValues = launchValues; self.secretNames = secretNames; scopes = []; createdAt = Date()
+    }
+
+    enum CodingKeys: String, CodingKey { case id, serverID, displayName, kind, endpoint, package, launchValues, secretNames, scopes, createdAt }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id); serverID = try c.decode(String.self, forKey: .serverID)
+        displayName = try c.decode(String.self, forKey: .displayName); kind = try c.decode(ConnectorKind.self, forKey: .kind)
+        endpoint = try c.decodeIfPresent(URL.self, forKey: .endpoint); package = try c.decodeIfPresent(RegistryServer.Package.self, forKey: .package)
+        launchValues = try c.decodeIfPresent([String: String].self, forKey: .launchValues) ?? [:]
+        secretNames = try c.decodeIfPresent(Set<String>.self, forKey: .secretNames) ?? []
+        scopes = try c.decodeIfPresent(Set<String>.self, forKey: .scopes) ?? []; createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
     }
 }
 
@@ -103,6 +117,7 @@ public enum MCPAuthorizationError: Error, Sendable, CustomStringConvertible {
     case discovery(String)
     case registrationRequired
     case stateMismatch
+    case insufficientScope(Set<String>)
     case rejected(String)
     public var description: String {
         switch self {
@@ -110,6 +125,7 @@ public enum MCPAuthorizationError: Error, Sendable, CustomStringConvertible {
         case .discovery(let value): return "OAuth discovery failed: \(value)"
         case .registrationRequired: return "This connector requires a client ID registered by its owner."
         case .stateMismatch: return "The connector sign-in answer did not match this request."
+        case .insufficientScope(let scopes): return "This connector needs more permission: \(scopes.sorted().joined(separator: ", "))."
         case .rejected(let value): return value
         }
     }

@@ -56,6 +56,11 @@ final class JobCoordinator {
     @discardableResult
     func start(request: String, repo: ChatRepo, workflow: WorkflowDefinition? = nil, additionalState: [String: JSONValue] = [:]) async -> JobRecord? {
         guard let app, let github = app.github.client else { return nil }
+        await app.sync.syncNow()
+        guard let dataRepo = app.sync.repo else {
+            lastError = "MAIPA-G needs its private data repo before Autonomous can start."
+            return nil
+        }
         let setup = AutonomousSetup(github: github)
         let installed = (try? await setup.isInstalled(in: repo.ref, ref: repo.defaultBranch)) == true
         let commit: String
@@ -99,6 +104,9 @@ final class JobCoordinator {
             targetRepo: repo.ref,
             targetRef: repo.branch,
             defaultBranch: repo.defaultBranch,
+            dataRepo: dataRepo,
+            dataBranch: "main",
+            dataInstallationID: app.github.installationID,
             directSave: rules.directSave,
             steps: [JobStepRecord(title: installed ? "Waiting for GitHub" : "Autonomous setup", status: installed ? .pending : .waiting)],
             questions: installed ? [] : [question]
@@ -171,8 +179,15 @@ final class JobCoordinator {
             let completeTask = [invocation.definition.prompt(task: invocation.task), invocation.context].filter { !$0.isEmpty }.joined(separator: "\n\nContext:\n")
             chat.messages = [.user(completeTask), ChatMessage(body: .assistant(AssistantTurn()))]
             let difficulty: TaskDifficulty = invocation.definition.modelPolicy == .fast ? .quick : invocation.definition.difficulty
-            let choice: ModelChoice = invocation.definition.modelPolicy == .differentFromPrimary ? .free : .auto
-            let route = ModelRouter.route(choice: choice, difficulty: difficulty, thinking: .medium, account: accountState, catalogue: catalogue)
+            let route: Route
+            if invocation.definition.modelPolicy == .differentFromPrimary {
+                guard let distinct = ModelRouter.distinctRoute(avoiding: invocation.avoidModel, difficulty: difficulty, thinking: .medium, account: accountState, catalogue: catalogue) else {
+                    throw ToolInputError("A second eligible AI with a different model ID is not available for this review.")
+                }
+                route = distinct
+            } else {
+                route = ModelRouter.route(choice: .auto, difficulty: difficulty, thinking: .medium, account: accountState, catalogue: catalogue)
+            }
             let input = AgentTurnInput(
                 chat: chat,
                 route: route,
@@ -196,7 +211,7 @@ final class JobCoordinator {
             let pending = turn.pendingQuestions?.questions.questions.first.map { AgentExecutionQuestion(text: $0.text, options: $0.options) }
             return AgentExecutionResult(
                 output: text, model: turn.steps.last?.model,
-                goalMet: text.uppercased().contains("GOAL_MET"), cost: turn.usage.cost ?? 0,
+                goalOutcome: AgentGoalOutcome.parse(text), cost: turn.usage.cost ?? 0,
                 needsSpendingApproval: turn.spendCheck != nil, pendingQuestion: pending
             )
         }
@@ -286,14 +301,16 @@ final class JobCoordinator {
             job = try await store.checkpoint(job)
             jobs = await store.all()
             let setup = AutonomousSetup(github: github)
+            var setupSecrets = [
+                "MAIPAG_APP_ID": String(credentials.appID),
+                "MAIPAG_APP_PRIVATE_KEY": credentials.privateKeyPEM,
+                "OPENROUTER_API_KEY": openRouterKey,
+            ]
+            if let connectorSecrets = app.connectors.autonomousSecretsJSON() { setupSecrets["MAIPAG_MCP_SECRETS"] = connectorSecrets }
             _ = try await setup.install(
                 in: repo,
                 branch: job.defaultBranch ?? "main",
-                secrets: [
-                    "MAIPAG_APP_ID": String(credentials.appID),
-                    "MAIPAG_APP_PRIVATE_KEY": credentials.privateKeyPEM,
-                    "OPENROUTER_API_KEY": openRouterKey,
-                ]
+                secrets: setupSecrets
             )
             job.status = .queued
             job.steps = [JobStepRecord(title: "Waiting for GitHub", status: .pending)]
@@ -424,12 +441,16 @@ final class JobCoordinator {
     private func dispatch(_ job: JobRecord) async throws {
         guard let app, let github = app.github.client, let repo = job.targetRepo else { return }
         await app.sync.syncNow()
+        if let connectorSecrets = app.connectors.autonomousSecretsJSON() {
+            try await github.putActionsSecret(repo, name: "MAIPAG_MCP_SECRETS", value: connectorSecrets)
+        }
         let dispatchRef = job.state["previewBuild"]?.boolValue == true ? (job.targetRef ?? job.defaultBranch ?? "main") : (job.defaultBranch ?? "main")
+        guard let inputs = job.autonomousWorkflowInputs else { throw ToolInputError("This job is missing its private data-repository identity.") }
         try await github.dispatchWorkflow(
             repo,
             workflow: "maipa-g.yml",
             ref: dispatchRef,
-            inputs: ["job_id": job.id.uuidString.lowercased()]
+            inputs: inputs
         )
         var updated = job
         updated.status = .running

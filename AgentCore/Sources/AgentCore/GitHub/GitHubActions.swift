@@ -1,4 +1,69 @@
 import Foundation
+import ZIPFoundation
+
+public struct GitHubRunWatchResult: Sendable, Hashable {
+    public var runs: [GitHubWorkflowRun]
+    public var checks: [GitHubCheckRun]
+    public var statuses: [GitHubCommitStatus]
+    public var failedLogs: String
+
+    public var succeeded: Bool {
+        runs.allSatisfy { ["success", "neutral", "skipped"].contains($0.conclusion ?? "") }
+            && checks.allSatisfy { ["success", "neutral", "skipped"].contains($0.conclusion ?? "") }
+            && statuses.allSatisfy { $0.state == "success" }
+    }
+}
+
+/// Finds only checks for the commit MAIPA-G published, waits for terminal results, and returns
+/// redacted failed logs. It never selects a run or artifact from another commit.
+public struct GitHubRunWatcher: Sendable {
+    public typealias Sleeper = @Sendable () async throws -> Void
+    private let github: GitHubClient
+    private let sleeper: Sleeper
+    private let maximumPolls: Int
+
+    public init(github: GitHubClient, maximumPolls: Int = 90, sleeper: @escaping Sleeper = {
+        try await Task.sleep(nanoseconds: 20_000_000_000)
+    }) {
+        self.github = github; self.maximumPolls = max(1, maximumPolls); self.sleeper = sleeper
+    }
+
+    public func wait(repo: RepoRef, commit: String, excludingRunID: Int? = nil, redacting logger: RedactingLogger) async throws -> GitHubRunWatchResult {
+        var matched: [GitHubWorkflowRun] = []
+        var checks: [GitHubCheckRun] = []
+        var statuses: [GitHubCommitStatus] = []
+        for poll in 0..<maximumPolls {
+            matched = try await github.workflowRuns(repo, limit: 100).filter { $0.headSHA == commit && $0.id != excludingRunID }
+            checks = (try? await github.checkRuns(repo, ref: commit)) ?? []
+            statuses = (try? await github.commitStatuses(repo, ref: commit)) ?? []
+            let discovered = !matched.isEmpty || !checks.isEmpty || !statuses.isEmpty
+            let runsDone = matched.allSatisfy { $0.status == "completed" }
+            let checksDone = checks.allSatisfy { $0.status == "completed" }
+            let statusesDone = statuses.allSatisfy { $0.state != "pending" }
+            if discovered && runsDone && checksDone && statusesDone { break }
+            // A repository with no automatic checks must not remain stuck for the full run limit.
+            if !discovered && poll >= 2 { return GitHubRunWatchResult(runs: [], checks: [], statuses: [], failedLogs: "") }
+            try await sleeper()
+        }
+        var logText = ""
+        for run in matched where !["success", "neutral", "skipped"].contains(run.conclusion ?? "") {
+            if let archive = try? await github.workflowLogArchive(repo, runID: run.id) {
+                logText += Self.readLogs(archive) + "\n"
+            }
+        }
+        return GitHubRunWatchResult(runs: matched, checks: checks, statuses: statuses, failedLogs: logger.redact(String(logText.prefix(160_000))))
+    }
+
+    static func readLogs(_ data: Data) -> String {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-logs-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            try PreviewArtifactExtractor.extract(data, to: root)
+            guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else { return "" }
+            return enumerator.compactMap { $0 as? URL }.filter { $0.pathExtension.lowercased() == "txt" || $0.lastPathComponent.contains("_") }.compactMap { try? String(contentsOf: $0, encoding: .utf8) }.joined(separator: "\n")
+        } catch { return "Workflow logs could not be unpacked." }
+    }
+}
 
 public extension GitHubClient {
     /// Starts a workflow only when the caller has already decided the user's request asks for it.
