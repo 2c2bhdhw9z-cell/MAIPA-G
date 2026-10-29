@@ -123,6 +123,22 @@ entries. Next: he tests build 25.**
    (c) approvals for deleting files or changing build setup come from keywords in his message
    (delete, remove, change, edit, update, add, create, with "don't/never/without" handled), which
    unusual wording can fool.
+   2:20 PM, its second list, checked: "GenerateImageTool doesn't exist" is wrong (it's at
+   `AgentCore/Sources/AgentCore/OpenRouter/OpenRouterImages.swift:73`, and build 25 compiled).
+   "Memory tools aren't offered" is wrong for chats (`ChatSession.swift:253-254` adds them to every
+   chat; the list it read is the ready-made agents'). The `mcp-` prefix check is only a warning, by
+   design. Force-unwrapped `URL(string:)!` calls use fixed literal addresses, so they're harmless.
+   Web search fragility and missing Swift are true (Swift because of report 5). Its searches ran
+   through the shell-less exec tool, and it's a free model.
+7. **2:20 PM: "the chat is long" trimming kicks in with the context ring under a quarter.** The
+   notice appeared on the message where he attached two screenshots. Cause:
+   `Transcript.estimatedTokens` (`AgentCore/Sources/AgentCore/Agent/Transcript.swift:69`)
+   counts the JSON text of every content part, so an attached picture's base64 data counts as
+   hundreds of thousands of tokens. `Transcript.fit` then drops old tool results against
+   `route.contextBudget`, here min(75% of context, 300,000) for a chosen model, or 60,000 for free
+   AIs, and halved after a provider says the request is too long. Fix: count images at their real
+   token cost (about 1-2 thousand each) instead of their data length, and base trimming on the
+   same real usage numbers the context ring shows.
 
 Technical notes for the logo fix (for Kiro):
 - iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
