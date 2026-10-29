@@ -8,6 +8,32 @@ Settings, set up and used by the AI on its own), and tool-call bars that end at 
 Linux checks and the iPhone build passed; downloaded and checked: 0.1.0 (25), iPhone arm64, 19
 entries. Next: he tests build 25.**
 
+## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
+He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,
+ask_user, generate_image) and Kiro's (read_file, list_directory, file_search, grep_search, code,
+fs_write, str_replace, fs_append, delete_file, execute_bash, remote_web_search, web_fetch,
+invoke_sub_agent, disclose_context, introspect): **"Whatever tools it doesn't have I want."**
+- Already in every chat: read_file (text), list_files (also finds files by name pattern, like
+  file_search), search_code, create_file, edit_file, delete_file, save_changes, web_search,
+  read_web_page, ask_user, generate_image, add_memory/edit_memory, read_attachment, connector
+  tools. `launch_helpers` exists, but only for agents and workflows. `run_shell` exists, but only
+  in Autonomous.
+- To add to every chat:
+  1. **run_command** (bash / execute_bash): a real shell on the chat computer (report 5's design).
+  2. **append_file** (fs_append).
+  3. **Images in read_file**: show repo pictures (PNG, JPG and so on) to AIs that can see them.
+  4. **code**: symbol search, file outlines, structural (AST) search and rewrite across
+     languages, plus language-server go-to-definition, references, rename and diagnostics. Runs
+     on the chat computer (ast-grep/tree-sitter and language servers), with a simple on-phone
+     outline when no computer is set.
+  5. **Helpers in chats** (invoke_sub_agent): `launch_helpers` for normal chats, each helper with
+     a fresh context.
+  6. **load_context** (disclose_context): load `.kiro/steering` files and `.kiro/skills/*/SKILL.md`
+     on demand, honouring always/auto/manual inclusion.
+  7. **introspect**: answer questions about MAIPA-G itself from its own bundled help.
+  8. **Regex search** (grep_search): check that search_code takes regular expressions; add them
+     if not. List and search respect .gitignore and .kiroignore.
+
 ## Build 24 test reports (29 October 2026, all fixed in build 25)
 1. **10:04 AM: the connector logos aren't the real ones.** "CAN I PLEASE JUST HAVE THE NORMAL
    ICONS/LOGOS". He circled the logo column in Discover and compared it with Grok, Claude and a
