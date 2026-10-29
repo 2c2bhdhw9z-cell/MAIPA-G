@@ -11,6 +11,7 @@ struct TurnActions {
     var switchToFree: () -> Void
     var signIn: () -> Void
     var openURL: (URL) -> Void
+    var toggleStar: (UUID) -> Void
 }
 
 /// One message. Equatable, so while a reply streams in only the reply being written redraws.
@@ -25,11 +26,30 @@ struct MessageRow: View, Equatable {
     }
 
     var body: some View {
+        ZStack(alignment: .topTrailing) {
+            switch message.body {
+            case .user(let user):
+                UserBubble(message: user)
+            case .assistant(let turn):
+                AssistantTurnView(turn: turn, isLatest: isLatest, modelName: modelName, actions: actions)
+            }
+            if canStar {
+                Button { actions.toggleStar(message.id) } label: {
+                    Image(systemName: message.starredMemoryID == nil ? "star" : "star.fill")
+                        .font(.caption)
+                        .foregroundStyle(message.starredMemoryID == nil ? Theme.secondaryText : .yellow)
+                        .padding(7)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(message.starredMemoryID == nil ? "Save as memory" : "Remove memory")
+            }
+        }
+    }
+
+    private var canStar: Bool {
         switch message.body {
-        case .user(let user):
-            UserBubble(message: user)
-        case .assistant(let turn):
-            AssistantTurnView(turn: turn, isLatest: isLatest, modelName: modelName, actions: actions)
+        case .user(let user): return !user.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .assistant(let turn): return turn.steps.contains { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         }
     }
 }
@@ -282,6 +302,7 @@ struct ToolLine: View {
         case "web_search": return "magnifyingglass"
         case "read_web_page": return "globe"
         case "read_attachment": return "paperclip"
+        case "add_memory", "edit_memory": return "brain"
         case AskUserTool.name: return "questionmark.bubble"
         default: return "wrench.and.screwdriver"
         }

@@ -88,6 +88,7 @@ struct ChatScreen: View {
                     thinking: session.chat.thinking,
                     thinkingLevels: app.openRouter.thinkingLevels(for: session.chat.model),
                     repo: session.chat.repo,
+                    groupName: app.groups.name(for: session.chat.groupID),
                     isGitHubConnected: app.github.isConnected,
                     isRunning: session.isRunning,
                     canStop: true,
@@ -105,7 +106,9 @@ struct ChatScreen: View {
                     onPickThinking: { session.setThinking($0) },
                     onPickRepo: { app.sheet = app.github.isConnected ? .repos(.chat(session.id)) : .connectGitHub },
                     onPickBranch: { app.sheet = .branches(.chat(session.id)) },
-                    onClearRepo: { session.setRepo(nil) }
+                    onClearRepo: { session.setRepo(nil) },
+                    onPickGroup: { app.sheet = .groups(.chat(session.id)) },
+                    onSpec: { app.sheet = .specs(session.chat.repo) }
                 )
                 .padding(.horizontal, 12)
                 .padding(.bottom, 6)
@@ -203,7 +206,8 @@ struct ChatScreen: View {
                     app.sheet = .signInOpenRouter
                 }
             },
-            openURL: { openURL($0) }
+            openURL: { openURL($0) },
+            toggleStar: { session.toggleStar($0) }
         )
     }
 }

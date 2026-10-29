@@ -7,19 +7,35 @@ public protocol ProductRecord: Codable, Sendable, Identifiable where ID == UUID 
 }
 
 public struct MemoryRecord: ProductRecord, Hashable {
-    public static let currentFormat = 1
+    public static let currentFormat = 2
     public enum Source: String, Codable, Sendable { case star, ai, user }
     public var format: Int
     public var id: UUID
     public var text: String
     public var isEnabled: Bool
     public var source: Source
+    /// The chat message that created a starred memory. It makes repeated taps idempotent.
+    public var sourceMessageID: UUID?
     public var createdAt: Date
     public var updatedAt: Date
 
-    public init(id: UUID = UUID(), text: String, isEnabled: Bool = true, source: Source = .user, createdAt: Date = Date()) {
+    public init(id: UUID = UUID(), text: String, isEnabled: Bool = true, source: Source = .user, sourceMessageID: UUID? = nil, createdAt: Date = Date()) {
         format = Self.currentFormat; self.id = id; self.text = text; self.isEnabled = isEnabled
-        self.source = source; self.createdAt = createdAt; updatedAt = createdAt
+        self.source = source; self.sourceMessageID = sourceMessageID; self.createdAt = createdAt; updatedAt = createdAt
+    }
+
+    enum CodingKeys: String, CodingKey { case format, id, text, isEnabled, source, sourceMessageID, createdAt, updatedAt }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        format = try c.decodeIfPresent(Int.self, forKey: .format) ?? 1
+        id = try c.decode(UUID.self, forKey: .id)
+        text = try c.decode(String.self, forKey: .text)
+        isEnabled = try c.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        source = try c.decodeIfPresent(Source.self, forKey: .source) ?? .user
+        sourceMessageID = try c.decodeIfPresent(UUID.self, forKey: .sourceMessageID)
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
     }
 }
 
@@ -265,16 +281,98 @@ public struct ConnectorRecord: ProductRecord, Hashable {
 }
 
 public struct SpecRecord: ProductRecord, Hashable {
-    public static let currentFormat = 1
-    public var format = currentFormat
+    public static let currentFormat = 2
+    public var format: Int
     public var id: UUID
     public var repo: RepoRef
+    public var branch: String
+    public var defaultBranch: String
     public var slug: String
-    public var state: JSONValue
+    public var title: String
+    public var request: String
+    public var stage: SpecStage
+    public var requirements: String
+    public var design: String
+    public var checkedDesign: String
+    public var tasksDocument: String
+    public var tasks: [SpecTask]
+    public var approvedStages: Set<SpecStage>
+    public var activeJobID: UUID?
+    public var activeTaskID: UUID?
+    public var saveReceipt: SaveReceipt?
     public var createdAt: Date
     public var updatedAt: Date
-    public init(id: UUID = UUID(), repo: RepoRef, slug: String, state: JSONValue = .object([:]), createdAt: Date = Date()) {
-        self.id = id; self.repo = repo; self.slug = slug; self.state = state; self.createdAt = createdAt; updatedAt = createdAt
+
+    public init(
+        id: UUID = UUID(), repo: RepoRef, branch: String = "main", defaultBranch: String = "main",
+        slug: String, title: String = "", request: String = "", stage: SpecStage = .requirements,
+        createdAt: Date = Date()
+    ) {
+        format = Self.currentFormat; self.id = id; self.repo = repo; self.branch = branch
+        self.defaultBranch = defaultBranch; self.slug = slug; self.title = title.isEmpty ? slug : title
+        self.request = request; self.stage = stage; requirements = ""; design = ""; checkedDesign = ""
+        tasksDocument = ""; tasks = []; approvedStages = []; activeJobID = nil; activeTaskID = nil
+        saveReceipt = nil; self.createdAt = createdAt; updatedAt = createdAt
+    }
+
+    public func artifact(for stage: SpecStage) -> String {
+        switch stage {
+        case .requirements: return requirements
+        case .design: return design
+        case .checkedDesign: return checkedDesign
+        case .tasks: return tasksDocument
+        case .execution, .completed: return ""
+        }
+    }
+
+    public mutating func setArtifact(_ text: String, for stage: SpecStage) {
+        switch stage {
+        case .requirements: requirements = text
+        case .design: design = text
+        case .checkedDesign: checkedDesign = text
+        case .tasks: tasksDocument = text
+        case .execution, .completed: break
+        }
+    }
+
+    public func path(for stage: SpecStage) -> String {
+        let name: String
+        switch stage {
+        case .requirements: name = "requirements.md"
+        case .design, .checkedDesign: name = "design.md"
+        case .tasks, .execution, .completed: name = "tasks.md"
+        }
+        return ".kiro/specs/\(slug)/\(name)"
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case format, id, repo, branch, defaultBranch, slug, title, request, stage, requirements
+        case design, checkedDesign, tasksDocument, tasks, approvedStages, activeJobID, activeTaskID
+        case saveReceipt, createdAt, updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        format = try c.decodeIfPresent(Int.self, forKey: .format) ?? 1
+        id = try c.decode(UUID.self, forKey: .id)
+        repo = try c.decode(RepoRef.self, forKey: .repo)
+        branch = try c.decodeIfPresent(String.self, forKey: .branch) ?? "main"
+        defaultBranch = try c.decodeIfPresent(String.self, forKey: .defaultBranch) ?? branch
+        slug = try c.decode(String.self, forKey: .slug)
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? slug
+        request = try c.decodeIfPresent(String.self, forKey: .request) ?? ""
+        stage = try c.decodeIfPresent(SpecStage.self, forKey: .stage) ?? .requirements
+        requirements = try c.decodeIfPresent(String.self, forKey: .requirements) ?? ""
+        design = try c.decodeIfPresent(String.self, forKey: .design) ?? ""
+        checkedDesign = try c.decodeIfPresent(String.self, forKey: .checkedDesign) ?? design
+        tasksDocument = try c.decodeIfPresent(String.self, forKey: .tasksDocument) ?? ""
+        tasks = try c.decodeIfPresent([SpecTask].self, forKey: .tasks) ?? []
+        approvedStages = try c.decodeIfPresent(Set<SpecStage>.self, forKey: .approvedStages) ?? []
+        activeJobID = try c.decodeIfPresent(UUID.self, forKey: .activeJobID)
+        activeTaskID = try c.decodeIfPresent(UUID.self, forKey: .activeTaskID)
+        saveReceipt = try c.decodeIfPresent(SaveReceipt.self, forKey: .saveReceipt)
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
     }
 }
 

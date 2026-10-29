@@ -460,6 +460,13 @@ private struct Runner {
             record.result = Self.capped(output.forModel)
             record.finishedAt = Date()
             turn.steps[stepIndex].toolCalls[callIndex] = record
+            if !output.isError, callIndex < turn.steps[stepIndex].toolCalls.count {
+                if record.name == "add_memory", !turn.notices.contains("Saved a memory: \(output.detail ?? output.summary)") {
+                    turn.notices.append("Saved a memory: \(output.detail ?? output.summary)")
+                } else if record.name == "edit_memory", !turn.notices.contains("Updated a memory: \(output.detail ?? output.summary)") {
+                    turn.notices.append("Updated a memory: \(output.detail ?? output.summary)")
+                }
+            }
         case .failure(let error):
             let base = turn.steps[stepIndex].toolCalls[callIndex].summary.replacingOccurrences(of: "…", with: "")
             let message: String

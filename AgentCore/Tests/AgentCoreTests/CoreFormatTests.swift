@@ -63,7 +63,86 @@ struct CoreFormatTests {
         let memory = MemoryRecord(text: "Use plain words", source: .star)
         let decodedMemory = try JSONCoding.decoder().decode(MemoryRecord.self, from: JSONCoding.encoder().encode(memory))
         #expect(decodedMemory.id == memory.id && decodedMemory.text == memory.text && decodedMemory.source == .star)
-        #expect(Chat.currentFormat == 2)
+        #expect(Chat.currentFormat == 3)
+    }
+
+    @Test func oldChatDefaultsGroupsStarsAndMemories() throws {
+        var chat = Chat(title: "Old")
+        chat.messages = [.user("hello")]
+        var object = try #require(JSONSerialization.jsonObject(with: JSONCoding.encoder().encode(chat)) as? [String: Any])
+        object.removeValue(forKey: "groupID")
+        object.removeValue(forKey: "memoryContext")
+        object.removeValue(forKey: "saveReceipts")
+        if var messages = object["messages"] as? [[String: Any]], !messages.isEmpty {
+            messages[0].removeValue(forKey: "starredMemoryID")
+            object["messages"] = messages
+        }
+        let decoded = try JSONCoding.decoder().decode(Chat.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(decoded.groupID == nil)
+        #expect(decoded.memoryContext.isEmpty)
+        #expect(decoded.messages.first?.starredMemoryID == nil)
+    }
+
+    @Test func specsApproveInOrderAndResumeTasks() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-specs-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let coordinator = SpecCoordinator(dataDirectory: root)
+        let repo = RepoRef(owner: "octo", name: "app")
+        var spec = try await coordinator.create(title: "Login Screen", request: "Build login", repo: repo, branch: "main", defaultBranch: "main")
+        #expect(spec.slug == "login-screen")
+        let second = try await coordinator.create(title: "Login Screen", request: "Another", repo: repo, branch: "main", defaultBranch: "main")
+        #expect(second.slug == "login-screen-2")
+        await #expect(throws: SpecFailure.self) { try await coordinator.approve(spec.id, stage: .design) }
+
+        for (stage, text) in [
+            (SpecStage.requirements, "# Requirements"),
+            (.design, "# Design"),
+            (.checkedDesign, "# Checked design"),
+            (.tasks, "- [ ] First task\n- [ ] Second task"),
+        ] {
+            spec = try await coordinator.updateArtifact(spec.id, stage: stage, text: text)
+            spec = try await coordinator.approve(spec.id, stage: stage)
+        }
+        #expect(spec.stage == .execution && spec.tasks.count == 2)
+        spec = try await coordinator.completeTask(spec.id, taskID: spec.tasks[0].id)
+        let restored = try #require(await coordinator.load(spec.id))
+        #expect(restored.tasks[0].isComplete && restored.stage == .execution)
+        spec = try await coordinator.completeTask(spec.id, taskID: spec.tasks[1].id)
+        #expect(spec.stage == .completed)
+        #expect(spec.path(for: .requirements) == ".kiro/specs/login-screen/requirements.md")
+        #expect(SpecWorkflows.draft(.checkedDesign, context: "x").steps.first?.agentID == "design-checker")
+    }
+
+    @Test func memoryAndGroupRecordsRoundTripWithSourcesAndDates() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-product-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let messageID = UUID()
+        let memoryStore = ProductStore<MemoryRecord>(dataDirectory: root, folder: "memories")
+        let groupStore = ProductStore<ChatGroupRecord>(dataDirectory: root, folder: "groups")
+        let memory = MemoryRecord(text: "Use plain words", isEnabled: false, source: .star, sourceMessageID: messageID, createdAt: Date(timeIntervalSince1970: 100))
+        let group = ChatGroupRecord(name: "Project", order: 2)
+        try await memoryStore.save(memory)
+        try await groupStore.save(group)
+        let loaded = try #require(await memoryStore.load(memory.id))
+        #expect(loaded.source == .star && loaded.sourceMessageID == messageID && !loaded.isEnabled)
+        #expect(loaded.createdAt == Date(timeIntervalSince1970: 100))
+        #expect(await groupStore.load(group.id)?.order == 2)
+
+        let starMessage = UUID()
+        let firstStar = try await StarMemoryService.toggle(store: memoryStore, messageID: starMessage, text: "A starred message", currentMemoryID: nil)
+        let countAfterFirst = await memoryStore.loadAll().count
+        let secondStar = try await StarMemoryService.toggle(store: memoryStore, messageID: starMessage, text: "A starred message", currentMemoryID: firstStar)
+        #expect(countAfterFirst == 2)
+        #expect(secondStar == nil)
+        if let firstStar { #expect(await memoryStore.load(firstStar) == nil) }
+
+        let chatStore = ChatStore(dataDirectory: root)
+        var grouped = Chat(title: "Keep me", groupID: group.id)
+        grouped.messages = [.user("Still here")]
+        try await chatStore.save(grouped)
+        #expect(try await chatStore.clearGroup(group.id) == 1)
+        let kept = try #require(await chatStore.load(grouped.id))
+        #expect(kept.groupID == nil && kept.messages.first?.userText == "Still here")
     }
 
     @Test func builtInAgentsAndWorkflowsHaveCompletePolicies() throws {

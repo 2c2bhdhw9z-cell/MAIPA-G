@@ -77,6 +77,8 @@ struct AppSettings: Codable, Equatable, Sendable {
     var directSaveRepos: [String: Bool] = [:]
     /// When work moves to an Autonomous GitHub runner. Big jobs too is the factory default.
     var workflowPolicy: WorkflowPolicy = .bigJobs
+    /// Master switch for adding enabled memories to newly started chats.
+    var memoriesOn = true
 
     init() {}
 
@@ -92,6 +94,7 @@ struct AppSettings: Codable, Equatable, Sendable {
         notificationsOn = try c.decodeIfPresent(Bool.self, forKey: .notificationsOn) ?? true
         directSaveRepos = try c.decodeIfPresent([String: Bool].self, forKey: .directSaveRepos) ?? [:]
         workflowPolicy = (try? c.decodeIfPresent(WorkflowPolicy.self, forKey: .workflowPolicy)) ?? .bigJobs
+        memoriesOn = try c.decodeIfPresent(Bool.self, forKey: .memoriesOn) ?? true
     }
 
     func savesDirectly(to repo: RepoRef) -> Bool { directSaveRepos[repo.fullName] ?? false }

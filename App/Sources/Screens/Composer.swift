@@ -28,6 +28,7 @@ struct Composer: View {
     var thinking: ThinkingLevel
     var thinkingLevels: [ThinkingLevel]
     var repo: ChatRepo?
+    var groupName: String?
     var isGitHubConnected: Bool
     var isRunning: Bool
     var canStop: Bool
@@ -38,6 +39,8 @@ struct Composer: View {
     var onPickRepo: () -> Void
     var onPickBranch: () -> Void
     var onClearRepo: () -> Void
+    var onPickGroup: () -> Void
+    var onSpec: () -> Void
 
     @FocusState private var focused: Bool
     @Environment(AppModel.self) private var app
@@ -120,26 +123,30 @@ struct Composer: View {
             .padding(12)
             .glassPanel(cornerRadius: 26)
 
-            HStack(spacing: 8) {
-                Button { webEnabled.toggle() } label: {
-                    Label("Web", systemImage: webEnabled ? "globe" : "globe.badge.chevron.backward")
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    Button(action: onSpec) { Label("Spec", systemImage: "list.clipboard").font(.caption.weight(.semibold)) }
+                    Button(action: onPickGroup) { Label(groupName ?? "Group", systemImage: "folder.badge.plus").font(.caption.weight(.semibold)) }
+                    Button { webEnabled.toggle() } label: {
+                        Label("Web", systemImage: webEnabled ? "globe" : "globe.badge.chevron.backward")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 10).padding(.vertical, 7)
+                            .background(webEnabled ? theme.accent.opacity(0.16) : Theme.raised, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(webEnabled ? "Web tools on" : "Web tools off")
+                    Toggle("Autonomous", isOn: $autonomous)
+                        .toggleStyle(.button)
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.capsule)
                         .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 10).padding(.vertical, 7)
-                        .background(webEnabled ? theme.accent.opacity(0.16) : Theme.raised, in: Capsule())
+                        .accessibilityHint("Runs repo work on GitHub's computer")
+                    PhotosPicker(selection: $photoItem, matching: .images) {
+                        Label("Photo", systemImage: "photo").font(.caption.weight(.semibold))
+                    }
+                    Button { choosingFile = true } label: { Label("File", systemImage: "paperclip").font(.caption.weight(.semibold)) }
+                    Spacer()
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(webEnabled ? "Web tools on" : "Web tools off")
-                Toggle("Autonomous", isOn: $autonomous)
-                    .toggleStyle(.button)
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.capsule)
-                    .font(.caption.weight(.semibold))
-                    .accessibilityHint("Runs repo work on GitHub's computer")
-                PhotosPicker(selection: $photoItem, matching: .images) {
-                    Label("Photo", systemImage: "photo").font(.caption.weight(.semibold))
-                }
-                Button { choosingFile = true } label: { Label("File", systemImage: "paperclip").font(.caption.weight(.semibold)) }
-                Spacer()
             }
             .padding(.horizontal, 4)
 

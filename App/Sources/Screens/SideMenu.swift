@@ -6,7 +6,14 @@ struct SideMenu: View {
     @Environment(AppModel.self) private var app
     @Environment(\.theme) private var theme
     @State private var query = ""
-    @State private var tab: MenuTab = .chats
+    @State private var tab: MenuTab = {
+        switch PreviewScenes.scene {
+        case "menu-agents": return .agents
+        case "menu-workflows": return .workflows
+        case "menu-memories": return .memories
+        default: return .chats
+        }
+    }()
     @State private var selected: ChatSummary?
     @State private var showRename = false
     @State private var showDelete = false
@@ -75,6 +82,7 @@ struct SideMenu: View {
         case chats = "Chats"
         case agents = "Agents"
         case workflows = "Workflows"
+        case memories = "Memories"
         var id: String { rawValue }
     }
 
@@ -116,7 +124,7 @@ struct SideMenu: View {
                     Text(query.isEmpty ? "Your chats will show up here." : "No chats match.")
                         .font(.subheadline).foregroundStyle(Theme.secondaryText).listRowBackground(Color.clear)
                 }
-                ForEach(groups, id: \.title) { group in
+                ForEach(groups, id: \.id) { group in
                     Section {
                         ForEach(group.chats) { chat in row(chat) }
                     } header: {
@@ -135,6 +143,27 @@ struct SideMenu: View {
                 app.automations.workflows.filter { query.isEmpty || ($0.name + " " + $0.summary).localizedCaseInsensitiveContains(query) },
                 empty: "No workflows match."
             ) { workflow in app.sheet = .workflowEditor(workflow.id) }
+        case .memories:
+            let filteredMemories = app.memories.memories.filter { query.isEmpty || $0.text.localizedCaseInsensitiveContains(query) }
+            List {
+                if filteredMemories.isEmpty {
+                    Text(query.isEmpty ? "No memories yet." : "No memories match.")
+                        .font(.subheadline).foregroundStyle(Theme.secondaryText).listRowBackground(Color.clear)
+                }
+                ForEach(filteredMemories) { memory in
+                    Button {
+                        app.sheet = .memoryEditor(memory.id)
+                        app.isMenuOpen = false
+                    } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(memory.text).lineLimit(3)
+                            Label(memory.source.label, systemImage: memory.source.icon).font(.caption).foregroundStyle(Theme.secondaryText)
+                        }
+                    }.buttonStyle(.plain)
+                }
+                Button { app.sheet = .memories; app.isMenuOpen = false } label: { Label("Manage memories", systemImage: "slider.horizontal.3") }
+            }
+            .listStyle(.plain).scrollContentBackground(.hidden)
         }
     }
 
@@ -272,17 +301,28 @@ struct SideMenu: View {
     // MARK: Grouping by day
 
     private struct Group {
+        var id: String
         var title: String
         var chats: [ChatSummary]
     }
 
     private var groupedChats: [Group] {
         let chats = app.library.summaries.filter { $0.matches(query) }
+        var result: [Group] = []
+        for userGroup in app.groups.groups {
+            let members = chats.filter { $0.groupID == userGroup.id }
+            if !members.isEmpty { result.append(Group(id: "group-\(userGroup.id.uuidString)", title: userGroup.name, chats: members)) }
+        }
+
+        let ungrouped = chats.filter { summary in
+            guard let id = summary.groupID else { return true }
+            return !app.groups.groups.contains { $0.id == id }
+        }
         let calendar = Calendar.current
         let now = Date()
         var order: [String] = []
         var buckets: [String: [ChatSummary]] = [:]
-        for chat in chats {
+        for chat in ungrouped {
             let title: String
             if calendar.isDateInToday(chat.updatedAt) {
                 title = "Today"
@@ -298,6 +338,7 @@ struct SideMenu: View {
             if buckets[title] == nil { order.append(title) }
             buckets[title, default: []].append(chat)
         }
-        return order.map { Group(title: $0, chats: buckets[$0] ?? []) }
+        result += order.map { Group(id: "date-\($0)", title: $0, chats: buckets[$0] ?? []) }
+        return result
     }
 }

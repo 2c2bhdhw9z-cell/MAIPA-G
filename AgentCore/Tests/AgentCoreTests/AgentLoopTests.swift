@@ -367,6 +367,28 @@ struct AgentLoopTests {
         #expect(TaskDifficulty.estimate("What does the main file do?", hasRepo: true) == .normal)
     }
 
+    @Test func aiMemoryToolsPersistAndShowANotice() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-memory-tool-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProductStore<MemoryRecord>(dataDirectory: root, folder: "memories")
+        let transport = ScriptedTransport([
+            .events([Self.toolCall(id: "m1", name: "add_memory", arguments: #"{"text":"Keep replies short"}"#), Self.toolsDone]),
+            .events([Self.text("I'll remember that."), Self.done]),
+        ])
+        let result = await Self.runToEnd(transport, chat: Self.newChat("Remember short replies"), route: Self.route(), tools: [AddMemoryTool(store: store), EditMemoryTool(store: store)])
+        let turn = try #require(result.0)
+        let saved = try #require(await store.loadAll().first)
+        #expect(saved.text == "Keep replies short" && saved.source == .ai)
+        #expect(turn.notices.contains { $0 == "Saved a memory: Keep replies short" })
+        #expect(turn.steps[0].toolCalls[0].summary == "Saved a memory")
+
+        _ = try await AddMemoryTool(store: store).run(arguments: ["text": "Keep replies short"], progress: { _ in })
+        #expect(await store.loadAll().count == 1, "adding the same memory is idempotent")
+        let prompt = SystemPrompt.make(userLogin: nil, repo: nil, memories: ["Keep replies short"])
+        #expect(prompt.contains("Memories the person chose"))
+        #expect(prompt.contains("- Keep replies short"))
+    }
+
     @Test func reportOnlyAgentCannotReceiveChangingTools() async throws {
         let transport = ScriptedTransport([.events([Self.text("Checked."), Self.done])])
         let agent = try #require(BuiltInAgents.named("investigator"))

@@ -20,17 +20,24 @@ struct HomeScreen: View {
                     .padding(.top, 6)
                 Spacer(minLength: 24)
                 if app.openRouter.isSignedIn {
-                    HStack(spacing: 8) {
-                        Button { app.sheet = .agents } label: { Label("Agents", systemImage: "person.crop.circle") }
-                        Button { app.sheet = .workflows } label: { Label("Workflows", systemImage: "point.3.connected.trianglepath.dotted") }
-                        if let balance = app.openRouter.balance { Label(balance.dollars, systemImage: "creditcard") }
-                        if let free = app.openRouter.freeRequestsLeft { Label("\(free) free", systemImage: "sparkles") }
-                        if let repo = home.repo {
-                            Button { app.sheet = .files(repo) } label: { Label("Files", systemImage: "folder") }
-                        }
-                        if !app.jobs.jobs.isEmpty {
-                            Button { app.jobs.show() } label: {
-                                Label(app.jobs.activeCount > 0 ? "\(app.jobs.activeCount) working" : "Jobs", systemImage: "gearshape.2")
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            Button { app.sheet = app.github.isConnected ? .repos(.home) : .connectGitHub } label: {
+                                Label(app.github.isConnected ? "GitHub ✓" : "GitHub", systemImage: "link")
+                            }
+                            Button { app.sheet = .specs(home.repo) } label: { Label("Specs", systemImage: "list.clipboard") }
+                            Button { app.sheet = .workflows } label: { Label("Workflows", systemImage: "point.3.connected.trianglepath.dotted") }
+                            Button { app.sheet = .agents } label: { Label("Agents", systemImage: "person.crop.circle") }
+                            if let balance = app.openRouter.balance { Label(balance.dollars, systemImage: "creditcard") }
+                            else { Label("OpenRouter ✓", systemImage: "sparkles") }
+                            if let free = app.openRouter.freeRequestsLeft { Label("\(free) free", systemImage: "sparkles") }
+                            if let repo = home.repo {
+                                Button { app.sheet = .files(repo) } label: { Label("Files", systemImage: "folder") }
+                            }
+                            if !app.jobs.jobs.isEmpty {
+                                Button { app.jobs.show() } label: {
+                                    Label(app.jobs.activeCount > 0 ? "\(app.jobs.activeCount) working" : "Jobs", systemImage: "gearshape.2")
+                                }
                             }
                         }
                     }
@@ -49,6 +56,7 @@ struct HomeScreen: View {
                     thinking: home.thinking,
                     thinkingLevels: app.openRouter.thinkingLevels(for: home.model),
                     repo: home.repo,
+                    groupName: app.groups.name(for: home.groupID),
                     isGitHubConnected: app.github.isConnected,
                     isRunning: false,
                     canStop: false,
@@ -58,7 +66,9 @@ struct HomeScreen: View {
                     onPickThinking: { app.choose(thinking: $0, for: .home) },
                     onPickRepo: { app.sheet = app.github.isConnected ? .repos(.home) : .connectGitHub },
                     onPickBranch: { app.sheet = .branches(.home) },
-                    onClearRepo: { app.choose(repo: nil, for: .home) }
+                    onClearRepo: { app.choose(repo: nil, for: .home) },
+                    onPickGroup: { app.sheet = .groups(.home) },
+                    onSpec: { app.sheet = .specs(home.repo) }
                 )
             }
             .padding(.horizontal, 14)

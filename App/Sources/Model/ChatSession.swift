@@ -116,6 +116,26 @@ final class ChatSession: Identifiable {
         touch()
     }
 
+    func setGroup(_ id: UUID?) {
+        chat.groupID = id
+        touch()
+    }
+
+    func toggleStar(_ messageID: UUID) {
+        guard let index = chat.messages.firstIndex(where: { $0.id == messageID }), let app else { return }
+        let message = chat.messages[index]
+        let text: String
+        switch message.body {
+        case .user(let user): text = user.text
+        case .assistant(let turn): text = turn.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n")
+        }
+        Task {
+            let memoryID = await app.memories.toggleStar(messageID: message.id, text: text, currentMemoryID: message.starredMemoryID)
+            chat.messages[index].starredMemoryID = memoryID
+            touch()
+        }
+    }
+
     func rename(_ title: String) {
         let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
@@ -200,6 +220,8 @@ final class ChatSession: Identifiable {
             attachmentData[attachment.id] = try? await app.attachmentStore.data(for: attachment)
         }
         var tools: [any AgentTool] = webEnabled ? [WebSearchTool(transport: app.transport), ReadWebPageTool(transport: app.transport)] : []
+        tools.append(AddMemoryTool(store: app.memories.store))
+        tools.append(EditMemoryTool(store: app.memories.store))
         if !allAttachments.filter({ $0.kind == .text }).isEmpty {
             tools.append(ReadAttachmentTool(attachments: allAttachments, store: app.attachmentStore))
         }
@@ -262,7 +284,7 @@ final class ChatSession: Identifiable {
         let input = AgentTurnInput(
             chat: chat,
             route: route,
-            systemPrompt: SystemPrompt.make(userLogin: app.github.login, repo: repoContext),
+            systemPrompt: SystemPrompt.make(userLogin: app.github.login, repo: repoContext, memories: chat.memoryContext),
             tools: tools,
             allowTools: app.openRouter.supportsTools(chat.model),
             spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil,
@@ -283,6 +305,10 @@ final class ChatSession: Identifiable {
         for await event in run.events {
             guard case .updated(let turn, let milestone) = event else { continue }
             receive(turn, milestone: milestone)
+        }
+        if lastTurn?.steps.flatMap(\.toolCalls).contains(where: { $0.name == "add_memory" || $0.name == "edit_memory" }) == true {
+            await app.memories.load()
+            app.sync.request()
         }
         if let saves = changeSession {
             let receipts = await saves.receipts()

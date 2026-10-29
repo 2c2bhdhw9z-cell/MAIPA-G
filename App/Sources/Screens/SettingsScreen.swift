@@ -37,6 +37,7 @@ struct SettingsScreen: View {
                 accounts
                 look
                 workflowPolicy
+                memories
                 money
                 notifications
                 repoSaving
@@ -66,6 +67,7 @@ struct SettingsScreen: View {
                     settings.notificationsOn = edited.notificationsOn
                     settings.directSaveRepos = edited.directSaveRepos
                     settings.workflowPolicy = edited.workflowPolicy
+                    settings.memoriesOn = edited.memoriesOn
                 }
             }
             .task {
@@ -196,6 +198,15 @@ struct SettingsScreen: View {
             Text("Workflows")
         } footer: {
             Text("Autonomous uses GitHub's computer for repo work. Jobs without a repo stay on this iPhone.")
+        }
+    }
+
+    private var memories: some View {
+        Section {
+            Toggle("Use memories in new chats", isOn: $draft.memoriesOn)
+            Button("Edit memories") { app.sheet = .memories }
+        } header: { Text("Memories") } footer: {
+            Text("Each memory also has its own switch. Memories start empty.")
         }
     }
 

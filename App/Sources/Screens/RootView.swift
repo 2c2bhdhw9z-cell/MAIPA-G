@@ -128,6 +128,12 @@ struct SheetContent: View {
                 )
             }
         case .workflowMaker: NavigationStack { WorkflowMakerScreen() }
+        case .memories: MemoriesScreen()
+        case .memoryEditor(let id):
+            NavigationStack { MemoryEditorScreen(record: id.flatMap { value in app.memories.memories.first { $0.id == value } }) }
+        case .groups(let target): GroupPicker(target: target)
+        case .specs(let repo): SpecsScreen(repo: repo)
+        case .specReview(let id): NavigationStack { SpecReviewScreen(specID: id) }
         }
     }
 }

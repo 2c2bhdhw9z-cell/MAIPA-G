@@ -51,6 +51,19 @@ public actor ChatStore {
         try? FileManager.default.removeItem(at: url(for: id))
     }
 
+    /// Removes only a deleted group's association. Every chat and message remains intact.
+    @discardableResult
+    public func clearGroup(_ groupID: UUID) throws -> Int {
+        var changed = 0
+        for var chat in loadAll() where chat.groupID == groupID {
+            chat.groupID = nil
+            chat.updatedAt = Date()
+            try save(chat)
+            changed += 1
+        }
+        return changed
+    }
+
     /// Writes any small JSON document (such as settings.json) into the mirrored folder.
     public func saveDocument<T: Encodable>(_ value: T, at relativePath: String) throws {
         let url = dataDirectory.appendingPathComponent(relativePath)

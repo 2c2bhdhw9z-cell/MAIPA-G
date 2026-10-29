@@ -57,7 +57,7 @@ public struct ChatRepo: Codable, Sendable, Hashable {
 
 /// One conversation. Saved as one JSON file, on the phone and in the user's private data repo.
 public struct Chat: Codable, Sendable, Identifiable, Hashable {
-    public static let currentFormat = 2
+    public static let currentFormat = 3
 
     public var format: Int
     public var id: UUID
@@ -78,6 +78,8 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
     public var activeJobID: UUID?
     public var workflowID: UUID?
     public var specID: UUID?
+    /// Enabled memories captured when this chat began. Existing chats do not change underneath the user.
+    public var memoryContext: [String]
 
     public init(
         id: UUID = UUID(),
@@ -86,7 +88,9 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         repo: ChatRepo? = nil,
         model: ModelChoice = .auto,
         thinking: ThinkingLevel = .default,
-        messages: [ChatMessage] = []
+        messages: [ChatMessage] = [],
+        groupID: UUID? = nil,
+        memoryContext: [String] = []
     ) {
         self.format = Self.currentFormat
         self.id = id
@@ -98,11 +102,37 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         self.model = model
         self.thinking = thinking
         self.messages = messages
-        self.groupID = nil
+        self.groupID = groupID
         self.saveReceipts = nil
         self.activeJobID = nil
         self.workflowID = nil
         self.specID = nil
+        self.memoryContext = memoryContext
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case format, id, title, titleIsCustom, createdAt, updatedAt, repo, model, thinking, messages
+        case groupID, saveReceipts, activeJobID, workflowID, specID, memoryContext
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        format = try c.decodeIfPresent(Int.self, forKey: .format) ?? 1
+        id = try c.decode(UUID.self, forKey: .id)
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
+        titleIsCustom = try c.decodeIfPresent(Bool.self, forKey: .titleIsCustom) ?? false
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+        repo = try c.decodeIfPresent(ChatRepo.self, forKey: .repo)
+        model = try c.decodeIfPresent(ModelChoice.self, forKey: .model) ?? .auto
+        thinking = try c.decodeIfPresent(ThinkingLevel.self, forKey: .thinking) ?? .default
+        messages = try c.decodeIfPresent([ChatMessage].self, forKey: .messages) ?? []
+        groupID = try c.decodeIfPresent(UUID.self, forKey: .groupID)
+        saveReceipts = try c.decodeIfPresent([SaveReceipt].self, forKey: .saveReceipts)
+        activeJobID = try c.decodeIfPresent(UUID.self, forKey: .activeJobID)
+        workflowID = try c.decodeIfPresent(UUID.self, forKey: .workflowID)
+        specID = try c.decodeIfPresent(UUID.self, forKey: .specID)
+        memoryContext = try c.decodeIfPresent([String].self, forKey: .memoryContext) ?? []
     }
 
     /// Everything the chat has cost so far, in dollars, as OpenRouter reported it.
@@ -140,11 +170,23 @@ public struct ChatMessage: Codable, Sendable, Identifiable, Hashable {
     public var id: UUID
     public var createdAt: Date
     public var body: Body
+    public var starredMemoryID: UUID?
 
-    public init(id: UUID = UUID(), createdAt: Date = Date(), body: Body) {
+    public init(id: UUID = UUID(), createdAt: Date = Date(), body: Body, starredMemoryID: UUID? = nil) {
         self.id = id
         self.createdAt = createdAt
         self.body = body
+        self.starredMemoryID = starredMemoryID
+    }
+
+    enum CodingKeys: String, CodingKey { case id, createdAt, body, starredMemoryID }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        body = try c.decode(Body.self, forKey: .body)
+        starredMemoryID = try c.decodeIfPresent(UUID.self, forKey: .starredMemoryID)
     }
 
     public static func user(_ text: String, attachments: [AttachmentReference] = []) -> ChatMessage {

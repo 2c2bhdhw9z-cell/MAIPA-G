@@ -23,6 +23,11 @@ enum AppSheet: Identifiable, Hashable {
     case workflows
     case workflowEditor(String?)
     case workflowMaker
+    case memories
+    case memoryEditor(UUID?)
+    case groups(ComposerTarget)
+    case specs(ChatRepo?)
+    case specReview(UUID)
 
     var id: String {
         switch self {
@@ -39,6 +44,11 @@ enum AppSheet: Identifiable, Hashable {
         case .workflows: return "workflows"
         case .workflowEditor(let id): return "workflow-editor-\(id ?? "new")"
         case .workflowMaker: return "workflow-maker"
+        case .memories: return "memories"
+        case .memoryEditor(let id): return "memory-editor-\(id?.uuidString ?? "new")"
+        case .groups(let target): return "groups-\(target)"
+        case .specs(let repo): return "specs-\(repo?.ref.fullName ?? "all")"
+        case .specReview(let id): return "spec-review-\(id.uuidString)"
         }
     }
 }
@@ -53,6 +63,7 @@ final class HomeDraft {
     var thinking: ThinkingLevel = .default
     var repo: ChatRepo?
     var attachments: [AttachmentReference] = []
+    var groupID: UUID?
     var webEnabled = true
     /// Always starts off for a new chat.
     var autonomous = false
@@ -74,6 +85,9 @@ final class AppModel {
     let notifications = Notifications()
     let jobs: JobCoordinator
     let automations: AutomationLibrary
+    let memories: MemoryLibrary
+    let groups: GroupLibrary
+    let specs: SpecCoordinator
     let backgroundJobs = BackgroundJobs()
     let home = HomeDraft()
     private(set) var settings: AppSettings
@@ -96,11 +110,17 @@ final class AppModel {
         attachmentStore = AttachmentStore(dataDirectory: paths.data)
         jobs = JobCoordinator(dataDirectory: paths.data)
         automations = AutomationLibrary(dataDirectory: paths.data)
+        memories = MemoryLibrary(dataDirectory: paths.data)
+        groups = GroupLibrary(dataDirectory: paths.data)
+        specs = SpecCoordinator(dataDirectory: paths.data)
         settings = Self.readSettings(paths)
         library.app = self
         sync.app = self
         jobs.app = self
         automations.app = self
+        memories.app = self
+        groups.app = self
+        specs.app = self
         backgroundJobs.app = self
         backgroundJobs.register()
         home.repo = settings.lastRepo
@@ -120,6 +140,9 @@ final class AppModel {
         await library.load()
         await jobs.load()
         await automations.load()
+        await memories.load()
+        await groups.load()
+        await specs.load()
         async let models: Void = openRouter.loadModels()
         async let key: Void = openRouter.refreshKeyInfo()
         await github.refresh()
@@ -157,6 +180,7 @@ final class AppModel {
             Task {
                 await sync.syncNow()
                 await jobs.refresh()
+                await specs.refreshJobs()
                 grace.end()
             }
         case .active:
@@ -210,6 +234,15 @@ final class AppModel {
         if (report.downloaded + report.deletedHere).contains(where: { $0.hasPrefix("agents/") || $0.hasPrefix("workflows/") }) {
             await automations.load()
         }
+        if (report.downloaded + report.deletedHere).contains(where: { $0.hasPrefix("memories/") }) {
+            await memories.load()
+        }
+        if (report.downloaded + report.deletedHere).contains(where: { $0.hasPrefix("groups/") }) {
+            await groups.load()
+        }
+        if (report.downloaded + report.deletedHere).contains(where: { $0.hasPrefix("specs/") }) {
+            await specs.load()
+        }
     }
 
     // MARK: Chats
@@ -226,10 +259,11 @@ final class AppModel {
             let request = text
             Task { await jobs.start(request: request, repo: repo) }
         } else {
-            library.startChat(text: text, attachments: home.attachments, repo: home.repo, model: home.model, thinking: home.thinking)
+            library.startChat(text: text, attachments: home.attachments, repo: home.repo, model: home.model, thinking: home.thinking, groupID: home.groupID, memories: memories.activeTexts)
         }
         home.text = ""
         home.attachments = []
+        home.groupID = nil
         home.model = .auto
         home.thinking = .default
         home.autonomous = false
@@ -308,6 +342,20 @@ final class AppModel {
         }
     }
 
+    func group(for target: ComposerTarget) -> UUID? {
+        switch target {
+        case .home: return home.groupID
+        case .chat(let id): return library.session(id)?.chat.groupID
+        }
+    }
+
+    func choose(group id: UUID?, for target: ComposerTarget) {
+        switch target {
+        case .home: home.groupID = id
+        case .chat(let chatID): library.session(chatID)?.setGroup(id)
+        }
+    }
+
     // MARK: Screenshots
 
     /// Sets up one made-up scene for the build check's screenshots (see PreviewScenes).
@@ -319,6 +367,9 @@ final class AppModel {
             home.repo = ChatRepo(ref: RepoRef(owner: "2c2bhdhw9z-cell", name: "MAIPA-G"), branch: "main", defaultBranch: "main", isPrivate: false)
         }
         let summaries = PreviewScenes.sampleSummaries()
+        groups.preview(PreviewScenes.sampleGroups())
+        memories.preview(PreviewScenes.sampleMemories())
+        specs.preview(PreviewScenes.sampleSpecs())
         switch scene {
         case "chat": library.preview(summaries: summaries, open: PreviewScenes.sampleChat())
         case "questions": library.preview(summaries: summaries, open: PreviewScenes.questionChat())
@@ -352,6 +403,38 @@ final class AppModel {
         case "workflow-maker":
             library.preview(summaries: summaries, open: nil)
             sheet = .workflowMaker
+        case "memories", "menu-memories":
+            library.preview(summaries: summaries, open: nil)
+            if scene == "memories" { sheet = .memories } else { isMenuOpen = true }
+        case "memory-editor":
+            library.preview(summaries: summaries, open: nil)
+            sheet = .memoryEditor(memories.memories.first?.id)
+        case "chat-memory":
+            var chat = PreviewScenes.sampleChat()
+            if !chat.messages.isEmpty { chat.messages[0].starredMemoryID = memories.memories.first?.id }
+            library.preview(summaries: summaries, open: chat)
+        case "groups":
+            library.preview(summaries: summaries, open: nil)
+            home.groupID = PreviewScenes.previewGroupID
+            sheet = .groups(.home)
+        case "specs":
+            library.preview(summaries: summaries, open: nil)
+            sheet = .specs(home.repo)
+        case "spec-requirements", "spec-design", "spec-tasks":
+            var spec = PreviewScenes.sampleSpecs()[0]
+            if scene == "spec-requirements" {
+                spec.stage = .requirements
+                spec.approvedStages = []
+            } else if scene == "spec-design" {
+                spec.stage = .checkedDesign
+                spec.approvedStages = [.requirements, .design]
+            }
+            specs.preview([spec])
+            library.preview(summaries: summaries, open: nil)
+            sheet = .specReview(spec.id)
+        case "menu-agents", "menu-workflows":
+            library.preview(summaries: summaries, open: nil)
+            isMenuOpen = true
         case "connect":
             library.preview(summaries: [], open: nil)
             sheet = .connectGitHub
