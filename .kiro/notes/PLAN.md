@@ -1,8 +1,9 @@
 # MAIPA-G plan
 
-**Status (28 October 2026, 5 PM Eastern): he said go ("I want to continue this"). Build 1 is
-being made on the branch `build-1` (one pull request, squash-merged when its build check passes).
-Every question is answered; the plan below is final.**
+**Status (28 October 2026, 8 PM Eastern): Build 1 is finished and merged into main (pull
+request #1, squash-merged; its branch is deleted). Its .ipa is on the Releases page. The sign-ins
+need GitHub Pages switched on once (Settings → Pages → main, /docs); the sandbox isn't allowed to,
+so he was asked to. Next: he tests Build 1, then Build 2 when he says go. The plan below is final.**
 
 ## What it is
 An iPhone app (.ipa) for AI agents and workflows, with GitHub built in, like Kiro (app.kiro.dev)
@@ -206,7 +207,7 @@ H. Safety, code, order
 - **Agent core:** one Swift package (`AgentCore`) with no Apple-only frameworks, shared by the
   app and a Linux command-line runner for cloud jobs, so it can be built and tested on Linux in
   the Kiro sandbox.
-- **Builds:** GitHub Actions on macos-latest. Run xcodegen, then xcodebuild with signing off.
+- **Builds:** GitHub Actions on macos-26 (Xcode 26.6). Run xcodegen, then xcodebuild with signing off.
   Zip `Payload/MAIPA-G.app` into `MAIPA-G-<run>.ipa` and `MAIPA-G.ipa`, and publish GitHub
   Release `build-<run>-<sha>` from main only. Pull requests build as a check only. Reuse the
   packaging, .ipa checks and release retry logic from Continuum's `.github/workflows/ios.yml`.
@@ -267,3 +268,25 @@ H. Safety, code, order
   - If the PR from an earlier session was merged or closed, start a new branch.
   - The per-repo option saves straight to the branch. A repo's own rules files override the
     default.
+- **What Build 1 settled (28 October 2026):**
+  - GitHub: each person gets their own GitHub App, made with the manifest flow
+    (`docs/github/new/`). `request_oauth_on_install: true` makes create, install and sign-in
+    one trip. Its permissions cover the later builds too, because an app keeps what it was made
+    with: contents, pull requests, issues, actions, workflows and secrets (write); checks and
+    statuses (read); and `repository_creation: write`. That is the narrow permission GitHub
+    added on 13 October 2026, used instead of `administration`, which could also delete repos.
+    The app is called "MAIPA-G", or "MAIPA-G-xxxx" if that name is taken, and its commits show
+    as `<app>[bot]`.
+  - The app trusts GitHub's own list of installations (asked with the signed JWT), not the
+    `installation_id` in the redirect.
+  - Reading repos: the branch's tarball is unpacked into a snapshot per commit in Caches, and
+    later commits are patched in from the compare API. Search runs on the phone.
+  - Auto: `openrouter/auto` with the auto-router plugin's `cost_tier` (low, medium or high),
+    chosen from how hard the task is (judged by Apple's on-phone AI, or by a word check without
+    it). With no credit it uses `openrouter/free`. A 402 marks the account out of credit for an
+    hour.
+  - Chats sync to the private `MAIPA-G-data` repo from Build 1 on, because he deletes the app
+    before every install.
+  - Markdown: Apple's swift-markdown, drawn by MAIPA-G's own SwiftUI renderer and highlighter.
+  - The PR check also opens every screen in the simulator, in Dark and Light, and keeps the
+    screenshots.
