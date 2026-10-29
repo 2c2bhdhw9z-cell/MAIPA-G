@@ -154,6 +154,25 @@ struct OpenRouterTests {
         #expect(accumulator.citations == [SourceCitation(url: "https://example.com/a", title: "Example")])
     }
 
+    @Test func imageGenerationParsesBytesOptionsAndCost() async throws {
+        final class ImageTransport: HTTPTransport, @unchecked Sendable {
+            let lock = NSLock(); var request: HTTPRequest?
+            func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+                lock.withLock { self.request = request }
+                return HTTPResponse(status: 200, body: Data(#"{"data":[{"b64_json":"AQID","mime_type":"image/png","revised_prompt":"A clearer prompt"}],"usage":{"cost":0.04}}"#.utf8))
+            }
+            func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse { HTTPStreamResponse(status: 404, headers: [:], body: AsyncThrowingStream { $0.finish() }) }
+        }
+        let transport = ImageTransport()
+        let options = ImageGenerationOptions(aspectRatio: .wide, quality: .high)
+        let images = try await OpenRouterClient(transport: transport, apiKey: "key").generateImages(prompt: "A robot", model: "image/model", options: options)
+        #expect(images.count == 1 && images[0].data == Data([1, 2, 3]))
+        #expect(images[0].cost == 0.04 && images[0].revisedPrompt == "A clearer prompt")
+        let body = try #require(transport.request?.body.flatMap(JSONValue.parse))
+        #expect(body["aspect_ratio"] == "16:9" && body["quality"] == "high")
+        #expect(transport.request?.url.path == "/api/v1/images")
+    }
+
     @Test func signInURLCarriesPKCE() {
         let pkce = PKCE(verifier: "dBjftJeZ4CVP-mJ92K9rIn2ky-qD9-kOaeH-SiUpY4U")
         let url = OpenRouterClient.signInURL(callback: URL(string: "https://example.github.io/MAIPA-G/openrouter/")!, pkce: pkce, state: "s1")

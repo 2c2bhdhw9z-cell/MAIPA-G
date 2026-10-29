@@ -134,6 +134,12 @@ struct SheetContent: View {
         case .groups(let target): GroupPicker(target: target)
         case .specs(let repo): SpecsScreen(repo: repo)
         case .specReview(let id): NavigationStack { SpecReviewScreen(specID: id) }
+        case .connectors: ConnectorsScreen()
+        case .connectorDetail(let id): ConnectorDetailScreen(connectorID: id, serverID: nil)
+        case .connectorCatalogDetail(let id): ConnectorDetailScreen(connectorID: nil, serverID: id)
+        case .pictureGenerator(let target): PictureViewer(target: target, result: nil)
+        case .picture(let id): PictureViewer(target: nil, result: app.library.generatedImage(id))
+        case .webPreview(let repo): WebPreviewScreen(repo: repo)
         }
     }
 }

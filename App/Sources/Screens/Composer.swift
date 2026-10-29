@@ -41,6 +41,8 @@ struct Composer: View {
     var onClearRepo: () -> Void
     var onPickGroup: () -> Void
     var onSpec: () -> Void
+    var onPicture: () -> Void
+    var onPreview: () -> Void
 
     @FocusState private var focused: Bool
     @Environment(AppModel.self) private var app
@@ -144,6 +146,8 @@ struct Composer: View {
                     PhotosPicker(selection: $photoItem, matching: .images) {
                         Label("Photo", systemImage: "photo").font(.caption.weight(.semibold))
                     }
+                    Button(action: onPicture) { Label("Make picture", systemImage: "paintbrush").font(.caption.weight(.semibold)) }
+                    if repo != nil { Button(action: onPreview) { Label("Preview", systemImage: "safari").font(.caption.weight(.semibold)) } }
                     Button { choosingFile = true } label: { Label("File", systemImage: "paperclip").font(.caption.weight(.semibold)) }
                     Spacer()
                 }

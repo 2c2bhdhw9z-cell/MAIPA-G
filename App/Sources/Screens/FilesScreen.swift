@@ -43,6 +43,10 @@ struct FilesScreen: View {
             .navigationTitle(selectedPath ?? (folder.isEmpty ? repo.ref.name : folder))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button { app.sheet = .webPreview(repo) } label: { Image(systemName: "safari") }
+                        .accessibilityLabel("Live preview")
+                }
                 ToolbarItem(placement: .cancellationAction) {
                     if selectedPath != nil { Button("Files") { selectedPath = nil; text = nil; image = nil } }
                     else { Button("Done") { dismiss() } }

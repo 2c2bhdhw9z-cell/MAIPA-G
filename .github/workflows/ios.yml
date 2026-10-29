@@ -1,74 +1,67 @@
 name: iOS
 
-# Builds the sideloadable .ipa. The checks that need no Mac (AgentCore's tests) run first on Linux.
-# Pull requests build as a check only; a push to main also publishes the .ipa as a GitHub Release,
-# with a permanent "newest build" link.
+# The complete release candidate is built once, on the ready pull request. A squash merge does not
+# rebuild it: scripts/publish-verified-ipa.sh proves the PR and main trees match before publishing
+# this run's checked artifact. Manual main builds remain available for recovery.
 on:
   workflow_dispatch:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "App/**"
       - "AgentCore/**"
-      - ".github/workflows/ios.yml"
-  push:
-    branches: [main]
-    paths:
-      - "App/**"
-      - "AgentCore/**"
+      - "docs/**"
+      - "scripts/**"
       - ".github/workflows/ios.yml"
 
-# One build per branch at a time. On main a second push waits for the running build, so a release
-# is never thrown away part-way; on a pull request the newer push replaces the older check.
 concurrency:
   group: ios-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
-# contents: write so the build can publish a Release.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   checks:
     name: AgentCore tests (Linux)
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    permissions:
-      contents: read
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
-
       - name: Tool versions
         run: swift --version
-
       - name: Cache SwiftPM builds
         uses: actions/cache@v6
         with:
           path: AgentCore/.build
           key: agentcore-linux-${{ hashFiles('AgentCore/Package.resolved') }}-${{ hashFiles('AgentCore/Sources/**', 'AgentCore/Tests/**') }}
           restore-keys: agentcore-linux-${{ hashFiles('AgentCore/Package.resolved') }}-
-
+      - name: Build Autonomous runner
+        run: swift build --package-path AgentCore -c release --product MAIPAGRunner
       - name: Tests
         run: swift test --package-path AgentCore
+      - name: Public network checks
+        env:
+          MAIPAG_NETWORK_TESTS: "1"
+        run: swift test --package-path AgentCore --filter NetworkTests
+      - name: Compile independent IPA checker
+        run: python3 -m py_compile scripts/check-ipa.py
 
-  # Each screen, opened in the iPhone simulator with made-up content, photographed in Dark and Light,
-  # so the look is checked before a build reaches the phone. Pull requests and manual runs only.
   screens:
-    name: Screenshots (simulator)
+    name: Complete Dark and Light screenshots
     needs: checks
-    if: github.event_name != 'push'
     runs-on: macos-26
-    timeout-minutes: 45
-    permissions:
-      contents: read
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - name: Install XcodeGen
         run: brew install xcodegen
-      - name: Take the screenshots
+      - name: Take every screenshot
         run: |
           chmod +x scripts/screenshots.sh
           scripts/screenshots.sh
-      - name: Upload the screenshots
+      - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -76,19 +69,16 @@ jobs:
           path: |
             App/build/screenshots/*.png
             App/build/screenshots/*.txt
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
 
   ipa:
-    name: iPhone app
-    needs: checks
+    name: iPhone release candidate
+    needs: [checks, screens]
     runs-on: macos-26
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-
-      # Everything about the runner that could explain a failure, printed before anything can fail:
-      # nobody on this project has a Mac, so the log is the only way to see one.
       - name: Runner and toolchain versions
         run: |
           sw_vers
@@ -96,123 +86,24 @@ jobs:
           xcodebuild -version
           swift --version
           xcodebuild -showsdks | sed -n '/iOS/,/^$/p' || true
-
       - name: Install XcodeGen
         run: |
           brew install xcodegen
           xcodegen --version
-
-      # The Apple-only parts of AgentCore (signing GitHub's app tokens with the Security framework)
-      # are tested here, where they can run.
       - name: AgentCore tests (macOS)
         run: swift test --package-path AgentCore
-
-      - name: Build and package the .ipa
+      - name: Build and package the IPA
         env:
           MAIPAG_BUILD_NUMBER: ${{ github.run_number }}
         run: |
-          chmod +x App/package-ipa.sh
+          chmod +x App/package-ipa.sh scripts/check-ipa.py
           App/package-ipa.sh
-
-      # Fails the job rather than handing over a broken file, so a green tick always means there
-      # is an installable app at the end of it.
-      - name: Check the .ipa
-        run: |
-          set -euo pipefail
-          IPA=App/build/MAIPA-G.ipa
-          [ -f "$IPA" ] || { echo "::error::no .ipa was produced"; exit 1; }
-          SIZE=$(stat -f%z "$IPA")
-          echo "size: $SIZE bytes"
-          [ "$SIZE" -gt 500000 ] || { echo "::error::the .ipa is implausibly small ($SIZE bytes)"; exit 1; }
-
-          rm -rf /tmp/ipacheck && mkdir /tmp/ipacheck && unzip -q "$IPA" -d /tmp/ipacheck
-          APP=/tmp/ipacheck/Payload/MAIPA-G.app
-          [ -f "$APP/MAIPA-G" ] || { echo "::error::no executable at Payload/MAIPA-G.app/MAIPA-G"; exit 1; }
-          [ -f "$APP/Info.plist" ] || { echo "::error::no Info.plist in the bundle"; exit 1; }
-
-          plist() { /usr/libexec/PlistBuddy -c "Print :$1" "$APP/Info.plist" 2>/dev/null || true; }
-          BUILD=$(plist CFBundleVersion)
-          VERSION=$(plist CFBundleShortVersionString)
-          ID=$(plist CFBundleIdentifier)
-          EXE=$(plist CFBundleExecutable)
-          SCHEME=$(plist CFBundleURLTypes:0:CFBundleURLSchemes:0)
-          echo "id $ID, version $VERSION, build $BUILD, executable $EXE, url scheme $SCHEME"
-          [ "$BUILD" = "${{ github.run_number }}" ] || { echo "::error::build number is '$BUILD', expected ${{ github.run_number }}; sideloading apps would keep the old copy"; exit 1; }
-          [ "$ID" = "dev.maipag.app" ] || { echo "::error::unexpected bundle id '$ID'"; exit 1; }
-          [ "$EXE" = "MAIPA-G" ] || { echo "::error::unexpected executable name '$EXE'"; exit 1; }
-          [ "$SCHEME" = "maipag" ] || { echo "::error::the maipag:// address is missing, so GitHub and OpenRouter sign-ins could not come back"; exit 1; }
-
-          # The icon has to arrive as the compiled catalogue AND the Info.plist keys pointing at it,
-          # or the app installs as a blank square, which no build log would ever show.
-          [ -f "$APP/Assets.car" ] || { echo "::error::no Assets.car; the app would install with a blank icon"; exit 1; }
-          plutil -extract CFBundleIcons.CFBundlePrimaryIcon.CFBundleIconName raw -o - "$APP/Info.plist" | grep -q AppIcon \
-            || { echo "::error::the Info.plist names no app icon; iOS would show a blank one"; exit 1; }
-
-          lipo -info "$APP/MAIPA-G"
-          lipo -info "$APP/MAIPA-G" | grep -q arm64 || { echo "::error::the app isn't built for iPhone (arm64)"; exit 1; }
-          echo "ipa checked"
-
-      - name: Upload the .ipa
+      - name: Independently check the IPA
+        run: python3 scripts/check-ipa.py App/build/MAIPA-G.ipa --build "${{ github.run_number }}" --version "0.1.0"
+      - name: Upload checked release candidate
         uses: actions/upload-artifact@v7
         with:
           name: MAIPA-G-ipa-${{ github.run_number }}
           path: App/build/MAIPA-G.ipa
           if-no-files-found: error
           retention-days: 14
-
-      # A Release asset on a public repo is a plain download link that sideloading apps can open,
-      # and /releases/latest/download/MAIPA-G.ipa always points at the newest one. The numbered
-      # copy says which build a file is, so an old download is never signed by mistake.
-      - name: Publish the .ipa as a Release
-        if: success() && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          RUN=${{ github.run_number }}
-          TAG="build-$RUN-$(echo '${{ github.sha }}' | cut -c1-7)"
-          LATEST="https://github.com/${{ github.repository }}/releases/latest/download/MAIPA-G.ipa"
-          cp App/build/MAIPA-G.ipa "App/build/MAIPA-G-$RUN.ipa"
-          cat > /tmp/notes.md <<'EOF'
-          **MAIPA-G**, an AI helper for your iPhone with GitHub built in.
-
-          Download `MAIPA-G-<number>.ipa` below (both .ipa files are the same app; the numbered one
-          tells you which build it is) and sign it with your sideloading app.
-
-          Always the newest build:
-          EOF
-          echo "$LATEST" >> /tmp/notes.md
-          printf '\nBuilt from %s.\n' "${{ github.sha }}" >> /tmp/notes.md
-
-          # Retried, because GitHub's release API sometimes answers 500 at the very end of a good
-          # build. `gh release create` can make the release and then fail uploading, so a retry may
-          # find it there: then the files are re-uploaded and it is published.
-          publish() {
-            gh release create "$TAG" App/build/MAIPA-G.ipa "App/build/MAIPA-G-$RUN.ipa" \
-              --target "${{ github.sha }}" --title "MAIPA-G build $RUN" --notes-file /tmp/notes.md
-          }
-          finish_existing() {
-            gh release upload "$TAG" App/build/MAIPA-G.ipa "App/build/MAIPA-G-$RUN.ipa" --clobber &&
-            gh release edit "$TAG" --draft=false --target "${{ github.sha }}"
-          }
-          for attempt in 1 2 3 4 5; do
-            if gh release view "$TAG" >/dev/null 2>&1; then
-              finish_existing && exit 0
-            elif publish; then
-              exit 0
-            fi
-            [ "$attempt" -lt 5 ] && sleep $((attempt * 15))
-          done
-          echo "::error::could not publish $TAG after 5 attempts; the .ipa is attached to this run as an artifact"
-          exit 1
-
-      - name: Say how to install it
-        if: success() && github.ref == 'refs/heads/main'
-        run: |
-          {
-            echo "## Install this build"
-            echo
-            echo "**[Download MAIPA-G.ipa](https://github.com/${{ github.repository }}/releases/latest/download/MAIPA-G.ipa)** (always the newest build)."
-            echo
-            echo "Then sign it with your sideloading app."
-          } >> "$GITHUB_STEP_SUMMARY"

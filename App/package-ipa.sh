@@ -87,5 +87,6 @@ echo "==> zipping"
 (cd "$STAGE" && zip -qry "$IPA" Payload)
 
 echo
+python3 "$ROOT/scripts/check-ipa.py" "$IPA" --build "$BUILD_NUMBER" --version "0.1.0"
 echo "==> $IPA ($(du -h "$IPA" | cut -f1))"
 unzip -l "$IPA" | tail -n 30

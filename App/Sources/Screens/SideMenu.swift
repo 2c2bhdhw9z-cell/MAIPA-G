@@ -248,6 +248,18 @@ struct SideMenu: View {
                 }
                 Spacer()
                 Button {
+                    app.sheet = .connectors
+                    app.isMenuOpen = false
+                } label: {
+                    Image(systemName: "puzzlepiece.extension")
+                        .font(.body.weight(.semibold))
+                        .frame(width: 36, height: 36)
+                        .background(Theme.raised, in: Circle())
+                        .overlay(Circle().strokeBorder(Theme.stroke))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Connectors")
+                Button {
                     app.jobs.show()
                 } label: {
                     Image(systemName: "gearshape.2")

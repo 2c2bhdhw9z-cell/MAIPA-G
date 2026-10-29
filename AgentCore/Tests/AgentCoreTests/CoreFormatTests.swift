@@ -257,6 +257,53 @@ struct CoreFormatTests {
         #expect(restored.statuses["requirements"] == .completed)
         #expect(await store.load(job.id)?.status == .needsAnswer)
     }
+    @Test func registryPaginationOAuthAndConnectorNamesAreExact() async throws {
+        final class Transport: HTTPTransport, @unchecked Sendable {
+            let lock = NSLock(); var requests: [HTTPRequest] = []
+            func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+                lock.withLock { requests.append(request) }
+                if request.url.path.contains("oauth-protected-resource") {
+                    return HTTPResponse(status: 200, body: Data(#"{"resource":"https://mcp.example.com/mcp","authorization_servers":["https://auth.example.com"],"scopes_supported":["tools.read"]}"#.utf8))
+                }
+                if request.url.path.contains("oauth-authorization-server") {
+                    return HTTPResponse(status: 200, body: Data(#"{"issuer":"https://auth.example.com","authorization_endpoint":"https://auth.example.com/authorize","token_endpoint":"https://auth.example.com/token","registration_endpoint":"https://auth.example.com/register","scopes_supported":["tools.read"]}"#.utf8))
+                }
+                let body = #"{"servers":[{"server":{"name":"com.github/github-mcp","title":"GitHub","description":"GitHub tools","version":"1.0","remotes":[{"type":"streamable-http","url":"https://example.com/mcp"}],"packages":[{"registryType":"npm","identifier":"@modelcontextprotocol/server-github","version":"1.0"}]},"_meta":{"io.modelcontextprotocol.registry/official":{"status":"active","isLatest":true}}}],"metadata":{"nextCursor":"next:1","count":1}}"#
+                return HTTPResponse(status: 200, body: Data(body.utf8))
+            }
+            func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse { HTTPStreamResponse(status: 404, headers: [:], body: AsyncThrowingStream { $0.finish() }) }
+        }
+        let transport = Transport()
+        let page = try await MCPRegistryClient(transport: transport).page(search: "github", cursor: "before:1", limit: 5)
+        #expect(page.servers.first?.displayName == "GitHub")
+        #expect(page.servers.first?.supportsPhone == true && page.servers.first?.supportsAutonomous == true)
+        #expect(page.nextCursor == "next:1")
+        let query = try #require(URLComponents(url: transport.requests[0].url, resolvingAgainstBaseURL: false)?.queryItems)
+        #expect(query.first { $0.name == "version" }?.value == "latest")
+        #expect(query.first { $0.name == "search" }?.value == "github")
+        #expect(query.first { $0.name == "cursor" }?.value == "before:1")
+
+        let authorization = try await MCPOAuthClient(transport: transport).authorizationRequest(endpoint: URL(string: "https://mcp.example.com/mcp")!, requestedScopes: ["tools.read"])
+        let authQuery = URLComponents(url: authorization.url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        #expect(authQuery.first { $0.name == "client_id" }?.value == MCPOAuthClient.clientMetadataURL.absoluteString)
+        #expect(authQuery.first { $0.name == "resource" }?.value == "https://mcp.example.com/mcp")
+        #expect(authQuery.first { $0.name == "state" }?.value == authorization.state)
+        #expect(authQuery.first { $0.name == "code_challenge_method" }?.value == "S256")
+        #expect(ConnectorToolDefinition.namespace(server: "GitHub Cloud", tool: "Search-Repositories") == "mcp_github_cloud_search_repositories")
+    }
+
+    @Test func pictureRoutingAndWebPreviewRejectTraversal() throws {
+        let freeVision = ModelInfo(id: "vision/free:free", name: "Vision Free", promptPrice: 0, completionPrice: 0, inputModalities: ["text", "image"], outputModalities: ["text"], supportedParameters: ["tools"], created: Date(timeIntervalSince1970: 2))
+        let textOnly = ModelInfo(id: "text/paid", name: "Text", inputModalities: ["text"], outputModalities: ["text"], supportedParameters: ["tools"], created: Date(timeIntervalSince1970: 3))
+        let route = ModelRouter.route(choice: .auto, difficulty: .normal, thinking: .medium, account: AccountState(isFreeTier: true), catalogue: [freeVision.id: freeVision, textOnly.id: textOnly], requiresImageInput: true)
+        #expect(route.model == freeVision.id)
+        let staticSite = WebProjectDetector.detect(paths: ["index.html", "assets/app.js"])
+        #expect(staticSite?.kind == .staticSite && staticSite?.entryPath == "index.html")
+        let built = WebProjectDetector.detect(paths: ["package.json"], packageJSON: Data(#"{"scripts":{"build":"vite build"}}"#.utf8))
+        #expect(built?.buildCommand == "npm run build")
+        #expect(throws: WebPreviewError.self) { try PreviewPath.relativePath(for: URL(string: "maipag-preview://site/%2e%2e/secret")!, root: "", spaFallback: "index.html") }
+        #expect(PreviewPath.mimeType(for: "app.js") == "text/javascript")
+    }
 }
 
 @Suite("Server-sent events")

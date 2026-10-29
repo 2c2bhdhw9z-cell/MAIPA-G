@@ -8,12 +8,14 @@ public struct ToolOutput: Sendable, Hashable {
     /// More to show when the line is tapped open.
     public var detail: String?
     public var isError: Bool
+    public var generatedImages: [GeneratedImageResult]
 
-    public init(forModel: String, summary: String, detail: String? = nil, isError: Bool = false) {
+    public init(forModel: String, summary: String, detail: String? = nil, isError: Bool = false, generatedImages: [GeneratedImageResult] = []) {
         self.forModel = forModel
         self.summary = summary
         self.detail = detail
         self.isError = isError
+        self.generatedImages = generatedImages
     }
 }
 

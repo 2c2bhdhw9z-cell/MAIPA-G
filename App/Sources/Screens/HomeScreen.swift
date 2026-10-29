@@ -28,6 +28,7 @@ struct HomeScreen: View {
                             Button { app.sheet = .specs(home.repo) } label: { Label("Specs", systemImage: "list.clipboard") }
                             Button { app.sheet = .workflows } label: { Label("Workflows", systemImage: "point.3.connected.trianglepath.dotted") }
                             Button { app.sheet = .agents } label: { Label("Agents", systemImage: "person.crop.circle") }
+                            Button { app.sheet = .connectors } label: { Label("Connectors", systemImage: "puzzlepiece.extension") }
                             if let balance = app.openRouter.balance { Label(balance.dollars, systemImage: "creditcard") }
                             else { Label("OpenRouter ✓", systemImage: "sparkles") }
                             if let free = app.openRouter.freeRequestsLeft { Label("\(free) free", systemImage: "sparkles") }
@@ -68,7 +69,9 @@ struct HomeScreen: View {
                     onPickBranch: { app.sheet = .branches(.home) },
                     onClearRepo: { app.choose(repo: nil, for: .home) },
                     onPickGroup: { app.sheet = .groups(.home) },
-                    onSpec: { app.sheet = .specs(home.repo) }
+                    onSpec: { app.sheet = .specs(home.repo) },
+                    onPicture: { app.sheet = .pictureGenerator(.home) },
+                    onPreview: { if let repo = home.repo { app.sheet = .webPreview(repo) } }
                 )
             }
             .padding(.horizontal, 14)

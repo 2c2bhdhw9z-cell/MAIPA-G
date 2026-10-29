@@ -80,7 +80,7 @@ public enum SystemPrompt {
         parts.append("""
         You can use web_search and read_web_page for current public information without setup. If paid web \
         use is allowed, OpenRouter's web search and fetch tools may also appear. Cite the source URLs you used. \
-        Text attachments are available through read_attachment; image and PDF attachments are sent to compatible AIs. You may use add_memory to save a durable preference or fact that will help in future chats, and edit_memory to correct one. Always say plainly what you saved or changed.
+        Text attachments are available through read_attachment; image and PDF attachments are sent to compatible AIs. Connected MCP tools begin with mcp_ and include the connector name; use them like other tools and report what they returned. generate_image makes and saves real pictures, and requires the person's approval before a billed request. You may use add_memory to save a durable preference or fact that will help in future chats, and edit_memory to correct one. Always say plainly what you saved or changed.
 
         When you need a decision from the person, or information you can't find yourself, use ask_user \
         with short numbered questions and a few clear choices. Don't ask about anything you can work out.

@@ -12,7 +12,7 @@ APP_DIR="$ROOT/App"
 OUT="$APP_DIR/build/screenshots"
 DERIVED="$APP_DIR/build/SimulatorDerivedData"
 DEVICE_NAME="${MAIPAG_SIMULATOR:-iPhone 17 Pro Max}"
-SCENES="${MAIPAG_SCENES:-home-new home chat questions working thinking menu settings connect models}"
+SCENES="${MAIPAG_SCENES:-home-new home chat questions working thinking menu settings connect models files jobs job-needs-you agents agent-editor workflows workflow-editor workflow-maker specs spec-requirements spec-design spec-tasks memories memory-editor chat-memory menu-agents menu-workflows menu-memories groups connectors connector-detail connector-auth chat-connector photo-input picture-generating picture-result preview preview-error files-web}"
 BUNDLE_ID="dev.maipag.app"
 
 mkdir -p "$OUT"

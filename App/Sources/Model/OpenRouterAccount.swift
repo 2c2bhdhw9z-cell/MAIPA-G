@@ -82,6 +82,11 @@ final class OpenRouterAccount {
         apiKey = "preview"
         keyInfo = OpenRouterKeyInfo(label: "MAIPA-G", usage: 1.42, usageDaily: 0.08, isFreeTier: false, freeRequestsUsedToday: 3, freeRequestsLimitToday: 50, freeRequestsLeftToday: 47)
         credits = OpenRouterCredits(purchased: 5, used: 1.42)
+        setModels([
+            ModelInfo(id: "openrouter/auto", name: "OpenRouter: Auto", outputModalities: ["text"], supportedParameters: ["tools", "reasoning"]),
+            ModelInfo(id: "google/gemini-image", name: "Google: Gemini Image", promptPrice: 0.000001, completionPrice: 0.000004, inputModalities: ["text", "image"], outputModalities: ["text", "image"], supportedParameters: ["tools"]),
+            ModelInfo(id: "qwen/qwen-vl:free", name: "Qwen: Vision Free", promptPrice: 0, completionPrice: 0, inputModalities: ["text", "image"], outputModalities: ["text"], supportedParameters: ["tools"]),
+        ])
     }
 
     func signOut() {

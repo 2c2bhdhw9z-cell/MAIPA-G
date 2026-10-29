@@ -1,5 +1,6 @@
 import AgentCore
 import Foundation
+import UIKit
 
 /// For checking how the app looks without a phone. The build check launches the app in Apple's
 /// iPhone simulator with `-preview <scene>` and takes a screenshot of each scene. A preview shows
@@ -62,6 +63,13 @@ enum PreviewScenes {
             ChatMessage(createdAt: Date().addingTimeInterval(-60), body: .user(UserMessage(text: "Where does MAIPA-G keep my chats?"))),
             ChatMessage(createdAt: Date().addingTimeInterval(-58), body: .assistant(turn)),
         ]
+        return chat
+    }
+
+    static func pictureChat() -> Chat {
+        var chat = Chat(title: "A picture for the launch page")
+        var step = AssistantStep(); step.finishedAt = Date(); step.text = "I made the picture and saved it with this chat."; step.generatedImages = [sampleGeneratedImage()]
+        chat.messages = [.user("Make a friendly MAIPA-G launch picture"), ChatMessage(body: .assistant(AssistantTurn(status: .done, steps: [step], routeLabel: "Image AI")))]
         return chat
     }
 
@@ -164,6 +172,23 @@ enum PreviewScenes {
         spec.tasksDocument = "- [ ] Add the shared record\n- [ ] Add the iPhone screens\n- [ ] Check persistence"
         spec.approvedStages = [.requirements, .design, .checkedDesign]
         return [spec]
+    }
+
+    static func sampleGeneratedImage() -> GeneratedImageResult {
+        GeneratedImageResult(
+            attachment: AttachmentReference(name: "maipa-g-picture.png", mimeType: "image/png", kind: .image, path: "media/preview/picture.png", bytes: 100),
+            prompt: "A tiny friendly robot planning an app at a desk, soft violet light",
+            model: "google/gemini-image", aspectRatio: "1:1", quality: "high", cost: 0.04
+        )
+    }
+
+    static func pictureImage() -> UIImage {
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 900, height: 900))
+        return renderer.image { context in
+            UIColor(red: 0.12, green: 0.08, blue: 0.22, alpha: 1).setFill(); context.fill(CGRect(x: 0, y: 0, width: 900, height: 900))
+            let text = "✦\nMAIPA-G" as NSString
+            text.draw(in: CGRect(x: 100, y: 260, width: 700, height: 380), withAttributes: [.font: UIFont.systemFont(ofSize: 105, weight: .bold), .foregroundColor: UIColor.white, .paragraphStyle: { let p = NSMutableParagraphStyle(); p.alignment = .center; return p }()])
+        }
     }
 
     static func sampleSummaries() -> [ChatSummary] {

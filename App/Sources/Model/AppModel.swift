@@ -28,6 +28,12 @@ enum AppSheet: Identifiable, Hashable {
     case groups(ComposerTarget)
     case specs(ChatRepo?)
     case specReview(UUID)
+    case connectors
+    case connectorDetail(UUID)
+    case connectorCatalogDetail(String)
+    case pictureGenerator(ComposerTarget)
+    case picture(UUID)
+    case webPreview(ChatRepo)
 
     var id: String {
         switch self {
@@ -49,6 +55,12 @@ enum AppSheet: Identifiable, Hashable {
         case .groups(let target): return "groups-\(target)"
         case .specs(let repo): return "specs-\(repo?.ref.fullName ?? "all")"
         case .specReview(let id): return "spec-review-\(id.uuidString)"
+        case .connectors: return "connectors"
+        case .connectorDetail(let id): return "connector-\(id.uuidString)"
+        case .connectorCatalogDetail(let id): return "connector-catalog-\(id)"
+        case .pictureGenerator(let target): return "picture-generator-\(target)"
+        case .picture(let id): return "picture-\(id.uuidString)"
+        case .webPreview(let repo): return "preview-\(repo.ref.fullName)-\(repo.branch)"
         }
     }
 }
@@ -88,6 +100,8 @@ final class AppModel {
     let memories: MemoryLibrary
     let groups: GroupLibrary
     let specs: SpecCoordinator
+    let connectors: ConnectorLibrary
+    let previews: PreviewCoordinator
     let backgroundJobs = BackgroundJobs()
     let home = HomeDraft()
     private(set) var settings: AppSettings
@@ -113,6 +127,8 @@ final class AppModel {
         memories = MemoryLibrary(dataDirectory: paths.data)
         groups = GroupLibrary(dataDirectory: paths.data)
         specs = SpecCoordinator(dataDirectory: paths.data)
+        connectors = ConnectorLibrary(transport: transport, paths: paths)
+        previews = PreviewCoordinator(root: paths.previews)
         settings = Self.readSettings(paths)
         library.app = self
         sync.app = self
@@ -121,6 +137,8 @@ final class AppModel {
         memories.app = self
         groups.app = self
         specs.app = self
+        connectors.app = self
+        previews.app = self
         backgroundJobs.app = self
         backgroundJobs.register()
         home.repo = settings.lastRepo
@@ -143,6 +161,7 @@ final class AppModel {
         await memories.load()
         await groups.load()
         await specs.load()
+        await connectors.load()
         async let models: Void = openRouter.loadModels()
         async let key: Void = openRouter.refreshKeyInfo()
         await github.refresh()
@@ -242,6 +261,9 @@ final class AppModel {
         }
         if (report.downloaded + report.deletedHere).contains(where: { $0.hasPrefix("specs/") }) {
             await specs.load()
+        }
+        if (report.downloaded + report.deletedHere).contains(where: { $0.hasPrefix("connectors/") }) {
+            await connectors.load()
         }
     }
 
@@ -356,6 +378,14 @@ final class AppModel {
         }
     }
 
+    func attach(_ attachment: AttachmentReference, to target: ComposerTarget) {
+        switch target {
+        case .home: if !home.attachments.contains(where: { $0.id == attachment.id }) { home.attachments.append(attachment) }
+        case .chat(let id):
+            if let session = library.session(id), !session.draftAttachments.contains(where: { $0.id == attachment.id }) { session.draftAttachments.append(attachment) }
+        }
+    }
+
     // MARK: Screenshots
 
     /// Sets up one made-up scene for the build check's screenshots (see PreviewScenes).
@@ -442,6 +472,33 @@ final class AppModel {
             library.preview(summaries: summaries, open: nil)
             await openRouter.loadModels(force: true)
             sheet = .models(.home)
+        case "connectors":
+            library.preview(summaries: summaries, open: nil); connectors.preview(); sheet = .connectors
+        case "connector-detail", "connector-auth":
+            library.preview(summaries: summaries, open: nil); connectors.preview(authNeeded: scene == "connector-auth")
+            if let connector = connectors.connected.first {
+                sheet = .connectorDetail(connector.id)
+            }
+        case "chat-connector":
+            var chat = PreviewScenes.sampleChat()
+            if var turn = chat.lastAssistantTurn {
+                var call = ToolCallRecord(id: "mcp1", name: "mcp_github_search_repositories", arguments: "{}", summary: "Used GitHub · Search repositories", status: .done)
+                call.detail = "Found MAIPA-G and Continuum-."
+                turn.steps[0].toolCalls.append(call); chat.messages[chat.messages.count - 1].assistantTurn = turn
+            }
+            library.preview(summaries: summaries, open: chat); connectors.preview()
+        case "photo-input":
+            library.preview(summaries: summaries, open: nil)
+            home.attachments = [AttachmentReference(name: "launch-photo.jpg", mimeType: "image/jpeg", kind: .image, path: "attachments/preview/photo.jpg", bytes: 1200)]
+        case "picture-generating": library.preview(summaries: summaries, open: nil); sheet = .pictureGenerator(.home)
+        case "picture-result":
+            let chat = PreviewScenes.pictureChat(); library.preview(summaries: summaries, open: chat)
+            if let id = chat.lastAssistantTurn?.steps.first?.generatedImages?.first?.id { sheet = .picture(id) }
+        case "preview", "preview-error", "files-web":
+            library.preview(summaries: summaries, open: nil)
+            if scene == "preview" { previews.previewFixture(); if let repo = home.repo { sheet = .webPreview(repo) } }
+            else if scene == "files-web", let repo = home.repo { sheet = .files(repo) }
+            else if let repo = home.repo { previews.previewError(); sheet = .webPreview(repo) }
         default:
             library.preview(summaries: scene == "home-new" ? [] : summaries, open: nil)
         }

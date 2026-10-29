@@ -18,6 +18,10 @@ struct AppPaths: Sendable {
     let attachments: URL
     /// Generated/downloaded media mirrored through MAIPA-G-data.
     let media: URL
+    /// Cached on-demand MCP Registry pages.
+    let connectorCatalogue: URL
+    /// Isolated website previews, safe to delete and rebuild.
+    let previews: URL
 
     static func make() -> AppPaths {
         let manager = FileManager.default
@@ -33,9 +37,11 @@ struct AppPaths: Sendable {
             repoCopies: caches.appendingPathComponent("RepoCopies", isDirectory: true),
             modelCatalogue: caches.appendingPathComponent("models.json"),
             attachments: support.appendingPathComponent("data/attachments", isDirectory: true),
-            media: support.appendingPathComponent("data/media", isDirectory: true)
+            media: support.appendingPathComponent("data/media", isDirectory: true),
+            connectorCatalogue: caches.appendingPathComponent("connectors.json"),
+            previews: caches.appendingPathComponent("Previews", isDirectory: true)
         )
-        for folder in [paths.support, paths.data, paths.caches, paths.repoCopies, paths.attachments, paths.media] {
+        for folder in [paths.support, paths.data, paths.caches, paths.repoCopies, paths.attachments, paths.media, paths.previews] {
             try? manager.createDirectory(at: folder, withIntermediateDirectories: true)
         }
         return paths

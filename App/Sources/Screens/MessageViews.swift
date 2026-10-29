@@ -173,6 +173,9 @@ struct StepView: View {
             if !step.text.isEmpty {
                 MarkdownView(text: step.text)
             }
+            ForEach(step.generatedImages ?? []) { image in
+                GeneratedImageCard(result: image)
+            }
             ForEach(step.toolCalls) { call in
                 ToolLine(call: call)
             }
@@ -183,6 +186,22 @@ struct StepView: View {
                 }
             }
         }
+    }
+}
+
+struct GeneratedImageCard: View {
+    @Environment(AppModel.self) private var app
+    let result: GeneratedImageResult
+    @State private var image: UIImage?
+    var body: some View {
+        Button { app.sheet = .picture(result.id) } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                if let image { Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 320).clipShape(RoundedRectangle(cornerRadius: 16)) }
+                else { ProgressView().frame(maxWidth: .infinity).frame(height: 160) }
+                HStack { Label("Generated picture", systemImage: "photo"); Spacer(); if let cost = result.cost { Text(cost.dollars) } }
+                    .font(.caption).foregroundStyle(Theme.secondaryText)
+            }
+        }.buttonStyle(.plain).task { if let data = try? await app.attachmentStore.data(for: result.attachment) { image = UIImage(data: data) } }
     }
 }
 
@@ -303,6 +322,8 @@ struct ToolLine: View {
         case "read_web_page": return "globe"
         case "read_attachment": return "paperclip"
         case "add_memory", "edit_memory": return "brain"
+        case "generate_image": return "paintbrush"
+        case let name where name.hasPrefix("mcp_"): return "puzzlepiece.extension"
         case AskUserTool.name: return "questionmark.bubble"
         default: return "wrench.and.screwdriver"
         }

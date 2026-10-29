@@ -220,6 +220,7 @@ final class ChatSession: Identifiable {
             attachmentData[attachment.id] = try? await app.attachmentStore.data(for: attachment)
         }
         var tools: [any AgentTool] = webEnabled ? [WebSearchTool(transport: app.transport), ReadWebPageTool(transport: app.transport)] : []
+        tools.append(contentsOf: app.connectors.agentTools())
         tools.append(AddMemoryTool(store: app.memories.store))
         tools.append(EditMemoryTool(store: app.memories.store))
         if !allAttachments.filter({ $0.kind == .text }).isEmpty {
@@ -280,7 +281,11 @@ final class ChatSession: Identifiable {
         }
         let thinking = chat.thinking
         let judgedDifficulty = difficulty
-        let route = ModelRouter.route(choice: chat.model, difficulty: judgedDifficulty, thinking: thinking, account: app.openRouter.accountState, catalogue: catalogue)
+        let hasImageInput = allAttachments.contains { $0.kind == .image }
+        let route = ModelRouter.route(choice: chat.model, difficulty: judgedDifficulty, thinking: thinking, account: app.openRouter.accountState, catalogue: catalogue, requiresImageInput: hasImageInput)
+        if let imageModel = app.openRouter.models.first(where: \.generatesImages) {
+            tools.append(GenerateImageTool(client: app.openRouter.client, store: app.attachmentStore, model: imageModel.id, maySpend: !imageModel.isFree))
+        }
         let input = AgentTurnInput(
             chat: chat,
             route: route,
@@ -295,7 +300,7 @@ final class ChatSession: Identifiable {
         let environment = AgentEnvironment(
             openRouter: OpenRouterClient(transport: app.transport, apiKey: apiKey),
             freeRoute: {
-                ModelRouter.route(choice: .free, difficulty: judgedDifficulty, thinking: thinking, account: AccountState(), catalogue: catalogue)
+                ModelRouter.route(choice: .free, difficulty: judgedDifficulty, thinking: thinking, account: AccountState(), catalogue: catalogue, requiresImageInput: hasImageInput)
             },
             onOutOfCredits: { await account.markOutOfCredits() }
         )

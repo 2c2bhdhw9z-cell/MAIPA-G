@@ -26,17 +26,21 @@ let package = Package(
         // GitHub requires libsodium sealed boxes when repository Actions secrets are uploaded.
         // SwiftNaCl vendors libsodium source for Linux and an xcframework for Apple platforms.
         .package(url: "https://github.com/Kingpin-Apps/swift-nacl.git", from: "1.0.3"),
+        // The protocol implementation used for phone Streamable HTTP connectors and runner stdio.
+        .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.12.1"),
+        .package(url: "https://github.com/apple/swift-system.git", from: "1.0.0"),
+        .package(url: "https://github.com/weichsel/ZIPFoundation.git", from: "0.9.20"),
     ],
     targets: [
         // zlib, for unpacking the gzip'd tarballs GitHub serves. A C target rather than a system
         // library so it can wrap inflateInit2, which is a macro Swift cannot call directly.
         .target(
-            name: "CZlib",
+            name: "MAIPAGZlib",
             linkerSettings: [.linkedLibrary("z")]
         ),
         .target(
             name: "AgentCore",
-            dependencies: ["CZlib", .product(name: "Crypto", package: "swift-crypto"), .product(name: "Clibsodium", package: "swift-nacl")]
+            dependencies: ["MAIPAGZlib", .product(name: "Crypto", package: "swift-crypto"), .product(name: "Clibsodium", package: "swift-nacl"), .product(name: "MCP", package: "swift-sdk"), .product(name: "SystemPackage", package: "swift-system"), .product(name: "ZIPFoundation", package: "ZIPFoundation")]
         ),
         .executableTarget(
             name: "MAIPAGRunner",

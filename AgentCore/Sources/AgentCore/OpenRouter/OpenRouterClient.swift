@@ -105,7 +105,7 @@ public struct OpenRouterClient: Sendable {
     public static let appURL = "https://github.com/2c2bhdhw9z-cell/MAIPA-G"
     public static let appTitle = "MAIPA-G"
 
-    private let transport: any HTTPTransport
+    let transport: any HTTPTransport
     private let apiKey: String?
 
     public init(transport: any HTTPTransport, apiKey: String?) {
@@ -113,7 +113,7 @@ public struct OpenRouterClient: Sendable {
         self.apiKey = apiKey
     }
 
-    private var headers: [String: String] {
+    var headers: [String: String] {
         var headers = [
             "HTTP-Referer": Self.appURL,
             "X-OpenRouter-Title": Self.appTitle,

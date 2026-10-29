@@ -5,9 +5,27 @@ public actor AttachmentStore {
     public init(dataDirectory: URL) { self.dataDirectory = dataDirectory }
 
     public func importData(_ data: Data, name: String, mimeType: String, kind: AttachmentKind) throws -> AttachmentReference {
+        try write(data, name: name, mimeType: mimeType, kind: kind, folder: "attachments")
+    }
+
+    public func importGeneratedImage(_ data: Data, name: String, mimeType: String) throws -> AttachmentReference {
+        try write(data, name: name, mimeType: mimeType, kind: .image, folder: "media")
+    }
+
+    public func saveGeneratedMetadata(_ result: GeneratedImageResult) throws {
+        let url = dataDirectory.appendingPathComponent("media/\(result.id.uuidString.lowercased()).json")
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONCoding.encoder(pretty: true).encode(result).write(to: url, options: .atomic)
+    }
+
+    public func generatedMetadata(_ id: UUID) throws -> GeneratedImageResult {
+        try JSONCoding.decoder().decode(GeneratedImageResult.self, from: Data(contentsOf: dataDirectory.appendingPathComponent("media/\(id.uuidString.lowercased()).json")))
+    }
+
+    private func write(_ data: Data, name: String, mimeType: String, kind: AttachmentKind, folder: String) throws -> AttachmentReference {
         let id = UUID()
         let cleanName = name.replacingOccurrences(of: "/", with: "-")
-        let path = "attachments/\(id.uuidString.lowercased())/\(cleanName.isEmpty ? "attachment" : cleanName)"
+        let path = "\(folder)/\(id.uuidString.lowercased())/\(cleanName.isEmpty ? "attachment" : cleanName)"
         guard SnapshotStore.isSafeRelativePath(path) else { throw ToolInputError("That attachment name is not safe.") }
         let url = dataDirectory.appendingPathComponent(path)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)

@@ -108,7 +108,9 @@ struct ChatScreen: View {
                     onPickBranch: { app.sheet = .branches(.chat(session.id)) },
                     onClearRepo: { session.setRepo(nil) },
                     onPickGroup: { app.sheet = .groups(.chat(session.id)) },
-                    onSpec: { app.sheet = .specs(session.chat.repo) }
+                    onSpec: { app.sheet = .specs(session.chat.repo) },
+                    onPicture: { app.sheet = .pictureGenerator(.chat(session.id)) },
+                    onPreview: { if let repo = session.chat.repo { app.sheet = .webPreview(repo) } }
                 )
                 .padding(.horizontal, 12)
                 .padding(.bottom, 6)

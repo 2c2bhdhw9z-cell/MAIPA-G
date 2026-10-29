@@ -460,6 +460,9 @@ private struct Runner {
             record.result = Self.capped(output.forModel)
             record.finishedAt = Date()
             turn.steps[stepIndex].toolCalls[callIndex] = record
+            if !output.generatedImages.isEmpty {
+                turn.steps[stepIndex].generatedImages = (turn.steps[stepIndex].generatedImages ?? []) + output.generatedImages
+            }
             if !output.isError, callIndex < turn.steps[stepIndex].toolCalls.count {
                 if record.name == "add_memory", !turn.notices.contains("Saved a memory: \(output.detail ?? output.summary)") {
                     turn.notices.append("Saved a memory: \(output.detail ?? output.summary)")

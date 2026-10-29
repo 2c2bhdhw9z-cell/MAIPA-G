@@ -137,7 +137,10 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
 
     /// Everything the chat has cost so far, in dollars, as OpenRouter reported it.
     public var totalUsage: Usage {
-        messages.compactMap(\.assistantTurn).flatMap(\.steps).compactMap(\.usage).reduce(Usage(), +)
+        var usage = messages.compactMap(\.assistantTurn).flatMap(\.steps).compactMap(\.usage).reduce(Usage(), +)
+        let imageCosts = messages.compactMap(\.assistantTurn).flatMap(\.steps).flatMap { $0.generatedImages ?? [] }.compactMap(\.cost)
+        if !imageCosts.isEmpty { usage.cost = (usage.cost ?? 0) + imageCosts.reduce(0, +) }
+        return usage
     }
 
     public var lastAssistantTurn: AssistantTurn? {
@@ -293,7 +296,12 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
         return seen
     }
 
-    public var usage: Usage { steps.compactMap(\.usage).reduce(Usage(), +) }
+    public var usage: Usage {
+        var usage = steps.compactMap(\.usage).reduce(Usage(), +)
+        let imageCosts = steps.flatMap { $0.generatedImages ?? [] }.compactMap(\.cost)
+        if !imageCosts.isEmpty { usage.cost = (usage.cost ?? 0) + imageCosts.reduce(0, +) }
+        return usage
+    }
 
     /// The question set the AI is waiting on, if any.
     public var pendingQuestions: (stepIndex: Int, callIndex: Int, questions: QuestionSet)? {
@@ -339,6 +347,20 @@ public struct SourceCitation: Codable, Sendable, Hashable, Identifiable {
     public init(url: String, title: String? = nil) { self.url = url; self.title = title }
 }
 
+public struct GeneratedImageResult: Codable, Sendable, Hashable, Identifiable {
+    public var id: UUID { attachment.id }
+    public var attachment: AttachmentReference
+    public var prompt: String
+    public var model: String
+    public var aspectRatio: String
+    public var quality: String
+    public var cost: Double?
+    public init(attachment: AttachmentReference, prompt: String, model: String, aspectRatio: String, quality: String, cost: Double? = nil) {
+        self.attachment = attachment; self.prompt = prompt; self.model = model
+        self.aspectRatio = aspectRatio; self.quality = quality; self.cost = cost
+    }
+}
+
 /// One request to the model and what came back.
 public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
     public var id: UUID
@@ -355,6 +377,8 @@ public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
     public var finishReason: String?
     /// Web sources returned by OpenRouter server tools.
     public var citations: [SourceCitation]?
+    /// Real generated media saved under media/, retained through chat sync.
+    public var generatedImages: [GeneratedImageResult]?
 
     public init(id: UUID = UUID(), startedAt: Date = Date()) {
         self.id = id
@@ -368,6 +392,7 @@ public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
         self.usage = nil
         self.finishReason = nil
         self.citations = nil
+        self.generatedImages = nil
     }
 
     /// How long the model thought, when it shared its thinking.

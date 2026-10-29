@@ -12,6 +12,12 @@ struct NetworkTests {
         #expect(page.url.host == "example.com")
     }
 
+    @Test func searchesOfficialMCPRegistry() async throws {
+        let page = try await MCPRegistryClient(transport: URLSessionTransport()).page(search: "github", limit: 5)
+        #expect(!page.servers.isEmpty)
+        #expect(page.servers.allSatisfy { !$0.name.isEmpty })
+    }
+
     @Test func unpacksAndSearchesARealRepo() async throws {
         let repo = ProcessInfo.processInfo.environment["MAIPAG_TEST_REPO"] ?? "2c2bhdhw9z-cell/Continuum-"
         let ref = ProcessInfo.processInfo.environment["MAIPAG_TEST_REF"] ?? "master"

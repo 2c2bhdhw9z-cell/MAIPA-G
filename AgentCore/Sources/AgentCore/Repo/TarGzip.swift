@@ -1,4 +1,4 @@
-import CZlib
+import MAIPAGZlib
 import Foundation
 
 /// Streams gzip (or zlib) data back to its original bytes.

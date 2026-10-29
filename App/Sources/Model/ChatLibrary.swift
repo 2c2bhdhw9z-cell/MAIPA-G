@@ -192,5 +192,9 @@ final class ChatLibrary {
 
     func session(_ id: UUID) -> ChatSession? { sessions[id] }
 
+    func generatedImage(_ id: UUID) -> GeneratedImageResult? {
+        openSession?.chat.messages.compactMap(\.assistantTurn).flatMap(\.steps).flatMap { $0.generatedImages ?? [] }.first { $0.id == id }
+    }
+
     var runningCount: Int { sessions.values.filter(\.isRunning).count }
 }
