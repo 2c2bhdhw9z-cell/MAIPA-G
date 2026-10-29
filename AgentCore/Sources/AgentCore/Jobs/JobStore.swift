@@ -27,7 +27,7 @@ public actor JobStore {
     }
 
     @discardableResult
-    public func update(_ id: UUID, _ change: (inout JobRecord) throws -> Void) async throws -> JobRecord {
+    public func update(_ id: UUID, _ change: @Sendable (inout JobRecord) throws -> Void) async throws -> JobRecord {
         guard var job = await records.load(id) else { throw JobStoreError.notFound }
         try change(&job)
         job.format = JobRecord.currentFormat
