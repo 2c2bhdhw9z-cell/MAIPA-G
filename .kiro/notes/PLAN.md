@@ -203,6 +203,20 @@ entries. Next: he tests build 25.**
     note to main in between. Safe, but too strict: Undo should make a commit that reverses only
     its own change when the newer commits don't touch the same files. Kiro reverted `62518fc`
     by hand at 3:45 PM. While he tests saving on the MAIPA-G repo, Kiro must not push to its main.
+    Tool tests (4:14 PM, one six-part message, run twice): the last line of CloudRunner.swift (`}`,
+    line 854, read in two parts) was right; 66 asset files was right; `\(` gave "80+ lines across
+    87 files" (really 90 files, but it said the results were cut short); 🤗 none was right; canva.com
+    honestly reported Canva's "Unsupported client" page; the nonsense search honestly found nothing;
+    Continuum-'s README was right in run 1.
+17. **An OpenRouter 500 isn't retried, and Try again starts over.** Run 1 ended in "OpenRouter
+    500: Internal Server Error". `Networking/Retry.swift:56` retries only 502/503/504. Fix: retry
+    500 too (a few times, with backoff), and make Try again continue from the saved tool results
+    instead of redoing the whole turn.
+18. **Reading his other repos is luck.** Run 2 said "I couldn't find a repository named
+    'Continuum-'". `read_repo_file` (`Agent/RepoReferenceTool.swift`) is meant for attached repo
+    file references at an exact commit, and the AI isn't told his repo names (the trailing dash
+    trips it). Fix: put his repo list in the prompt and add a tool that reads a file from any of
+    his repos by name (default branch), offering close matches when a name is slightly off.
 
 Technical notes for the logo fix (for Kiro):
 - iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
