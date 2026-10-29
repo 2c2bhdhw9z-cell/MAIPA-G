@@ -8,6 +8,7 @@ import Observation
 final class OpenRouterAccount {
     private(set) var apiKey: String?
     private(set) var keyInfo: OpenRouterKeyInfo?
+    private(set) var credits: OpenRouterCredits?
     private(set) var accountState = AccountState()
     private(set) var models: [ModelInfo] = []
     private(set) var modelsByID: [String: ModelInfo] = [:]
@@ -31,6 +32,7 @@ final class OpenRouterAccount {
 
     /// Free-AI requests left today, when OpenRouter reports it.
     var freeRequestsLeft: Int? { keyInfo?.freeRequestsLeftToday }
+    var balance: Double? { credits?.balance ?? keyInfo?.limitRemaining }
 
     func restore() {
         apiKey = Keychain.string(.openRouterKey)
@@ -79,12 +81,14 @@ final class OpenRouterAccount {
     func previewSignedIn() {
         apiKey = "preview"
         keyInfo = OpenRouterKeyInfo(label: "MAIPA-G", usage: 1.42, usageDaily: 0.08, isFreeTier: false, freeRequestsUsedToday: 3, freeRequestsLimitToday: 50, freeRequestsLeftToday: 47)
+        credits = OpenRouterCredits(purchased: 5, used: 1.42)
     }
 
     func signOut() {
         Keychain.remove(.openRouterKey)
         apiKey = nil
         keyInfo = nil
+        credits = nil
         accountState = AccountState()
         saveState()
     }
@@ -96,6 +100,7 @@ final class OpenRouterAccount {
         do {
             let info = try await client.keyInfo()
             keyInfo = info
+            credits = try? await client.credits()
             if accountState.isFreeTier != info.isFreeTier {
                 accountState.isFreeTier = info.isFreeTier
                 saveState()

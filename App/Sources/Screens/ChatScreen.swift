@@ -64,8 +64,25 @@ struct ChatScreen: View {
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                Composer(
+                VStack(spacing: 4) {
+                    if let receipt = session.chat.saveReceipts?.last {
+                        HStack(spacing: 10) {
+                            if receipt.pullRequest != nil, receipt.resolution == nil {
+                                Button("Add it") { Task { await session.addLastSave() } }.buttonStyle(.borderedProminent)
+                                Button("Throw away", role: .destructive) { Task { await session.throwAwayLastSave() } }.buttonStyle(.bordered)
+                            }
+                            if receipt.undoneAt == nil, receipt.resolution == nil {
+                                Button("Undo") { Task { await session.undoLastSave() } }.buttonStyle(.bordered)
+                            }
+                            Spacer()
+                        }
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 16)
+                    }
+                    Composer(
                     text: $session.draft,
+                    attachments: $session.draftAttachments,
+                    webEnabled: $session.webEnabled,
                     modelLabel: app.openRouter.label(for: session.chat.model),
                     thinking: session.chat.thinking,
                     thinkingLevels: app.openRouter.thinkingLevels(for: session.chat.model),
@@ -75,9 +92,11 @@ struct ChatScreen: View {
                     canStop: true,
                     onSend: {
                         let text = session.draft
+                        let attachments = session.draftAttachments
                         session.draft = ""
+                        session.draftAttachments = []
                         followsBottom = true
-                        session.send(text)
+                        session.send(text, attachments: attachments)
                         Haptics.tap()
                     },
                     onStop: { session.stop() },
@@ -93,6 +112,7 @@ struct ChatScreen: View {
                 .background(alignment: .bottom) {
                     LinearGradient(colors: [Theme.background.opacity(0), Theme.background], startPoint: .top, endPoint: .center)
                         .ignoresSafeArea()
+                }
                 }
             }
         }
@@ -119,8 +139,15 @@ struct ChatScreen: View {
                 .accessibilityHint("Rename this chat")
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Button { app.newChat() } label: { Image(systemName: "square.and.pencil") }
-                    .accessibilityLabel("New chat")
+                HStack(spacing: 12) {
+                    if let cost = session.chat.totalUsage.cost { Text(cost.dollars).font(.caption.monospacedDigit()).foregroundStyle(Theme.secondaryText) }
+                    if let repo = session.chat.repo {
+                        Button { app.sheet = .files(repo) } label: { Image(systemName: "folder") }
+                            .accessibilityLabel("Files")
+                    }
+                    Button { app.newChat() } label: { Image(systemName: "square.and.pencil") }
+                        .accessibilityLabel("New chat")
+                }
             }
         }
         .alert("Rename chat", isPresented: $renaming) {

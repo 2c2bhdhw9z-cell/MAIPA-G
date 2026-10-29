@@ -23,7 +23,22 @@ public protocol AgentTool: Sendable {
     var spec: ToolSpec { get }
     /// The line shown while the tool runs, such as "Reading README.md…".
     func runningSummary(for arguments: JSONValue) -> String
+    /// A destructive or build-setup change can pause for explicit approval before it runs.
+    func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest?
     func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput
+}
+
+public extension AgentTool {
+    func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? { nil }
+}
+
+public struct ToolApprovalRequest: Sendable, Hashable {
+    public var question: String
+    public var allowLabel: String
+    public init(question: String, allowLabel: String = "Allow") {
+        self.question = question
+        self.allowLabel = allowLabel
+    }
 }
 
 /// Thrown by a tool when the AI asked for something impossible. The message goes back to the

@@ -113,12 +113,12 @@ final class ChatLibrary {
     }
 
     /// Starts a chat from the home screen's box.
-    func startChat(text: String, repo: ChatRepo?, model: ModelChoice, thinking: ThinkingLevel) {
+    func startChat(text: String, attachments: [AttachmentReference] = [], repo: ChatRepo?, model: ModelChoice, thinking: ThinkingLevel) {
         let chat = Chat(repo: repo, model: model, thinking: thinking)
         let session = ChatSession(chat: chat, app: app)
         sessions[chat.id] = session
         openSession = session
-        session.send(text)
+        session.send(text, attachments: attachments)
         upsert(session.chat)
         dropIdleSessions()
     }

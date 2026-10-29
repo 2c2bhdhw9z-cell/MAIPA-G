@@ -37,6 +37,8 @@ struct SettingsScreen: View {
                 accounts
                 look
                 money
+                notifications
+                repoSaving
                 saving
                 about
                 technical
@@ -60,6 +62,8 @@ struct SettingsScreen: View {
                     settings.effects = edited.effects
                     settings.spendLimitOn = edited.spendLimitOn
                     settings.spendLimit = edited.spendLimit
+                    settings.notificationsOn = edited.notificationsOn
+                    settings.directSaveRepos = edited.directSaveRepos
                 }
             }
             .task {
@@ -125,6 +129,7 @@ struct SettingsScreen: View {
 
     private func moneyLine(_ info: OpenRouterKeyInfo) -> String {
         var parts: [String] = []
+        if let balance = app.openRouter.balance { parts.append("Balance: \(balance.dollars)") }
         if let today = info.usageDaily { parts.append("Spent today: \(today.dollars)") }
         if let left = info.freeRequestsLeftToday { parts.append("free AI requests left today: \(left)") }
         if info.isFreeTier { parts.append("no credit bought yet, so Auto uses the free AIs") }
@@ -192,6 +197,30 @@ struct SettingsScreen: View {
             Text("Money")
         } footer: {
             Text("When a reply costs this much, MAIPA-G pauses and asks before spending more.")
+        }
+    }
+
+    private var notifications: some View {
+        Section {
+            Toggle("Tell me when work finishes or needs me", isOn: $draft.notificationsOn)
+        } header: { Text("Notifications") } footer: {
+            Text("MAIPA-G only sends a notification when work finishes or needs an answer.")
+        }
+    }
+
+    private var repoSaving: some View {
+        Section {
+            if app.github.repos.isEmpty {
+                Text("Your repos appear here after GitHub connects.").foregroundStyle(Theme.secondaryText)
+            }
+            ForEach(app.github.repos) { repo in
+                Toggle(repo.fullName, isOn: Binding(
+                    get: { draft.directSaveRepos[repo.fullName] ?? false },
+                    set: { draft.directSaveRepos[repo.fullName] = $0 }
+                ))
+            }
+        } header: { Text("Save straight to branch") } footer: {
+            Text("Off uses a side branch and pull request. A repo's own rules always win.")
         }
     }
 

@@ -19,10 +19,24 @@ struct HomeScreen: View {
                     .multilineTextAlignment(.center)
                     .padding(.top, 6)
                 Spacer(minLength: 24)
+                if app.openRouter.isSignedIn {
+                    HStack(spacing: 8) {
+                        if let balance = app.openRouter.balance { Label(balance.dollars, systemImage: "creditcard") }
+                        if let free = app.openRouter.freeRequestsLeft { Label("\(free) free", systemImage: "sparkles") }
+                        if let repo = home.repo {
+                            Button { app.sheet = .files(repo) } label: { Label("Files", systemImage: "folder") }
+                        }
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.secondaryText)
+                    .padding(.bottom, 10)
+                }
                 SetupCards()
                     .padding(.bottom, 12)
                 Composer(
                     text: $home.text,
+                    attachments: $home.attachments,
+                    webEnabled: $home.webEnabled,
                     modelLabel: app.openRouter.label(for: home.model),
                     thinking: home.thinking,
                     thinkingLevels: app.openRouter.thinkingLevels(for: home.model),

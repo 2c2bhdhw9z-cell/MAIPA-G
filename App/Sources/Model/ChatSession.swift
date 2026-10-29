@@ -10,11 +10,15 @@ final class ChatSession: Identifiable {
     let id: UUID
     private(set) var chat: Chat
     var draft = ""
+    var draftAttachments: [AttachmentReference] = []
+    var webEnabled = true
     private(set) var isRunning = false
 
     @ObservationIgnored weak var app: AppModel?
     @ObservationIgnored private var run: AgentRun?
     @ObservationIgnored private var workspace: RepoWorkspace?
+    @ObservationIgnored private var changeWorkspace: ChangeWorkspace?
+    @ObservationIgnored private var changeSession: ChangeSession?
     @ObservationIgnored private var pendingTurn: AssistantTurn?
     @ObservationIgnored private var flushScheduled = false
     @ObservationIgnored private var saveTask: Task<Void, Never>?
@@ -32,13 +36,13 @@ final class ChatSession: Identifiable {
 
     // MARK: What the user does
 
-    func send(_ text: String) {
+    func send(_ text: String, attachments: [AttachmentReference] = []) {
         let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !message.isEmpty, !isRunning else { return }
+        guard (!message.isEmpty || !attachments.isEmpty), !isRunning else { return }
         settleWaitingTurn()
-        chat.messages.append(.user(message))
+        chat.messages.append(.user(message, attachments: attachments))
         chat.messages.append(ChatMessage(body: .assistant(AssistantTurn())))
-        if chat.title.isEmpty { chat.title = Self.provisionalTitle(message) }
+        if chat.title.isEmpty { chat.title = Self.provisionalTitle(message.isEmpty ? attachments.first?.name ?? "Attachment" : message) }
         touch()
         start()
     }
@@ -100,6 +104,8 @@ final class ChatSession: Identifiable {
     func setRepo(_ repo: ChatRepo?) {
         chat.repo = repo
         workspace = nil
+        changeWorkspace = nil
+        changeSession = nil
         touch()
     }
 
@@ -111,9 +117,50 @@ final class ChatSession: Identifiable {
         touch()
     }
 
+    func addLastSave() async {
+        guard let app, let github = app.github.client, var receipts = chat.saveReceipts,
+              let index = receipts.indices.last, receipts[index].pullRequest != nil, receipts[index].resolution == nil else { return }
+        do {
+            try await GitHubChangeService(github: github).addIt(receipts[index])
+            receipts[index].resolution = "added"
+            chat.saveReceipts = receipts
+            appendNotice("Added the pull request and removed its side branch.")
+        } catch { appendNotice("Couldn't add it: \(error)") }
+    }
+
+    func throwAwayLastSave() async {
+        guard let app, let github = app.github.client, var receipts = chat.saveReceipts,
+              let index = receipts.indices.last, receipts[index].pullRequest != nil, receipts[index].resolution == nil else { return }
+        do {
+            try await GitHubChangeService(github: github).throwAway(receipts[index])
+            receipts[index].resolution = "discarded"
+            chat.saveReceipts = receipts
+            appendNotice("Closed the pull request and removed its side branch.")
+        } catch { appendNotice("Couldn't throw it away: \(error)") }
+    }
+
+    func undoLastSave() async {
+        guard let app, let github = app.github.client, var receipts = chat.saveReceipts,
+              let index = receipts.lastIndex(where: { $0.undoneAt == nil }) else { return }
+        do {
+            _ = try await GitHubChangeService(github: github).undo(receipts[index])
+            receipts[index].undoneAt = Date()
+            chat.saveReceipts = receipts
+            appendNotice("Undid MAIPA-G's last save.")
+        } catch { appendNotice("Undo stopped safely: \(error)") }
+    }
+
+    private func appendNotice(_ text: String) {
+        guard var turn = lastTurn else { return }
+        turn.notices.append(text)
+        replaceLastTurn(turn)
+        touch()
+    }
+
     // MARK: Running
 
     private func start() {
+        app?.notifications.requestIfNeeded(enabled: app?.settings.notificationsOn == true)
         isRunning = true
         let grace = BackgroundGrace(name: "MAIPA-G reply") { [weak self] in self?.stop() }
         Task { [weak self] in
@@ -135,7 +182,20 @@ final class ChatSession: Identifiable {
             return
         }
 
-        var tools: [any AgentTool] = []
+        let lastMessage = chat.messages.last { $0.userText != nil }?.userText ?? ""
+        let changeAuthorization = ChangeAuthorization(request: lastMessage)
+        let allAttachments = chat.messages.flatMap { message -> [AttachmentReference] in
+            if case .user(let user) = message.body { return user.attachments }
+            return []
+        }
+        var attachmentData: [UUID: Data] = [:]
+        for attachment in allAttachments where attachment.kind == .image || attachment.kind == .pdf {
+            attachmentData[attachment.id] = try? await app.attachmentStore.data(for: attachment)
+        }
+        var tools: [any AgentTool] = webEnabled ? [WebSearchTool(transport: app.transport), ReadWebPageTool(transport: app.transport)] : []
+        if !allAttachments.filter({ $0.kind == .text }).isEmpty {
+            tools.append(ReadAttachmentTool(attachments: allAttachments, store: app.attachmentStore))
+        }
         var repoContext: SystemPrompt.RepoContext?
         if let repo = chat.repo {
             guard let github = app.github.client else {
@@ -146,7 +206,22 @@ final class ChatSession: Identifiable {
                 let commit = try await github.resolveCommit(repo.ref, ref: repo.branch)
                 let workspace = workspaceFor(repo: repo, commit: commit, github: github, store: app.snapshots)
                 await workspace.prefetch()
-                tools = [ListFilesTool(workspace: workspace), SearchCodeTool(workspace: workspace), ReadFileTool(workspace: workspace)]
+                let changes: ChangeWorkspace
+                if let existing = changeWorkspace, existing.base.commit == commit {
+                    changes = existing
+                } else {
+                    changes = ChangeWorkspace(base: workspace)
+                    changeWorkspace = changes
+                }
+                let service = GitHubChangeService(github: github)
+                let rules = await service.resolveRules(in: workspace, directSaveSetting: app.settings.savesDirectly(to: repo.ref))
+                let saves = changeSession ?? ChangeSession()
+                changeSession = saves
+                tools.append(contentsOf: [
+                    ListFilesTool(workspace: workspace), SearchCodeTool(workspace: workspace), ReadFileTool(workspace: workspace),
+                    CreateFileTool(workspace: changes, authorization: changeAuthorization), EditFileTool(workspace: changes, authorization: changeAuthorization), DeleteFileTool(workspace: changes, authorization: changeAuthorization),
+                    SaveChangesTool(workspace: changes, service: service, session: saves, selectedBranch: repo.branch, defaultBranch: repo.defaultBranch, rules: rules),
+                ])
                 repoContext = SystemPrompt.RepoContext(
                     ref: repo.ref,
                     branch: repo.branch,
@@ -160,7 +235,6 @@ final class ChatSession: Identifiable {
             }
         }
 
-        let lastMessage = chat.messages.last { $0.userText != nil }?.userText ?? ""
         let hasRepo = chat.repo != nil
         var difficulty = TaskDifficulty.estimate(lastMessage, hasRepo: hasRepo)
         if chat.model == .auto, app.openRouter.accountState.paidAllowed(),
@@ -168,6 +242,13 @@ final class ChatSession: Identifiable {
             difficulty = judged
         }
         let catalogue = app.openRouter.modelsByID
+        if case .model(let modelID) = chat.model,
+           let model = catalogue[modelID],
+           (allAttachments.contains(where: { $0.kind == .image }) && !model.acceptsImages ||
+            allAttachments.contains(where: { $0.kind == .pdf }) && !model.acceptsFiles) {
+            fail(.other, "This AI can't read pictures or PDFs. Pick Auto or an AI that accepts them.")
+            return
+        }
         let thinking = chat.thinking
         let judgedDifficulty = difficulty
         let route = ModelRouter.route(choice: chat.model, difficulty: judgedDifficulty, thinking: thinking, account: app.openRouter.accountState, catalogue: catalogue)
@@ -177,7 +258,9 @@ final class ChatSession: Identifiable {
             systemPrompt: SystemPrompt.make(userLogin: app.github.login, repo: repoContext),
             tools: tools,
             allowTools: app.openRouter.supportsTools(chat.model),
-            spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil
+            spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil,
+            attachmentData: attachmentData,
+            serverTools: webEnabled && app.openRouter.accountState.paidAllowed() ? OpenRouterWebTools.paid : []
         )
         let account = app.openRouter
         let environment = AgentEnvironment(
@@ -193,6 +276,13 @@ final class ChatSession: Identifiable {
         for await event in run.events {
             guard case .updated(let turn, let milestone) = event else { continue }
             receive(turn, milestone: milestone)
+        }
+        if let saves = changeSession {
+            let receipts = await saves.receipts()
+            var existing = Set((chat.saveReceipts ?? []).map(\.id))
+            for receipt in receipts where existing.insert(receipt.id).inserted {
+                chat.saveReceipts = (chat.saveReceipts ?? []) + [receipt]
+            }
         }
         flush()
         if var turn = lastTurn, turn.status == .running {

@@ -133,6 +133,27 @@ struct OpenRouterTests {
         #expect(info.limit == nil)
     }
 
+    @Test func multipartAttachmentsAndServerToolsEncode() throws {
+        let image = Data([1, 2, 3])
+        var chat = Chat()
+        let reference = AttachmentReference(name: "photo.jpg", mimeType: "image/jpeg", kind: .image, path: "attachments/x/photo.jpg", bytes: image.count)
+        chat.messages = [.user("What is this?", attachments: [reference])]
+        let messages = Transcript.messages(for: chat, systemPrompt: "s", attachmentData: [reference.id: image])
+        let request = ChatCompletionRequest(model: "openrouter/auto", messages: messages, tools: OpenRouterWebTools.paid)
+        let json = try #require(JSONValue.parse(try JSONEncoder().encode(request)))
+        let content = try #require(json["messages"]?.arrayValue?[1]["content"]?.arrayValue)
+        #expect(content[0]["type"] == "text")
+        #expect(content[1]["type"] == "image_url")
+        #expect(content[1]["image_url"]?["url"]?.stringValue?.hasPrefix("data:image/jpeg;base64,") == true)
+        #expect(json["tools"]?.arrayValue?.map { $0["type"]?.stringValue ?? "" } == ["openrouter:web_search", "openrouter:web_fetch"])
+    }
+
+    @Test func streamedCitationsAreRetained() {
+        var accumulator = StreamAccumulator()
+        accumulator.apply(chunk(#"{"choices":[{"delta":{"content":"Source","annotations":[{"type":"url_citation","url_citation":{"url":"https://example.com/a","title":"Example"}}]}}]}"#))
+        #expect(accumulator.citations == [SourceCitation(url: "https://example.com/a", title: "Example")])
+    }
+
     @Test func signInURLCarriesPKCE() {
         let pkce = PKCE(verifier: "dBjftJeZ4CVP-mJ92K9rIn2ky-qD9-kOaeH-SiUpY4U")
         let url = OpenRouterClient.signInURL(callback: URL(string: "https://example.github.io/MAIPA-G/openrouter/")!, pkce: pkce, state: "s1")

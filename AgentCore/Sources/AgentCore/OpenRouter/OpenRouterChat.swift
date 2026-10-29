@@ -3,20 +3,23 @@ import Foundation
 // MARK: - Request
 
 /// A message in OpenRouter's (OpenAI-compatible) chat format.
-public struct APIMessage: Codable, Sendable, Hashable {
+public struct APIMessage: Encodable, Sendable, Hashable {
     public enum Role: String, Codable, Sendable { case system, user, assistant, tool }
 
     public var role: Role
     public var content: String?
+    /// OpenRouter multipart content for image/PDF input. nil keeps ordinary text messages unchanged.
+    public var contentParts: [JSONValue]?
     public var toolCalls: [APIToolCall]?
     public var toolCallID: String?
     /// The model's own thinking blocks, returned exactly as received. Models such as Claude need
     /// them back while a tool-using answer is still in progress, or they lose their train of thought.
     public var reasoningDetails: [JSONValue]?
 
-    public init(role: Role, content: String?, toolCalls: [APIToolCall]? = nil, toolCallID: String? = nil, reasoningDetails: [JSONValue]? = nil) {
+    public init(role: Role, content: String?, contentParts: [JSONValue]? = nil, toolCalls: [APIToolCall]? = nil, toolCallID: String? = nil, reasoningDetails: [JSONValue]? = nil) {
         self.role = role
         self.content = content
+        self.contentParts = contentParts
         self.toolCalls = toolCalls
         self.toolCallID = toolCallID
         self.reasoningDetails = reasoningDetails
@@ -36,7 +39,9 @@ public struct APIMessage: Codable, Sendable, Hashable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(role, forKey: .role)
-        if let content {
+        if let contentParts, !contentParts.isEmpty {
+            try container.encode(contentParts, forKey: .content)
+        } else if let content {
             try container.encode(content, forKey: .content)
         } else {
             // An assistant turn that only called tools has no text. OpenAI's format says null.
@@ -71,7 +76,7 @@ public struct APIToolCall: Codable, Sendable, Hashable {
 }
 
 /// A tool the model may call, described with a JSON Schema for its arguments.
-public struct ToolSpec: Codable, Sendable, Hashable {
+public struct ToolSpec: Encodable, Sendable, Hashable {
     public struct Function: Codable, Sendable, Hashable {
         public var name: String
         public var description: String
@@ -80,10 +85,27 @@ public struct ToolSpec: Codable, Sendable, Hashable {
 
     public var type: String
     public var function: Function
+    public var serverOptions: JSONValue?
 
     public init(name: String, description: String, parameters: JSONValue) {
         self.type = "function"
         self.function = Function(name: name, description: description, parameters: parameters)
+        self.serverOptions = nil
+    }
+
+    /// A tool OpenRouter runs itself, such as openrouter:web_search.
+    public init(server name: String, options: JSONValue? = nil) {
+        type = name
+        function = Function(name: name, description: "", parameters: .object([:]))
+        serverOptions = options
+    }
+
+    enum CodingKeys: String, CodingKey { case type, function, serverOptions = "options" }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type, forKey: .type)
+        if type == "function" { try c.encode(function, forKey: .function) }
+        try c.encodeIfPresent(serverOptions, forKey: .serverOptions)
     }
 }
 
@@ -210,6 +232,7 @@ public struct StreamChunk: Sendable {
     public var finishReason: String?
     public var usage: Usage?
     public var error: OpenRouterAPIError?
+    public var citations: [SourceCitation]
 
     public struct ToolCallDelta: Sendable, Hashable {
         public var index: Int?
@@ -238,6 +261,11 @@ public struct StreamChunk: Sendable {
         finishReason = choice?["finish_reason"]?.stringValue
         usage = json["usage"].flatMap { $0.isNull ? nil : Usage(json: $0) }
         error = json["error"].flatMap { $0.isNull ? nil : OpenRouterAPIError(errorObject: $0, httpStatus: 200, retryAfter: nil) }
+        citations = (delta?["annotations"]?.arrayValue ?? json["citations"]?.arrayValue ?? []).compactMap { annotation in
+            let citation = annotation["url_citation"] ?? annotation
+            guard let url = citation["url"]?.stringValue else { return nil }
+            return SourceCitation(url: url, title: citation["title"]?.stringValue)
+        }
     }
 }
 
@@ -251,6 +279,7 @@ public struct StreamAccumulator: Sendable {
     public private(set) var finishReason: String?
     public private(set) var usage: Usage?
     public private(set) var error: OpenRouterAPIError?
+    public private(set) var citations: [SourceCitation] = []
 
     private var detailOrder: [Int] = []
     private var details: [Int: [String: JSONValue]] = [:]
@@ -270,6 +299,7 @@ public struct StreamAccumulator: Sendable {
         if let finish = chunk.finishReason { finishReason = finish }
         if let usage = chunk.usage { self.usage = usage }
         if let error = chunk.error { self.error = error }
+        for citation in chunk.citations where !citations.contains(where: { $0.url == citation.url }) { citations.append(citation) }
     }
 
     /// Reasoning blocks arrive in pieces that share an `index`. Text-like fields are joined;

@@ -57,6 +57,10 @@ struct AppSettings: Codable, Equatable, Sendable {
     var spendLimit: Double = 1
     /// The repo the last new chat used, so the next one starts there too.
     var lastRepo: ChatRepo?
+    /// Local finish/needs-answer notifications start on.
+    var notificationsOn = true
+    /// Repos whose changes save straight to the selected branch.
+    var directSaveRepos: [String: Bool] = [:]
 
     init() {}
 
@@ -69,7 +73,11 @@ struct AppSettings: Codable, Equatable, Sendable {
         spendLimitOn = try c.decodeIfPresent(Bool.self, forKey: .spendLimitOn) ?? false
         spendLimit = try c.decodeIfPresent(Double.self, forKey: .spendLimit) ?? 1
         lastRepo = try? c.decodeIfPresent(ChatRepo.self, forKey: .lastRepo)
+        notificationsOn = try c.decodeIfPresent(Bool.self, forKey: .notificationsOn) ?? true
+        directSaveRepos = try c.decodeIfPresent([String: Bool].self, forKey: .directSaveRepos) ?? [:]
     }
+
+    func savesDirectly(to repo: RepoRef) -> Bool { directSaveRepos[repo.fullName] ?? false }
 
     static let fileName = "settings.json"
 }

@@ -83,6 +83,7 @@ public struct ModelInfo: Codable, Sendable, Hashable, Identifiable {
     public var isRouter: Bool { id.hasPrefix("openrouter/") }
     public var supportsTools: Bool { supportedParameters.contains("tools") }
     public var acceptsImages: Bool { inputModalities.contains("image") }
+    public var acceptsFiles: Bool { inputModalities.contains("file") }
 
     /// The company, from "Anthropic: Claude Sonnet 5.5" or else from the id's prefix.
     public var maker: String {
@@ -165,6 +166,19 @@ extension ModelInfo {
             reasoning: reasoning,
             created: entry["created"]?.doubleValue.map { Date(timeIntervalSince1970: $0) }
         )
+    }
+}
+
+/// Account-wide OpenRouter credit totals (GET /api/v1/credits).
+public struct OpenRouterCredits: Codable, Sendable, Hashable {
+    public var purchased: Double
+    public var used: Double
+    public var balance: Double { max(0, purchased - used) }
+    public init(purchased: Double, used: Double) { self.purchased = purchased; self.used = used }
+    init(response: JSONValue) {
+        let data = response["data"] ?? response
+        purchased = data["total_credits"]?.doubleValue ?? data["purchased"]?.doubleValue ?? 0
+        used = data["total_usage"]?.doubleValue ?? data["usage"]?.doubleValue ?? 0
     }
 }
 

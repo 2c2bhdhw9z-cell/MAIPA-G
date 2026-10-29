@@ -57,7 +57,7 @@ public struct ChatRepo: Codable, Sendable, Hashable {
 
 /// One conversation. Saved as one JSON file, on the phone and in the user's private data repo.
 public struct Chat: Codable, Sendable, Identifiable, Hashable {
-    public static let currentFormat = 1
+    public static let currentFormat = 2
 
     public var format: Int
     public var id: UUID
@@ -70,6 +70,14 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
     public var model: ModelChoice
     public var thinking: ThinkingLevel
     public var messages: [ChatMessage]
+    /// Optional user-created group. nil keeps Build 1 chats ungrouped.
+    public var groupID: UUID?
+    /// Receipts for saves made from this chat. The last eligible receipt powers Undo.
+    public var saveReceipts: [SaveReceipt]?
+    /// Durable links used by later job, workflow and spec coordinators.
+    public var activeJobID: UUID?
+    public var workflowID: UUID?
+    public var specID: UUID?
 
     public init(
         id: UUID = UUID(),
@@ -90,6 +98,11 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         self.model = model
         self.thinking = thinking
         self.messages = messages
+        self.groupID = nil
+        self.saveReceipts = nil
+        self.activeJobID = nil
+        self.workflowID = nil
+        self.specID = nil
     }
 
     /// Everything the chat has cost so far, in dollars, as OpenRouter reported it.
@@ -134,8 +147,8 @@ public struct ChatMessage: Codable, Sendable, Identifiable, Hashable {
         self.body = body
     }
 
-    public static func user(_ text: String) -> ChatMessage {
-        ChatMessage(body: .user(UserMessage(text: text)))
+    public static func user(_ text: String, attachments: [AttachmentReference] = []) -> ChatMessage {
+        ChatMessage(body: .user(UserMessage(text: text, attachments: attachments)))
     }
 
     public var userText: String? {
@@ -154,9 +167,47 @@ public struct ChatMessage: Codable, Sendable, Identifiable, Hashable {
     }
 }
 
+public enum AttachmentKind: String, Codable, Sendable, Hashable {
+    case image, pdf, text, file
+}
+
+/// A durable attachment. `path` is relative to MAIPA-G's mirrored data folder.
+public struct AttachmentReference: Codable, Sendable, Hashable, Identifiable {
+    public var id: UUID
+    public var name: String
+    public var mimeType: String
+    public var kind: AttachmentKind
+    public var path: String
+    public var bytes: Int
+    public var createdAt: Date
+
+    public init(id: UUID = UUID(), name: String, mimeType: String, kind: AttachmentKind, path: String, bytes: Int, createdAt: Date = Date()) {
+        self.id = id
+        self.name = name
+        self.mimeType = mimeType
+        self.kind = kind
+        self.path = path
+        self.bytes = bytes
+        self.createdAt = createdAt
+    }
+}
+
 public struct UserMessage: Codable, Sendable, Hashable {
     public var text: String
-    public init(text: String) { self.text = text }
+    public var attachments: [AttachmentReference]
+
+    public init(text: String, attachments: [AttachmentReference] = []) {
+        self.text = text
+        self.attachments = attachments
+    }
+
+    enum CodingKeys: String, CodingKey { case text, attachments }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        text = try c.decode(String.self, forKey: .text)
+        attachments = try c.decodeIfPresent([AttachmentReference].self, forKey: .attachments) ?? []
+    }
 }
 
 /// Everything the AI did in answer to one user message: one step per request to the model.
@@ -239,6 +290,13 @@ public struct TurnFailure: Codable, Sendable, Hashable {
     }
 }
 
+public struct SourceCitation: Codable, Sendable, Hashable, Identifiable {
+    public var url: String
+    public var title: String?
+    public var id: String { url }
+    public init(url: String, title: String? = nil) { self.url = url; self.title = title }
+}
+
 /// One request to the model and what came back.
 public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
     public var id: UUID
@@ -253,6 +311,8 @@ public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
     public var toolCalls: [ToolCallRecord]
     public var usage: Usage?
     public var finishReason: String?
+    /// Web sources returned by OpenRouter server tools.
+    public var citations: [SourceCitation]?
 
     public init(id: UUID = UUID(), startedAt: Date = Date()) {
         self.id = id
@@ -265,6 +325,7 @@ public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
         self.toolCalls = []
         self.usage = nil
         self.finishReason = nil
+        self.citations = nil
     }
 
     /// How long the model thought, when it shared its thinking.

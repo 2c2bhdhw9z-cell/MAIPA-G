@@ -27,7 +27,7 @@ struct MessageRow: View, Equatable {
     var body: some View {
         switch message.body {
         case .user(let user):
-            UserBubble(text: user.text)
+            UserBubble(message: user)
         case .assistant(let turn):
             AssistantTurnView(turn: turn, isLatest: isLatest, modelName: modelName, actions: actions)
         }
@@ -35,21 +35,29 @@ struct MessageRow: View, Equatable {
 }
 
 struct UserBubble: View {
-    var text: String
+    var message: UserMessage
     @Environment(\.theme) private var theme
 
     var body: some View {
         HStack {
             Spacer(minLength: 48)
-            Text(text)
-                .font(.body)
-                .textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 8) {
+                if !message.text.isEmpty {
+                    Text(message.text)
+                        .font(.body)
+                        .textSelection(.enabled)
+                }
+                ForEach(message.attachments) { attachment in
+                    Label(attachment.name, systemImage: attachment.kind == .image ? "photo" : attachment.kind == .pdf ? "doc.richtext" : "paperclip")
+                        .font(.caption.weight(.medium))
+                }
+            }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
                 .background(theme.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(theme.accent.opacity(0.25)))
                 .contextMenu {
-                    Button { UIPasteboard.general.string = text } label: { Label("Copy", systemImage: "doc.on.doc") }
+                    if !message.text.isEmpty { Button { UIPasteboard.general.string = message.text } label: { Label("Copy", systemImage: "doc.on.doc") } }
                 }
         }
     }
@@ -110,6 +118,10 @@ struct AssistantTurnView: View {
                 Text("·")
                 Text(route)
             }
+            if let cost = turn.usage.cost {
+                Text("·")
+                Text(cost.dollars)
+            }
             Spacer()
             let text = turn.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n")
             if !text.isEmpty {
@@ -143,6 +155,12 @@ struct StepView: View {
             }
             ForEach(step.toolCalls) { call in
                 ToolLine(call: call)
+            }
+            ForEach(step.citations ?? []) { citation in
+                Link(destination: URL(string: citation.url) ?? URL(string: "https://openrouter.ai")!) {
+                    Label(citation.title ?? citation.url, systemImage: "link")
+                        .font(.footnote).lineLimit(1)
+                }
             }
         }
     }
@@ -258,6 +276,12 @@ struct ToolLine: View {
         case "read_file": return "doc.text"
         case "search_code": return "magnifyingglass"
         case "list_files": return "folder"
+        case "create_file", "edit_file": return "square.and.pencil"
+        case "delete_file": return "trash"
+        case "save_changes": return "arrow.up.doc"
+        case "web_search": return "magnifyingglass"
+        case "read_web_page": return "globe"
+        case "read_attachment": return "paperclip"
         case AskUserTool.name: return "questionmark.bubble"
         default: return "wrench.and.screwdriver"
         }

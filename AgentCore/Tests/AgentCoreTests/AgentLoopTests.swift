@@ -55,6 +55,23 @@ struct EchoTool: AgentTool {
     }
 }
 
+actor ApprovalCounter {
+    var runs = 0
+    func increment() { runs += 1 }
+}
+
+struct ApprovalTool: AgentTool {
+    let counter: ApprovalCounter
+    let name = "delete_file"
+    var spec: ToolSpec { ToolSpec(name: name, description: "Delete", parameters: ["type": "object"]) }
+    func runningSummary(for arguments: JSONValue) -> String { "Deleting file…" }
+    func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? { ToolApprovalRequest(question: "Delete file?") }
+    func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        await counter.increment()
+        return ToolOutput(forModel: "deleted", summary: "Deleted file")
+    }
+}
+
 @Suite("Agent loop")
 struct AgentLoopTests {
     static func text(_ content: String, model: String = "test/model") -> String {
@@ -287,6 +304,35 @@ struct AgentLoopTests {
         #expect(fitted.count == messages.count)
         #expect(fitted[3].content == Transcript.trimmedToolResult)
         #expect(fitted.last?.content == "latest question")
+    }
+
+    @Test func destructiveToolsPauseForRealApproval() async throws {
+        let counter = ApprovalCounter()
+        let transport = ScriptedTransport([
+            .events([Self.toolCall(id: "d1", name: "delete_file", arguments: #"{"path":"old.txt"}"#), Self.toolsDone]),
+            .events([Self.text("Done."), Self.done]),
+        ])
+        let first = await Self.runToEnd(transport, chat: Self.newChat("delete old.txt"), route: Self.route(), tools: [ApprovalTool(counter: counter)])
+        var paused = try #require(first.0)
+        #expect(paused.status == .waitingForUser)
+        #expect(await counter.runs == 0)
+        #expect(paused.pendingQuestions?.questions.questions.first?.text == "Delete file?")
+
+        paused.steps[0].toolCalls[0].questions?.answers = ["Allow"]
+        var chat = Self.newChat("delete old.txt")
+        chat.messages[1].assistantTurn = paused
+        let second = await Self.runToEnd(transport, chat: chat, route: Self.route(), tools: [ApprovalTool(counter: counter)])
+        #expect(second.0?.status == .done)
+        #expect(await counter.runs == 1)
+    }
+
+    @Test func webParserAndSafetyRejectPrivateAddresses() {
+        let html = #"<a class="result__a" href="https://example.com/page">Example result</a><div class="result__snippet">Useful words</div>"#
+        let result = FreeWebSearch.parse(html)
+        #expect(result.first?.url.absoluteString == "https://example.com/page")
+        #expect(result.first?.title == "Example result")
+        #expect(!WebPageReader.isSafe(URL(string: "http://127.0.0.1/private")!))
+        #expect(WebPageReader.isSafe(URL(string: "https://example.com")!))
     }
 
     @Test func routerFollowsMoneyAndDifficulty() {

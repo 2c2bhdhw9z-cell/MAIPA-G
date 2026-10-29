@@ -12,13 +12,31 @@ public enum Transcript {
     /// never finished get a short note instead. Thinking blocks are sent back only for the turn in
     /// progress, which is where models need them to carry on mid-answer; older ones would only
     /// cost tokens.
-    public static func messages(for chat: Chat, systemPrompt: String) -> [APIMessage] {
+    public static func messages(for chat: Chat, systemPrompt: String, attachmentData: [UUID: Data] = [:]) -> [APIMessage] {
         var result: [APIMessage] = [.system(systemPrompt)]
         let lastAssistantIndex = chat.messages.lastIndex { $0.assistantTurn != nil }
         for (index, message) in chat.messages.enumerated() {
             switch message.body {
             case .user(let user):
-                result.append(.user(user.text))
+                var parts: [JSONValue] = []
+                if !user.text.isEmpty { parts.append(["type": "text", "text": .string(user.text)]) }
+                for attachment in user.attachments {
+                    guard let data = attachmentData[attachment.id] else { continue }
+                    let encoded = "data:\(attachment.mimeType);base64,\(data.base64EncodedString())"
+                    switch attachment.kind {
+                    case .image:
+                        parts.append(["type": "image_url", "image_url": ["url": .string(encoded)]])
+                    case .pdf:
+                        parts.append(["type": "file", "file": ["filename": .string(attachment.name), "file_data": .string(encoded)]])
+                    case .text, .file:
+                        break
+                    }
+                }
+                if parts.count > (user.text.isEmpty ? 0 : 1) {
+                    result.append(APIMessage(role: .user, content: nil, contentParts: parts))
+                } else {
+                    result.append(.user(user.text))
+                }
             case .assistant(let turn):
                 let isCurrent = index == lastAssistantIndex && index == chat.messages.count - 1
                 for step in turn.steps {
@@ -52,6 +70,7 @@ public enum Transcript {
         var characters = 0
         for message in messages {
             characters += message.content?.count ?? 0
+            characters += message.contentParts?.reduce(0) { $0 + $1.jsonString().count } ?? 0
             characters += message.toolCalls?.reduce(0) { $0 + $1.function.arguments.count + $1.function.name.count + 16 } ?? 0
             characters += 12
         }

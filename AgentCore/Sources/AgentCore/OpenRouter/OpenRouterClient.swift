@@ -147,6 +147,15 @@ public struct OpenRouterClient: Sendable {
         return OpenRouterKeyInfo(response: json)
     }
 
+    /// Account-wide purchased credit and usage. Some OAuth keys are not allowed to read it.
+    public func credits() async throws -> OpenRouterCredits {
+        let request = HTTPRequest(url: Self.apiBase.appendingPathComponent("credits"), headers: headers, idleTimeout: 30)
+        let response = try await withRetries(.standard, retryAfter: defaultRetryDelay) { try await transport.send(request) }
+        guard response.isSuccess else { throw OpenRouterAPIError(status: response.status, body: response.body, headers: response.headers) }
+        guard let json = JSONValue.parse(response.body) else { throw HTTPError.undecodable(status: response.status, type: "credits", detail: "not JSON", body: response.text) }
+        return OpenRouterCredits(response: json)
+    }
+
     /// Sends a chat request and returns its reply as it streams in. Errors before the reply starts
     /// are thrown here; errors during it arrive as a chunk with `error` set.
     public func stream(_ request: ChatCompletionRequest) async throws -> AsyncThrowingStream<StreamChunk, Error> {

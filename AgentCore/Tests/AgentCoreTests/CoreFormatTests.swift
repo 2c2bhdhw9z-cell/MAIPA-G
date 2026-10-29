@@ -48,6 +48,29 @@ struct CoreFormatTests {
         #expect(!encoded.contains("+") && !encoded.contains("/") && !encoded.contains("="))
         #expect(Base64URL.decode(encoded) == data)
     }
+
+    @Test func buildTwoRecordsAndOldMessagesRoundTrip() throws {
+        let old = try JSONCoding.decoder().decode(UserMessage.self, from: Data(#"{"text":"hello"}"#.utf8))
+        #expect(old.text == "hello" && old.attachments.isEmpty)
+
+        let attachment = AttachmentReference(name: "photo.jpg", mimeType: "image/jpeg", kind: .image, path: "attachments/id/photo.jpg", bytes: 12)
+        let message = UserMessage(text: "look", attachments: [attachment])
+        let decodedMessage = try JSONCoding.decoder().decode(UserMessage.self, from: JSONCoding.encoder().encode(message))
+        #expect(decodedMessage.text == message.text)
+        #expect(decodedMessage.attachments.map(\.id) == message.attachments.map(\.id))
+
+        let memory = MemoryRecord(text: "Use plain words", source: .star)
+        let decodedMemory = try JSONCoding.decoder().decode(MemoryRecord.self, from: JSONCoding.encoder().encode(memory))
+        #expect(decodedMemory.id == memory.id && decodedMemory.text == memory.text && decodedMemory.source == .star)
+        #expect(Chat.currentFormat == 2)
+    }
+
+    @Test func creditsCalculateAvailableMoney() {
+        let credits = OpenRouterCredits(response: JSONValue.parse(#"{"data":{"total_credits":5,"total_usage":1.25}}"#)!)
+        #expect(credits.purchased == 5)
+        #expect(credits.used == 1.25)
+        #expect(credits.balance == 3.75)
+    }
 }
 
 @Suite("Server-sent events")

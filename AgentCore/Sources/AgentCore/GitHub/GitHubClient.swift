@@ -339,6 +339,31 @@ public struct GitHubClient: Sendable {
         _ = try await send("PATCH", Self.path(repo, "/git/refs/heads/\(Self.escapePath(branch))"), body: ["sha": .string(sha), "force": false])
     }
 
+    public func createBranch(_ repo: RepoRef, branch: String, from sha: String) async throws {
+        _ = try await send("POST", Self.path(repo, "/git/refs"), body: ["ref": .string("refs/heads/\(branch)"), "sha": .string(sha)])
+    }
+
+    public func deleteBranch(_ repo: RepoRef, branch: String) async throws {
+        _ = try await send("DELETE", Self.path(repo, "/git/refs/heads/\(Self.escapePath(branch))"), allow: [404])
+    }
+
+    public func openPullRequest(_ repo: RepoRef, title: String, body text: String, head: String, base: String) async throws -> GitHubPullRequest {
+        let body: JSONValue = ["title": .string(title), "body": .string(text), "head": .string(head), "base": .string(base)]
+        return try await send("POST", Self.path(repo, "/pulls"), body: body).decode(GitHubPullRequest.self)
+    }
+
+    public func pullRequest(_ repo: RepoRef, number: Int) async throws -> GitHubPullRequest {
+        try await get(GitHubPullRequest.self, Self.path(repo, "/pulls/\(number)"))
+    }
+
+    public func closePullRequest(_ repo: RepoRef, number: Int) async throws -> GitHubPullRequest {
+        try await send("PATCH", Self.path(repo, "/pulls/\(number)"), body: ["state": "closed"]).decode(GitHubPullRequest.self)
+    }
+
+    public func mergePullRequest(_ repo: RepoRef, number: Int, title: String) async throws {
+        _ = try await send("PUT", Self.path(repo, "/pulls/\(number)/merge"), body: ["merge_method": "squash", "commit_title": .string(title)])
+    }
+
     // MARK: Public
 
     /// The newest published release of a public repo. Needs no sign-in.

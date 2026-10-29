@@ -98,6 +98,54 @@ struct RepoCopyTests {
         }
     }
 
+    @Test func stagedSaveAndUndoProtectAgainstInterveningChanges() async throws {
+        let github = FakeGitHub()
+        github.commitRemotely(["README.md": Data("old\n".utf8)])
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-change-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let head = try #require(github.head)
+        let repo = RepoRef(owner: "octo", name: "MAIPA-G-data")
+        let base = RepoWorkspace(repo: repo, branch: "main", commit: head, github: github.client, store: SnapshotStore(root: root))
+        let changes = ChangeWorkspace(base: base)
+        try await changes.edit(path: "README.md", text: "new\n")
+        try await changes.create(path: "Sources/New.swift", text: "let value = 1\n")
+        await #expect(throws: ChangeWorkspaceError.self) { try await changes.delete(path: "README.md") }
+
+        let service = GitHubChangeService(github: github.client)
+        let receipt = try await service.save(changes, selectedBranch: "main", defaultBranch: "main", rules: RepoWriteRules(directSave: true), title: "Update files")
+        #expect(github.remoteFile("README.md") == Data("new\n".utf8))
+        #expect(github.remoteFile("Sources/New.swift") != nil)
+        _ = try await service.undo(receipt)
+        #expect(github.remoteFile("README.md") == Data("old\n".utf8))
+        #expect(github.remoteFile("Sources/New.swift") == nil)
+
+        let secondBase = RepoWorkspace(repo: repo, branch: "main", commit: try #require(github.head), github: github.client, store: SnapshotStore(root: root))
+        let secondChanges = ChangeWorkspace(base: secondBase)
+        try await secondChanges.edit(path: "README.md", text: "again\n")
+        let second = try await service.save(secondChanges, selectedBranch: "main", defaultBranch: "main", rules: RepoWriteRules(directSave: true), title: "Again")
+        github.commitRemotely(["OTHER.md": Data("intervening".utf8)])
+        await #expect(throws: ChangeWorkspaceError.self) { _ = try await service.undo(second) }
+        #expect(github.remoteFile("OTHER.md") != nil)
+    }
+
+    @Test func defaultBranchSaveOpensAndResolvesPullRequest() async throws {
+        let github = FakeGitHub()
+        github.commitRemotely(["README.md": Data("old\n".utf8)])
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-pr-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let base = RepoWorkspace(repo: RepoRef(owner: "octo", name: "MAIPA-G-data"), branch: "main", commit: try #require(github.head), github: github.client, store: SnapshotStore(root: root))
+        let changes = ChangeWorkspace(base: base)
+        try await changes.edit(path: "README.md", text: "new\n")
+        let service = GitHubChangeService(github: github.client)
+        let receipt = try await service.save(changes, selectedBranch: "main", defaultBranch: "main", rules: RepoWriteRules(), title: "Update readme")
+        #expect(receipt.branch.hasPrefix("maipa-g/update-readme-"))
+        #expect(receipt.pullRequest?.number == 1)
+        #expect(github.branchHeads[receipt.branch] == receipt.savedCommit)
+        try await service.addIt(receipt)
+        #expect(github.pullState == "merged")
+        #expect(github.branchHeads[receipt.branch] == nil)
+    }
+
     @Test func linkHeaderPagination() {
         let header = #"<https://api.github.com/installation/repositories?per_page=100&page=2>; rel="next", <https://api.github.com/installation/repositories?per_page=100&page=5>; rel="last""#
         #expect(GitHubClient.nextPage(from: header)?.absoluteString == "https://api.github.com/installation/repositories?per_page=100&page=2")

@@ -4,7 +4,7 @@ import Foundation
 /// MAIPA-G-data repo. Files are written whole and swapped in, so a crash or a sync running at the
 /// same moment can never see half a file.
 public actor ChatStore {
-    public let dataDirectory: URL
+    public nonisolated let dataDirectory: URL
     private var chatsDirectory: URL { dataDirectory.appendingPathComponent("chats", isDirectory: true) }
 
     public init(dataDirectory: URL) {
@@ -61,5 +61,24 @@ public actor ChatStore {
     public func loadDocument<T: Decodable>(_ type: T.Type, at relativePath: String) -> T? {
         guard let data = try? Data(contentsOf: dataDirectory.appendingPathComponent(relativePath)) else { return nil }
         return try? JSONCoding.decoder().decode(type, from: data)
+    }
+
+    /// Writes attachment/media bytes atomically inside the mirrored folder.
+    public func saveBlob(_ data: Data, at relativePath: String) throws {
+        guard SnapshotStore.isSafeRelativePath(relativePath) else { throw CocoaError(.fileWriteInvalidFileName) }
+        let url = dataDirectory.appendingPathComponent(relativePath)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: url, options: .atomic)
+    }
+
+    public func loadBlob(at relativePath: String) -> Data? {
+        guard SnapshotStore.isSafeRelativePath(relativePath) else { return nil }
+        return try? Data(contentsOf: dataDirectory.appendingPathComponent(relativePath))
+    }
+
+    public func deleteItem(at relativePath: String) throws {
+        guard SnapshotStore.isSafeRelativePath(relativePath) else { throw CocoaError(.fileWriteInvalidFileName) }
+        let url = dataDirectory.appendingPathComponent(relativePath)
+        if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
     }
 }

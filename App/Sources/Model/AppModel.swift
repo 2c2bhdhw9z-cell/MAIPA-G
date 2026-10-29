@@ -16,6 +16,7 @@ enum AppSheet: Identifiable, Hashable {
     case models(ComposerTarget)
     case repos(ComposerTarget)
     case branches(ComposerTarget)
+    case files(ChatRepo)
 
     var id: String {
         switch self {
@@ -25,6 +26,7 @@ enum AppSheet: Identifiable, Hashable {
         case .models(let target): return "models-\(target)"
         case .repos(let target): return "repos-\(target)"
         case .branches(let target): return "branches-\(target)"
+        case .files(let repo): return "files-\(repo.ref.fullName)-\(repo.branch)"
         }
     }
 }
@@ -38,6 +40,8 @@ final class HomeDraft {
     var model: ModelChoice = .auto
     var thinking: ThinkingLevel = .default
     var repo: ChatRepo?
+    var attachments: [AttachmentReference] = []
+    var webEnabled = true
 }
 
 /// The app's state, shared by every screen.
@@ -52,6 +56,8 @@ final class AppModel {
     let sync: SyncCoordinator
     let updates: UpdateChecker
     let snapshots: SnapshotStore
+    let attachmentStore: AttachmentStore
+    let notifications = Notifications()
     let home = HomeDraft()
     private(set) var settings: AppSettings
 
@@ -70,6 +76,7 @@ final class AppModel {
         sync = SyncCoordinator(paths: paths)
         updates = UpdateChecker()
         snapshots = SnapshotStore(root: paths.repoCopies)
+        attachmentStore = AttachmentStore(dataDirectory: paths.data)
         settings = Self.readSettings(paths)
         library.app = self
         sync.app = self
@@ -174,13 +181,15 @@ final class AppModel {
 
     func sendFromHome() {
         let text = home.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty || !home.attachments.isEmpty else { return }
         guard openRouter.isSignedIn else {
             sheet = .signInOpenRouter
             return
         }
-        library.startChat(text: text, repo: home.repo, model: home.model, thinking: home.thinking)
+        notifications.requestIfNeeded(enabled: settings.notificationsOn)
+        library.startChat(text: text, attachments: home.attachments, repo: home.repo, model: home.model, thinking: home.thinking)
         home.text = ""
+        home.attachments = []
         home.model = .auto
         home.thinking = .default
         let repo = home.repo
@@ -198,6 +207,8 @@ final class AppModel {
         sync.request()
         if session.lastTurn?.status == .done || session.lastTurn?.status == .waitingForUser {
             Haptics.success()
+            let needsAnswer = session.lastTurn?.status == .waitingForUser
+            notifications.post(title: needsAnswer ? "MAIPA-G needs you" : "MAIPA-G finished", body: session.chat.title.isEmpty ? "Your chat is ready." : session.chat.title, enabled: settings.notificationsOn)
         }
     }
 
@@ -275,6 +286,9 @@ final class AppModel {
         case "menu":
             library.preview(summaries: summaries, open: nil)
             isMenuOpen = true
+        case "files":
+            library.preview(summaries: summaries, open: nil)
+            if let repo = home.repo { sheet = .files(repo) }
         case "settings":
             library.preview(summaries: summaries, open: nil)
             sheet = .settings
