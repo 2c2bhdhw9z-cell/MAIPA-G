@@ -177,24 +177,38 @@ public struct ProcessTool: AgentTool {
 
     public func runningSummary(for arguments: JSONValue) -> String { "Running a command…" }
 
-    public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
-        let command = arguments["command"]?.stringValue?.lowercased() ?? ""
-        let destructive = ["rm ", "rm\t", "git rm", "git clean", "unlink ", "rmdir ", "-delete", "removeitem", "os.remove", "shutil.rmtree"].contains { command.contains($0) }
-        if destructive && !authorization.deletion { return ToolApprovalRequest(question: "Allow this command to delete files?", allowLabel: "Allow") }
-        let buildSetup = [".github/workflows/", "project.yml", "package.swift", "package.json", "dockerfile"].contains { command.contains($0) }
-        if buildSetup && !authorization.buildSetup { return ToolApprovalRequest(question: "Allow this command to change the repo's build setup?", allowLabel: "Allow") }
-        return nil
-    }
+    public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? { nil }
 
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        try await execute(arguments: arguments, approved: false, progress: progress)
+    }
+
+    public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        try await execute(arguments: arguments, approved: true, progress: progress)
+    }
+
+    private func execute(arguments: JSONValue, approved: Bool, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let command = try arguments.requiredString("command")
         guard !command.contains("\u{0}") else { throw ProcessFailure.invalidCommand }
         let timeout = Double(arguments["timeout_seconds"]?.intValue ?? 600)
+        let before = try await WorkspaceState.capture(in: directory)
         progress("Running a command…")
         let result = try await BoundedProcess.run(
             executable: "/bin/bash", arguments: ["-lc", command], directory: directory,
             timeout: timeout
         )
+        let after = try await WorkspaceState.capture(in: directory)
+        if !approved {
+            let deleted = authorization.deletion ? [] : before.paths.subtracting(after.paths).sorted()
+            let buildChanged = authorization.buildSetup ? [] : before.buildFiles.changed(comparedWith: after.buildFiles)
+            let blocked = Array(Set(deleted + buildChanged)).sorted()
+            if !blocked.isEmpty {
+                try await before.restore(in: directory)
+                let kind = !deleted.isEmpty && !buildChanged.isEmpty ? "delete files or change build setup" : (!deleted.isEmpty ? "delete files" : "change build setup")
+                let shown = blocked.prefix(20).joined(separator: ", ") + (blocked.count > 20 ? ", and \(blocked.count - 20) more" : "")
+                throw ToolApprovalRequired(ToolApprovalRequest(question: "Allow this command to \(kind) in: \(shown)?"))
+            }
+        }
         let combined = [result.stdout, result.stderr].filter { !$0.isEmpty }.joined(separator: "\n")
         if result.timedOut { throw ProcessFailure.timedOut }
         return ToolOutput(
@@ -203,6 +217,63 @@ public struct ProcessTool: AgentTool {
             detail: combined,
             isError: result.exitCode != 0
         )
+    }
+}
+
+private struct WorkspaceState: Sendable {
+    var paths: Set<String>
+    var buildFiles: [String: Data]
+    var patch: Data
+
+    static func capture(in directory: URL) async throws -> WorkspaceState {
+        let listed = try await BoundedProcess.run(
+            executable: "/usr/bin/git", arguments: ["ls-files", "-co", "--exclude-standard", "-z"],
+            directory: directory, timeout: 120, outputLimit: 20_000_000
+        )
+        guard listed.exitCode == 0 else { throw CloudRunnerError.commandFailed }
+        let candidates = listed.stdout.split(separator: "\0").map(String.init)
+        let paths = Set(candidates.filter { path in
+            var folder: ObjCBool = false
+            return FileManager.default.fileExists(atPath: directory.appendingPathComponent(path).path, isDirectory: &folder) && !folder.boolValue
+        })
+        var buildFiles: [String: Data] = [:]
+        for path in paths where ChangeWorkspace.isBuildSetup(path) {
+            buildFiles[path] = try Data(contentsOf: directory.appendingPathComponent(path), options: .mappedIfSafe)
+        }
+        let add = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["add", "-A"], directory: directory, timeout: 120)
+        guard add.exitCode == 0 else { throw CloudRunnerError.commandFailed }
+        do {
+            let diff = try await BoundedProcess.run(
+                executable: "/usr/bin/git", arguments: ["diff", "--cached", "--binary", "--full-index"],
+                directory: directory, timeout: 120, outputLimit: 90_000_000
+            )
+            guard diff.exitCode == 0 else { throw CloudRunnerError.commandFailed }
+            let reset = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["reset"], directory: directory, timeout: 120)
+            guard reset.exitCode == 0 else { throw CloudRunnerError.commandFailed }
+            return WorkspaceState(paths: paths, buildFiles: buildFiles, patch: Data(diff.stdout.utf8))
+        } catch {
+            _ = try? await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["reset"], directory: directory, timeout: 120)
+            throw error
+        }
+    }
+
+    func restore(in directory: URL) async throws {
+        let reset = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["reset", "--hard", "HEAD"], directory: directory, timeout: 120)
+        guard reset.exitCode == 0 else { throw CloudRunnerError.commandFailed }
+        let clean = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["clean", "-fd"], directory: directory, timeout: 120)
+        guard clean.exitCode == 0 else { throw CloudRunnerError.commandFailed }
+        guard !patch.isEmpty else { return }
+        let apply = try await BoundedProcess.run(
+            executable: "/usr/bin/git", arguments: ["apply", "--whitespace=nowarn", "-"],
+            directory: directory, stdin: patch, timeout: 120
+        )
+        guard apply.exitCode == 0 else { throw CloudRunnerError.commandFailed }
+    }
+}
+
+private extension Dictionary where Key == String, Value == Data {
+    func changed(comparedWith other: Self) -> [String] {
+        Set(keys).union(other.keys).filter { self[$0] != other[$0] }.sorted()
     }
 }
 

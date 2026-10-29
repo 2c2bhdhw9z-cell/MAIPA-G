@@ -32,13 +32,14 @@ public struct WorkflowCheckpoint: Codable, Sendable, Hashable {
     public var outputs: [WorkflowOutput]
     public var pendingQuestion: WorkflowQuestion?
     public var cumulativeCost: Double
+    public var approvedSpendUpTo: Double?
     public var isCancelled: Bool
     public var updatedAt: Date
 
     public init(workflowID: String, request: String) {
         self.workflowID = workflowID; self.request = request; statuses = [:]
         repeatIterations = [:]; answers = [:]; outputs = []; cumulativeCost = 0
-        isCancelled = false; updatedAt = Date()
+        approvedSpendUpTo = nil; isCancelled = false; updatedAt = Date()
     }
 }
 
@@ -65,12 +66,14 @@ public actor WorkflowEngine {
     private let agents: [String: AgentDefinition]
     private let executor: AgentExecutor
     private let checkpointer: Checkpointer
+    private let spendLimit: Double?
     public private(set) var state: WorkflowCheckpoint
 
     public init(
         definition: WorkflowDefinition,
         checkpoint: WorkflowCheckpoint? = nil,
         agents: [AgentDefinition] = BuiltInAgents.all,
+        spendLimit: Double? = nil,
         runner: @escaping AgentExecutor.Runner,
         checkpointer: @escaping Checkpointer = { _ in }
     ) {
@@ -78,6 +81,7 @@ public actor WorkflowEngine {
         self.agents = Dictionary(uniqueKeysWithValues: agents.map { ($0.id, $0) })
         executor = AgentExecutor(definitions: agents, runner: runner)
         self.checkpointer = checkpointer
+        self.spendLimit = spendLimit.flatMap { $0 > 0 ? $0 : nil }
         state = checkpoint ?? WorkflowCheckpoint(workflowID: definition.id, request: "")
     }
 
@@ -145,20 +149,36 @@ public actor WorkflowEngine {
 
     private func runAgent(_ node: WorkflowNode, goalCondition: String? = nil) async throws -> Bool {
         guard let agentID = node.agentID, agents[agentID] != nil else { throw WorkflowEngineError.unknownAgent(node.agentID ?? "") }
+        try await ensureBudget(for: node)
         state.statuses[node.id] = .running; try await save()
         var task = node.instruction ?? node.title
         if let goalCondition, !goalCondition.isEmpty {
             task += "\n\nRepeat goal: \(goalCondition)\nEnd with a line containing exactly GOAL_MET only when current evidence proves this goal is met. Otherwise end with GOAL_NOT_MET."
         }
-        let result = try await executor.execute(agentID: agentID, task: task, context: context)
+        let result = try await executor.execute(agentID: agentID, task: task, context: context, spendLimit: remainingBudget)
         if state.isCancelled { throw CancellationError() }
         state.outputs.append(WorkflowOutput(nodeID: node.id, title: node.title, text: result.output, model: result.model))
         state.cumulativeCost += result.cost
+        if let pending = result.pendingQuestion {
+            state.statuses[node.id] = .waiting
+            let question = WorkflowQuestion(nodeID: node.id, text: pending.text, options: pending.options)
+            state.pendingQuestion = question
+            try await save()
+            throw Pause(question: question)
+        }
+        if result.needsSpendingApproval {
+            state.statuses[node.id] = .waiting
+            let question = WorkflowQuestion(nodeID: node.id, text: "This workflow has cost $\(String(format: "%.2f", state.cumulativeCost)). Keep going?", options: ["Keep going", "Stop"])
+            state.pendingQuestion = question
+            try await save()
+            throw Pause(question: question)
+        }
         state.statuses[node.id] = .completed; try await save()
         return result.goalMet
     }
 
     private func runParallel(_ node: WorkflowNode, goalCondition: String? = nil) async throws -> Bool {
+        try await ensureBudget(for: node)
         state.statuses[node.id] = .running
         for child in node.children { state.statuses[child.id] = .running }
         try await save()
@@ -168,6 +188,7 @@ public actor WorkflowEngine {
             return (child, agent)
         }
         let runner = executor
+        let operationBudget = remainingBudget.map { $0 / Double(max(resolved.count, 1)) }
         var results = Array<AgentExecutionResult?>(repeating: nil, count: resolved.count)
         try await withThrowingTaskGroup(of: (Int, AgentExecutionResult).self) { group in
             for (index, item) in resolved.enumerated() {
@@ -176,7 +197,7 @@ public actor WorkflowEngine {
                     if let goalCondition, !goalCondition.isEmpty {
                         task += "\n\nRepeat goal: \(goalCondition)\nEnd with a line containing exactly GOAL_MET only when current evidence proves this goal is met. Otherwise end with GOAL_NOT_MET."
                     }
-                    return (index, try await runner.execute(agentID: item.1.id, task: task, context: baseContext))
+                    return (index, try await runner.execute(agentID: item.1.id, task: task, context: baseContext, spendLimit: operationBudget))
                 }
             }
             for try await (index, result) in group { results[index] = result }
@@ -189,6 +210,20 @@ public actor WorkflowEngine {
             state.cumulativeCost += result.cost
             state.statuses[item.0.id] = .completed
             goalMet = goalMet || result.goalMet
+        }
+        if let pending = results.compactMap({ $0?.pendingQuestion }).first {
+            state.statuses[node.id] = .waiting
+            let question = WorkflowQuestion(nodeID: node.id, text: pending.text, options: pending.options)
+            state.pendingQuestion = question
+            try await save()
+            throw Pause(question: question)
+        }
+        if results.compactMap({ $0 }).contains(where: \.needsSpendingApproval) {
+            state.statuses[node.id] = .waiting
+            let question = WorkflowQuestion(nodeID: node.id, text: "This workflow has cost $\(String(format: "%.2f", state.cumulativeCost)). Keep going?", options: ["Keep going", "Stop"])
+            state.pendingQuestion = question
+            try await save()
+            throw Pause(question: question)
         }
         state.statuses[node.id] = .completed; try await save()
         return goalMet
@@ -243,9 +278,40 @@ public actor WorkflowEngine {
         }
     }
 
+    private var remainingBudget: Double? {
+        guard let spendLimit else { return nil }
+        return max(0.000_001, (state.approvedSpendUpTo ?? spendLimit) - state.cumulativeCost)
+    }
+
+    private func ensureBudget(for node: WorkflowNode) async throws {
+        guard let spendLimit else { return }
+        let threshold = state.approvedSpendUpTo ?? spendLimit
+        guard state.cumulativeCost >= threshold else { return }
+        if let answer = state.answers[node.id] {
+            state.answers[node.id] = nil
+            if answer.lowercased().contains("stop") {
+                state.isCancelled = true
+                state.statuses[node.id] = .cancelled
+                try await save()
+                throw CancellationError()
+            }
+            state.approvedSpendUpTo = state.cumulativeCost + spendLimit
+            state.pendingQuestion = nil
+            state.statuses[node.id] = .pending
+            try await save()
+            return
+        }
+        let question = WorkflowQuestion(nodeID: node.id, text: "This workflow has cost $\(String(format: "%.2f", state.cumulativeCost)). Keep going?", options: ["Keep going", "Stop"])
+        state.statuses[node.id] = .waiting
+        state.pendingQuestion = question
+        try await save()
+        throw Pause(question: question)
+    }
+
     private var context: String {
         let prior = state.outputs.map { "\($0.title):\n\($0.text)" }.joined(separator: "\n\n")
-        return ["Original request:\n\(state.request)", prior].filter { !$0.isEmpty }.joined(separator: "\n\nPrevious workflow results:\n")
+        let answers = state.answers.sorted { $0.key < $1.key }.map { "Answer for \($0.key): \($0.value)" }.joined(separator: "\n")
+        return ["Original request:\n\(state.request)", prior, answers].filter { !$0.isEmpty }.joined(separator: "\n\nPrevious workflow results:\n")
     }
 
     private func reset(_ nodes: [WorkflowNode]) {

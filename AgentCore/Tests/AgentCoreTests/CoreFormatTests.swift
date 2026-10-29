@@ -111,6 +111,11 @@ struct CoreFormatTests {
         #expect(spec.stage == .completed)
         #expect(spec.path(for: .requirements) == ".kiro/specs/login-screen/requirements.md")
         #expect(SpecWorkflows.draft(.checkedDesign, context: "x").steps.first?.agentID == "design-checker")
+        let execution = SpecWorkflows.execute(task: SpecTask(title: "Implement login"), context: "approved")
+        #expect(execution.steps.first?.kind == .repeatUntil)
+        #expect(execution.steps.first?.maximumIterations == 3)
+        #expect(execution.steps.first?.children.map(\.agentID) == ["coder", "code-checker"])
+        #expect(execution.steps.first?.children.last?.instruction?.contains("Do not edit") == true)
     }
 
     @Test func memoryAndGroupRecordsRoundTripWithSourcesAndDates() async throws {
@@ -155,9 +160,18 @@ struct CoreFormatTests {
         #expect(BuiltInAgents.named("investigator")?.permits(tool: "edit_file") == false)
         #expect(BuiltInAgents.named("code-checker")?.modelPolicy == .strong)
         #expect(BuiltInAgents.named("second-opinion")?.modelPolicy == .differentFromPrimary)
+        #expect(BuiltInAgents.named("coder")?.permits(tool: "run_shell") == true)
+        #expect(BuiltInAgents.named("researcher")?.permits(tool: "run_shell") == true)
+        #expect(BuiltInAgents.named("investigator")?.permits(tool: "run_shell") == false)
         #expect(BuiltInAgents.named("builder")?.behavior == .build)
         #expect(BuiltInAgents.named("request-sender")?.behavior == .pullRequest)
         #expect(BuiltInAgents.named("feedback-answerer")?.behavior == .feedback)
+        #expect(CloudToolAssembly.availableToolNames(for: try #require(BuiltInAgents.named("coder"))).contains("run_shell"))
+        #expect(CloudToolAssembly.availableToolNames(for: try #require(BuiltInAgents.named("researcher"))).contains("run_shell"))
+        #expect(CloudToolAssembly.availableToolNames(for: try #require(BuiltInAgents.named("builder"))).isSuperset(of: ["dispatch_workflow", "read_checks", "read_workflow_logs", "list_artifacts", "inspect_ipa"]))
+        #expect(CloudToolAssembly.availableToolNames(for: try #require(BuiltInAgents.named("request-sender"))).contains("create_pull_request"))
+        #expect(CloudToolAssembly.availableToolNames(for: try #require(BuiltInAgents.named("feedback-answerer"))).isSuperset(of: ["run_shell", "read_pull_request_comments", "reply_to_review_comment"]))
+        #expect(!CloudToolAssembly.availableToolNames(for: try #require(BuiltInAgents.named("code-checker"))).contains("run_shell"))
 
         #expect(BuiltInWorkflows.all.map(\.name) == [
             "Look into something", "Keep going until a goal is met", "Work through a checklist",
@@ -178,7 +192,19 @@ struct CoreFormatTests {
         let workflows = ProductStore<WorkflowRecord>(dataDirectory: root, folder: "workflows")
         let custom = CustomAgentRecord(name: "Release reader", summary: "Checks releases", instructions: "Inspect releases and report.", allowedTools: ["read_releases"], difficulty: .hard, behavior: .reportOnly, maximumHelpers: 2)
         try await agents.save(custom)
-        let draft = WorkflowDraftBuilder.initialDraft(description: "Design a feature and have two AIs review it")
+        let generated = WorkflowDefinition(id: "generated", name: "Release flow", summary: "Build, ask, and review", steps: [
+            .repeatUntil("repeat", title: "Repair", maximum: 4, goal: "Checks pass", steps: [
+                .agent("build", title: "Build", agent: "coder", instruction: "Implement and check."),
+                .agent("check", title: "Check", agent: custom.definition.id, instruction: "Check the release."),
+            ]),
+            .ask("approval", title: "Approval", question: "Send it?", options: ["Send", "Stop"]),
+            .parallel("reviews", title: "Reviews", agents: [
+                .agent("primary", title: "Primary", agent: "code-checker", instruction: "Review."),
+                .agent("second", title: "Second", agent: "second-opinion", instruction: "Review independently."),
+            ]),
+        ], isApproved: false)
+        let response = "```json\n" + String(decoding: try JSONCoding.encoder().encode(generated), as: UTF8.self) + "\n```"
+        let draft = try WorkflowDraftBuilder.generatedDraft(from: response, agentIDs: Set(BuiltInAgents.all.map(\.id)).union([custom.definition.id]))
         let record = WorkflowRecord(definition: draft)
         try await workflows.save(record)
         let loadedAgent = try #require(await agents.load(custom.id))
@@ -290,6 +316,9 @@ struct CoreFormatTests {
                 if request.url.path.contains("oauth-authorization-server") {
                     return HTTPResponse(status: 200, body: Data(#"{"issuer":"https://auth.example.com","authorization_endpoint":"https://auth.example.com/authorize","token_endpoint":"https://auth.example.com/token","registration_endpoint":"https://auth.example.com/register","scopes_supported":["tools.read"]}"#.utf8))
                 }
+                if request.url.path == "/token" {
+                    return HTTPResponse(status: 200, body: Data(#"{"access_token":"rotated","expires_in":3600}"#.utf8))
+                }
                 let body = #"{"servers":[{"server":{"name":"com.github/github-mcp","title":"GitHub","description":"GitHub tools","version":"1.0","remotes":[{"type":"streamable-http","url":"https://example.com/mcp"}],"packages":[{"registryType":"npm","identifier":"@modelcontextprotocol/server-github","version":"1.0"}]},"_meta":{"io.modelcontextprotocol.registry/official":{"status":"active","isLatest":true}}}],"metadata":{"nextCursor":"next:1","count":1}}"#
                 return HTTPResponse(status: 200, body: Data(body.utf8))
             }
@@ -311,6 +340,12 @@ struct CoreFormatTests {
         #expect(authQuery.first { $0.name == "resource" }?.value == "https://mcp.example.com/mcp")
         #expect(authQuery.first { $0.name == "state" }?.value == authorization.state)
         #expect(authQuery.first { $0.name == "code_challenge_method" }?.value == "S256")
+        let expiring = ConnectorCredential(accessToken: "old", refreshToken: "refresh", expiresAt: Date(), clientID: "client", scopes: ["tools.read"])
+        let refreshed = try await MCPOAuthClient(transport: transport).refresh(expiring, server: authorization.server, resource: authorization.resource)
+        #expect(refreshed.accessToken == "rotated")
+        #expect(refreshed.refreshToken == "refresh")
+        #expect(refreshed.scopes == ["tools.read"])
+        #expect(refreshed.needsRefresh() == false)
         #expect(ConnectorToolDefinition.namespace(server: "GitHub Cloud", tool: "Search-Repositories") == "mcp_github_cloud_search_repositories")
         #if os(Linux)
         let npm = RegistryServer.Package(registryType: "npm", identifier: "@modelcontextprotocol/server-github", version: "1.0")

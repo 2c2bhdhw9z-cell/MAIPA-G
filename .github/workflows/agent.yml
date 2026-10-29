@@ -65,3 +65,21 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: swift run --package-path .maipag-runner/AgentCore -c release MAIPAGRunner
+
+      - name: Check for a dedicated preview artifact
+        id: preview
+        if: always()
+        shell: bash
+        run: |
+          if test -f .maipag-preview-artifact/index.html; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload the commit-matched preview artifact
+        if: always() && steps.preview.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-site-${{ inputs.job_id }}
+          path: .maipag-preview-artifact
+          if-no-files-found: error
+          retention-days: 7

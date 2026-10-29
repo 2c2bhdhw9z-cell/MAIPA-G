@@ -187,6 +187,34 @@ struct RepoCopyTests {
         #expect(github.branchHeads[receipt.branch] == nil)
     }
 
+    @Test func laterSaveAppendsToTheOpenPullRequestBranch() async throws {
+        let github = FakeGitHub()
+        github.commitRemotely(["README.md": Data("old\n".utf8)])
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-pr-append-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = RepoRef(owner: "octo", name: "MAIPA-G-data")
+        let firstBase = RepoWorkspace(repo: repo, branch: "main", commit: try #require(github.head), github: github.client, store: SnapshotStore(root: root))
+        let firstChanges = ChangeWorkspace(base: firstBase)
+        try await firstChanges.edit(path: "README.md", text: "first\n")
+        let service = GitHubChangeService(github: github.client)
+        let first = try await service.save(firstChanges, selectedBranch: "main", defaultBranch: "main", rules: RepoWriteRules(), title: "Update readme")
+
+        let secondBase = RepoWorkspace(repo: repo, branch: first.branch, commit: first.savedCommit, github: github.client, store: SnapshotStore(root: root))
+        let secondChanges = ChangeWorkspace(base: secondBase)
+        try await secondChanges.edit(path: "README.md", text: "second\n")
+        let second = try await service.save(secondChanges, selectedBranch: first.branch, defaultBranch: "main", rules: RepoWriteRules(), title: "Continue update", activeReceipt: first)
+        #expect(second.branch == first.branch)
+        #expect(second.pullRequest?.number == first.pullRequest?.number)
+        #expect(github.commits[second.savedCommit]?.parent == first.savedCommit)
+        #expect(github.branchHeads[first.branch] == second.savedCommit)
+    }
+
+    @Test func repositoryRulesForceDirectSaving() {
+        let rules = RepoWriteRules.resolve(documents: [(".kiro/steering/owner-rules.md", "Never create a branch or pull request for this repo.")], directSaveSetting: false)
+        #expect(rules.directSave)
+        #expect(rules.reason?.contains("owner-rules.md") == true)
+    }
+
     @Test func linkHeaderPagination() {
         let header = #"<https://api.github.com/installation/repositories?per_page=100&page=2>; rel="next", <https://api.github.com/installation/repositories?per_page=100&page=5>; rel="last""#
         #expect(GitHubClient.nextPage(from: header)?.absoluteString == "https://api.github.com/installation/repositories?per_page=100&page=2")

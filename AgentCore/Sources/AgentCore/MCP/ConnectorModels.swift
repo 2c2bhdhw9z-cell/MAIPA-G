@@ -35,6 +35,11 @@ public struct ConnectorCredential: Codable, Sendable, Hashable {
         self.accessToken = accessToken; self.refreshToken = refreshToken; self.expiresAt = expiresAt
         self.clientID = clientID; self.clientSecret = clientSecret; self.scopes = scopes
     }
+
+    public func needsRefresh(at now: Date = Date(), margin: TimeInterval = 120) -> Bool {
+        guard refreshToken != nil, let expiresAt else { return false }
+        return expiresAt.timeIntervalSince(now) <= margin
+    }
 }
 
 public struct ConnectorToolDefinition: Codable, Sendable, Hashable, Identifiable {

@@ -85,8 +85,10 @@ public enum SpecWorkflows {
             name: task.title,
             summary: "Implement and independently check one approved spec task.",
             steps: [
-                .agent("spec.task.build", title: "Implement", agent: "coder", instruction: "Implement this approved spec task completely and run its checks.\n\nTask: \(task.title)\n\n\(context)"),
-                .agent("spec.task.check", title: "Check", agent: "code-checker", instruction: "Check that the task is complete and its tests pass. Fix any finding before finishing."),
+                .repeatUntil("spec.task.repair-loop", title: "Implement and verify", maximum: 3, goal: "The approved spec task is fully implemented and every relevant check passes with no unresolved defect.", steps: [
+                    .agent("spec.task.build", title: "Implement or repair", agent: "coder", instruction: "Implement this approved spec task completely. On later rounds, use the checker's prior findings to repair every defect. Run the relevant checks.\n\nTask: \(task.title)\n\n\(context)"),
+                    .agent("spec.task.check", title: "Check", agent: "code-checker", instruction: "Independently inspect the implementation and verification. Do not edit. End with GOAL_MET only when the task is complete, every relevant check passes, and no defect remains; otherwise end with GOAL_NOT_MET and list exact repair findings."),
+                ]),
             ],
             isApproved: true
         )

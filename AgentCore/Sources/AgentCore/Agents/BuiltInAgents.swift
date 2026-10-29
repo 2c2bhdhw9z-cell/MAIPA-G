@@ -1,8 +1,8 @@
 import Foundation
 
 public enum BuiltInAgents {
-    private static let inspect = ["list_files", "search_code", "read_file", "inspect_workspace", "read_attachment", "web_search", "read_web_page", "ask_user"]
-    private static let change = inspect + ["create_file", "edit_file", "delete_file", "save_changes"]
+    private static let inspect = ["list_files", "search_code", "read_file", "read_repo_file", "inspect_workspace", "read_attachment", "web_search", "read_web_page", "ask_user"]
+    private static let change = inspect + ["create_file", "edit_file", "delete_file", "save_changes", "run_shell"]
     private static let review = inspect + ["read_pull_request", "read_pull_request_comments", "read_checks", "read_workflow_logs"]
     private static let build = change + ["list_workflows", "dispatch_workflow", "read_checks", "read_workflow_logs", "list_artifacts", "inspect_ipa", "read_releases"]
 

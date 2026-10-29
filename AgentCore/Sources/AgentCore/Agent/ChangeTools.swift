@@ -3,6 +3,9 @@ import Foundation
 public struct ChangeAuthorization: Sendable, Hashable {
     public var deletion: Bool
     public var buildSetup: Bool
+    public init(deletion: Bool, buildSetup: Bool) {
+        self.deletion = deletion; self.buildSetup = buildSetup
+    }
     public init(request: String) {
         let text = request.lowercased()
         deletion = text.contains("delete") || text.contains("remove the file") || text.contains("remove files") || text.contains("just get on with it")
@@ -11,10 +14,13 @@ public struct ChangeAuthorization: Sendable, Hashable {
 }
 
 public actor ChangeSession {
-    private var saved: [SaveReceipt] = []
-    public init() {}
+    private var saved: [SaveReceipt]
+    public init(receipts: [SaveReceipt] = []) { saved = receipts }
     public func record(_ receipt: SaveReceipt) { saved.append(receipt) }
     public func receipts() -> [SaveReceipt] { saved }
+    public func activeReceipt() -> SaveReceipt? {
+        saved.last { $0.pullRequest != nil && $0.resolution == nil }
+    }
 }
 
 public struct SaveChangesTool: AgentTool {
@@ -32,7 +38,7 @@ public struct SaveChangesTool: AgentTool {
     public func runningSummary(for arguments: JSONValue) -> String { "Saving changes…" }
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let title = try arguments.requiredString("title")
-        let receipt = try await service.save(workspace, selectedBranch: selectedBranch, defaultBranch: defaultBranch, rules: rules, title: title, body: arguments.optionalString("summary") ?? "Changes made by MAIPA-G.")
+        let receipt = try await service.save(workspace, selectedBranch: selectedBranch, defaultBranch: defaultBranch, rules: rules, title: title, body: arguments.optionalString("summary") ?? "Changes made by MAIPA-G.", activeReceipt: await session.activeReceipt())
         await session.record(receipt)
         if let pull = receipt.pullRequest {
             return ToolOutput(forModel: "Saved commit \(receipt.savedCommit) and opened pull request #\(pull.number): \(pull.htmlURL)", summary: "Opened pull request #\(pull.number)", detail: pull.htmlURL)

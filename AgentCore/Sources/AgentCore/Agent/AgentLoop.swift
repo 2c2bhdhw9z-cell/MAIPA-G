@@ -340,7 +340,7 @@ private struct Runner {
     /// questions that still need answers.
     mutating func runTools(inStep stepIndex: Int) async throws -> Bool {
         var waiting = false
-        var jobs: [(callIndex: Int, tool: any AgentTool, arguments: JSONValue)] = []
+        var jobs: [(callIndex: Int, tool: any AgentTool, arguments: JSONValue, approved: Bool)] = []
 
         for callIndex in turn.steps[stepIndex].toolCalls.indices {
             let call = turn.steps[stepIndex].toolCalls[callIndex]
@@ -375,6 +375,7 @@ private struct Runner {
                 fail(stepIndex, callIndex, message: "Error: the arguments were not a valid JSON object: \(call.arguments.prefix(200))", summary: tool.runningSummary(for: .object([:])).replacingOccurrences(of: "…", with: "") + " · didn't work")
                 continue
             }
+            let wasApproved: Bool
             if let questions = call.questions {
                 guard let answer = questions.answers?.first else {
                     waiting = true
@@ -388,6 +389,7 @@ private struct Runner {
                     turn.steps[stepIndex].toolCalls[callIndex].finishedAt = Date()
                     continue
                 }
+                wasApproved = true
             } else if let approval = await tool.approvalRequest(for: arguments) {
                 turn.steps[stepIndex].toolCalls[callIndex].questions = QuestionSet(questions: [
                     .init(text: approval.question, options: [approval.allowLabel, "Don't allow"]),
@@ -396,10 +398,12 @@ private struct Runner {
                 turn.steps[stepIndex].toolCalls[callIndex].summary = "Needs your approval"
                 waiting = true
                 continue
+            } else {
+                wasApproved = false
             }
             turn.steps[stepIndex].toolCalls[callIndex].status = .running
             turn.steps[stepIndex].toolCalls[callIndex].summary = tool.runningSummary(for: arguments)
-            jobs.append((callIndex, tool, arguments))
+            jobs.append((callIndex, tool, arguments, wasApproved))
         }
         emit(milestone: true)
 
@@ -416,9 +420,17 @@ private struct Runner {
                     group.addTask {
                         let result: Result<ToolOutput, Error>
                         do {
-                            result = .success(try await job.tool.run(arguments: job.arguments) { message in
-                                sink.yield(.progress(job.callIndex, message))
-                            })
+                            let output: ToolOutput
+                            if job.approved {
+                                output = try await job.tool.runApproved(arguments: job.arguments) { message in
+                                    sink.yield(.progress(job.callIndex, message))
+                                }
+                            } else {
+                                output = try await job.tool.run(arguments: job.arguments) { message in
+                                    sink.yield(.progress(job.callIndex, message))
+                                }
+                            }
+                            result = .success(output)
                         } catch {
                             if error is CancellationError || Task.isCancelled { throw CancellationError() }
                             result = .failure(error)
@@ -435,7 +447,16 @@ private struct Runner {
                             if Date().timeIntervalSince(lastEmit) > 0.25 { emit(milestone: false) }
                         }
                     case .finished(let callIndex, let result):
-                        apply((callIndex, result), stepIndex: stepIndex)
+                        if case .failure(let error) = result, let approval = error as? ToolApprovalRequired {
+                            turn.steps[stepIndex].toolCalls[callIndex].status = .waitingForUser
+                            turn.steps[stepIndex].toolCalls[callIndex].summary = "Needs your approval"
+                            turn.steps[stepIndex].toolCalls[callIndex].questions = QuestionSet(questions: [
+                                .init(text: approval.request.question, options: [approval.request.allowLabel, "Don't allow"]),
+                            ])
+                            waiting = true
+                        } else {
+                            apply((callIndex, result), stepIndex: stepIndex)
+                        }
                         emit(milestone: true)
                         remaining -= 1
                     }

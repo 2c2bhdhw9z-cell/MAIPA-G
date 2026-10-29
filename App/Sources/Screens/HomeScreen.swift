@@ -33,7 +33,7 @@ struct HomeScreen: View {
                             else { Label("OpenRouter ✓", systemImage: "sparkles") }
                             if let free = app.openRouter.freeRequestsLeft { Label("\(free) free", systemImage: "sparkles") }
                             if let repo = home.repo {
-                                Button { app.sheet = .files(repo) } label: { Label("Files", systemImage: "folder") }
+                                Button { app.sheet = .files(repo, .home) } label: { Label("Files", systemImage: "folder") }
                             }
                             if !app.jobs.jobs.isEmpty {
                                 Button { app.jobs.show() } label: {

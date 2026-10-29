@@ -17,6 +17,7 @@ struct PictureViewer: View {
     @State private var progress = ""
     @State private var error: String?
     @State private var confirmSpend = false
+    @State private var spendApproved = false
 
     var body: some View {
         NavigationStack {
@@ -33,7 +34,11 @@ struct PictureViewer: View {
                         Picker("Quality", selection: $quality) { Text("Standard").tag(ImageQuality.standard); Text("High").tag(ImageQuality.high) }.pickerStyle(.segmented)
                         Picker("Image AI", selection: $model) { ForEach(imageModels) { Text($0.shortName).tag($0.id) } }
                         if let error { Text(error).foregroundStyle(Theme.danger) }
-                        Button("Generate picture") { confirmSpend = app.openRouter.accountState.paidAllowed(); if !confirmSpend { generate() } }.buttonStyle(.borderedProminent).disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isEmpty)
+                        Button("Generate picture") {
+                            let paid = imageModels.first(where: { $0.id == model })?.isFree == false
+                            confirmSpend = paid
+                            if !paid { generate() }
+                        }.buttonStyle(.borderedProminent).disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isEmpty)
                     }
                 }.padding()
             }
@@ -47,7 +52,10 @@ struct PictureViewer: View {
                 else if PreviewScenes.isActive, result != nil { image = PreviewScenes.pictureImage() }
                 else { await loadImage() }
             }
-            .confirmationDialog("This picture can use OpenRouter credit.", isPresented: $confirmSpend) { Button("Generate") { generate() }; Button("Cancel", role: .cancel) {} }
+            .confirmationDialog(spendMessage, isPresented: $confirmSpend) {
+                Button("Generate") { spendApproved = true; generate() }
+                Button("Cancel", role: .cancel) {}
+            }
         }
     }
 
@@ -65,7 +73,17 @@ struct PictureViewer: View {
         }
     }
 
+    private var spendMessage: String {
+        if app.settings.spendLimitOn {
+            return "This billed picture is a separate paid operation. Your stop-and-ask amount is \(app.settings.spendLimit.dollars); approve it before OpenRouter starts."
+        }
+        return "This picture can use OpenRouter credit."
+    }
+
     private func generate() {
+        let paid = imageModels.first(where: { $0.id == model })?.isFree == false
+        guard !paid || spendApproved else { confirmSpend = true; return }
+        spendApproved = false
         guard !isGenerating else { return }; isGenerating = true; error = nil
         Task {
             do {

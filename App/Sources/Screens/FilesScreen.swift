@@ -6,6 +6,7 @@ struct FilesScreen: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
     let repo: ChatRepo
+    let target: ComposerTarget
     @State private var workspace: RepoWorkspace?
     @State private var entries: [GitTreeEntry] = []
     @State private var folder = ""
@@ -43,7 +44,14 @@ struct FilesScreen: View {
             .navigationTitle(selectedPath ?? (folder.isEmpty ? repo.ref.name : folder))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .primaryAction) {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    if let selectedPath, let workspace {
+                        Button {
+                            app.reference(repo: repo.ref, commit: workspace.commit, path: selectedPath, in: target)
+                            dismiss()
+                        } label: { Image(systemName: "text.badge.plus") }
+                        .accessibilityLabel("Add file to chat")
+                    }
                     Button { app.sheet = .webPreview(repo) } label: { Image(systemName: "safari") }
                         .accessibilityLabel("Live preview")
                 }

@@ -16,7 +16,7 @@ enum AppSheet: Identifiable, Hashable {
     case models(ComposerTarget)
     case repos(ComposerTarget)
     case branches(ComposerTarget)
-    case files(ChatRepo)
+    case files(ChatRepo, ComposerTarget)
     case jobs
     case agents
     case agentEditor(String?)
@@ -43,7 +43,7 @@ enum AppSheet: Identifiable, Hashable {
         case .models(let target): return "models-\(target)"
         case .repos(let target): return "repos-\(target)"
         case .branches(let target): return "branches-\(target)"
-        case .files(let repo): return "files-\(repo.ref.fullName)-\(repo.branch)"
+        case .files(let repo, let target): return "files-\(repo.ref.fullName)-\(repo.branch)-\(target)"
         case .jobs: return "jobs"
         case .agents: return "agents"
         case .agentEditor(let id): return "agent-editor-\(id ?? "new")"
@@ -378,6 +378,17 @@ final class AppModel {
         }
     }
 
+    func reference(repo: RepoRef, commit: String, path: String, in target: ComposerTarget) {
+        let reference = "Repo file: \(repo.fullName)@\(commit):\(path)"
+        switch target {
+        case .home:
+            home.text = [home.text, reference].filter { !$0.isEmpty }.joined(separator: home.text.isEmpty ? "" : "\n")
+        case .chat(let id):
+            guard let session = library.session(id) else { return }
+            session.draft = [session.draft, reference].filter { !$0.isEmpty }.joined(separator: session.draft.isEmpty ? "" : "\n")
+        }
+    }
+
     func attach(_ attachment: AttachmentReference, to target: ComposerTarget) {
         switch target {
         case .home: if !home.attachments.contains(where: { $0.id == attachment.id }) { home.attachments.append(attachment) }
@@ -410,7 +421,7 @@ final class AppModel {
             isMenuOpen = true
         case "files":
             library.preview(summaries: summaries, open: nil)
-            if let repo = home.repo { sheet = .files(repo) }
+            if let repo = home.repo { sheet = .files(repo, .home) }
         case "settings":
             library.preview(summaries: summaries, open: nil)
             sheet = .settings
@@ -497,7 +508,7 @@ final class AppModel {
         case "preview", "preview-error", "files-web":
             library.preview(summaries: summaries, open: nil)
             if scene == "preview" { previews.previewFixture(); if let repo = home.repo { sheet = .webPreview(repo) } }
-            else if scene == "files-web", let repo = home.repo { sheet = .files(repo) }
+            else if scene == "files-web", let repo = home.repo { sheet = .files(repo, .home) }
             else if let repo = home.repo { previews.previewError(); sheet = .webPreview(repo) }
         default:
             library.preview(summaries: scene == "home-new" ? [] : summaries, open: nil)

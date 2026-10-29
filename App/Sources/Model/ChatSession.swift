@@ -233,8 +233,11 @@ final class ChatSession: Identifiable {
                 return
             }
             do {
-                let commit = try await github.resolveCommit(repo.ref, ref: repo.branch)
-                let workspace = workspaceFor(repo: repo, commit: commit, github: github, store: app.snapshots)
+                let activeReceipt = (chat.saveReceipts ?? []).last { $0.repo == repo.ref && $0.pullRequest != nil && $0.resolution == nil }
+                let workingBranch = activeReceipt?.branch ?? repo.branch
+                let workingRepo = ChatRepo(ref: repo.ref, branch: workingBranch, defaultBranch: repo.defaultBranch, isPrivate: repo.isPrivate)
+                let commit = try await github.resolveCommit(repo.ref, ref: workingBranch)
+                let workspace = workspaceFor(repo: workingRepo, commit: commit, github: github, store: app.snapshots)
                 await workspace.prefetch()
                 let changes: ChangeWorkspace
                 if let existing = changeWorkspace, existing.base.commit == commit {
@@ -245,16 +248,16 @@ final class ChatSession: Identifiable {
                 }
                 let service = GitHubChangeService(github: github)
                 let rules = await service.resolveRules(in: workspace, directSaveSetting: app.settings.savesDirectly(to: repo.ref))
-                let saves = changeSession ?? ChangeSession()
+                let saves = changeSession ?? ChangeSession(receipts: chat.saveReceipts ?? [])
                 changeSession = saves
                 tools.append(contentsOf: [
-                    ListFilesTool(workspace: workspace), SearchCodeTool(workspace: workspace), ReadFileTool(workspace: workspace),
+                    ListFilesTool(workspace: workspace), SearchCodeTool(workspace: workspace), ReadFileTool(workspace: workspace), ReadRepoFileTool(github: github),
                     CreateFileTool(workspace: changes, authorization: changeAuthorization), EditFileTool(workspace: changes, authorization: changeAuthorization), DeleteFileTool(workspace: changes, authorization: changeAuthorization),
-                    SaveChangesTool(workspace: changes, service: service, session: saves, selectedBranch: repo.branch, defaultBranch: repo.defaultBranch, rules: rules),
+                    SaveChangesTool(workspace: changes, service: service, session: saves, selectedBranch: workingBranch, defaultBranch: repo.defaultBranch, rules: rules),
                 ])
                 repoContext = SystemPrompt.RepoContext(
                     ref: repo.ref,
-                    branch: repo.branch,
+                    branch: workingBranch,
                     commit: commit,
                     isPrivate: repo.isPrivate,
                     summary: app.github.repo(named: repo.ref.fullName)?.summary

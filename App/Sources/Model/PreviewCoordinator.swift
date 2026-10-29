@@ -10,6 +10,8 @@ final class PreviewCoordinator {
     private(set) var isLoading = false
     private(set) var error: String?
     private(set) var console: [String] = []
+    private(set) var buildProject: WebPreviewProject?
+    private(set) var resolvedCommit: String?
     @ObservationIgnored weak var app: AppModel?
     @ObservationIgnored private let root: URL
 
@@ -21,6 +23,7 @@ final class PreviewCoordinator {
         defer { isLoading = false }
         do {
             let commit = try await github.resolveCommit(repo.ref, ref: repo.branch)
+            resolvedCommit = commit
             let workspace = RepoWorkspace(repo: repo.ref, branch: repo.branch, commit: commit, github: github, store: app!.snapshots)
             let entries = try await workspace.tree().entries
             let packageData = try? await github.fileContents(repo.ref, path: "package.json", ref: commit)
@@ -29,19 +32,22 @@ final class PreviewCoordinator {
             try? FileManager.default.removeItem(at: destination)
             try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
             if detected.buildCommand != nil {
-                let runs = try await github.workflowRuns(repo.ref, branch: repo.branch)
-                var found = false
-                for run in runs where run.conclusion == "success" {
-                    if let artifact = try await github.artifacts(repo.ref, runID: run.id).first(where: { $0.name.localizedCaseInsensitiveContains("preview") && !$0.expired }) {
-                        try PreviewArtifactExtractor.extract(try await github.artifactArchive(repo.ref, artifactID: artifact.id), to: destination)
-                        found = true; break
-                    }
+                buildProject = detected
+                guard let app,
+                      let job = app.jobs.jobs.first(where: { $0.targetRepo == repo.ref && $0.state["previewCommit"]?.stringValue == commit && $0.status == .done }),
+                      let runID = job.workflowRunID else { throw WebPreviewError.buildRequired(command: detected.buildCommand!) }
+                let run = try await github.workflowRun(repo.ref, runID: runID)
+                guard run.conclusion == "success", run.headSHA == commit else { throw WebPreviewError.buildRequired(command: detected.buildCommand!) }
+                let expectedName = "preview-site-\(job.id.uuidString.lowercased())"
+                guard let artifact = try await github.artifacts(repo.ref, runID: run.id).first(where: { $0.name == expectedName && !$0.expired }) else {
+                    throw WebPreviewError.missingResource(expectedName)
                 }
-                guard found else { throw WebPreviewError.buildRequired(command: detected.buildCommand!) }
+                try PreviewArtifactExtractor.extract(try await github.artifactArchive(repo.ref, artifactID: artifact.id), to: destination)
                 let paths = Self.relativeFiles(destination)
-                guard let built = WebProjectDetector.detect(paths: paths) else { throw WebPreviewError.missingResource("index.html in the preview artifact") }
+                guard let built = WebProjectDetector.detect(paths: paths), built.kind != .buildArtifact || paths.contains(built.entryPath) else { throw WebPreviewError.missingResource("index.html in the preview artifact") }
                 project = built
             } else {
+                buildProject = nil
                 let prefix = detected.rootPath.isEmpty ? "" : detected.rootPath + "/"
                 for entry in entries where entry.isFile && entry.path.hasPrefix(prefix) {
                     let relative = String(entry.path.dropFirst(prefix.count))
@@ -55,6 +61,11 @@ final class PreviewCoordinator {
             }
             directory = destination
         } catch { self.error = String(describing: error); project = nil; directory = nil }
+    }
+
+    func build(_ repo: ChatRepo) async -> Bool {
+        guard let app, let project = buildProject, let commit = resolvedCommit else { return false }
+        return await app.jobs.startPreviewBuild(repo: repo, project: project, commit: commit) != nil
     }
 
     func recordConsole(_ message: String) { if !message.isEmpty { console.append(String(message.prefix(1_000))); if console.count > 100 { console.removeFirst() } } }

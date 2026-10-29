@@ -19,7 +19,12 @@ struct WebPreviewScreen: View {
                 else if let error = app.previews.error {
                     ContentUnavailableView("Preview could not open", systemImage: "safari", description: Text(error))
                         .overlay(alignment: .bottom) {
-                            if error.contains("Autonomous") { Button("Build preview with Autonomous") { Task { await app.jobs.start(request: "Build this web project and upload the built site as an artifact named preview-site. Do not deploy it.", repo: repo); dismiss() } }.buttonStyle(.borderedProminent).padding() }
+                            if app.previews.buildProject != nil {
+                                Button("Build preview with Autonomous") {
+                                    Task { if await app.previews.build(repo) { dismiss() } }
+                                }
+                                .buttonStyle(.borderedProminent).padding()
+                            }
                         }
                 } else { ProgressView() }
             }

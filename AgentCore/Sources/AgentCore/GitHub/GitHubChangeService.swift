@@ -4,6 +4,19 @@ public struct RepoWriteRules: Sendable, Hashable {
     public var directSave: Bool
     public var reason: String?
     public init(directSave: Bool = false, reason: String? = nil) { self.directSave = directSave; self.reason = reason }
+
+    public static func resolve(documents: [(path: String, text: String)], directSaveSetting: Bool) -> RepoWriteRules {
+        if directSaveSetting { return RepoWriteRules(directSave: true, reason: "Direct save is on for this repo.") }
+        for document in documents {
+            let lower = document.text.lowercased()
+            let forbidsBranches = lower.contains("no branches") || lower.contains("never create a branch") || lower.contains("do not create branches")
+            let forbidsPRs = lower.contains("no pull request") || lower.contains("no prs") || lower.contains("never open") && lower.contains("pull request")
+            if forbidsBranches || forbidsPRs {
+                return RepoWriteRules(directSave: true, reason: "\(document.path) requires direct saves.")
+            }
+        }
+        return RepoWriteRules()
+    }
 }
 
 public enum GitHubChangeFailure: Error, Sendable, CustomStringConvertible {
@@ -30,16 +43,12 @@ public actor GitHubChangeService {
             let lower = entry.path.lowercased()
             return entry.isFile && (lower == "agents.md" || lower.hasSuffix("/agents.md") || lower.contains(".kiro/steering/") || lower.hasSuffix("owner-rules.md"))
         }.prefix(20)
+        var documents: [(path: String, text: String)] = []
         for entry in candidates {
             guard case .text(let text, _) = try? await workspace.readFile(entry.path) else { continue }
-            let lower = text.lowercased()
-            let forbidsBranches = lower.contains("no branches") || lower.contains("never create a branch") || lower.contains("do not create branches")
-            let forbidsPRs = lower.contains("no pull request") || lower.contains("no prs") || lower.contains("never open") && lower.contains("pull request")
-            if forbidsBranches || forbidsPRs {
-                return RepoWriteRules(directSave: true, reason: "\(entry.path) requires direct saves.")
-            }
+            documents.append((entry.path, text))
         }
-        return RepoWriteRules()
+        return RepoWriteRules.resolve(documents: documents, directSaveSetting: false)
     }
 
     public func save(
@@ -48,18 +57,30 @@ public actor GitHubChangeService {
         defaultBranch: String,
         rules: RepoWriteRules,
         title: String,
-        body: String = "Changes made by MAIPA-G."
+        body: String = "Changes made by MAIPA-G.",
+        activeReceipt: SaveReceipt? = nil
     ) async throws -> SaveReceipt {
         let staged = await workspace.stagedChanges()
         guard !staged.isEmpty else { throw ChangeWorkspaceError.noChanges }
         let repo = workspace.base.repo
-        let selectedHead = try await github.branchHead(repo, branch: selectedBranch)
+        let continuing: SaveReceipt?
+        if let activeReceipt, activeReceipt.repo == repo, let pull = activeReceipt.pullRequest {
+            let current = try await github.pullRequest(repo, number: pull.number)
+            guard current.state == "open" else { throw GitHubChangeFailure.pullRequestClosed }
+            continuing = activeReceipt
+        } else {
+            continuing = nil
+        }
+        let sourceBranch = continuing?.branch ?? selectedBranch
+        let selectedHead = try await github.branchHead(repo, branch: sourceBranch)
         guard let selectedHead else { throw GitHubChangeFailure.noHead }
         guard selectedHead == workspace.base.commit else { throw ChangeWorkspaceError.staleHead(expected: workspace.base.commit, actual: selectedHead) }
 
-        let usePR = !rules.directSave
+        let usePR = continuing != nil || (!rules.directSave && selectedBranch == defaultBranch)
         let targetBranch: String
-        if usePR && selectedBranch == defaultBranch {
+        if let continuing {
+            targetBranch = continuing.branch
+        } else if usePR {
             targetBranch = Self.branchName(title)
             try await github.createBranch(repo, branch: targetBranch, from: selectedHead)
         } else {
@@ -86,7 +107,9 @@ public actor GitHubChangeService {
         try await github.updateBranch(repo, branch: targetBranch, to: commit)
 
         var pullRequest: GitHubPullRequest?
-        if usePR {
+        if let continuing {
+            pullRequest = continuing.pullRequest
+        } else if usePR {
             pullRequest = try await github.openPullRequest(repo, title: title, body: body, head: targetBranch, base: defaultBranch)
         }
         await workspace.discardAll()

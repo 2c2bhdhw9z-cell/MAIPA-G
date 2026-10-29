@@ -85,7 +85,12 @@ final class SpecCoordinator {
             case .done:
                 do {
                     if let taskID = record.activeTaskID {
-                        _ = try await core.completeTask(record.id, taskID: taskID)
+                        if job.result?.verificationPassed == true {
+                            _ = try await core.completeTask(record.id, taskID: taskID)
+                        } else {
+                            lastError = "The task check still found unresolved defects. The task remains open."
+                            _ = try await core.setActiveJob(nil, for: record.id)
+                        }
                     } else if let output = job.result?.summary, !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         _ = try await core.updateArtifact(record.id, stage: record.stage, text: output)
                         _ = try await core.setActiveJob(nil, for: record.id)

@@ -71,6 +71,7 @@ public struct WorkflowDefinition: Codable, Sendable, Hashable, Identifiable {
                 if node.instruction?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false { errors.append("\(node.title) needs instructions.") }
             case .repeatUntil:
                 if !(1...50).contains(node.maximumIterations ?? 0) { errors.append("\(node.title) needs a repeat maximum from 1 to 50.") }
+                if node.successCondition?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false { errors.append("\(node.title) needs a success condition.") }
                 if node.children.isEmpty { errors.append("\(node.title) needs at least one step.") }
             case .stopAndAsk:
                 if node.question?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false { errors.append("\(node.title) needs a question.") }
@@ -89,23 +90,40 @@ public struct WorkflowDefinition: Codable, Sendable, Hashable, Identifiable {
 }
 
 public enum WorkflowDraftBuilder {
-    /// Produces a real, editable typed draft from plain language. The app always presents the
-    /// resulting steps for explicit approval before execution.
+    public static func generationPrompt(description: String, agents: [AgentDefinition]) -> String {
+        let catalogue = agents.map { "\($0.id): \($0.name) — \($0.summary)" }.joined(separator: "\n")
+        return """
+        Translate the workflow description into one typed workflow JSON object. Return JSON only, with exactly these top-level keys: id, name, summary, steps, isBuiltIn, isApproved. Set id to "generated", isBuiltIn and isApproved to false. Every step has id, kind, title, agentID, instruction, children, maximumIterations, successCondition, question, and options. kind is one of agent, sequence, repeatUntil, stopAndAsk, parallel. Use only listed agent IDs. Repeat limits must be finite integers from 1 through 50. Parallel children must all be agent steps. Preserve checklists as ordered agent or sequence steps and include builders, questions, repeats, and custom agents when the description asks for them.
+
+        Available agents:
+        \(catalogue)
+
+        Description:
+        \(description)
+        """
+    }
+
+    public static func generatedDraft(from response: String, agentIDs: Set<String>, id: String = "custom:\(UUID().uuidString.lowercased())") throws -> WorkflowDefinition {
+        guard let start = response.firstIndex(of: "{"), let end = response.lastIndex(of: "}"), start <= end else {
+            throw ToolInputError("Workflow maker did not return a typed workflow draft.")
+        }
+        let data = Data(response[start...end].utf8)
+        var draft: WorkflowDefinition
+        do { draft = try JSONCoding.decoder().decode(WorkflowDefinition.self, from: data) }
+        catch { throw ToolInputError("Workflow maker returned invalid workflow JSON: \(error)") }
+        draft.id = id
+        draft.isBuiltIn = false
+        draft.isApproved = false
+        let errors = draft.validationErrors(agentIDs: agentIDs)
+        guard errors.isEmpty else { throw ToolInputError(errors.joined(separator: " ")) }
+        return draft
+    }
+
+    /// A blank typed draft used only by the manual editor when no AI draft has been requested.
     public static func initialDraft(description: String, id: String = "custom:\(UUID().uuidString.lowercased())") -> WorkflowDefinition {
         let text = description.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lower = text.lowercased()
-        var steps: [WorkflowNode] = [.agent(title: "Plan the work", agent: "planner", instruction: text)]
-        if lower.contains("design") || lower.contains("feature") {
-            steps.append(.agent(title: "Design it", agent: "designer", instruction: "Design the approved request."))
-            steps.append(.agent(title: "Check the design", agent: "design-checker", instruction: "Check the design against the request."))
-        }
-        if lower.contains("review") && lower.contains("two") {
-            steps.append(.parallel(title: "Independent reviews", agents: [
-                .agent(title: "Code review", agent: "code-checker", instruction: "Review the completed work."),
-                .agent(title: "Second opinion", agent: "second-opinion", instruction: "Review independently with a different model."),
-            ]))
-            steps.append(.agent(title: "Combine reviews", agent: "review-combiner", instruction: "Combine the independent reviews."))
-        }
-        return WorkflowDefinition(id: id, name: text.isEmpty ? "New workflow" : String(text.prefix(60)), summary: text, steps: steps, isApproved: false)
+        return WorkflowDefinition(id: id, name: text.isEmpty ? "New workflow" : String(text.prefix(60)), summary: text, steps: [
+            .agent(title: "Plan the work", agent: "planner", instruction: text.isEmpty ? "Describe this step." : text),
+        ], isApproved: false)
     }
 }

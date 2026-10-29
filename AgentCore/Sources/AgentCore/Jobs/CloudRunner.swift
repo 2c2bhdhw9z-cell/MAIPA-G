@@ -169,9 +169,14 @@ public struct CloudRunner: Sendable {
         do {
             let workBranch = try await prepareRepository(for: &job)
             try await store.save(job)
+            let toolResults = CloudToolResults()
+            if job.state["previewBuild"]?.boolValue == true {
+                try await runPreviewBuild(job: &job, branch: workBranch, store: store)
+                return
+            }
             if let encoded = job.state["workflowDefinition"],
                let definition = try? decode(WorkflowDefinition.self, from: encoded) {
-                try await runWorkflow(definition, job: &job, branch: workBranch, store: store, github: github, startedAt: startedAt)
+                try await runWorkflow(definition, job: &job, branch: workBranch, store: store, github: github, toolResults: toolResults, startedAt: startedAt)
                 return
             }
             var chat = try chatForJob(job)
@@ -179,6 +184,13 @@ public struct CloudRunner: Sendable {
 
             let authorization = ChangeAuthorization(request: chat.firstUserText ?? job.title)
             var tools: [any AgentTool] = [ProcessTool(directory: configuration.workspace, authorization: authorization)]
+            tools.append(contentsOf: CloudToolAssembly.make(
+                github: github, repo: configuration.targetRepository, ref: workBranch,
+                workspace: configuration.workspace,
+                defaultBranch: job.defaultBranch ?? "main", directSave: job.directSave,
+                buildExplicitlyRequested: job.state["buildExplicitlyRequested"]?.boolValue == true,
+                results: toolResults
+            ))
             tools.append(contentsOf: try await stdioTools(for: job))
             if let values = job.state["mcpServers"]?.arrayValue {
                 for value in values {
@@ -242,7 +254,7 @@ public struct CloudRunner: Sendable {
             case .waitingForUser:
                 job.status = turn.spendCheck == nil ? .needsAnswer : .needsApproval
             case .done:
-                job.result = try await finishRepository(job: job, branch: workBranch, github: github, chat: chat)
+                job.result = try await finishRepository(job: job, branch: workBranch, github: github, toolResults: toolResults, chat: chat)
                 var state = job.state.objectValue ?? [:]
                 state["workspacePatch"] = nil
                 job.state = .object(state)
@@ -272,13 +284,21 @@ public struct CloudRunner: Sendable {
         branch: String,
         store: RemoteJobStore,
         github: GitHubClient,
+        toolResults: CloudToolResults,
         startedAt: Date
     ) async throws {
         let savedCheckpoint: WorkflowCheckpoint? = job.state["workflowCheckpoint"].flatMap { try? decode(WorkflowCheckpoint.self, from: $0) }
         let sink = RemoteWorkflowCheckpointSink(job: job, store: store, workspace: configuration.workspace, definition: definition)
         let request = job.state["request"]?.stringValue ?? savedCheckpoint?.request ?? job.title
-        let authorization = ChangeAuthorization(request: request)
+        let authorization = workflowAuthorization(job: job, request: request)
         var tools: [any AgentTool] = [WorkspaceInspectTool(directory: configuration.workspace), ProcessTool(directory: configuration.workspace, authorization: authorization)]
+        tools.append(contentsOf: CloudToolAssembly.make(
+            github: github, repo: configuration.targetRepository, ref: branch,
+            workspace: configuration.workspace,
+            defaultBranch: job.defaultBranch ?? "main", directSave: job.directSave,
+            buildExplicitlyRequested: workflowBuildAuthorized(job: job),
+            results: toolResults
+        ))
         tools.append(contentsOf: try await stdioTools(for: job))
         if let values = job.state["mcpServers"]?.arrayValue {
             for value in values where (try? decode(StdioMCPServer.self, from: value)) != nil {
@@ -305,7 +325,7 @@ public struct CloudRunner: Sendable {
             let input = AgentTurnInput(
                 chat: chat, route: route,
                 systemPrompt: SystemPrompt.make(userLogin: nil, repo: nil, agent: invocation.definition, workflowContext: invocation.context),
-                tools: workflowTools, spendLimit: spendLimit, agent: invocation.definition
+                tools: workflowTools, spendLimit: invocation.spendLimit, agent: invocation.definition
             )
             var final: AssistantTurn?
             let agentRun = AgentLoop.start(input, environment: environment)
@@ -321,9 +341,10 @@ public struct CloudRunner: Sendable {
             if Date().timeIntervalSince(startedAt) >= configuration.handoverAfter { throw CloudRunnerError.handoverRequired }
             guard let turn = final, turn.status != .failed else { throw CloudRunnerError.commandFailed }
             let output = turn.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n")
-            return AgentExecutionResult(output: output, model: turn.steps.last?.model, goalMet: output.uppercased().contains("GOAL_MET"), cost: turn.usage.cost ?? 0)
+            let pending = turn.pendingQuestions?.questions.questions.first.map { AgentExecutionQuestion(text: $0.text, options: $0.options) }
+            return AgentExecutionResult(output: output, model: turn.steps.last?.model, goalMet: output.uppercased().contains("GOAL_MET"), cost: turn.usage.cost ?? 0, needsSpendingApproval: turn.spendCheck != nil, pendingQuestion: pending)
         }
-        let engine = WorkflowEngine(definition: definition, checkpoint: savedCheckpoint, agents: definitions, runner: runner) { checkpoint in
+        let engine = WorkflowEngine(definition: definition, checkpoint: savedCheckpoint, agents: definitions, spendLimit: spendLimit, runner: runner) { checkpoint in
             try await sink.save(checkpoint)
         }
         if let pending = savedCheckpoint?.pendingQuestion,
@@ -348,13 +369,17 @@ public struct CloudRunner: Sendable {
         }
         switch outcome {
         case .completed(let checkpoint):
-            job.result = try await finishRepository(job: job, branch: branch, github: github, summaryOverride: checkpoint.outputs.last?.text)
+            var result = try await finishRepository(job: job, branch: branch, github: github, toolResults: toolResults, summaryOverride: checkpoint.outputs.last?.text)
+            if definition.id.hasPrefix("spec-task:") {
+                result.verificationPassed = checkpoint.outputs.last.map { Self.hasPassingMarker($0.text) } ?? false
+            }
+            job.result = result
             job.status = .done
             job.questions = []
         case .waiting(_, let question):
             job.status = .needsAnswer
             let old = job.questions.first { $0.text == question.text }
-            job.questions = [JobQuestion(id: old?.id ?? UUID(), text: question.text, options: question.options, answer: old?.answer)]
+            job.questions = [JobQuestion(id: old?.id ?? UUID(), text: question.text, options: question.options, answer: old?.answer, isApproval: ["Allow", "Start build", "Keep going", "Continue"].contains(question.options.first ?? ""))]
         case .cancelled:
             job.status = .stopped
         case .failed(_, let message):
@@ -371,6 +396,25 @@ public struct CloudRunner: Sendable {
         var chat = Chat(title: job.title)
         chat.messages = [.user(request), ChatMessage(body: .assistant(AssistantTurn()))]
         return chat
+    }
+
+    private func workflowBuildAuthorized(job: JobRecord) -> Bool {
+        if job.state["buildExplicitlyRequested"]?.boolValue == true { return true }
+        return job.questions.contains { question in
+            question.text.lowercased().contains("start this github actions workflow") && question.answer == question.options.first
+        }
+    }
+
+    private func workflowAuthorization(job: JobRecord, request: String) -> ChangeAuthorization {
+        let requested = ChangeAuthorization(request: request)
+        let approved = job.questions.filter { question in
+            guard let answer = question.answer else { return false }
+            return question.options.first == answer
+        }.map { $0.text.lowercased() }
+        return ChangeAuthorization(
+            deletion: requested.deletion || approved.contains(where: { $0.contains("delete files") }),
+            buildSetup: requested.buildSetup || approved.contains(where: { $0.contains("build setup") })
+        )
     }
 
     private func applySavedAnswers(_ job: JobRecord, to chat: inout Chat) {
@@ -433,9 +477,13 @@ public struct CloudRunner: Sendable {
     private func prepareRepository(for job: inout JobRecord) async throws -> String {
         let selected = job.targetRef ?? job.defaultBranch ?? "main"
         let defaultBranch = job.defaultBranch ?? "main"
+        let effectiveRules = try await localWriteRules(for: job)
+        job.directSave = effectiveRules.directSave
         var state = job.state.objectValue ?? [:]
+        state["effectiveDirectSave"] = .bool(effectiveRules.directSave)
+        state["repoRuleReason"] = effectiveRules.reason.map(JSONValue.string)
         let existing = state["workBranch"]?.stringValue
-        let branch = existing ?? (job.directSave || selected != defaultBranch
+        let branch = existing ?? (effectiveRules.directSave || selected != defaultBranch
             ? selected
             : "maipa-g/\(Self.slug(job.title))-\(job.id.uuidString.lowercased().prefix(8))")
         let botName = state["botName"]?.stringValue ?? "maipa-g[bot]"
@@ -477,18 +525,22 @@ public struct CloudRunner: Sendable {
         job.state = .object(state)
     }
 
-    private func finishRepository(job: JobRecord, branch: String, github: GitHubClient, chat: Chat? = nil, summaryOverride: String? = nil) async throws -> JobResult {
+    private func finishRepository(job: JobRecord, branch: String, github: GitHubClient, toolResults: CloudToolResults, chat: Chat? = nil, summaryOverride: String? = nil) async throws -> JobResult {
+        let effectiveRules = try await localWriteRules(for: job)
         let status = try await git(["status", "--porcelain"], allowFailure: true)
         var commit: String?
         if !status.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             try await git(["add", "-A"])
             try await git(["commit", "-m", job.title])
             commit = try await git(["rev-parse", "HEAD"]).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            commit = try await git(["rev-parse", "HEAD"]).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        try await git(["push", "origin", "HEAD:refs/heads/\(branch)"])
+        let destination = effectiveRules.directSave ? (job.targetRef ?? job.defaultBranch ?? "main") : branch
+        try await git(["push", "origin", "HEAD:refs/heads/\(destination)"])
 
-        var pullRequest: GitHubPullRequest?
-        if !job.directSave, branch != (job.defaultBranch ?? "main") {
+        var pullRequest = await toolResults.pullRequest
+        if pullRequest == nil, !effectiveRules.directSave, branch != (job.defaultBranch ?? "main") {
             pullRequest = try await github.openPullRequest(
                 configuration.targetRepository,
                 title: job.title,
@@ -497,8 +549,65 @@ public struct CloudRunner: Sendable {
                 base: job.defaultBranch ?? "main"
             )
         }
+        var buildURL = await toolResults.buildURL
+        var artifactURL = await toolResults.artifactURL
+        if let commit {
+            let runs = (try? await github.workflowRuns(configuration.targetRepository, branch: destination)) ?? []
+            if let run = runs.first(where: { $0.headSHA == commit }) {
+                buildURL = buildURL ?? run.htmlURL
+                let artifacts = (try? await github.artifacts(configuration.targetRepository, runID: run.id)) ?? []
+                artifactURL = artifactURL ?? artifacts.first(where: { !$0.expired })?.archiveDownloadURL
+            }
+        }
         let summary = summaryOverride ?? chat?.lastAssistantTurn?.steps.last(where: { !$0.text.isEmpty })?.text ?? "Finished the requested work."
-        return JobResult(summary: summary, pullRequest: pullRequest, commit: commit)
+        return JobResult(summary: summary, pullRequest: pullRequest, commit: commit, buildURL: buildURL, artifactURL: artifactURL)
+    }
+
+    private func localWriteRules(for job: JobRecord) async throws -> RepoWriteRules {
+        if job.directSave || job.state["effectiveDirectSave"]?.boolValue == true {
+            return RepoWriteRules(directSave: true, reason: job.state["repoRuleReason"]?.stringValue ?? "Direct save is enabled for this job.")
+        }
+        let manager = FileManager.default
+        guard let values = manager.enumerator(at: configuration.workspace, includingPropertiesForKeys: [.isRegularFileKey], options: []) else { return RepoWriteRules() }
+        var documents: [(String, String)] = []
+        for case let url as URL in values {
+            let relative = String(url.path.dropFirst(configuration.workspace.path.count + 1))
+            if relative == ".git" || relative.hasPrefix(".git/") { continue }
+            let lower = relative.lowercased()
+            guard lower == "agents.md" || lower.hasSuffix("/agents.md") || lower.contains(".kiro/steering/") || lower.hasSuffix("owner-rules.md") else { continue }
+            guard documents.count < 20, let data = try? Data(contentsOf: url), data.count <= 1_000_000, let text = String(data: data, encoding: .utf8) else { continue }
+            documents.append((relative, text))
+        }
+        return RepoWriteRules.resolve(documents: documents, directSaveSetting: false)
+    }
+
+    private func runPreviewBuild(job: inout JobRecord, branch: String, store: RemoteJobStore) async throws {
+        guard let command = job.state["previewBuildCommand"]?.stringValue,
+              let expectedCommit = job.state["previewCommit"]?.stringValue else { throw CloudRunnerError.missingRequest }
+        let actualCommit = try await git(["rev-parse", "HEAD"]).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard actualCommit == expectedCommit else { throw CloudRunnerError.commandFailed }
+        let install: String
+        if FileManager.default.fileExists(atPath: configuration.workspace.appendingPathComponent("pnpm-lock.yaml").path) { install = "pnpm install --frozen-lockfile" }
+        else if FileManager.default.fileExists(atPath: configuration.workspace.appendingPathComponent("yarn.lock").path) { install = "yarn install --immutable" }
+        else if FileManager.default.fileExists(atPath: configuration.workspace.appendingPathComponent("package-lock.json").path) { install = "npm ci" }
+        else { install = "npm install" }
+        let result = try await BoundedProcess.run(executable: "/bin/bash", arguments: ["-lc", "\(install) && \(command)"], directory: configuration.workspace, timeout: 900, outputLimit: 80_000)
+        guard result.exitCode == 0 else { throw CloudRunnerError.commandFailed }
+        let outputs = job.state["previewOutputDirectories"]?.arrayValue?.compactMap(\.stringValue) ?? ["dist", "build", "out", ".output/public"]
+        guard let source = outputs.map({ configuration.workspace.appendingPathComponent($0, isDirectory: true) }).first(where: { FileManager.default.fileExists(atPath: $0.appendingPathComponent("index.html").path) }) else {
+            throw WebPreviewError.missingResource("built index.html")
+        }
+        let destination = configuration.workspace.appendingPathComponent(".maipag-preview-artifact", isDirectory: true)
+        try? FileManager.default.removeItem(at: destination)
+        try FileManager.default.copyItem(at: source, to: destination)
+        let tracked = try await git(["diff", "--name-only", "HEAD", "--", "."], allowFailure: true).stdout
+        guard tracked.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw CloudRunnerError.commandFailed }
+        job.status = .done
+        job.result = JobResult(summary: "Built the preview artifact from \(expectedCommit.prefix(7)).", commit: expectedCommit, buildURL: job.workflowRunURL)
+        job.steps = [JobStepRecord(title: "Build preview", detail: "Artifact ready for upload", status: .done, startedAt: job.createdAt, finishedAt: Date())]
+        job.updatedAt = Date()
+        try await store.save(job)
+        logger.progress("Preview build finished and is ready for artifact upload.")
     }
 
     private func stdioTools(for job: JobRecord) async throws -> [any AgentTool] {
@@ -541,6 +650,10 @@ public struct CloudRunner: Sendable {
         guard let index = chat.messages.indices.last, chat.messages[index].assistantTurn != nil else { return }
         chat.messages[index].assistantTurn = turn
         chat.updatedAt = Date()
+    }
+
+    private static func hasPassingMarker(_ text: String) -> Bool {
+        text.components(separatedBy: .newlines).contains { $0.trimmingCharacters(in: .whitespacesAndNewlines) == "GOAL_MET" }
     }
 
     private static func slug(_ value: String) -> String {

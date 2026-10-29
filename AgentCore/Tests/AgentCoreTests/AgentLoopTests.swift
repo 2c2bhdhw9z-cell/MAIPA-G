@@ -75,6 +75,7 @@ struct ApprovalTool: AgentTool {
 
 actor WorkflowTestRecorder {
     var calls: [String] = []
+    var spendLimits: [Double?] = []
     var checkpoints: [WorkflowCheckpoint] = []
     var goalOnCall: Int?
 
@@ -82,6 +83,7 @@ actor WorkflowTestRecorder {
 
     func run(_ invocation: AgentInvocation) async throws -> AgentExecutionResult {
         calls.append(invocation.task)
+        spendLimits.append(invocation.spendLimit)
         let number = calls.count
         if invocation.task.contains("slow") { try await Task.sleep(nanoseconds: 40_000_000) }
         return AgentExecutionResult(output: "result \(invocation.task)", model: invocation.definition.modelPolicy == .differentFromPrimary ? "other/model" : "main/model", goalMet: goalOnCall == number, cost: 0.01)
@@ -365,6 +367,10 @@ struct AgentLoopTests {
         #expect(result.first?.url.absoluteString == "https://example.com/page")
         #expect(result.first?.title == "Example result")
         #expect(!WebPageReader.isSafe(URL(string: "http://127.0.0.1/private")!))
+        #expect(!WebPageReader.isSafe(URL(string: "http://[::1]/private")!))
+        #expect(!WebPageReader.isSafe(URL(string: "http://[::ffff:192.168.1.2]/private")!))
+        #expect(!IPAddress(family: .v4, bytes: [169, 254, 1, 1]).isPublic)
+        #expect(!IPAddress(family: .v6, bytes: [0xfe, 0x80] + Array(repeating: 0, count: 14)).isPublic)
         #expect(WebPageReader.isSafe(URL(string: "https://example.com")!))
     }
 
@@ -403,6 +409,81 @@ struct AgentLoopTests {
         let prompt = SystemPrompt.make(userLogin: nil, repo: nil, memories: ["Keep replies short"])
         #expect(prompt.contains("Memories the person chose"))
         #expect(prompt.contains("- Keep replies short"))
+    }
+
+    @Test func shellDeltaGuardRestoresAndPausesForExactDeletionApproval() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-shell-guard-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("keep".utf8).write(to: root.appendingPathComponent("old.txt"))
+        for arguments in [["init"], ["config", "user.email", "test@example.com"], ["config", "user.name", "Test"], ["add", "old.txt"], ["commit", "-m", "base"]] {
+            let result = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: arguments, directory: root)
+            #expect(result.exitCode == 0)
+        }
+        let arguments: JSONValue = ["command": "python3 -c \"from pathlib import Path; Path('old.txt').unlink()\""]
+        let transport = ScriptedTransport([
+            .events([Self.toolCall(id: "s1", name: "run_shell", arguments: arguments.jsonString()), Self.toolsDone]),
+            .events([Self.text("Deleted after approval."), Self.done]),
+        ])
+        let first = await Self.runToEnd(transport, chat: Self.newChat("clean up"), route: Self.route(), tools: [ProcessTool(directory: root)])
+        var paused = try #require(first.0)
+        #expect(paused.status == .waitingForUser)
+        #expect(paused.pendingQuestions?.questions.questions.first?.text.contains("old.txt") == true)
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("old.txt").path))
+
+        paused.steps[0].toolCalls[0].questions?.answers = ["Allow"]
+        var chat = Self.newChat("clean up")
+        chat.messages[1].assistantTurn = paused
+        let second = await Self.runToEnd(transport, chat: chat, route: Self.route(), tools: [ProcessTool(directory: root)])
+        #expect(second.0?.status == .done)
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("old.txt").path))
+    }
+
+    @Test func workflowUsesOneAggregateSpendAllowance() async throws {
+        let recorder = WorkflowTestRecorder()
+        let definition = WorkflowDefinition(id: "budget", name: "Budget", summary: "", steps: [
+            .agent("one", title: "One", agent: "planner", instruction: "one"),
+            .agent("two", title: "Two", agent: "planner", instruction: "two"),
+            .agent("three", title: "Three", agent: "planner", instruction: "three"),
+        ], isApproved: true)
+        let engine = WorkflowEngine(definition: definition, spendLimit: 0.015, runner: { try await recorder.run($0) })
+        guard case .waiting(let checkpoint, let question) = await engine.run(request: "go") else { Issue.record("Expected aggregate spend pause"); return }
+        #expect(checkpoint.cumulativeCost == 0.02)
+        #expect(question.nodeID == "three")
+        let limits = await recorder.spendLimits
+        #expect(limits.count == 2)
+        #expect(abs((limits[0] ?? 0) - 0.015) < 0.000_001)
+        #expect(abs((limits[1] ?? 0) - 0.005) < 0.000_001)
+        try await engine.answer(nodeID: "three", answer: "Keep going")
+        guard case .completed(let complete) = await engine.run() else { Issue.record("Expected approved continuation"); return }
+        #expect(complete.cumulativeCost == 0.03)
+        let finalLimits = await recorder.spendLimits.compactMap { $0 }
+        #expect(abs((finalLimits.last ?? 0) - 0.015) < 0.000_001)
+    }
+
+    @Test func workflowPropagatesToolApprovalAndCarriesAnswerIntoRetry() async throws {
+        actor RunnerState {
+            var invocations: [AgentInvocation] = []
+            func run(_ invocation: AgentInvocation) -> AgentExecutionResult {
+                invocations.append(invocation)
+                if invocations.count == 1 {
+                    return AgentExecutionResult(output: "Prepared a guarded change.", cost: 0.01, pendingQuestion: AgentExecutionQuestion(text: "Allow this command to delete files in: old.txt?", options: ["Allow", "Don't allow"]))
+                }
+                return AgentExecutionResult(output: "Finished after approval.", cost: 0.01)
+            }
+        }
+        let state = RunnerState()
+        let definition = WorkflowDefinition(id: "approval-flow", name: "Approval", summary: "", steps: [
+            .agent("change", title: "Change", agent: "coder", instruction: "Make the change"),
+        ], isApproved: true)
+        let engine = WorkflowEngine(definition: definition, runner: { await state.run($0) })
+        guard case .waiting(_, let question) = await engine.run(request: "go") else { Issue.record("Expected tool approval pause"); return }
+        #expect(question.text.contains("old.txt"))
+        try await engine.answer(nodeID: "change", answer: "Allow")
+        guard case .completed = await engine.run() else { Issue.record("Expected workflow continuation"); return }
+        let invocations = await state.invocations
+        #expect(invocations.count == 2)
+        #expect(invocations.last?.context.contains("Answer for change: Allow") == true)
     }
 
     @Test func reportOnlyAgentCannotReceiveChangingTools() async throws {
@@ -504,14 +585,14 @@ struct AgentLoopTests {
         #expect(!(await recorder.calls).contains("already"))
     }
 
-    @Test func cloudShellIsBoundedApprovalGatedAndLoggerRedacts() async throws {
-        let root = FileManager.default.temporaryDirectory
+    @Test func cloudShellIsBoundedAndLoggerRedacts() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-shell-basic-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let initialized = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["init"], directory: root)
+        #expect(initialized.exitCode == 0)
         let tool = ProcessTool(directory: root)
-        #expect(await tool.approvalRequest(for: ["command": "rm old.txt"]) != nil)
-        #expect(await tool.approvalRequest(for: ["command": "python3 -c 'import os; os.remove(\"old.txt\")'"]) != nil)
-        #expect(await tool.approvalRequest(for: ["command": "git status"]) == nil)
-        let authorized = ProcessTool(directory: root, authorization: ChangeAuthorization(request: "Delete old.txt and update Package.swift"))
-        #expect(await authorized.approvalRequest(for: ["command": "rm old.txt && printf update > Package.swift"]) == nil)
+        #expect(await tool.approvalRequest(for: ["command": "rm old.txt"]) == nil)
         let output = try await tool.run(arguments: ["command": "printf cloud-runner"], progress: { _ in })
         #expect(output.forModel == "Exit code: 0\ncloud-runner")
         let logger = RedactingLogger(secrets: ["secret-token"])

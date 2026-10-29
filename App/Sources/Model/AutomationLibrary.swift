@@ -8,6 +8,7 @@ final class AutomationLibrary {
     private(set) var customAgents: [CustomAgentRecord] = []
     private(set) var customWorkflows: [WorkflowRecord] = []
     private(set) var isLoaded = false
+    private(set) var isMakingWorkflow = false
     private(set) var lastError: String?
 
     @ObservationIgnored weak var app: AppModel?
@@ -99,6 +100,45 @@ final class AutomationLibrary {
     func deleteWorkflow(_ id: UUID) async {
         do { try await workflowStore.delete(id); await load(); app?.sync.request() }
         catch { lastError = String(describing: error) }
+    }
+
+    func makeWorkflow(description: String) async -> WorkflowRecord? {
+        guard !isMakingWorkflow, let app, let apiKey = app.openRouter.apiKey,
+              let maker = BuiltInAgents.named("workflow-maker") else { return nil }
+        isMakingWorkflow = true
+        lastError = nil
+        defer { isMakingWorkflow = false }
+        let definitions = agents
+        let prompt = WorkflowDraftBuilder.generationPrompt(description: description, agents: definitions)
+        var chat = Chat(title: "Workflow maker")
+        chat.messages = [.user(prompt), ChatMessage(body: .assistant(AssistantTurn()))]
+        let catalogue = app.openRouter.modelsByID
+        let route = ModelRouter.route(choice: .auto, difficulty: .hard, thinking: .medium, account: app.openRouter.accountState, catalogue: catalogue)
+        let input = AgentTurnInput(
+            chat: chat, route: route,
+            systemPrompt: SystemPrompt.make(userLogin: app.github.login, repo: nil, agent: maker),
+            tools: [], allowTools: false,
+            spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil,
+            agent: maker
+        )
+        let environment = AgentEnvironment(
+            openRouter: OpenRouterClient(transport: app.transport, apiKey: apiKey),
+            freeRoute: { ModelRouter.route(choice: .free, difficulty: .hard, thinking: .medium, account: AccountState(), catalogue: catalogue) },
+            onOutOfCredits: {}
+        )
+        var final: AssistantTurn?
+        for await event in AgentLoop.run(input, environment: environment) {
+            if case .updated(let turn, _) = event { final = turn }
+        }
+        do {
+            guard let turn = final, turn.status == .done else { throw ToolInputError(final?.failure?.message ?? "Workflow maker did not finish.") }
+            let text = turn.steps.map(\.text).joined(separator: "\n")
+            let draft = try WorkflowDraftBuilder.generatedDraft(from: text, agentIDs: Set(definitions.map(\.id)))
+            return WorkflowRecord(definition: draft)
+        } catch {
+            lastError = String(describing: error)
+            return nil
+        }
     }
 
     func run(_ workflow: WorkflowDefinition, request: String) async {

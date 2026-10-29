@@ -75,7 +75,10 @@ final class ConnectorLibrary {
         guard configuration.kind == .remote else { return }
         states[configuration.id] = .connecting
         let credential = Keychain.value(ConnectorCredential.self, account: credentialKey(configuration.id))
-        let session = MCPConnectorSession(configuration: configuration, credential: credential)
+        let session = MCPConnectorSession(configuration: configuration, credential: credential) { [weak self] current in
+            guard let self else { throw MCPAuthorizationError.rejected("The connector is no longer available.") }
+            return try await self.refreshCredential(current, for: configuration)
+        }
         sessions[configuration.id] = session
         do {
             let tools = try await session.tools()
@@ -103,7 +106,10 @@ final class ConnectorLibrary {
             guard let code = values["code"] else { throw MCPAuthorizationError.rejected(values["error_description"] ?? "The connector did not return a sign-in code.") }
             let credential = try await oauth.exchange(code: code, callbackState: values["state"], request: request)
             Keychain.setValue(credential, account: credentialKey(configuration.id))
-            await restore(configuration)
+            var updated = configuration
+            updated.scopes = credential.scopes
+            await save(updated)
+            await restore(updated)
         } catch WebSignIn.Failure.cancelled { states[configuration.id] = .authorizationNeeded }
         catch {
             if !dynamicRegistration {
@@ -132,6 +138,20 @@ final class ConnectorLibrary {
             guard states[configuration.id] == .connected, let session = sessions[configuration.id] else { return [] }
             return (toolDefinitions[configuration.id] ?? []).map { MCPTool(definition: $0, session: session) }
         }
+    }
+
+    private func refreshCredential(_ credential: ConnectorCredential, for configuration: ConnectorConfiguration) async throws -> ConnectorCredential {
+        guard let endpoint = configuration.endpoint, credential.refreshToken != nil else { return credential }
+        let oauth = MCPOAuthClient(transport: transport)
+        let (resource, server) = try await oauth.discover(endpoint: endpoint)
+        let updated = try await oauth.refresh(credential, server: server, resource: resource.resource)
+        Keychain.setValue(updated, account: credentialKey(configuration.id))
+        if updated.scopes != configuration.scopes {
+            var copy = configuration
+            copy.scopes = updated.scopes
+            await save(copy)
+        }
+        return updated
     }
 
     private func credentialKey(_ id: UUID) -> String { "mcp.\(id.uuidString.lowercased()).credential" }

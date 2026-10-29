@@ -148,7 +148,7 @@ struct ChatScreen: View {
                 HStack(spacing: 12) {
                     if let cost = session.chat.totalUsage.cost { Text(cost.dollars).font(.caption.monospacedDigit()).foregroundStyle(Theme.secondaryText) }
                     if let repo = session.chat.repo {
-                        Button { app.sheet = .files(repo) } label: { Image(systemName: "folder") }
+                        Button { app.sheet = .files(repo, .chat(session.id)) } label: { Image(systemName: "folder") }
                             .accessibilityLabel("Files")
                     }
                     Button { app.newChat() } label: { Image(systemName: "square.and.pencil") }

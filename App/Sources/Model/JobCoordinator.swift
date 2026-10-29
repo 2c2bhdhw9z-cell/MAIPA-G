@@ -54,11 +54,23 @@ final class JobCoordinator {
     }
 
     @discardableResult
-    func start(request: String, repo: ChatRepo, workflow: WorkflowDefinition? = nil) async -> JobRecord? {
+    func start(request: String, repo: ChatRepo, workflow: WorkflowDefinition? = nil, additionalState: [String: JSONValue] = [:]) async -> JobRecord? {
         guard let app, let github = app.github.client else { return nil }
         let setup = AutonomousSetup(github: github)
         let installed = (try? await setup.isInstalled(in: repo.ref, ref: repo.defaultBranch)) == true
-        var state: [String: JSONValue] = ["request": .string(request)]
+        let commit: String
+        do { commit = try await github.resolveCommit(repo.ref, ref: repo.branch) }
+        catch { lastError = app.github.describe(error); return nil }
+        let ruleWorkspace = RepoWorkspace(repo: repo.ref, branch: repo.branch, commit: commit, github: github, store: app.snapshots)
+        let rules = await GitHubChangeService(github: github).resolveRules(in: ruleWorkspace, directSaveSetting: app.settings.savesDirectly(to: repo.ref))
+        var state: [String: JSONValue] = [
+            "request": .string(request),
+            "effectiveDirectSave": .bool(rules.directSave),
+            "targetCommit": .string(commit),
+            "buildExplicitlyRequested": .bool(UserRequestPolicy.explicitlyRequestsBuild(request)),
+        ]
+        state["repoRuleReason"] = rules.reason.map(JSONValue.string)
+        for (key, value) in additionalState { state[key] = value }
         if let workflow,
            let data = try? JSONCoding.encoder().encode(workflow),
            let value = JSONValue.parse(data) {
@@ -87,7 +99,7 @@ final class JobCoordinator {
             targetRepo: repo.ref,
             targetRef: repo.branch,
             defaultBranch: repo.defaultBranch,
-            directSave: app.settings.savesDirectly(to: repo.ref),
+            directSave: rules.directSave,
             steps: [JobStepRecord(title: installed ? "Waiting for GitHub" : "Autonomous setup", status: installed ? .pending : .waiting)],
             questions: installed ? [] : [question]
         )
@@ -102,6 +114,23 @@ final class JobCoordinator {
             lastError = app.github.describe(error)
             return nil
         }
+    }
+
+    @discardableResult
+    func startPreviewBuild(repo: ChatRepo, project: WebPreviewProject, commit: String) async -> JobRecord? {
+        guard let command = project.buildCommand else { return nil }
+        let outputs = project.outputDirectories.map(JSONValue.string)
+        return await start(
+            request: "Build a private live-preview artifact from the selected saved commit.",
+            repo: repo,
+            additionalState: [
+                "previewBuild": true,
+                "previewBuildCommand": .string(command),
+                "previewOutputDirectories": .array(outputs),
+                "previewCommit": .string(commit),
+                "buildExplicitlyRequested": true,
+            ]
+        )
     }
 
     @discardableResult
@@ -149,6 +178,7 @@ final class JobCoordinator {
                 route: route,
                 systemPrompt: SystemPrompt.make(userLogin: login, repo: nil, agent: invocation.definition, workflowContext: invocation.context),
                 tools: [WebSearchTool(transport: transport), ReadWebPageTool(transport: transport)],
+                spendLimit: invocation.spendLimit,
                 agent: invocation.definition
             )
             let environment = AgentEnvironment(
@@ -163,16 +193,20 @@ final class JobCoordinator {
             let turn = final ?? AssistantTurn(status: .failed)
             let text = turn.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n")
             if turn.status == .failed { throw ToolInputError(turn.failure?.message ?? "The agent did not finish.") }
+            let pending = turn.pendingQuestions?.questions.questions.first.map { AgentExecutionQuestion(text: $0.text, options: $0.options) }
             return AgentExecutionResult(
                 output: text, model: turn.steps.last?.model,
-                goalMet: text.uppercased().contains("GOAL_MET"), cost: turn.usage.cost ?? 0
+                goalMet: text.uppercased().contains("GOAL_MET"), cost: turn.usage.cost ?? 0,
+                needsSpendingApproval: turn.spendCheck != nil, pendingQuestion: pending
             )
         }
         let restored = await store.workflowCheckpoint(jobID)
+        let workflowSpendLimit = await store.load(jobID)?.state["spendLimit"]?.doubleValue
         let engine = WorkflowEngine(
             definition: workflow,
             checkpoint: restored,
             agents: BuiltInAgents.all + app.automations.customAgents.map(\.definition),
+            spendLimit: workflowSpendLimit,
             runner: runner,
             checkpointer: { checkpoint in _ = try await recordStore.checkpointWorkflow(jobID, checkpoint: checkpoint) }
         )
@@ -206,10 +240,12 @@ final class JobCoordinator {
                 switch outcome {
                 case .completed:
                     job.status = .done
-                    job.result = JobResult(summary: checkpoint.outputs.last?.text ?? "Workflow finished.")
+                    let summary = checkpoint.outputs.last?.text ?? "Workflow finished."
+                    let passed = workflow.id.hasPrefix("spec-task:") ? summary.components(separatedBy: .newlines).contains { $0.trimmingCharacters(in: .whitespacesAndNewlines) == "GOAL_MET" } : nil
+                    job.result = JobResult(summary: summary, verificationPassed: passed)
                 case .waiting(_, let question):
                     job.status = .needsAnswer
-                    job.questions = [JobQuestion(text: question.text, options: question.options)]
+                    job.questions = [JobQuestion(text: question.text, options: question.options, isApproval: ["Allow", "Start build", "Keep going", "Continue"].contains(question.options.first ?? ""))]
                 case .cancelled:
                     job.status = .stopped
                 case .failed(_, let message):
@@ -223,6 +259,7 @@ final class JobCoordinator {
 
     private func workflowState(definition: WorkflowDefinition, request: String) -> JSONValue {
         var value: [String: JSONValue] = ["request": .string(request)]
+        if let app, app.settings.spendLimitOn { value["spendLimit"] = .number(app.settings.spendLimit) }
         if let data = try? JSONCoding.encoder().encode(definition), let encoded = JSONValue.parse(data) {
             value["workflowDefinition"] = encoded
         }
@@ -387,10 +424,11 @@ final class JobCoordinator {
     private func dispatch(_ job: JobRecord) async throws {
         guard let app, let github = app.github.client, let repo = job.targetRepo else { return }
         await app.sync.syncNow()
+        let dispatchRef = job.state["previewBuild"]?.boolValue == true ? (job.targetRef ?? job.defaultBranch ?? "main") : (job.defaultBranch ?? "main")
         try await github.dispatchWorkflow(
             repo,
             workflow: "maipa-g.yml",
-            ref: job.defaultBranch ?? "main",
+            ref: dispatchRef,
             inputs: ["job_id": job.id.uuidString.lowercased()]
         )
         var updated = job

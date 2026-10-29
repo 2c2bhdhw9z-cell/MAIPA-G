@@ -92,12 +92,16 @@ struct WorkflowMakerScreen: View {
         Form {
             Section("Describe it") {
                 TextField("Example: Plan and build a feature, then have two AIs review it", text: $description, axis: .vertical).lineLimit(4...10)
-                Button("Make draft") {
-                    let definition = WorkflowDraftBuilder.initialDraft(description: description)
-                    draft = WorkflowRecord(definition: definition)
-                }.disabled(description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button {
+                    Task { draft = await app.automations.makeWorkflow(description: description) }
+                } label: {
+                    if app.automations.isMakingWorkflow { ProgressView() }
+                    else { Text("Make draft") }
+                }
+                .disabled(description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || app.automations.isMakingWorkflow)
             }
             Section { Text("Workflow maker turns your words into typed steps. You can edit every step, then you must approve the saved draft before its first run.").font(.caption).foregroundStyle(Theme.secondaryText) }
+            if let error = app.automations.lastError { Section { Text(error).foregroundStyle(Theme.danger) } }
             if let draft { Section("Draft") { NavigationLink("Review and edit \(draft.name)") { WorkflowEditorScreen(record: draft) } } }
         }
         .navigationTitle("Workflow maker")

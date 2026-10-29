@@ -18,6 +18,10 @@ public extension GitHubClient {
         return try response.decode(WorkflowRunsPage.self).workflowRuns
     }
 
+    func workflowRun(_ repo: RepoRef, runID: Int) async throws -> GitHubWorkflowRun {
+        try await get(GitHubWorkflowRun.self, Self.path(repo, "/actions/runs/\(runID)"))
+    }
+
     func workflowJobs(_ repo: RepoRef, runID: Int) async throws -> [GitHubWorkflowJob] {
         let response = try await send("GET", Self.path(repo, "/actions/runs/\(runID)/jobs"), query: ["per_page": "100"])
         return try response.decode(WorkflowJobsPage.self).jobs

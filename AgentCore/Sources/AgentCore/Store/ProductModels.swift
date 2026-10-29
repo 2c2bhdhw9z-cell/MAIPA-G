@@ -182,10 +182,12 @@ public struct JobResult: Codable, Sendable, Hashable {
     public var commit: String?
     public var buildURL: String?
     public var artifactURL: String?
+    /// Typed outcome from workflows whose final checker must explicitly pass.
+    public var verificationPassed: Bool?
 
-    public init(summary: String, pullRequest: GitHubPullRequest? = nil, commit: String? = nil, buildURL: String? = nil, artifactURL: String? = nil) {
+    public init(summary: String, pullRequest: GitHubPullRequest? = nil, commit: String? = nil, buildURL: String? = nil, artifactURL: String? = nil, verificationPassed: Bool? = nil) {
         self.summary = summary; self.pullRequest = pullRequest; self.commit = commit
-        self.buildURL = buildURL; self.artifactURL = artifactURL
+        self.buildURL = buildURL; self.artifactURL = artifactURL; self.verificationPassed = verificationPassed
     }
 }
 

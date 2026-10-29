@@ -109,7 +109,7 @@ struct SheetContent: View {
         case .models(let target): ModelPicker(target: target)
         case .repos(let target): RepoPicker(target: target)
         case .branches(let target): BranchPicker(target: target)
-        case .files(let repo): FilesScreen(repo: repo)
+        case .files(let repo, let target): FilesScreen(repo: repo, target: target)
         case .jobs: JobsScreen()
         case .agents: AgentsScreen()
         case .agentEditor(let id):

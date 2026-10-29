@@ -107,7 +107,9 @@ public struct MCPOAuthClient: Sendable {
             "resource": authorization.resource.absoluteString,
         ]
         if let secret = authorization.client.clientSecret { fields["client_secret"] = secret }
-        return try await tokenRequest(authorization.server.tokenEndpoint, fields: fields, client: authorization.client)
+        var credential = try await tokenRequest(authorization.server.tokenEndpoint, fields: fields, client: authorization.client)
+        if credential.scopes.isEmpty { credential.scopes = authorization.scopes }
+        return credential
     }
 
     public func refresh(_ credential: ConnectorCredential, server: MCPAuthorizationServerMetadata, resource: URL) async throws -> ConnectorCredential {
@@ -116,6 +118,7 @@ public struct MCPOAuthClient: Sendable {
         if let secret = credential.clientSecret { fields["client_secret"] = secret }
         var updated = try await tokenRequest(server.tokenEndpoint, fields: fields, client: MCPRegisteredClient(clientID: credential.clientID, clientSecret: credential.clientSecret))
         if updated.refreshToken == nil { updated.refreshToken = refresh }
+        if updated.scopes.isEmpty { updated.scopes = credential.scopes }
         return updated
     }
 
@@ -137,20 +140,23 @@ public struct MCPOAuthClient: Sendable {
 
 /// A live remote MCP connection backed by the official Swift SDK's Streamable HTTP transport.
 public actor MCPConnectorSession {
+    public typealias CredentialRefresher = @Sendable (ConnectorCredential) async throws -> ConnectorCredential
+
     public let configuration: ConnectorConfiguration
-    private let credential: ConnectorCredential?
-    private let client = Client(name: "MAIPA-G", version: "0.1.0", title: "MAIPA-G", websiteUrl: OpenRouterClient.appURL)
+    private var credential: ConnectorCredential?
+    private let refreshCredential: CredentialRefresher?
+    private var client = Client(name: "MAIPA-G", version: "0.1.0", title: "MAIPA-G", websiteUrl: OpenRouterClient.appURL)
     private var transport: HTTPClientTransport?
     private var connected = false
 
-    public init(configuration: ConnectorConfiguration, credential: ConnectorCredential? = nil) {
-        self.configuration = configuration; self.credential = credential
+    public init(configuration: ConnectorConfiguration, credential: ConnectorCredential? = nil, refreshCredential: CredentialRefresher? = nil) {
+        self.configuration = configuration; self.credential = credential; self.refreshCredential = refreshCredential
     }
 
     public func connect() async throws {
-        guard !connected, let endpoint = configuration.endpoint, endpoint.scheme == "https" else {
-            if connected { return }; throw MCPAuthorizationError.insecureURL
-        }
+        if connected { return }
+        try await refreshIfNeeded(force: false)
+        guard let endpoint = configuration.endpoint, endpoint.scheme == "https" else { throw MCPAuthorizationError.insecureURL }
         let token = credential?.accessToken
         let transport = HTTPClientTransport(endpoint: endpoint, configuration: .ephemeral, streaming: true) { request in
             var request = request
@@ -164,6 +170,14 @@ public actor MCPConnectorSession {
     public func disconnect() async { await client.disconnect(); transport = nil; connected = false }
 
     public func tools() async throws -> [ConnectorToolDefinition] {
+        do { return try await listTools() }
+        catch where Self.isAuthorizationFailure(error) && credential?.refreshToken != nil {
+            try await refreshIfNeeded(force: true)
+            return try await listTools()
+        }
+    }
+
+    private func listTools() async throws -> [ConnectorToolDefinition] {
         if !connected { try await connect() }
         var cursor: String?
         var output: [ConnectorToolDefinition] = []
@@ -179,6 +193,14 @@ public actor MCPConnectorSession {
     }
 
     public func call(tool name: String, arguments: JSONValue) async throws -> (text: String, isError: Bool) {
+        do { return try await callOnce(tool: name, arguments: arguments) }
+        catch where Self.isAuthorizationFailure(error) && credential?.refreshToken != nil {
+            try await refreshIfNeeded(force: true)
+            return try await callOnce(tool: name, arguments: arguments)
+        }
+    }
+
+    private func callOnce(tool name: String, arguments: JSONValue) async throws -> (text: String, isError: Bool) {
         if !connected { try await connect() }
         let values = try MCP.Value(arguments).objectValue ?? [:]
         let result = try await client.callTool(name: name, arguments: values)
@@ -192,6 +214,20 @@ public actor MCPConnectorSession {
             }
         }.joined(separator: "\n")
         return (rendered, result.isError == true)
+    }
+
+    private func refreshIfNeeded(force: Bool) async throws {
+        guard let credential, let refreshCredential,
+              force || credential.needsRefresh() else { return }
+        if connected { await client.disconnect() }
+        connected = false; transport = nil
+        self.credential = try await refreshCredential(credential)
+        client = Client(name: "MAIPA-G", version: "0.1.0", title: "MAIPA-G", websiteUrl: OpenRouterClient.appURL)
+    }
+
+    private static func isAuthorizationFailure(_ error: Error) -> Bool {
+        let text = String(describing: error).lowercased()
+        return text.contains("401") || text.contains("unauthorized") || text.contains("authorization") || text.contains("invalid token")
     }
 }
 
