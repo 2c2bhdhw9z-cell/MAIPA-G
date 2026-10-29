@@ -36,5 +36,10 @@ cp "$IPA" "$TMP/MAIPA-G.ipa"; cp "$IPA" "$TMP/MAIPA-G-$RUN_NUMBER.ipa"
 TAG="build-$RUN_NUMBER-${MAIN_SHA:0:7}"
 NOTES="$TMP/notes.md"
 printf '**MAIPA-G** checked by iOS run %s and published from main commit `%s`.\n\nAlways newest: https://github.com/%s/releases/latest/download/MAIPA-G.ipa\n' "$RUN_ID" "$MAIN_SHA" "$REPO" >"$NOTES"
-gh release create "$TAG" "$TMP/MAIPA-G.ipa" "$TMP/MAIPA-G-$RUN_NUMBER.ipa" --repo "$REPO" --target "$MAIN_SHA" --title "MAIPA-G build $RUN_NUMBER" --notes-file "$NOTES"
+# A release made beforehand (as a draft) only gets the files attached; otherwise it is created here.
+if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+  gh release upload "$TAG" "$TMP/MAIPA-G.ipa" "$TMP/MAIPA-G-$RUN_NUMBER.ipa" --repo "$REPO" --clobber
+else
+  gh release create "$TAG" "$TMP/MAIPA-G.ipa" "$TMP/MAIPA-G-$RUN_NUMBER.ipa" --repo "$REPO" --target "$MAIN_SHA" --title "MAIPA-G build $RUN_NUMBER" --notes-file "$NOTES"
+fi
 echo "published $TAG from verified tree $MAIN_TREE"
