@@ -1,0 +1,4 @@
+Integration logo shapes from Simple Icons (https://simpleicons.org), CC0 1.0 Universal.
+Microsoft and Slack logo artwork adapted from SuperTinyIcons (https://github.com/edent/SuperTinyIcons):
+Copyright © 2017 Terence Eden, used under the MIT License.
+Brand names and logos remain trademarks of their respective owners and are used only to identify the service a person chooses to connect.

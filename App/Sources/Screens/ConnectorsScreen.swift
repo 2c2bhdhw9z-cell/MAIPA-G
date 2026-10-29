@@ -1,5 +1,6 @@
 import AgentCore
 import SwiftUI
+import UIKit
 
 /// Connectors shown like integrations in an ordinary app: familiar services, plain descriptions,
 /// recognisable coloured icons and one Connect button. "All" still exposes every result from the
@@ -79,7 +80,8 @@ struct ConnectorsScreen: View {
                             service: IntegrationService.matching(connector.displayName + " " + connector.serverID),
                             name: connector.displayName,
                             detail: connectedStatus(connector),
-                            trailing: .chevron
+                            trailing: .chevron,
+                            iconURL: app.connectors.catalog.first(where: { $0.name == connector.serverID })?.preferredIconURL
                         )
                     }
                     .buttonStyle(.plain)
@@ -114,7 +116,8 @@ struct ConnectorsScreen: View {
                         service: IntegrationService.matching(server.displayName + " " + server.name),
                         name: server.displayName,
                         detail: plainDescription(server),
-                        trailing: connectedServer(server) ? .connected : .connect
+                        trailing: connectedServer(server) ? .connected : .connect,
+                        iconURL: server.preferredIconURL
                     )
                 }
                 .buttonStyle(.plain)
@@ -249,10 +252,11 @@ private struct ConnectorCard: View {
     let name: String
     let detail: String
     let trailing: ConnectorTrailing
+    var iconURL: URL? = nil
 
     var body: some View {
         HStack(spacing: 12) {
-            IntegrationIcon(service: service)
+            IntegrationIcon(service: service, name: name, remoteURL: iconURL)
             VStack(alignment: .leading, spacing: 3) {
                 Text(name).font(.body.weight(.semibold)).foregroundStyle(.primary).lineLimit(1)
                 Text(detail).font(.footnote).foregroundStyle(Theme.secondaryText).lineLimit(2)
@@ -279,14 +283,85 @@ private struct ConnectorCard: View {
 
 struct IntegrationIcon: View {
     let service: IntegrationService
+    var name: String? = nil
+    var remoteURL: URL? = nil
+
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 10, style: .continuous).fill(service.colour.opacity(0.18))
-            Image(systemName: service.symbol).font(.system(size: 19, weight: .semibold)).foregroundStyle(service.colour)
+            if let assetName = service.assetName {
+                Image(assetName)
+                    .resizable()
+                    .renderingMode(service.usesOriginalColours ? .original : .template)
+                    .scaledToFit()
+                    .foregroundStyle(service.colour)
+                    .padding(9)
+            } else if let remoteURL {
+                RemoteConnectorLogo(url: remoteURL, fallback: initials)
+            } else {
+                Text(initials)
+                    .font(.system(size: initials.count > 1 ? 13 : 18, weight: .bold, design: .rounded))
+                    .foregroundStyle(service.colour)
+            }
         }
         .frame(width: 44, height: 44)
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.stroke))
         .accessibilityHidden(true)
+    }
+
+    private var initials: String {
+        let words = (name ?? service.name).split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        let letters = words.prefix(2).compactMap(\.first)
+        return letters.isEmpty ? "•" : String(letters).uppercased()
+    }
+}
+
+private struct RemoteConnectorLogo: View {
+    let url: URL
+    let fallback: String
+    @State private var data: Data?
+
+    var body: some View {
+        Group {
+            if let data, let image = UIImage(data: data) {
+                Image(uiImage: image).resizable().scaledToFit()
+            } else {
+                Text(fallback).font(.system(size: fallback.count > 1 ? 13 : 18, weight: .bold, design: .rounded))
+            }
+        }
+        .padding(8)
+        .task(id: url) { data = await ConnectorLogoLoader.shared.data(for: url) }
+    }
+}
+
+private actor ConnectorLogoLoader {
+    static let shared = ConnectorLogoLoader()
+    private var cache: [URL: Data] = [:]
+    private var order: [URL] = []
+
+    func data(for url: URL) async -> Data? {
+        if let cached = cache[url] { return cached }
+        guard url.scheme == "https" else { return nil }
+        do {
+            let response = try await URLSessionTransport().stream(HTTPRequest(url: url, headers: ["Accept": "image/png,image/jpeg,image/webp,*/*;q=0.2"], idleTimeout: 15))
+            guard response.isSuccess else { return nil }
+            if let length = response.header("content-length").flatMap(Int.init), length > 512_000 { return nil }
+            let data = try await response.collect(limit: 512_001)
+            guard data.count <= 512_000, Self.looksLikeImage(data) else { return nil }
+            if cache.count >= 80, let oldest = order.first {
+                cache[oldest] = nil
+                order.removeFirst()
+            }
+            cache[url] = data
+            order.append(url)
+            return data
+        } catch { return nil }
+    }
+
+    private static func looksLikeImage(_ data: Data) -> Bool {
+        data.starts(with: [0x89, 0x50, 0x4E, 0x47])
+            || data.starts(with: [0xFF, 0xD8, 0xFF])
+            || (data.count >= 12 && data.prefix(4) == Data("RIFF".utf8) && data.dropFirst(8).prefix(4) == Data("WEBP".utf8))
     }
 }
 
@@ -298,6 +373,14 @@ struct IntegrationService: Identifiable {
     let aliases: [String]
     let symbol: String
     let colour: Color
+    let assetName: String?
+    let usesOriginalColours: Bool
+
+    init(name: String, detail: String, search: String, aliases: [String], symbol: String, colour: Color, assetName: String? = nil, usesOriginalColours: Bool = false) {
+        self.name = name; self.detail = detail; self.search = search; self.aliases = aliases
+        self.symbol = symbol; self.colour = colour; self.assetName = assetName
+        self.usesOriginalColours = usesOriginalColours
+    }
 
     func matches(_ text: String) -> Bool {
         let value = " " + Self.normalized(text) + " "
@@ -310,28 +393,35 @@ struct IntegrationService: Identifiable {
 
     static func matching(_ text: String) -> IntegrationService {
         popular.first(where: { $0.matches(text) })
-            ?? IntegrationService(name: "App", detail: "Connected tool", search: text, aliases: [], symbol: "puzzlepiece.extension.fill", colour: .mint)
+            ?? IntegrationService(name: text, detail: "Connected tool", search: text, aliases: [], symbol: "puzzlepiece.extension.fill", colour: colour(for: text))
+    }
+
+    private static func colour(for text: String) -> Color {
+        var value: UInt64 = 14_695_981_039_346_656_037
+        for byte in text.utf8 { value = (value ^ UInt64(byte)) &* 1_099_511_628_211 }
+        let choices: [Color] = [.mint, .cyan, .blue, .indigo, .purple, .pink, .orange, .green]
+        return choices[Int(value % UInt64(choices.count))]
     }
 
     static let popular: [IntegrationService] = [
-        .init(name: "GitHub", detail: "Search repositories, manage issues and review changes", search: "github", aliases: ["github"], symbol: "chevron.left.forwardslash.chevron.right", colour: .primary),
-        .init(name: "Gmail", detail: "Read, search and draft email", search: "gmail", aliases: ["gmail", "google mail"], symbol: "envelope.fill", colour: .red),
-        .init(name: "Google Calendar", detail: "Read and manage your calendar events", search: "calendar", aliases: ["google calendar", "gcalendar", "google agenda"], symbol: "calendar", colour: .blue),
-        .init(name: "Google Drive", detail: "Search, read and upload your files", search: "drive", aliases: ["google drive", "gdrive"], symbol: "externaldrive.fill", colour: .green),
-        .init(name: "Google Docs", detail: "Read, edit and create documents", search: "docs", aliases: ["google docs", "gdocs"], symbol: "doc.text.fill", colour: .blue),
-        .init(name: "Google Sheets", detail: "Read, analyse and update spreadsheets", search: "sheets", aliases: ["google sheets", "gsheets"], symbol: "tablecells.fill", colour: .green),
-        .init(name: "Google Slides", detail: "Read and create presentations", search: "slides", aliases: ["google slides", "gslides"], symbol: "rectangle.on.rectangle.angled", colour: .orange),
-        .init(name: "Microsoft 365", detail: "Use Outlook, OneDrive, Teams and SharePoint", search: "microsoft", aliases: ["microsoft 365", "office 365", "m365", "m365 copilot"], symbol: "square.grid.2x2.fill", colour: .blue),
-        .init(name: "Slack", detail: "Search channels and send messages", search: "slack", aliases: ["slack"], symbol: "number", colour: .purple),
-        .init(name: "Notion", detail: "Search, read and update your workspace", search: "notion", aliases: ["notion"], symbol: "doc.text", colour: .primary),
-        .init(name: "Linear", detail: "Search and manage issues and projects", search: "linear", aliases: ["linear"], symbol: "circle.lefthalf.filled", colour: .indigo),
-        .init(name: "Figma", detail: "Read designs, comments and project details", search: "figma", aliases: ["figma"], symbol: "paintbrush.pointed.fill", colour: .pink),
-        .init(name: "Dropbox", detail: "Search, read and manage cloud files", search: "dropbox", aliases: ["dropbox"], symbol: "shippingbox.fill", colour: .blue),
-        .init(name: "Atlassian", detail: "Use Jira and Confluence projects", search: "atlassian", aliases: ["atlassian", "jira", "confluence"], symbol: "triangle.fill", colour: .blue),
-        .init(name: "Box", detail: "Search and work with company files", search: "box", aliases: ["box", "box mcp"], symbol: "archivebox.fill", colour: .blue),
-        .init(name: "Asana", detail: "Read and manage tasks and projects", search: "asana", aliases: ["asana"], symbol: "circle.grid.3x3.fill", colour: .pink),
-        .init(name: "Canva", detail: "Search and work with Canva designs", search: "canva", aliases: ["canva"], symbol: "wand.and.stars", colour: .cyan),
-        .init(name: "YouTube", detail: "Search videos and work with channel information", search: "youtube", aliases: ["youtube"], symbol: "play.rectangle.fill", colour: .red),
+        .init(name: "GitHub", detail: "Search repositories, manage issues and review changes", search: "github", aliases: ["github"], symbol: "chevron.left.forwardslash.chevron.right", colour: .primary, assetName: "IntegrationGitHub"),
+        .init(name: "Gmail", detail: "Read, search and draft email", search: "gmail", aliases: ["gmail", "google mail"], symbol: "envelope.fill", colour: .red, assetName: "IntegrationGmail"),
+        .init(name: "Google Calendar", detail: "Read and manage your calendar events", search: "calendar", aliases: ["google calendar", "gcalendar", "google agenda"], symbol: "calendar", colour: .blue, assetName: "IntegrationGoogleCalendar"),
+        .init(name: "Google Drive", detail: "Search, read and upload your files", search: "drive", aliases: ["google drive", "gdrive"], symbol: "externaldrive.fill", colour: .green, assetName: "IntegrationGoogleDrive"),
+        .init(name: "Google Docs", detail: "Read, edit and create documents", search: "docs", aliases: ["google docs", "gdocs"], symbol: "doc.text.fill", colour: .blue, assetName: "IntegrationGoogleDocs"),
+        .init(name: "Google Sheets", detail: "Read, analyse and update spreadsheets", search: "sheets", aliases: ["google sheets", "gsheets"], symbol: "tablecells.fill", colour: .green, assetName: "IntegrationGoogleSheets"),
+        .init(name: "Google Slides", detail: "Read and create presentations", search: "slides", aliases: ["google slides", "gslides"], symbol: "rectangle.on.rectangle.angled", colour: .orange, assetName: "IntegrationGoogleSlides"),
+        .init(name: "Microsoft 365", detail: "Use Outlook, OneDrive, Teams and SharePoint", search: "microsoft", aliases: ["microsoft 365", "office 365", "m365", "m365 copilot"], symbol: "square.grid.2x2.fill", colour: .blue, assetName: "IntegrationMicrosoft", usesOriginalColours: true),
+        .init(name: "Slack", detail: "Search channels and send messages", search: "slack", aliases: ["slack"], symbol: "number", colour: .purple, assetName: "IntegrationSlack", usesOriginalColours: true),
+        .init(name: "Notion", detail: "Search, read and update your workspace", search: "notion", aliases: ["notion"], symbol: "doc.text", colour: .primary, assetName: "IntegrationNotion"),
+        .init(name: "Linear", detail: "Search and manage issues and projects", search: "linear", aliases: ["linear"], symbol: "circle.lefthalf.filled", colour: .indigo, assetName: "IntegrationLinear"),
+        .init(name: "Figma", detail: "Read designs, comments and project details", search: "figma", aliases: ["figma"], symbol: "paintbrush.pointed.fill", colour: .pink, assetName: "IntegrationFigma"),
+        .init(name: "Dropbox", detail: "Search, read and manage cloud files", search: "dropbox", aliases: ["dropbox"], symbol: "shippingbox.fill", colour: .blue, assetName: "IntegrationDropbox"),
+        .init(name: "Atlassian", detail: "Use Jira and Confluence projects", search: "atlassian", aliases: ["atlassian", "jira", "confluence"], symbol: "triangle.fill", colour: .blue, assetName: "IntegrationAtlassian"),
+        .init(name: "Box", detail: "Search and work with company files", search: "box", aliases: ["box", "box mcp"], symbol: "archivebox.fill", colour: .blue, assetName: "IntegrationBox"),
+        .init(name: "Asana", detail: "Read and manage tasks and projects", search: "asana", aliases: ["asana"], symbol: "circle.grid.3x3.fill", colour: .pink, assetName: "IntegrationAsana"),
+        .init(name: "Canva", detail: "Search and work with Canva designs", search: "canva", aliases: ["canva"], symbol: "wand.and.stars", colour: .cyan, assetName: "IntegrationCanva"),
+        .init(name: "YouTube", detail: "Search videos and work with channel information", search: "youtube", aliases: ["youtube"], symbol: "play.rectangle.fill", colour: .red, assetName: "IntegrationYouTube"),
     ]
 }
 
