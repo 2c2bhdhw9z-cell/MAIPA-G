@@ -1,6 +1,6 @@
 # MAIPA-G plan
 
-**Status (29 October 2026, 10:43 AM Eastern): the whole plan is built and on main. Build 24
+**Status (29 October 2026, 12:23 PM Eastern): the whole plan is built and on main. Build 24
 (`build-24-aa5a76b`, 4.6 MB) is installed and he is testing it. His reports so far are in "Build 24
 test reports" below. Per his rule, nothing gets fixed until he says he's done testing; then all of
 them go into one batch and one build.**
@@ -81,7 +81,19 @@ them go into one batch and one build.**
    npm/pnpm/yarn/TypeScript, Java with Gradle/Maven, Rust, Go, Ruby, PHP with Composer, Elixir,
    Swift 6, .NET, Bun, gcc/clang/cmake/make, Git, gh, ripgrep) plus Deno, cloc, sqlite3, jq,
    ImageMagick, ffmpeg and Playwright with Chromium. Install once per computer and keep it. Gave
-   him a one-message version to try now on `mcp-test`.
+   him a one-message version to try now on `mcp-test`. 12:20 PM: it worked through the connector
+   on the free Nemotron model ($0.00); all 25 are on `mcp-test`. Already on the Sprite: Bun, Deno,
+   gcc, clang, make, gh, uv, sqlite3, jq. Added: Swift 6.4.1 (download), .NET 10.0.113, PHP 8.5.4,
+   Composer, cmake, cloc, ripgrep, ImageMagick, ffmpeg (apt-get), ruff and pytest (pip3), pnpm,
+   yarn, TypeScript and Playwright 1.64.1 with Chromium (npm).
+4. **12:06 PM: the tool-call bars are too wide.** He drew a line along the empty part of every
+   "1 tool call >" bar and every "Using Sprites MCP Server · exec… ⌄" bar: "Shrink it to match
+   wherever the drop thing goes." Cause: `ToolCallsFold` and `ToolLine` in
+   `App/Sources/Screens/MessageViews.swift` put `Spacer(minLength: 4)` after the chevron, so the
+   rounded `Theme.surface` background stretches across the whole width. Fix: each bar hugs its
+   icon, text and arrow and ends right after the arrow (the running spinner sits just after the
+   arrow, inside the bar). Long titles still shorten in the middle when they reach the screen
+   edge.
 
 Technical notes for the logo fix (for Kiro):
 - iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
