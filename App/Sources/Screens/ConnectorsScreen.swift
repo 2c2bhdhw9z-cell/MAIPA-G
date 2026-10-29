@@ -305,7 +305,7 @@ struct IntegrationService: Identifiable {
     }
 
     private static func normalized(_ text: String) -> String {
-        text.lowercased().map { $0.isLetter || $0.isNumber ? $0 : " " }.split(separator: " ").joined(separator: " ")
+        String(text.lowercased().map { $0.isLetter || $0.isNumber ? $0 : " " }.split(separator: " ").joined(separator: " "))
     }
 
     static func matching(_ text: String) -> IntegrationService {
