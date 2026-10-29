@@ -55,7 +55,13 @@ them go into one batch and one build.**
    100-500 ms with processes kept, cold wake 1-2 s, bills only CPU/memory actually used, $30
    trial, REST `PUT /v1/sprites/<name>` and `POST /v1/sprites/<name>/exec` with a bearer token);
    Vercel Sandbox; Upstash Box; Modal; Amazon EC2. Kiro's pick: Fly.io Sprites, with GitHub's free
-   computer as the fallback for people without an account. Waiting on his answer.
+   computer as the fallback for people without an account. 11:40 AM: he made a Fly.io account
+   to try Sprites. Sprites has its own hosted connector, `https://sprites.dev/mcp`, with OAuth
+   (Fly.io sign-in, organization choice, a consent screen that limits it to `mcp-` names by
+   default). Its sign-in server accepts Client ID Metadata Documents and dynamic registration, and
+   MAIPA-G's `mcp/client.json` is live, so build 24's custom connector (+ in Connectors) should
+   sign in. Gave him steps to test it on the public MAIPA-G repo (27,065 lines in 200 text files
+   at `0f1160d`).
 
 Technical notes for the logo fix (for Kiro):
 - iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
