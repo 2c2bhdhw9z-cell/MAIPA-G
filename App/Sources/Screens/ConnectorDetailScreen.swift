@@ -33,9 +33,13 @@ struct ConnectorDetailScreen: View {
     @ViewBuilder
     private func savedSections(_ connector: ConnectorConfiguration) -> some View {
         Section {
-            LabeledContent("Runs on", value: connector.kind == .remote ? "iPhone" : "Autonomous")
-            if let endpoint = connector.endpoint { LabeledContent("Server", value: endpoint.host ?? endpoint.absoluteString) }
-            LabeledContent("Status", value: stateText)
+            HStack(spacing: 12) {
+                IntegrationIcon(service: IntegrationService.matching(connector.displayName + " " + connector.serverID))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(connector.displayName).font(.headline)
+                    Text(stateText).font(.footnote).foregroundStyle(Theme.secondaryText)
+                }
+            }
         }
         if let error = app.connectors.errors[connector.id] {
             Section("What happened") { Text(error).foregroundStyle(Theme.danger) }
@@ -57,15 +61,28 @@ struct ConnectorDetailScreen: View {
             Button("Disconnect") { Task { await app.connectors.disconnect(connector) } }
             Button("Remove connector", role: .destructive) { showingDelete = true }
         }
+        Section {
+            DisclosureGroup("Technical details") {
+                LabeledContent("Runs on", value: connector.kind == .remote ? "This iPhone" : "Autonomous")
+                if let endpoint = connector.endpoint { LabeledContent("Server", value: endpoint.host ?? endpoint.absoluteString) }
+            }
+        }
     }
 
     @ViewBuilder
     private func registrySections(_ server: RegistryServer) -> some View {
         Section {
-            Text(server.description)
-            LabeledContent("Version", value: server.version)
-            LabeledContent("Phone", value: server.supportsPhone ? "Yes" : "No")
-            LabeledContent("Autonomous", value: server.supportsAutonomous ? "Yes" : "No")
+            HStack(alignment: .top, spacing: 12) {
+                IntegrationIcon(service: IntegrationService.matching(server.displayName + " " + server.name))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(server.displayName).font(.headline)
+                    Text(server.description.isEmpty ? "Connect this app to use its tools in MAIPA-G." : server.description)
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.secondaryText)
+                }
+            }
+            if server.supportsPhone { Label("Works in chats on this iPhone", systemImage: "iphone") }
+            if server.supportsAutonomous { Label("Works in Autonomous jobs", systemImage: "gearshape.2") }
         }
         if let package = autonomousPackage, !package.launchInputs.isEmpty {
             Section {
@@ -78,11 +95,11 @@ struct ConnectorDetailScreen: View {
         }
         Section {
             if server.supportsPhone {
-                Button("Add to iPhone") { Task { await app.connectors.add(server); moveToSaved(server) } }
+                Button("Connect") { Task { await connectOnPhone(server) } }
                     .buttonStyle(.borderedProminent)
             }
             if server.supportsAutonomous {
-                Button("Add for Autonomous") {
+                Button("Use in Autonomous") {
                     Task { await app.connectors.add(server, preferPhone: false, launchValues: launchValues, secretValues: secretValues); moveToSaved(server) }
                 }
                 .disabled(!autonomousInputsComplete)
@@ -126,7 +143,15 @@ struct ConnectorDetailScreen: View {
         )
     }
     private var stateText: String { String(describing: connector.flatMap { app.connectors.states[$0.id] } ?? .disconnected).replacingOccurrences(of: "authorizationNeeded", with: "Sign in needed") }
-    private func moveToSaved(_ server: RegistryServer) { if let item = app.connectors.connected.last { app.sheet = .connectorDetail(item.id) } }
+    private func connectOnPhone(_ server: RegistryServer) async {
+        await app.connectors.add(server)
+        guard let item = app.connectors.connected.first(where: { $0.serverID == server.name }) else { return }
+        if app.connectors.states[item.id] == .authorizationNeeded { await app.connectors.authorize(item) }
+        app.sheet = .connectorDetail(item.id)
+    }
+    private func moveToSaved(_ server: RegistryServer) {
+        if let item = app.connectors.connected.first(where: { $0.serverID == server.name }) { app.sheet = .connectorDetail(item.id) }
+    }
 }
 
 /// One tool a connected connector offers: its name and what it does.

@@ -36,6 +36,10 @@ public actor JobStore {
         return job
     }
 
+    public func delete(_ id: UUID) async throws {
+        try await records.delete(id)
+    }
+
     public func stop(_ id: UUID) async throws -> JobRecord {
         try await update(id) { job in
             job.status = .stopped

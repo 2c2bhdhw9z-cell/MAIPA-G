@@ -32,6 +32,28 @@ final class ChatSession: Identifiable {
     }
 
     var lastTurn: AssistantTurn? { chat.lastAssistantTurn }
+    var contextModelID: String? {
+        chat.messages.reversed().compactMap(\.assistantTurn).flatMap { $0.steps.reversed() }.compactMap(\.model).first
+    }
+    var contextUsedTokens: Int {
+        // The latest request's prompt already includes the conversation and every returned tool
+        // result. Add its answer to show what the next request will need to carry forward.
+        if let usage = chat.messages.reversed().compactMap(\.assistantTurn).flatMap({ $0.steps.reversed() }).compactMap(\.usage).first {
+            return max(0, usage.promptTokens + usage.completionTokens)
+        }
+        // Before OpenRouter has reported usage, give a conservative plain-text estimate rather than
+        // showing a made-up exact number.
+        let characters = chat.messages.reduce(0) { total, message in
+            switch message.body {
+            case .user(let user): return total + user.text.count
+            case .assistant(let turn):
+                return total + turn.steps.reduce(0) { partial, step in
+                    partial + step.text.count + step.reasoning.count + step.toolCalls.reduce(0) { $0 + $1.arguments.count + ($1.result?.count ?? 0) }
+                }
+            }
+        }
+        return max(0, characters / 4)
+    }
     var isWaitingForAnswers: Bool { lastTurn?.pendingQuestions != nil }
     var isWaitingOnSpend: Bool { lastTurn?.status == .waitingForUser && lastTurn?.spendCheck != nil }
 

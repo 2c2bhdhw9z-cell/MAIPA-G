@@ -34,6 +34,17 @@ final class OpenRouterAccount {
     var freeRequestsLeft: Int? { keyInfo?.freeRequestsLeftToday }
     var balance: Double? { credits?.balance ?? keyInfo?.limitRemaining }
 
+    func contextLimit(for choice: ModelChoice, lastModelID: String? = nil) -> Int? {
+        let id: String?
+        switch choice {
+        case .model(let selected): id = selected
+        case .auto, .free: id = lastModelID
+        }
+        guard let id else { return nil }
+        return modelsByID[id]?.contextLength
+            ?? modelsByID[id.replacingOccurrences(of: ":free", with: "")]?.contextLength
+    }
+
     func restore() {
         apiKey = Keychain.string(.openRouterKey)
         if let data = try? Data(contentsOf: statePath), let state = try? JSONCoding.decoder().decode(AccountState.self, from: data) {
@@ -84,6 +95,7 @@ final class OpenRouterAccount {
         credits = OpenRouterCredits(purchased: 5, used: 1.42)
         setModels([
             ModelInfo(id: "openrouter/auto", name: "OpenRouter: Auto", outputModalities: ["text"], supportedParameters: ["tools", "reasoning"]),
+            ModelInfo(id: "anthropic/claude-sonnet-5.5", name: "Anthropic: Claude Sonnet 5.5", contextLength: 200_000, outputModalities: ["text"], supportedParameters: ["tools", "reasoning"]),
             ModelInfo(id: "google/gemini-image", name: "Google: Gemini Image", promptPrice: 0.000001, completionPrice: 0.000004, inputModalities: ["text", "image"], outputModalities: ["text", "image"], supportedParameters: ["tools"]),
             ModelInfo(id: "qwen/qwen-vl:free", name: "Qwen: Vision Free", promptPrice: 0, completionPrice: 0, inputModalities: ["text", "image"], outputModalities: ["text"], supportedParameters: ["tools"]),
         ])

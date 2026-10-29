@@ -11,6 +11,16 @@ public struct GitHubWorkspacePublisher: Sendable {
         self.github = github; self.repo = repo; self.workspace = workspace
     }
 
+    /// Whether the model-controlled workspace has anything for the trusted publisher to save.
+    public func hasChanges() async throws -> Bool {
+        let staged = try await git(["add", "-A"])
+        guard staged.exitCode == 0 else { throw CloudRunnerError.commandFailed }
+        let diff = try await git(["diff", "--cached", "--quiet", "HEAD", "--", "."], allowFailure: true)
+        _ = try? await git(["reset"], allowFailure: true)
+        guard diff.exitCode == 0 || diff.exitCode == 1 else { throw CloudRunnerError.commandFailed }
+        return diff.exitCode == 1
+    }
+
     public func publish(branch: String, baseRef: String, expectedRemoteHead: String? = nil, message: String) async throws -> String {
         let localHead = try await git(["rev-parse", "HEAD"]).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         let baseHead = try await github.branchHead(repo, branch: baseRef)

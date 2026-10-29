@@ -4,6 +4,8 @@ import SwiftUI
 struct JobsScreen: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
+    @State private var deletingJob: JobRecord?
+    @State private var showsDelete = false
 
     var body: some View {
         NavigationStack {
@@ -13,6 +15,12 @@ struct JobsScreen: View {
                 } else {
                     ForEach(app.jobs.jobs) { job in
                         NavigationLink(value: job.id) { JobRow(job: job) }
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button(role: .destructive) { askToDelete(job) } label: { Label("Delete", systemImage: "trash") }
+                            }
+                            .contextMenu {
+                                Button(role: .destructive) { askToDelete(job) } label: { Label("Delete job", systemImage: "trash") }
+                            }
                     }
                 }
             }
@@ -27,8 +35,28 @@ struct JobsScreen: View {
             }
             .refreshable { await app.jobs.refresh() }
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .confirmationDialog("Delete this job?", isPresented: $showsDelete, titleVisibility: .visible) {
+                Button("Delete job", role: .destructive) {
+                    if let id = deletingJob?.id { Task { await app.jobs.delete(id) } }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(deleteMessage)
+            }
         }
-        .task { await app.jobs.refresh() }
+        .task { if !PreviewScenes.isActive { await app.jobs.refresh() } }
+    }
+
+    private func askToDelete(_ job: JobRecord) {
+        deletingJob = job
+        showsDelete = true
+    }
+
+    private var deleteMessage: String {
+        guard let job = deletingJob else { return "This removes the saved job." }
+        return [.done, .failed, .stopped].contains(job.status)
+            ? "This removes the saved job from this phone and MAIPA-G-data."
+            : "This stops the GitHub run, then removes the saved job from this phone and MAIPA-G-data."
     }
 }
 
@@ -78,6 +106,8 @@ private struct JobRow: View {
 struct JobDetailScreen: View {
     @Environment(AppModel.self) private var app
     @Environment(\.openURL) private var openURL
+    @Environment(\.dismiss) private var dismiss
+    @State private var showsDelete = false
     var job: JobRecord
 
     private var current: JobRecord { app.jobs.jobs.first(where: { $0.id == job.id }) ?? job }
@@ -146,6 +176,13 @@ struct JobDetailScreen: View {
                 }
             }
 
+            if current.status == .failed, current.result == nil {
+                Section("Result") {
+                    Text("This older job stopped without saving the reason. You can Resume it with the fixed runner or delete it below.")
+                        .foregroundStyle(Theme.secondaryText)
+                }
+            }
+
             Section {
                 link("Open run", current.workflowRunURL)
                 link("Open logs", current.logsURL)
@@ -154,11 +191,25 @@ struct JobDetailScreen: View {
                 } else if current.status == .stopped || current.status == .failed {
                     Button("Resume") { Task { await app.jobs.resume(current.id) } }
                 }
+                Button("Delete job", role: .destructive) { showsDelete = true }
             }
         }
         .navigationTitle(current.title)
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await app.jobs.refresh() }
+        .confirmationDialog("Delete this job?", isPresented: $showsDelete, titleVisibility: .visible) {
+            Button("Delete job", role: .destructive) {
+                Task {
+                    await app.jobs.delete(current.id)
+                    dismiss()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text([.done, .failed, .stopped].contains(current.status)
+                 ? "This removes the saved job from this phone and MAIPA-G-data."
+                 : "This stops the GitHub run, then removes the saved job from this phone and MAIPA-G-data.")
+        }
     }
 
     private var progress: Double {

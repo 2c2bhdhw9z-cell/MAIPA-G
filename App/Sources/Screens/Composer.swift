@@ -25,6 +25,8 @@ struct Composer: View {
     @Binding var webEnabled: Bool
     @Binding var autonomous: Bool
     var modelLabel: String
+    var contextUsedTokens: Int
+    var contextLimitTokens: Int?
     var thinking: ThinkingLevel
     var thinkingLevels: [ThinkingLevel]
     var repo: ChatRepo?
@@ -86,9 +88,10 @@ struct Composer: View {
                 HStack(spacing: 6) {
                     attachmentMenu
                     webButton
+                    ContextMeter(used: contextUsedTokens, limit: contextLimitTokens)
                     Spacer(minLength: 4)
-                    compactModelButton
-                    if !thinkingLevels.isEmpty { compactThinkingMenu }
+                    modelButton.offset(y: 6)
+                    if !thinkingLevels.isEmpty { thinkingMenu.offset(y: 6) }
                     sendButton
                 }
             }
@@ -164,7 +167,7 @@ struct Composer: View {
         }
     }
 
-    private var compactModelButton: some View {
+    private var modelButton: some View {
         Button(action: onPickModel) {
             HStack(spacing: 3) {
                 Image(systemName: modelLabel == "Auto" ? "wand.and.stars" : "cpu")
@@ -174,9 +177,9 @@ struct Composer: View {
                     .font(.system(size: 8, weight: .bold))
                     .foregroundStyle(Theme.secondaryText)
             }
-            .font(.caption.weight(.medium))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
+            .font(.footnote.weight(.medium))
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
             .background(Theme.raised.opacity(0.9), in: Capsule())
             .overlay(Capsule().strokeBorder(Theme.stroke))
         }
@@ -184,7 +187,7 @@ struct Composer: View {
         .accessibilityLabel("AI: \(modelLabel)")
     }
 
-    private var compactThinkingMenu: some View {
+    private var thinkingMenu: some View {
         Menu {
             Section("Thinking") {
                 ForEach(thinkingLevels.reversed(), id: \.self) { level in
@@ -204,9 +207,9 @@ struct Composer: View {
                     .font(.system(size: 8, weight: .bold))
                     .foregroundStyle(Theme.secondaryText)
             }
-            .font(.caption.weight(.medium))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
+            .font(.footnote.weight(.medium))
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
             .background(Theme.raised.opacity(0.9), in: Capsule())
             .overlay(Capsule().strokeBorder(Theme.stroke))
         }
@@ -287,4 +290,62 @@ struct Composer: View {
             .accessibilityLabel("Send")
         }
     }
+}
+
+/// Kiro-style context ring: how much of the selected AI's working memory this chat currently uses.
+/// Tap it for the exact OpenRouter token count and the model's known limit.
+private struct ContextMeter: View {
+    var used: Int
+    var limit: Int?
+    @State private var showsDetails = false
+    @Environment(\.theme) private var theme
+
+    private var fraction: Double {
+        guard let limit, limit > 0 else { return used > 0 ? 0.08 : 0 }
+        return min(1, max(0, Double(used) / Double(limit)))
+    }
+
+    private var colour: Color {
+        if fraction >= 0.9 { return Theme.danger }
+        if fraction >= 0.7 { return .orange }
+        return theme.accent
+    }
+
+    var body: some View {
+        Button { showsDetails = true } label: {
+            ZStack {
+                Circle().stroke(Theme.stroke, lineWidth: 3)
+                Circle()
+                    .trim(from: 0, to: max(fraction, used > 0 ? 0.025 : 0))
+                    .stroke(colour, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                Circle().fill(colour.opacity(0.18)).padding(6)
+            }
+            .frame(width: 27, height: 27)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityText)
+        .popover(isPresented: $showsDetails) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Context").font(.headline)
+                Text(detailText).font(.subheadline.monospacedDigit())
+                Text("Context is everything this AI can keep in mind for its next answer. The ring fills as this chat grows.")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.secondaryText)
+            }
+            .padding(18)
+            .frame(width: 290)
+            .presentationCompactAdaptation(.popover)
+        }
+    }
+
+    private var detailText: String {
+        if let limit, limit > 0 {
+            return "\(used.formatted()) of \(limit.formatted()) tokens · \(Int((fraction * 100).rounded()))%"
+        }
+        return used == 0 ? "Empty — the first answer will report it." : "About \(used.formatted()) tokens used."
+    }
+
+    private var accessibilityText: String { "Context: \(detailText)" }
 }

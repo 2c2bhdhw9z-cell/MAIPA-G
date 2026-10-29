@@ -85,6 +85,8 @@ struct ChatScreen: View {
                     webEnabled: $session.webEnabled,
                     autonomous: $session.autonomous,
                     modelLabel: app.openRouter.label(for: session.chat.model),
+                    contextUsedTokens: session.contextUsedTokens,
+                    contextLimitTokens: app.openRouter.contextLimit(for: session.chat.model, lastModelID: session.contextModelID),
                     thinking: session.chat.thinking,
                     thinkingLevels: app.openRouter.thinkingLevels(for: session.chat.model),
                     repo: session.chat.repo,
