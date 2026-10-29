@@ -12,7 +12,18 @@ on:
       - "docs/**"
       - "scripts/**"
       - ".github/workflows/ios.yml"
+  # By hand: publish one checked run of a merged pull request (all three are checked again below).
   workflow_dispatch:
+    inputs:
+      run_id:
+        description: iOS check run that built and checked the .ipa
+        required: true
+      pr_head:
+        description: Head commit of the merged pull request
+        required: true
+      main_sha:
+        description: The squash-merge commit on main
+        required: true
 
 permissions:
   contents: write
@@ -36,6 +47,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "main=${{ inputs.main_sha }}" >> "$GITHUB_OUTPUT"
+            echo "head=${{ inputs.pr_head }}" >> "$GITHUB_OUTPUT"
+            echo "run=${{ inputs.run_id }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           MAIN_SHA="${{ github.sha }}"
           PR_HEAD=$(gh api "repos/${{ github.repository }}/commits/$MAIN_SHA/pulls" --jq '[.[] | select(.merged_at != null)][0].head.sha')
           if [ -z "$PR_HEAD" ] || [ "$PR_HEAD" = "null" ]; then echo "::error::no merged pull request for $MAIN_SHA"; exit 1; fi

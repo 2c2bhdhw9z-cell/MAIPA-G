@@ -27,7 +27,7 @@ done
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 ARTIFACT_ID="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[] | select(.name|startswith("MAIPA-G-ipa-")) | .id' | head -n1)"
 [ -n "$ARTIFACT_ID" ] || { echo "error: no IPA artifact on run" >&2; exit 1; }
-gh api "repos/$REPO/actions/artifacts/$ARTIFACT_ID/zip" -H 'Accept: application/octet-stream' >"$TMP/artifact.zip"
+gh api "repos/$REPO/actions/artifacts/$ARTIFACT_ID/zip" >"$TMP/artifact.zip"
 unzip -q "$TMP/artifact.zip" -d "$TMP/artifact"
 IPA="$(find "$TMP/artifact" -name 'MAIPA-G.ipa' -type f -print -quit)"
 [ -n "$IPA" ] || { echo "error: artifact contains no MAIPA-G.ipa" >&2; exit 1; }
