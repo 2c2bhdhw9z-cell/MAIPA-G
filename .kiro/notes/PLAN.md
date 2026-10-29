@@ -142,7 +142,11 @@ entries. Next: he tests build 25.**
    removed nothing (a first message alone over budget), so the notice can show with nothing left
    out; only report trimming when something was actually removed. Test he can run: a new chat
    whose first message has 2-3 screenshots (one phone screenshot's base64 estimates at roughly half
-   a million tokens).
+   a million tokens). **Confirmed 2:35 PM:** a new chat with 3 screenshots showed the notice under
+   the first answer while the ring said 22,056 of 1,000,000 tokens (2%). "What was in the second
+   picture?" then got "I don't see any images", because the first exchange was dropped. He expects
+   nothing lost, like Kiro. So the fix also: when a chat really nears the model's limit, summarize
+   the older part instead of silently dropping it, as Kiro does.
 
 Technical notes for the logo fix (for Kiro):
 - iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
