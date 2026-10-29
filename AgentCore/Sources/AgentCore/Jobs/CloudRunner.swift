@@ -28,7 +28,7 @@ public struct CloudRunnerConfiguration: Sendable {
     }
 }
 
-public enum CloudRunnerError: Error, Sendable, Equatable {
+public enum CloudRunnerError: Error, Sendable, Equatable, LocalizedError {
     case jobNotFound
     case wrongRepository
     case missingRequest
@@ -37,6 +37,19 @@ public enum CloudRunnerError: Error, Sendable, Equatable {
     case checksFailed
     case handoverRequired
     case missingWorkflowIdentity
+
+    public var errorDescription: String? {
+        switch self {
+        case .jobNotFound: return "The saved job could not be found."
+        case .wrongRepository: return "The job's repository details did not match."
+        case .missingRequest: return "The job was missing its request."
+        case .commandFailed: return "A command or GitHub step failed. Open the run for its details."
+        case .noDifferentModel: return "A genuinely different second AI was not available."
+        case .checksFailed: return "The repository's automatic checks still failed after repairs."
+        case .handoverRequired: return "The job needed a fresh runner but could not hand over."
+        case .missingWorkflowIdentity: return "The job was missing its private saving details."
+        }
+    }
 }
 
 private struct StaticTokenProvider: GitHubTokenProvider {
@@ -287,7 +300,8 @@ public struct CloudRunner: Sendable {
             logger.progress("MAIPA-G Autonomous checkpointed \(job.status.rawValue).")
         } catch {
             job.status = .failed
-            let reason = logger.redact(String(describing: error))
+            let description = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+            let reason = logger.redact(description)
             job.result = JobResult(summary: "The job stopped safely: \(reason)")
             job.updatedAt = Date()
             try? await store.save(job)

@@ -44,7 +44,7 @@ struct JobsScreen: View {
                 Text(deleteMessage)
             }
         }
-        .task { await app.jobs.refresh() }
+        .task { if !PreviewScenes.isActive { await app.jobs.refresh() } }
     }
 
     private func askToDelete(_ job: JobRecord) {

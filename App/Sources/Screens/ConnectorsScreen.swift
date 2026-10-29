@@ -300,8 +300,12 @@ struct IntegrationService: Identifiable {
     let colour: Color
 
     func matches(_ text: String) -> Bool {
-        let value = text.lowercased()
-        return aliases.contains { value.contains($0) }
+        let value = " " + Self.normalized(text) + " "
+        return aliases.contains { value.contains(" " + Self.normalized($0) + " ") }
+    }
+
+    private static func normalized(_ text: String) -> String {
+        text.lowercased().map { $0.isLetter || $0.isNumber ? $0 : " " }.split(separator: " ").joined(separator: " ")
     }
 
     static func matching(_ text: String) -> IntegrationService {
@@ -312,19 +316,19 @@ struct IntegrationService: Identifiable {
     static let popular: [IntegrationService] = [
         .init(name: "GitHub", detail: "Search repositories, manage issues and review changes", search: "github", aliases: ["github"], symbol: "chevron.left.forwardslash.chevron.right", colour: .primary),
         .init(name: "Gmail", detail: "Read, search and draft email", search: "gmail", aliases: ["gmail", "google mail"], symbol: "envelope.fill", colour: .red),
-        .init(name: "Google Calendar", detail: "Read and manage your calendar events", search: "google calendar", aliases: ["google calendar", "gcalendar"], symbol: "calendar", colour: .blue),
-        .init(name: "Google Drive", detail: "Search, read and upload your files", search: "google drive", aliases: ["google drive", "gdrive"], symbol: "externaldrive.fill", colour: .green),
-        .init(name: "Google Docs", detail: "Read, edit and create documents", search: "google docs", aliases: ["google docs", "gdocs"], symbol: "doc.text.fill", colour: .blue),
-        .init(name: "Google Sheets", detail: "Read, analyse and update spreadsheets", search: "google sheets", aliases: ["google sheets", "gsheets"], symbol: "tablecells.fill", colour: .green),
-        .init(name: "Google Slides", detail: "Read and create presentations", search: "google slides", aliases: ["google slides", "gslides"], symbol: "rectangle.on.rectangle.angled", colour: .orange),
-        .init(name: "Microsoft 365", detail: "Use Outlook, OneDrive, Teams and SharePoint", search: "microsoft 365", aliases: ["microsoft 365", "office 365", "m365"], symbol: "square.grid.2x2.fill", colour: .blue),
+        .init(name: "Google Calendar", detail: "Read and manage your calendar events", search: "calendar", aliases: ["google calendar", "gcalendar", "google agenda"], symbol: "calendar", colour: .blue),
+        .init(name: "Google Drive", detail: "Search, read and upload your files", search: "drive", aliases: ["google drive", "gdrive"], symbol: "externaldrive.fill", colour: .green),
+        .init(name: "Google Docs", detail: "Read, edit and create documents", search: "docs", aliases: ["google docs", "gdocs"], symbol: "doc.text.fill", colour: .blue),
+        .init(name: "Google Sheets", detail: "Read, analyse and update spreadsheets", search: "sheets", aliases: ["google sheets", "gsheets"], symbol: "tablecells.fill", colour: .green),
+        .init(name: "Google Slides", detail: "Read and create presentations", search: "slides", aliases: ["google slides", "gslides"], symbol: "rectangle.on.rectangle.angled", colour: .orange),
+        .init(name: "Microsoft 365", detail: "Use Outlook, OneDrive, Teams and SharePoint", search: "microsoft", aliases: ["microsoft 365", "office 365", "m365", "m365 copilot"], symbol: "square.grid.2x2.fill", colour: .blue),
         .init(name: "Slack", detail: "Search channels and send messages", search: "slack", aliases: ["slack"], symbol: "number", colour: .purple),
         .init(name: "Notion", detail: "Search, read and update your workspace", search: "notion", aliases: ["notion"], symbol: "doc.text", colour: .primary),
         .init(name: "Linear", detail: "Search and manage issues and projects", search: "linear", aliases: ["linear"], symbol: "circle.lefthalf.filled", colour: .indigo),
         .init(name: "Figma", detail: "Read designs, comments and project details", search: "figma", aliases: ["figma"], symbol: "paintbrush.pointed.fill", colour: .pink),
         .init(name: "Dropbox", detail: "Search, read and manage cloud files", search: "dropbox", aliases: ["dropbox"], symbol: "shippingbox.fill", colour: .blue),
         .init(name: "Atlassian", detail: "Use Jira and Confluence projects", search: "atlassian", aliases: ["atlassian", "jira", "confluence"], symbol: "triangle.fill", colour: .blue),
-        .init(name: "Box", detail: "Search and work with company files", search: "box", aliases: [" box ", "box-mcp", "/box"], symbol: "archivebox.fill", colour: .blue),
+        .init(name: "Box", detail: "Search and work with company files", search: "box", aliases: ["box", "box mcp"], symbol: "archivebox.fill", colour: .blue),
         .init(name: "Asana", detail: "Read and manage tasks and projects", search: "asana", aliases: ["asana"], symbol: "circle.grid.3x3.fill", colour: .pink),
         .init(name: "Canva", detail: "Search and work with Canva designs", search: "canva", aliases: ["canva"], symbol: "wand.and.stars", colour: .cyan),
         .init(name: "YouTube", detail: "Search videos and work with channel information", search: "youtube", aliases: ["youtube"], symbol: "play.rectangle.fill", colour: .red),
