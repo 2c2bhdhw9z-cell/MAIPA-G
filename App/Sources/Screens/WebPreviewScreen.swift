@@ -102,7 +102,9 @@ struct PreviewWebView: UIViewRepresentable {
         }
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { owner?.recordConsole("error: \(error.localizedDescription)") }
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { owner?.recordConsole("error: \(error.localizedDescription)") }
-        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        // Must match the SDK's signature exactly, or WebKit never calls it and the preview could
+        // leave its own files.
+        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
             guard let url = action.request.url else { decisionHandler(.cancel); return }
             decisionHandler(url.scheme == "maipag-preview" ? .allow : .cancel)
         }

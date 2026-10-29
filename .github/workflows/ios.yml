@@ -1,8 +1,8 @@
 name: iOS
 
 # The complete release candidate is built once, on the ready pull request. A squash merge does not
-# rebuild it: scripts/publish-verified-ipa.sh proves the PR and main trees match before publishing
-# this run's checked artifact. Manual main builds remain available for recovery.
+# rebuild it: release.yml runs scripts/publish-verified-ipa.sh, which proves the PR and main trees
+# match before publishing this run's checked artifact. It only publishes when every job here passed.
 on:
   workflow_dispatch:
   pull_request:
@@ -74,7 +74,7 @@ jobs:
 
   ipa:
     name: iPhone release candidate
-    needs: [checks, screens]
+    needs: checks
     runs-on: macos-26
     timeout-minutes: 60
     steps:

@@ -1,0 +1,62 @@
+name: Release
+
+# After a pull request is squash-merged into main, publishes the .ipa that the pull request's own
+# check already built and checked. Nothing is rebuilt: scripts/publish-verified-ipa.sh first proves
+# main has exactly the pull request's files, then attaches that run's checked artifact.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "App/**"
+      - "AgentCore/**"
+      - "docs/**"
+      - "scripts/**"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+  pull-requests: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish the checked .ipa
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Find the merged pull request and its green check
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          MAIN_SHA="${{ github.sha }}"
+          PR_HEAD=$(gh api "repos/${{ github.repository }}/commits/$MAIN_SHA/pulls" --jq '[.[] | select(.merged_at != null)][0].head.sha')
+          if [ -z "$PR_HEAD" ] || [ "$PR_HEAD" = "null" ]; then echo "::error::no merged pull request for $MAIN_SHA"; exit 1; fi
+          RUN_ID=$(gh api "repos/${{ github.repository }}/actions/workflows/ios.yml/runs?head_sha=$PR_HEAD&status=success&per_page=1" --jq '.workflow_runs[0].id')
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then echo "::error::no green iOS check for $PR_HEAD"; exit 1; fi
+          echo "main=$MAIN_SHA" >> "$GITHUB_OUTPUT"
+          echo "head=$PR_HEAD" >> "$GITHUB_OUTPUT"
+          echo "run=$RUN_ID" >> "$GITHUB_OUTPUT"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          chmod +x scripts/publish-verified-ipa.sh
+          scripts/publish-verified-ipa.sh "${{ steps.source.outputs.run }}" "${{ steps.source.outputs.head }}" "${{ steps.source.outputs.main }}"
+      - name: Say how to install it
+        run: |
+          {
+            echo "## Install this build"
+            echo
+            echo "**[Download MAIPA-G.ipa](https://github.com/${{ github.repository }}/releases/latest/download/MAIPA-G.ipa)** (always the newest build)."
+            echo
+            echo "Then sign it with your sideloading app."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -50,7 +50,14 @@ xcodebuild \
   -skipPackagePluginValidation \
   -skipMacroValidation \
   CODE_SIGNING_ALLOWED=NO \
-  build | tail -n 20
+  build > "$OUT/build-log.txt" 2>&1 || {
+    # Every compile error, not just the last lines: nobody on this project has a Mac to look.
+    echo "::error::the app didn't compile for the simulator"
+    grep -E ': (fatal )?error:' "$OUT/build-log.txt" | sed 's#^.*/MAIPA-G/MAIPA-G/##' | sort -u | head -n 300
+    tail -n 25 "$OUT/build-log.txt"
+    exit 65
+  }
+tail -n 5 "$OUT/build-log.txt"
 
 APP="$DERIVED/Build/Products/Release-iphonesimulator/MAIPA-G.app"
 [ -d "$APP" ] || { echo "error: no simulator app at $APP" >&2; exit 1; }
