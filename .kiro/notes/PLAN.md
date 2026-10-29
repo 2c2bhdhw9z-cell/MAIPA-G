@@ -138,7 +138,11 @@ entries. Next: he tests build 25.**
    `route.contextBudget`, here min(75% of context, 300,000) for a chosen model, or 60,000 for free
    AIs, and halved after a provider says the request is too long. Fix: count images at their real
    token cost (about 1-2 thousand each) instead of their data length, and base trimming on the
-   same real usage numbers the context ring shows.
+   same real usage numbers the context ring shows. Also `fit` returns `trimmed: true` even when it
+   removed nothing (a first message alone over budget), so the notice can show with nothing left
+   out; only report trimming when something was actually removed. Test he can run: a new chat
+   whose first message has 2-3 screenshots (one phone screenshot's base64 estimates at roughly half
+   a million tokens).
 
 Technical notes for the logo fix (for Kiro):
 - iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
