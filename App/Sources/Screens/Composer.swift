@@ -85,7 +85,9 @@ struct Composer: View {
                     }
                 }
                 HStack(spacing: 6) {
-                    Spacer(minLength: 0)
+                    attachmentMenu
+                    webButton
+                    Spacer(minLength: 4)
                     compactModelButton
                     if !thinkingLevels.isEmpty { compactThinkingMenu }
                     sendButton
@@ -95,8 +97,6 @@ struct Composer: View {
             .glassPanel(cornerRadius: 26)
 
             FlowLayout(spacing: 7, lineSpacing: 6) {
-                attachmentMenu
-                webButton
                 Button(action: onSpec) { Label("Spec", systemImage: "list.clipboard").font(.caption.weight(.semibold)) }
                 Button(action: onPickGroup) { Label(groupName ?? "Group", systemImage: "folder.badge.plus").font(.caption.weight(.semibold)) }
                 Toggle("Autonomous", isOn: $autonomous)
