@@ -18,9 +18,13 @@ public enum BuiltInWorkflows {
         ]),
         workflow("full-feature", "Full feature", "Requirements, design, checked design, plan, build, independent two-AI review, and final check.", [
             .agent("full.requirements", title: "Requirements", agent: "planner", instruction: "Write complete, testable requirements and resolve consequential unknowns."),
+            .ask("full.requirements-approval", title: "Approve requirements", question: "Are these requirements approved?", options: ["Approve", "Stop"]),
             .agent("full.design", title: "Design", agent: "designer", instruction: "Design the feature from the approved requirements."),
+            .ask("full.design-approval", title: "Approve design", question: "Is this design approved?", options: ["Approve", "Stop"]),
             .agent("full.design-check", title: "Checked design", agent: "design-checker", instruction: "Check the design against every approved requirement."),
+            .ask("full.design-check-approval", title: "Approve checked design", question: "Is the checked design approved?", options: ["Approve", "Stop"]),
             .agent("full.plan", title: "Implementation plan", agent: "planner", instruction: "Produce an ordered implementation and verification plan from the checked design."),
+            .ask("full.plan-approval", title: "Approve implementation plan", question: "Is this implementation plan approved and ready to build?", options: ["Approve", "Stop"]),
             .agent("full.build", title: "Implementation", agent: "coder", instruction: "Implement the approved plan completely and run its checks."),
             .parallel("full.reviews", title: "Independent two-AI review", agents: [
                 .agent("full.review-one", title: "Code checker", agent: "code-checker", instruction: "Review the implementation independently."),

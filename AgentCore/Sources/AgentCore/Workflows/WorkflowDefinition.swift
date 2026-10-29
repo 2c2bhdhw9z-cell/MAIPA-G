@@ -26,6 +26,8 @@ public struct WorkflowNode: Codable, Sendable, Hashable, Identifiable {
         self.question = question; self.options = options
     }
 
+    public var flattenedNodes: [WorkflowNode] { [self] + children.flatMap(\.flattenedNodes) }
+
     public static func agent(_ id: String = UUID().uuidString.lowercased(), title: String, agent: String, instruction: String) -> WorkflowNode {
         WorkflowNode(id: id, kind: .agent, title: title, agentID: agent, instruction: instruction)
     }
@@ -55,6 +57,8 @@ public struct WorkflowDefinition: Codable, Sendable, Hashable, Identifiable {
         self.id = id; self.name = name; self.summary = summary; self.steps = steps
         self.isBuiltIn = isBuiltIn; self.isApproved = isBuiltIn || isApproved
     }
+
+    public var flattenedNodes: [WorkflowNode] { steps.flatMap(\.flattenedNodes) }
 
     public func validationErrors(agentIDs: Set<String>) -> [String] {
         var errors: [String] = []

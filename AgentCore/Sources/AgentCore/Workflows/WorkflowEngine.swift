@@ -122,28 +122,35 @@ public actor WorkflowEngine {
         try? await save()
     }
 
-    private func run(_ node: WorkflowNode) async throws -> Bool {
+    private func run(_ node: WorkflowNode, goalCondition: String? = nil) async throws -> Bool {
         try Task.checkCancellation()
         if state.isCancelled { throw CancellationError() }
         if state.statuses[node.id] == .completed { return false }
         switch node.kind {
-        case .agent: return try await runAgent(node)
+        case .agent: return try await runAgent(node, goalCondition: goalCondition)
         case .sequence:
             state.statuses[node.id] = .running; try await save()
             var goalMet = false
-            for child in node.children { goalMet = try await run(child) || goalMet }
+            for (index, child) in node.children.enumerated() {
+                let childGoal = index == node.children.count - 1 ? goalCondition : nil
+                goalMet = try await run(child, goalCondition: childGoal) || goalMet
+            }
             state.statuses[node.id] = .completed; try await save()
             return goalMet
-        case .parallel: return try await runParallel(node)
+        case .parallel: return try await runParallel(node, goalCondition: goalCondition)
         case .stopAndAsk: return try await runAsk(node)
         case .repeatUntil: return try await runRepeat(node)
         }
     }
 
-    private func runAgent(_ node: WorkflowNode) async throws -> Bool {
+    private func runAgent(_ node: WorkflowNode, goalCondition: String? = nil) async throws -> Bool {
         guard let agentID = node.agentID, agents[agentID] != nil else { throw WorkflowEngineError.unknownAgent(node.agentID ?? "") }
         state.statuses[node.id] = .running; try await save()
-        let result = try await executor.execute(agentID: agentID, task: node.instruction ?? node.title, context: context)
+        var task = node.instruction ?? node.title
+        if let goalCondition, !goalCondition.isEmpty {
+            task += "\n\nRepeat goal: \(goalCondition)\nEnd with a line containing exactly GOAL_MET only when current evidence proves this goal is met. Otherwise end with GOAL_NOT_MET."
+        }
+        let result = try await executor.execute(agentID: agentID, task: task, context: context)
         if state.isCancelled { throw CancellationError() }
         state.outputs.append(WorkflowOutput(nodeID: node.id, title: node.title, text: result.output, model: result.model))
         state.cumulativeCost += result.cost
@@ -151,7 +158,7 @@ public actor WorkflowEngine {
         return result.goalMet
     }
 
-    private func runParallel(_ node: WorkflowNode) async throws -> Bool {
+    private func runParallel(_ node: WorkflowNode, goalCondition: String? = nil) async throws -> Bool {
         state.statuses[node.id] = .running
         for child in node.children { state.statuses[child.id] = .running }
         try await save()
@@ -165,7 +172,11 @@ public actor WorkflowEngine {
         try await withThrowingTaskGroup(of: (Int, AgentExecutionResult).self) { group in
             for (index, item) in resolved.enumerated() {
                 group.addTask {
-                    (index, try await runner.execute(agentID: item.1.id, task: item.0.instruction ?? item.0.title, context: baseContext))
+                    var task = item.0.instruction ?? item.0.title
+                    if let goalCondition, !goalCondition.isEmpty {
+                        task += "\n\nRepeat goal: \(goalCondition)\nEnd with a line containing exactly GOAL_MET only when current evidence proves this goal is met. Otherwise end with GOAL_NOT_MET."
+                    }
+                    return (index, try await runner.execute(agentID: item.1.id, task: task, context: baseContext))
                 }
             }
             for try await (index, result) in group { results[index] = result }
@@ -185,6 +196,12 @@ public actor WorkflowEngine {
 
     private func runAsk(_ node: WorkflowNode) async throws -> Bool {
         if let answer = state.answers[node.id] {
+            if answer.lowercased().contains("stop") {
+                state.statuses[node.id] = .cancelled
+                state.isCancelled = true
+                try await save()
+                throw CancellationError()
+            }
             state.outputs.append(WorkflowOutput(nodeID: node.id, title: node.title, text: "User answer: \(answer)"))
             state.statuses[node.id] = .completed; try await save()
             return false
@@ -214,7 +231,10 @@ public actor WorkflowEngine {
             }
             reset(node.children)
             var goalMet = false
-            for child in node.children { goalMet = try await run(child) || goalMet }
+            for (index, child) in node.children.enumerated() {
+                let condition = index == node.children.count - 1 ? node.successCondition : nil
+                goalMet = try await run(child, goalCondition: condition) || goalMet
+            }
             state.repeatIterations[node.id, default: 0] += 1
             try await save()
             if goalMet {

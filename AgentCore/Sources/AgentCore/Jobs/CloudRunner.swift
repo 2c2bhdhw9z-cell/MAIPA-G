@@ -21,6 +21,7 @@ public enum CloudRunnerError: Error, Sendable, Equatable {
     case wrongRepository
     case missingRequest
     case commandFailed
+    case handoverRequired
 }
 
 private struct StaticTokenProvider: GitHubTokenProvider {
@@ -70,20 +71,68 @@ public actor RemoteJobStore {
 private actor RemoteWorkflowCheckpointSink {
     private var job: JobRecord
     private let store: RemoteJobStore
+    private let workspace: URL
+    private let definition: WorkflowDefinition
 
-    init(job: JobRecord, store: RemoteJobStore) { self.job = job; self.store = store }
+    init(job: JobRecord, store: RemoteJobStore, workspace: URL, definition: WorkflowDefinition) {
+        self.job = job
+        self.store = store
+        self.workspace = workspace
+        self.definition = definition
+    }
 
     func save(_ checkpoint: WorkflowCheckpoint) async throws {
         var object = job.state.objectValue ?? [:]
         object["workflowCheckpoint"] = (try? JSONCoding.encoder().encode(checkpoint)).flatMap(JSONValue.parse)
+        object["workspacePatch"] = try await workspacePatch()
         job.state = .object(object)
         job.cumulativeCost = checkpoint.cumulativeCost
+        job.steps = workflowSteps(checkpoint)
         job.status = checkpoint.isCancelled ? .stopped : (checkpoint.pendingQuestion == nil ? .running : .needsAnswer)
         job.updatedAt = Date()
         try await store.save(job)
     }
 
     func current() -> JobRecord { job }
+
+    private func workflowSteps(_ checkpoint: WorkflowCheckpoint) -> [JobStepRecord] {
+        definition.flattenedNodes.enumerated().map { index, node in
+            let prior = index < job.steps.count ? job.steps[index] : JobStepRecord(title: node.title)
+            let status: JobStepRecord.Status
+            switch checkpoint.statuses[node.id] {
+            case .running: status = .running
+            case .waiting: status = .waiting
+            case .completed: status = .done
+            case .failed: status = .failed
+            case .cancelled: status = .stopped
+            default: status = .pending
+            }
+            let detail = checkpoint.outputs.last(where: { $0.nodeID == node.id })?.text
+            return JobStepRecord(
+                id: prior.id,
+                title: node.title,
+                detail: detail.map { String($0.prefix(500)) },
+                status: status,
+                startedAt: status == .pending ? nil : (prior.startedAt ?? checkpoint.updatedAt),
+                finishedAt: [.done, .failed, .stopped].contains(status) ? (prior.finishedAt ?? checkpoint.updatedAt) : nil
+            )
+        }
+    }
+
+    private func workspacePatch() async throws -> JSONValue? {
+        let add = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["add", "-A"], directory: workspace, timeout: 120)
+        guard add.exitCode == 0 else { throw CloudRunnerError.commandFailed }
+        do {
+            let diff = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["diff", "--cached", "--binary", "--full-index"], directory: workspace, timeout: 120, outputLimit: 90_000_000)
+            guard diff.exitCode == 0 else { throw CloudRunnerError.commandFailed }
+            let reset = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["reset"], directory: workspace, timeout: 120)
+            guard reset.exitCode == 0 else { throw CloudRunnerError.commandFailed }
+            return diff.stdout.isEmpty ? nil : .string(diff.stdout)
+        } catch {
+            _ = try? await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["reset"], directory: workspace, timeout: 120)
+            throw error
+        }
+    }
 }
 
 /// Shared Linux execution engine. It checkpoints at every AgentLoop milestone and hands a job to
@@ -122,13 +171,15 @@ public struct CloudRunner: Sendable {
             try await store.save(job)
             if let encoded = job.state["workflowDefinition"],
                let definition = try? decode(WorkflowDefinition.self, from: encoded) {
-                try await runWorkflow(definition, job: &job, branch: workBranch, store: store, github: github)
+                try await runWorkflow(definition, job: &job, branch: workBranch, store: store, github: github, startedAt: startedAt)
                 return
             }
             var chat = try chatForJob(job)
             applySavedAnswers(job, to: &chat)
 
-            var tools: [any AgentTool] = [ProcessTool(directory: configuration.workspace)]
+            let authorization = ChangeAuthorization(request: chat.firstUserText ?? job.title)
+            var tools: [any AgentTool] = [ProcessTool(directory: configuration.workspace, authorization: authorization)]
+            tools.append(contentsOf: try await stdioTools(for: job))
             if let values = job.state["mcpServers"]?.arrayValue {
                 for value in values {
                     if let server = try? decode(StdioMCPServer.self, from: value) {
@@ -178,7 +229,7 @@ public struct CloudRunner: Sendable {
                 try await github.dispatchWorkflow(
                     configuration.targetRepository,
                     workflow: "maipa-g.yml",
-                    ref: job.targetRef ?? job.defaultBranch ?? "main",
+                    ref: job.defaultBranch ?? "main",
                     inputs: ["job_id": job.id.uuidString.lowercased()]
                 )
                 logger.progress("Checkpoint saved. A fresh runner will continue the job.")
@@ -220,11 +271,15 @@ public struct CloudRunner: Sendable {
         job: inout JobRecord,
         branch: String,
         store: RemoteJobStore,
-        github: GitHubClient
+        github: GitHubClient,
+        startedAt: Date
     ) async throws {
         let savedCheckpoint: WorkflowCheckpoint? = job.state["workflowCheckpoint"].flatMap { try? decode(WorkflowCheckpoint.self, from: $0) }
-        let sink = RemoteWorkflowCheckpointSink(job: job, store: store)
-        var tools: [any AgentTool] = [WorkspaceInspectTool(directory: configuration.workspace), ProcessTool(directory: configuration.workspace)]
+        let sink = RemoteWorkflowCheckpointSink(job: job, store: store, workspace: configuration.workspace, definition: definition)
+        let request = job.state["request"]?.stringValue ?? savedCheckpoint?.request ?? job.title
+        let authorization = ChangeAuthorization(request: request)
+        var tools: [any AgentTool] = [WorkspaceInspectTool(directory: configuration.workspace), ProcessTool(directory: configuration.workspace, authorization: authorization)]
+        tools.append(contentsOf: try await stdioTools(for: job))
         if let values = job.state["mcpServers"]?.arrayValue {
             for value in values where (try? decode(StdioMCPServer.self, from: value)) != nil {
                 if let server = try? decode(StdioMCPServer.self, from: value) { tools.append(StdioMCPTool(server: server, directory: configuration.workspace)) }
@@ -253,9 +308,17 @@ public struct CloudRunner: Sendable {
                 tools: workflowTools, spendLimit: spendLimit, agent: invocation.definition
             )
             var final: AssistantTurn?
-            for await event in AgentLoop.run(input, environment: environment) {
+            let agentRun = AgentLoop.start(input, environment: environment)
+            let remaining = max(0, configuration.handoverAfter - Date().timeIntervalSince(startedAt))
+            let deadline = Task {
+                if remaining > 0 { try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000)) }
+                if !Task.isCancelled { agentRun.cancel() }
+            }
+            for await event in agentRun.events {
                 if case .updated(let turn, _) = event { final = turn }
             }
+            deadline.cancel()
+            if Date().timeIntervalSince(startedAt) >= configuration.handoverAfter { throw CloudRunnerError.handoverRequired }
             guard let turn = final, turn.status != .failed else { throw CloudRunnerError.commandFailed }
             let output = turn.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n")
             return AgentExecutionResult(output: output, model: turn.steps.last?.model, goalMet: output.uppercased().contains("GOAL_MET"), cost: turn.usage.cost ?? 0)
@@ -269,6 +332,20 @@ public struct CloudRunner: Sendable {
         }
         let outcome = await engine.run(request: job.state["request"]?.stringValue)
         job = await sink.current()
+        if Date().timeIntervalSince(startedAt) >= configuration.handoverAfter {
+            job.status = .handingOver
+            job.handoverGeneration += 1
+            job.updatedAt = Date()
+            try await store.save(job)
+            try await github.dispatchWorkflow(
+                configuration.targetRepository,
+                workflow: "maipa-g.yml",
+                ref: job.defaultBranch ?? "main",
+                inputs: ["job_id": job.id.uuidString.lowercased()]
+            )
+            logger.progress("Workflow checkpoint saved. A fresh runner will continue the job.")
+            return
+        }
         switch outcome {
         case .completed(let checkpoint):
             job.result = try await finishRepository(job: job, branch: branch, github: github, summaryOverride: checkpoint.outputs.last?.text)
@@ -422,6 +499,21 @@ public struct CloudRunner: Sendable {
         }
         let summary = summaryOverride ?? chat?.lastAssistantTurn?.steps.last(where: { !$0.text.isEmpty })?.text ?? "Finished the requested work."
         return JobResult(summary: summary, pullRequest: pullRequest, commit: commit)
+    }
+
+    private func stdioTools(for job: JobRecord) async throws -> [any AgentTool] {
+        #if os(Linux)
+        var tools: [any AgentTool] = []
+        for value in job.state["stdioConnectors"]?.arrayValue ?? [] {
+            guard let configuration = try? decode(ConnectorConfiguration.self, from: value), configuration.kind == .stdio else { continue }
+            let connector = AutonomousStdioConnector(configuration: configuration)
+            let definitions = try await connector.connect()
+            tools.append(contentsOf: definitions.map { AutonomousMCPTool(definition: $0, connector: connector) })
+        }
+        return tools
+        #else
+        return []
+        #endif
     }
 
     @discardableResult

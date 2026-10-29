@@ -380,7 +380,7 @@ private struct Runner {
                     waiting = true
                     continue
                 }
-                let allowed = answer == "Allow" || answer == "Yes"
+                let allowed = questions.questions.first?.options.first == answer
                 guard allowed else {
                     turn.steps[stepIndex].toolCalls[callIndex].result = "The person did not approve this change."
                     turn.steps[stepIndex].toolCalls[callIndex].status = .done

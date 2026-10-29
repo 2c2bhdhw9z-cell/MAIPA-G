@@ -167,8 +167,8 @@ struct CoreFormatTests {
         let agentIDs = Set(BuiltInAgents.all.map(\.id))
         #expect(BuiltInWorkflows.all.allSatisfy { $0.isApproved && $0.validationErrors(agentIDs: agentIDs).isEmpty })
         let full = try #require(BuiltInWorkflows.named("full-feature"))
-        #expect(full.steps.map(\.title) == ["Requirements", "Design", "Checked design", "Implementation plan", "Implementation", "Independent two-AI review", "Combine reviews", "Final check"])
-        #expect(full.steps[5].children.map(\.agentID) == ["code-checker", "second-opinion"])
+        #expect(full.steps.map(\.title) == ["Requirements", "Approve requirements", "Design", "Approve design", "Checked design", "Approve checked design", "Implementation plan", "Approve implementation plan", "Implementation", "Independent two-AI review", "Combine reviews", "Final check"])
+        #expect(full.steps[9].children.map(\.agentID) == ["code-checker", "second-opinion"])
     }
 
     @Test func customAutomationRecordsRoundTripWithoutPersistingBuiltIns() async throws {
@@ -250,12 +250,34 @@ struct CoreFormatTests {
 
         var workflow = WorkflowCheckpoint(workflowID: "full-feature", request: "Build it")
         workflow.statuses["requirements"] = .completed
+        workflow.statuses["implementation"] = .running
         workflow.pendingQuestion = WorkflowQuestion(nodeID: "approval", text: "Continue?", options: ["Continue", "Stop"])
+        let workflowDefinition = WorkflowDefinition(id: "full-feature", name: "Full", summary: "", steps: [
+            .agent("requirements", title: "Requirements", agent: "planner", instruction: "Plan"),
+            .agent("implementation", title: "Implementation", agent: "coder", instruction: "Build"),
+        ], isApproved: true)
+        _ = try await store.update(job.id) { record in
+            let data = try JSONCoding.encoder().encode(workflowDefinition)
+            var state = record.state.objectValue ?? [:]
+            state["workflowDefinition"] = JSONValue.parse(data)
+            record.state = .object(state)
+        }
         _ = try await store.checkpointWorkflow(job.id, checkpoint: workflow)
         let restored = try #require(await store.workflowCheckpoint(job.id))
         #expect(restored.workflowID == "full-feature")
         #expect(restored.statuses["requirements"] == .completed)
         #expect(await store.load(job.id)?.status == .needsAnswer)
+        #expect(await store.load(job.id)?.steps.map(\.status) == [.done, .running])
+
+        workflow.isCancelled = true
+        workflow.pendingQuestion = nil
+        workflow.statuses["implementation"] = .cancelled
+        _ = try await store.checkpointWorkflow(job.id, checkpoint: workflow)
+        _ = try await store.resume(job.id)
+        let resumable = try #require(await store.workflowCheckpoint(job.id))
+        #expect(!resumable.isCancelled)
+        #expect(resumable.statuses["requirements"] == .completed)
+        #expect(resumable.statuses["implementation"] == .pending)
     }
     @Test func registryPaginationOAuthAndConnectorNamesAreExact() async throws {
         final class Transport: HTTPTransport, @unchecked Sendable {
@@ -290,6 +312,13 @@ struct CoreFormatTests {
         #expect(authQuery.first { $0.name == "state" }?.value == authorization.state)
         #expect(authQuery.first { $0.name == "code_challenge_method" }?.value == "S256")
         #expect(ConnectorToolDefinition.namespace(server: "GitHub Cloud", tool: "Search-Repositories") == "mcp_github_cloud_search_repositories")
+        #if os(Linux)
+        let npm = RegistryServer.Package(registryType: "npm", identifier: "@modelcontextprotocol/server-github", version: "1.0")
+        #expect(try AutonomousStdioConnector.command(for: npm) == ["npx", "--yes", "@modelcontextprotocol/server-github@1.0"])
+        #expect(throws: ToolInputError.self) {
+            try AutonomousStdioConnector.command(for: .init(registryType: "npm", identifier: "bad\npackage"))
+        }
+        #endif
     }
 
     @Test func pictureRoutingAndWebPreviewRejectTraversal() throws {

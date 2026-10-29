@@ -208,11 +208,15 @@ public actor AutonomousStdioConnector {
         guard configuration.kind == .stdio, let package = configuration.package else { throw ToolInputError("This is not a stdio connector.") }
         let command = try Self.command(for: package)
         let process = Process()
-        let input = Pipe(), output = Pipe(), errors = Pipe()
+        let input = Pipe(), output = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = command
-        process.standardInput = input; process.standardOutput = output; process.standardError = errors
-        process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, supplied in supplied }
+        process.standardInput = input; process.standardOutput = output; process.standardError = FileHandle.nullDevice
+        let inherited = ProcessInfo.processInfo.environment.filter { key, _ in
+            let upper = key.uppercased()
+            return !upper.contains("TOKEN") && !upper.contains("SECRET") && !upper.contains("PASSWORD") && !upper.contains("PRIVATE_KEY") && key != "OPENROUTER_API_KEY"
+        }
+        process.environment = inherited.merging(environment) { _, supplied in supplied }
         try process.run()
         let transport = StdioTransport(
             input: FileDescriptor(rawValue: output.fileHandleForReading.fileDescriptor),
@@ -251,6 +255,30 @@ public actor AutonomousStdioConnector {
         case "pypi": return ["uvx", package.version.map { "\(package.identifier)==\($0)" } ?? package.identifier]
         default: throw ToolInputError("Autonomous does not support the \(package.registryType) package runtime.")
         }
+    }
+}
+
+/// One discovered stdio connector tool backed by the official SDK session on Autonomous Linux.
+public struct AutonomousMCPTool: AgentTool {
+    public let definition: ConnectorToolDefinition
+    public let connector: AutonomousStdioConnector
+    public var name: String { definition.namespacedName }
+
+    public init(definition: ConnectorToolDefinition, connector: AutonomousStdioConnector) {
+        self.definition = definition
+        self.connector = connector
+    }
+
+    public var spec: ToolSpec {
+        ToolSpec(name: name, description: "\(definition.serverName): \(definition.description)", parameters: definition.inputSchema)
+    }
+
+    public func runningSummary(for arguments: JSONValue) -> String { "Using \(definition.serverName) · \(definition.title)…" }
+
+    public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        progress("Waiting for \(definition.serverName)…")
+        let response = try await connector.call(tool: definition.originalName, arguments: arguments)
+        return ToolOutput(forModel: response, summary: "Used \(definition.serverName) · \(definition.title)", detail: response)
     }
 }
 #endif

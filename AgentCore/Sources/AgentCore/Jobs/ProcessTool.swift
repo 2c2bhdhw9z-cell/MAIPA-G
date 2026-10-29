@@ -40,7 +40,11 @@ public enum BoundedProcess {
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.currentDirectoryURL = directory
-        process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, supplied in supplied }
+        let inherited = ProcessInfo.processInfo.environment.filter { key, _ in
+            let upper = key.uppercased()
+            return !upper.contains("TOKEN") && !upper.contains("SECRET") && !upper.contains("PASSWORD") && !upper.contains("PRIVATE_KEY") && key != "OPENROUTER_API_KEY"
+        }
+        process.environment = inherited.merging(environment) { _, supplied in supplied }
         process.standardOutput = output
         process.standardError = errors
         if let stdin {
@@ -165,16 +169,20 @@ public struct ProcessTool: AgentTool {
     }
 
     private let directory: URL
-    public init(directory: URL) { self.directory = directory }
+    private let authorization: ChangeAuthorization
+    public init(directory: URL, authorization: ChangeAuthorization = ChangeAuthorization(request: "")) {
+        self.directory = directory
+        self.authorization = authorization
+    }
 
     public func runningSummary(for arguments: JSONValue) -> String { "Running a command…" }
 
     public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
         let command = arguments["command"]?.stringValue?.lowercased() ?? ""
-        let destructive = ["rm ", "rm\t", "git clean", "unlink ", "rmdir "].contains { command.contains($0) }
-        if destructive { return ToolApprovalRequest(question: "Allow this command to delete files?", allowLabel: "Allow") }
-        let buildSetup = [".github/workflows/", "project.yml", "package.swift", "dockerfile"].contains { command.contains($0) }
-        if buildSetup { return ToolApprovalRequest(question: "Allow this command to change the repo's build setup?", allowLabel: "Allow") }
+        let destructive = ["rm ", "rm\t", "git rm", "git clean", "unlink ", "rmdir ", "-delete", "removeitem", "os.remove", "shutil.rmtree"].contains { command.contains($0) }
+        if destructive && !authorization.deletion { return ToolApprovalRequest(question: "Allow this command to delete files?", allowLabel: "Allow") }
+        let buildSetup = [".github/workflows/", "project.yml", "package.swift", "package.json", "dockerfile"].contains { command.contains($0) }
+        if buildSetup && !authorization.buildSetup { return ToolApprovalRequest(question: "Allow this command to change the repo's build setup?", allowLabel: "Allow") }
         return nil
     }
 

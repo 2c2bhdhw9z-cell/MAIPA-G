@@ -62,10 +62,11 @@ actor ApprovalCounter {
 
 struct ApprovalTool: AgentTool {
     let counter: ApprovalCounter
+    var allowLabel = "Allow"
     let name = "delete_file"
     var spec: ToolSpec { ToolSpec(name: name, description: "Delete", parameters: ["type": "object"]) }
     func runningSummary(for arguments: JSONValue) -> String { "Deleting file…" }
-    func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? { ToolApprovalRequest(question: "Delete file?") }
+    func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? { ToolApprovalRequest(question: "Delete file?", allowLabel: allowLabel) }
     func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         await counter.increment()
         return ToolOutput(forModel: "deleted", summary: "Deleted file")
@@ -341,6 +342,21 @@ struct AgentLoopTests {
         let second = await Self.runToEnd(transport, chat: chat, route: Self.route(), tools: [ApprovalTool(counter: counter)])
         #expect(second.0?.status == .done)
         #expect(await counter.runs == 1)
+
+        let labeledCounter = ApprovalCounter()
+        let labeledTransport = ScriptedTransport([
+            .events([Self.toolCall(id: "d2", name: "delete_file", arguments: #"{"path":"picture.png"}"#), Self.toolsDone]),
+            .events([Self.text("Generated."), Self.done]),
+        ])
+        let labeledFirst = await Self.runToEnd(labeledTransport, chat: Self.newChat("make a picture"), route: Self.route(), tools: [ApprovalTool(counter: labeledCounter, allowLabel: "Generate")])
+        var labeledPause = try #require(labeledFirst.0)
+        #expect(labeledPause.pendingQuestions?.questions.questions.first?.options == ["Generate", "Don't allow"])
+        labeledPause.steps[0].toolCalls[0].questions?.answers = ["Generate"]
+        var labeledChat = Self.newChat("make a picture")
+        labeledChat.messages[1].assistantTurn = labeledPause
+        let labeledSecond = await Self.runToEnd(labeledTransport, chat: labeledChat, route: Self.route(), tools: [ApprovalTool(counter: labeledCounter, allowLabel: "Generate")])
+        #expect(labeledSecond.0?.status == .done)
+        #expect(await labeledCounter.runs == 1)
     }
 
     @Test func webParserAndSafetyRejectPrivateAddresses() {
@@ -441,6 +457,13 @@ struct AgentLoopTests {
         #expect(complete.outputs.map(\.nodeID) == ["one", "slow", "fast", "ask", "last"])
         #expect(complete.cumulativeCost == 0.04)
         #expect(await recorder.checkpoints.count >= 8)
+
+        let stoppedRecorder = WorkflowTestRecorder()
+        let stoppedEngine = WorkflowEngine(definition: definition, runner: { try await stoppedRecorder.run($0) })
+        guard case .waiting = await stoppedEngine.run(request: "request") else { Issue.record("Expected pause before stop"); return }
+        try await stoppedEngine.answer(nodeID: "ask", answer: "Stop")
+        guard case .cancelled = await stoppedEngine.run() else { Issue.record("Expected Stop to cancel the workflow"); return }
+        #expect(!(await stoppedRecorder.calls).contains("finish"))
     }
 
     @Test func workflowRepeatCompletesOrPausesAtMaximumAndCanStop() async throws {
@@ -452,6 +475,7 @@ struct AgentLoopTests {
         let successful = WorkflowEngine(definition: definition, runner: { try await successRecorder.run($0) })
         guard case .completed(let complete) = await successful.run(request: "goal") else { Issue.record("Expected repeat completion"); return }
         #expect(complete.repeatIterations["repeat"] == 2)
+        #expect((await successRecorder.calls).allSatisfy { $0.contains("Repeat goal: verified") && $0.contains("GOAL_MET") })
 
         let boundedRecorder = WorkflowTestRecorder()
         let bounded = WorkflowEngine(definition: definition, runner: { try await boundedRecorder.run($0) })
@@ -484,7 +508,10 @@ struct AgentLoopTests {
         let root = FileManager.default.temporaryDirectory
         let tool = ProcessTool(directory: root)
         #expect(await tool.approvalRequest(for: ["command": "rm old.txt"]) != nil)
+        #expect(await tool.approvalRequest(for: ["command": "python3 -c 'import os; os.remove(\"old.txt\")'"]) != nil)
         #expect(await tool.approvalRequest(for: ["command": "git status"]) == nil)
+        let authorized = ProcessTool(directory: root, authorization: ChangeAuthorization(request: "Delete old.txt and update Package.swift"))
+        #expect(await authorized.approvalRequest(for: ["command": "rm old.txt && printf update > Package.swift"]) == nil)
         let output = try await tool.run(arguments: ["command": "printf cloud-runner"], progress: { _ in })
         #expect(output.forModel == "Exit code: 0\ncloud-runner")
         let logger = RedactingLogger(secrets: ["secret-token"])

@@ -71,6 +71,10 @@ final class JobCoordinator {
         }
         if let botName = app.github.credentials?.botName { state["botName"] = .string(botName) }
         if app.settings.spendLimitOn { state["spendLimit"] = .number(app.settings.spendLimit) }
+        let stdioConnectors = app.connectors.connected.filter { $0.kind == .stdio }.compactMap { connector -> JSONValue? in
+            (try? JSONCoding.encoder().encode(connector)).flatMap(JSONValue.parse)
+        }
+        if !stdioConnectors.isEmpty { state["stdioConnectors"] = .array(stdioConnectors) }
         let question = JobQuestion(
             text: "Set up Autonomous in \(repo.ref.name)?",
             options: ["Set up and start", "Not now"],
