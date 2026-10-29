@@ -1,9 +1,11 @@
 # MAIPA-G plan
 
-**Status (28 October 2026, 8 PM Eastern): Build 1 is finished and merged into main (pull
-request #1, squash-merged; its branch is deleted). Its .ipa is on the Releases page. The sign-ins
-need GitHub Pages switched on once (Settings → Pages → main, /docs); the sandbox isn't allowed to,
-so he was asked to. Next: he tests Build 1, then Build 2 when he says go. The plan below is final.**
+**Status (29 October 2026, 3:45 AM Eastern): the whole plan (Builds 1 to 5) is built, merged
+into main (pull request #2, squash-merged; its branch is deleted) and released as build 15
+(`build-15-bd5865a`, checked: 0.1.0 (15), iPhone only, arm64). He asked to skip the final round of
+screenshots; the full set of 78 (every screen, Dark and Light) had passed at 2:55 AM. Next: he
+tests build 15. Only he can try his own sign-ins, Autonomous on GitHub, connectors and
+notifications.**
 
 ## What it is
 An iPhone app (.ipa) for AI agents and workflows, with GitHub built in, like Kiro (app.kiro.dev)

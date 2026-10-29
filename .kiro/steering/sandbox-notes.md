@@ -19,6 +19,12 @@ Things that cost time to find out. Keep them short and true.
   (`gh run download` gives 401).
 - The sandbox can't change repo settings that need admin rights (turning on GitHub Pages gave
   403). Neither can a workflow's own token. Only the owner can, in the repo's Settings.
+- Releases: the sandbox can create a release but can't upload files to it (uploads.github.com
+  gives 400). A workflow's token can upload files but gets 403 creating the release. So: make the
+  release as a draft from the sandbox (`gh api -X POST .../releases`, tag `build-<run>-<sha7>`),
+  dispatch release.yml with run_id, pr_head and main_sha (it attaches the checked .ipa), then
+  publish the draft (`PATCH .../releases/<id> -F draft=false -f make_latest=true`).
+- The three shell-command tests hang on GitHub's Mac, so they run on Linux only.
 
 ## The sandbox itself
 - `/tmp` doesn't last from one command to the next. Keep scratch files in `/projects/sandbox/`
