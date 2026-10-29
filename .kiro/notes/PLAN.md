@@ -74,6 +74,14 @@ them go into one batch and one build.**
    is set, the AI must use it by itself whenever a task needs it, like Kiro, with no "do this on
    the computer" from him.** So the fix sets up the chat's computer automatically (private repos
    included, without exposing his GitHub token to the model) and tells the AI it has it.
+   He asked how to pre-install everything Kiro's sandbox has, and more. A Sprite already boots
+   Ubuntu 26.04 with Node, Python, Go, Ruby, Rust, Java, Elixir, Docker and coding CLIs. **The fix
+   installs one standard tool set on every chat computer automatically, the same on every
+   provider:** at least what Kiro's sandbox has (Python with uv/ruff/pytest, Node with
+   npm/pnpm/yarn/TypeScript, Java with Gradle/Maven, Rust, Go, Ruby, PHP with Composer, Elixir,
+   Swift 6, .NET, Bun, gcc/clang/cmake/make, Git, gh, ripgrep) plus Deno, cloc, sqlite3, jq,
+   ImageMagick, ffmpeg and Playwright with Chromium. Install once per computer and keep it. Gave
+   him a one-message version to try now on `mcp-test`.
 
 Technical notes for the logo fix (for Kiro):
 - iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
