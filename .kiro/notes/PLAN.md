@@ -1,16 +1,14 @@
 # MAIPA-G plan
 
-**Status (29 October 2026, 8:35 AM Eastern): the whole plan is built and on main. Build 22
-(`build-22-b806f03`, 4.5 MB) is the one to install. The owner's real first Autonomous job on
-`snes-tas-studio` did run, inspect the repo and answer, then failed because the read-only job tried
-to open a pull request with no changes; fixed so no-change jobs finish normally, setup dispatches
-retry, failures save their reason, and Jobs can be stopped/deleted. Connectors now use normal
-My apps/Discover/All service cards and Connect buttons backed by live Registry lookup. A Kiro-style
-context ring shows used/available tokens. The top row wraps; tool/command arrows sit beside their
-labels; the star and full-size AI/Thinking controls moved only slightly down inside the composer.
-Run 22's Linux checks, Mac checks and iPhone build passed; run 20's complete Dark/Light screenshots
-verified the visible layout before the final invisible string conversion. Downloaded and checked:
-0.1.0 (22), iPhone only, arm64, 18 complete zip entries. Next: he tests build 22.**
+**Status (29 October 2026, 9:40 AM Eastern): the whole plan is built and on main. Build 24
+(`build-24-aa5a76b`, 4.6 MB) is the one to install. It includes Build 22's fixed Jobs, normal
+integration layout and context meter, then replaces every generic integration symbol: 18 familiar
+services have their actual bundled logo shapes; every Registry entry uses its own published safe
+raster icon when available, an older entry can use its trusted GitHub publisher identity, and only
+a publisher with no artwork gets unique initials/colour. Run 24's Linux checks, Mac tests and
+iPhone build passed; the real-logo Connectors screenshot was reviewed before the final dynamic
+fallback change. Downloaded and checked: 0.1.0 (24), iPhone only, arm64, 19 complete zip entries.
+Next: he installs and tests build 24.**
 
 ## What it is
 An iPhone app (.ipa) for AI agents and workflows, with GitHub built in, like Kiro (app.kiro.dev)
