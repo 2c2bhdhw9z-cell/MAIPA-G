@@ -176,8 +176,8 @@ struct StepView: View {
             ForEach(step.generatedImages ?? []) { image in
                 GeneratedImageCard(result: image)
             }
-            ForEach(step.toolCalls) { call in
-                ToolLine(call: call)
+            if !step.toolCalls.isEmpty {
+                ToolCallsFold(calls: step.toolCalls)
             }
             ForEach(step.citations ?? []) { citation in
                 Link(destination: URL(string: citation.url) ?? URL(string: "https://openrouter.ai")!) {
@@ -247,6 +247,67 @@ struct ThoughtsView: View {
         if isLive { return "Thinking…" }
         if let seconds = step.thinkingSeconds { return "Thought for \(seconds)s" }
         return "Thoughts"
+    }
+}
+
+/// A whole group of tool calls. It starts folded so searches, file reads and commands don't take
+/// over the conversation; the live operation still names itself in the folded heading.
+struct ToolCallsFold: View {
+    var calls: [ToolCallRecord]
+    @State private var open = false
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                withAnimation(.snappy) { open.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: commandCount > 0 ? "terminal" : "wrench.and.screwdriver")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(hasFailure ? Theme.danger : theme.accent)
+                        .frame(width: 18)
+                    Text(title)
+                        .font(.subheadline)
+                        .foregroundStyle(isRunning ? .primary : Theme.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .shimmer(isRunning && theme.thinkingShimmer)
+                    Spacer(minLength: 4)
+                    if isRunning { ProgressView().controlSize(.mini) }
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(Theme.secondaryText)
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                }
+                .padding(.vertical, 6)
+                .padding(.horizontal, 10)
+                .background(Theme.surface.opacity(0.6), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(title), \(open ? "collapse" : "expand")")
+
+            if open {
+                ForEach(calls) { call in ToolLine(call: call) }
+                    .padding(.leading, 8)
+            }
+        }
+    }
+
+    private var commandCount: Int { calls.filter { $0.name == "run_shell" }.count }
+    private var toolCount: Int { calls.count - commandCount }
+    private var isRunning: Bool { calls.contains { $0.status == .running } }
+    private var hasFailure: Bool { calls.contains { $0.status == .failed } }
+
+    private var title: String {
+        if let running = calls.last(where: { $0.status == .running }) { return running.summary }
+        var parts: [String] = []
+        if commandCount == 1 { parts.append("Ran command") }
+        else if commandCount > 1 { parts.append("Ran \(commandCount) commands") }
+        if toolCount == 1 { parts.append("1 tool call") }
+        else if toolCount > 1 { parts.append("\(toolCount) tool calls") }
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -323,6 +384,7 @@ struct ToolLine: View {
         case "read_attachment": return "paperclip"
         case "add_memory", "edit_memory": return "brain"
         case "generate_image": return "paintbrush"
+        case "run_shell": return "terminal"
         case let name where name.hasPrefix("mcp_"): return "puzzlepiece.extension"
         case AskUserTool.name: return "questionmark.bubble"
         default: return "wrench.and.screwdriver"

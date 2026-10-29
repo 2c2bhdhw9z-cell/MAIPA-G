@@ -20,28 +20,27 @@ struct HomeScreen: View {
                     .padding(.top, 6)
                 Spacer(minLength: 24)
                 if app.openRouter.isSignedIn {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            Button { app.sheet = app.github.isConnected ? .repos(.home) : .connectGitHub } label: {
-                                Label(app.github.isConnected ? "GitHub ✓" : "GitHub", systemImage: "link")
-                            }
-                            Button { app.sheet = .specs(home.repo) } label: { Label("Specs", systemImage: "list.clipboard") }
-                            Button { app.sheet = .workflows } label: { Label("Workflows", systemImage: "point.3.connected.trianglepath.dotted") }
-                            Button { app.sheet = .agents } label: { Label("Agents", systemImage: "person.crop.circle") }
-                            Button { app.sheet = .connectors } label: { Label("Connectors", systemImage: "puzzlepiece.extension") }
-                            if let balance = app.openRouter.balance { Label(balance.dollars, systemImage: "creditcard") }
-                            else { Label("OpenRouter ✓", systemImage: "sparkles") }
-                            if let free = app.openRouter.freeRequestsLeft { Label("\(free) free", systemImage: "sparkles") }
-                            if let repo = home.repo {
-                                Button { app.sheet = .files(repo, .home) } label: { Label("Files", systemImage: "folder") }
-                            }
-                            if !app.jobs.jobs.isEmpty {
-                                Button { app.jobs.show() } label: {
-                                    Label(app.jobs.activeCount > 0 ? "\(app.jobs.activeCount) working" : "Jobs", systemImage: "gearshape.2")
-                                }
+                    FlowLayout(spacing: 8, lineSpacing: 6) {
+                        Button { app.sheet = app.github.isConnected ? .repos(.home) : .connectGitHub } label: {
+                            Label(app.github.isConnected ? "GitHub ✓" : "GitHub", systemImage: "link")
+                        }
+                        Button { app.sheet = .specs(home.repo) } label: { Label("Specs", systemImage: "list.clipboard") }
+                        Button { app.sheet = .workflows } label: { Label("Workflows", systemImage: "point.3.connected.trianglepath.dotted") }
+                        Button { app.sheet = .agents } label: { Label("Agents", systemImage: "person.crop.circle") }
+                        Button { app.sheet = .connectors } label: { Label("Connectors", systemImage: "puzzlepiece.extension") }
+                        if let balance = app.openRouter.balance { Label(balance.dollars, systemImage: "creditcard") }
+                        else { Label("OpenRouter ✓", systemImage: "sparkles") }
+                        if let free = app.openRouter.freeRequestsLeft { Label("\(free) free", systemImage: "sparkles") }
+                        if let repo = home.repo {
+                            Button { app.sheet = .files(repo, .home) } label: { Label("Files", systemImage: "folder") }
+                        }
+                        if !app.jobs.jobs.isEmpty {
+                            Button { app.jobs.show() } label: {
+                                Label(app.jobs.activeCount > 0 ? "\(app.jobs.activeCount) working" : "Jobs", systemImage: "gearshape.2")
                             }
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Theme.secondaryText)
                     .padding(.bottom, 10)
