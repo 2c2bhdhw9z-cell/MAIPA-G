@@ -2,6 +2,16 @@ import Foundation
 
 /// One latest active server from the official MCP Registry.
 public struct RegistryServer: Codable, Sendable, Hashable, Identifiable {
+    public struct Icon: Codable, Sendable, Hashable {
+        public var source: URL
+        public var mimeType: String?
+        public var sizes: [String]?
+        public var theme: String?
+        public init(source: URL, mimeType: String? = nil, sizes: [String]? = nil, theme: String? = nil) {
+            self.source = source; self.mimeType = mimeType; self.sizes = sizes; self.theme = theme
+        }
+    }
+
     public struct Remote: Codable, Sendable, Hashable {
         public var type: String
         public var url: URL
@@ -111,6 +121,8 @@ public struct RegistryServer: Codable, Sendable, Hashable, Identifiable {
     public var description: String
     public var version: String
     public var repositoryURL: URL?
+    public var websiteURL: URL?
+    public var icons: [Icon]?
     public var remotes: [Remote]
     public var packages: [Package]
     public var publishedAt: Date?
@@ -119,12 +131,31 @@ public struct RegistryServer: Codable, Sendable, Hashable, Identifiable {
     public var supportsAutonomous: Bool { packages.contains(where: \.isAutonomousCompatible) }
     public var preferredRemote: Remote? { remotes.first { $0.type == "streamable-http" && $0.url.scheme == "https" } }
 
-    public init(name: String, displayName: String? = nil, description: String = "", version: String = "", repositoryURL: URL? = nil, remotes: [Remote] = [], packages: [Package] = [], publishedAt: Date? = nil) {
+    public var preferredIconURL: URL? {
+        if let declared = icons?.first(where: {
+            $0.source.scheme == "https" && $0.mimeType?.lowercased() != "image/svg+xml" && $0.source.pathExtension.lowercased() != "svg"
+        })?.source { return declared }
+        // Most Registry entries predate icon metadata. A GitHub publisher avatar is still that
+        // connector's own identity, and comes from a trusted host rather than an icon proxy.
+        if repositoryURL?.host?.lowercased() == "github.com",
+           let owner = repositoryURL?.pathComponents.dropFirst().first,
+           !owner.isEmpty {
+            var parts = URLComponents()
+            parts.scheme = "https"; parts.host = "github.com"; parts.path = "/\(owner).png"
+            parts.queryItems = [URLQueryItem(name: "size", value: "128")]
+            return parts.url
+        }
+        return nil
+    }
+
+    public init(name: String, displayName: String? = nil, description: String = "", version: String = "", repositoryURL: URL? = nil, websiteURL: URL? = nil, icons: [Icon]? = nil, remotes: [Remote] = [], packages: [Package] = [], publishedAt: Date? = nil) {
         self.name = name
         self.displayName = displayName ?? Self.friendlyName(name)
         self.description = description
         self.version = version
         self.repositoryURL = repositoryURL
+        self.websiteURL = websiteURL
+        self.icons = icons
         self.remotes = remotes
         self.packages = packages
         self.publishedAt = publishedAt
@@ -181,12 +212,23 @@ public struct RegistryServer: Codable, Sendable, Hashable, Identifiable {
             )
         }
         let date = official?["publishedAt"]?.stringValue.flatMap { ISO8601DateFormatter().date(from: $0) }
+        let icons = (server["icons"]?.arrayValue ?? []).compactMap { value -> Icon? in
+            guard let text = value["src"]?.stringValue, let source = URL(string: text), source.scheme == "https" else { return nil }
+            return Icon(
+                source: source,
+                mimeType: value["mimeType"]?.stringValue,
+                sizes: value["sizes"]?.arrayValue?.compactMap(\.stringValue),
+                theme: value["theme"]?.stringValue
+            )
+        }
         self.init(
             name: name,
             displayName: server["title"]?.stringValue,
             description: server["description"]?.stringValue ?? "",
             version: server["version"]?.stringValue ?? "",
             repositoryURL: server["repository"]?["url"]?.stringValue.flatMap(URL.init(string:)),
+            websiteURL: server["websiteUrl"]?.stringValue.flatMap(URL.init(string:)),
+            icons: icons.isEmpty ? nil : icons,
             remotes: remotes,
             packages: packages,
             publishedAt: date

@@ -1,5 +1,6 @@
 import AgentCore
 import SwiftUI
+import UIKit
 
 /// Connectors shown like integrations in an ordinary app: familiar services, plain descriptions,
 /// recognisable coloured icons and one Connect button. "All" still exposes every result from the
@@ -79,7 +80,8 @@ struct ConnectorsScreen: View {
                             service: IntegrationService.matching(connector.displayName + " " + connector.serverID),
                             name: connector.displayName,
                             detail: connectedStatus(connector),
-                            trailing: .chevron
+                            trailing: .chevron,
+                            iconURL: app.connectors.catalog.first(where: { $0.name == connector.serverID })?.preferredIconURL
                         )
                     }
                     .buttonStyle(.plain)
@@ -114,7 +116,8 @@ struct ConnectorsScreen: View {
                         service: IntegrationService.matching(server.displayName + " " + server.name),
                         name: server.displayName,
                         detail: plainDescription(server),
-                        trailing: connectedServer(server) ? .connected : .connect
+                        trailing: connectedServer(server) ? .connected : .connect,
+                        iconURL: server.preferredIconURL
                     )
                 }
                 .buttonStyle(.plain)
@@ -249,10 +252,11 @@ private struct ConnectorCard: View {
     let name: String
     let detail: String
     let trailing: ConnectorTrailing
+    var iconURL: URL? = nil
 
     var body: some View {
         HStack(spacing: 12) {
-            IntegrationIcon(service: service)
+            IntegrationIcon(service: service, name: name, remoteURL: iconURL)
             VStack(alignment: .leading, spacing: 3) {
                 Text(name).font(.body.weight(.semibold)).foregroundStyle(.primary).lineLimit(1)
                 Text(detail).font(.footnote).foregroundStyle(Theme.secondaryText).lineLimit(2)
@@ -279,6 +283,9 @@ private struct ConnectorCard: View {
 
 struct IntegrationIcon: View {
     let service: IntegrationService
+    var name: String? = nil
+    var remoteURL: URL? = nil
+
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 10, style: .continuous).fill(service.colour.opacity(0.18))
@@ -289,15 +296,72 @@ struct IntegrationIcon: View {
                     .scaledToFit()
                     .foregroundStyle(service.colour)
                     .padding(9)
+            } else if let remoteURL {
+                RemoteConnectorLogo(url: remoteURL, fallback: initials)
             } else {
-                Image(systemName: service.symbol)
-                    .font(.system(size: 19, weight: .semibold))
+                Text(initials)
+                    .font(.system(size: initials.count > 1 ? 13 : 18, weight: .bold, design: .rounded))
                     .foregroundStyle(service.colour)
             }
         }
         .frame(width: 44, height: 44)
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.stroke))
         .accessibilityHidden(true)
+    }
+
+    private var initials: String {
+        let words = (name ?? service.name).split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        let letters = words.prefix(2).compactMap(\.first)
+        return letters.isEmpty ? "•" : String(letters).uppercased()
+    }
+}
+
+private struct RemoteConnectorLogo: View {
+    let url: URL
+    let fallback: String
+    @State private var data: Data?
+
+    var body: some View {
+        Group {
+            if let data, let image = UIImage(data: data) {
+                Image(uiImage: image).resizable().scaledToFit()
+            } else {
+                Text(fallback).font(.system(size: fallback.count > 1 ? 13 : 18, weight: .bold, design: .rounded))
+            }
+        }
+        .padding(8)
+        .task(id: url) { data = await ConnectorLogoLoader.shared.data(for: url) }
+    }
+}
+
+private actor ConnectorLogoLoader {
+    static let shared = ConnectorLogoLoader()
+    private var cache: [URL: Data] = [:]
+    private var order: [URL] = []
+
+    func data(for url: URL) async -> Data? {
+        if let cached = cache[url] { return cached }
+        guard url.scheme == "https" else { return nil }
+        do {
+            let response = try await URLSessionTransport().stream(HTTPRequest(url: url, headers: ["Accept": "image/png,image/jpeg,image/webp,*/*;q=0.2"], idleTimeout: 15))
+            guard response.isSuccess else { return nil }
+            if let length = response.header("content-length").flatMap(Int.init), length > 512_000 { return nil }
+            let data = try await response.collect(limit: 512_001)
+            guard data.count <= 512_000, Self.looksLikeImage(data) else { return nil }
+            if cache.count >= 80, let oldest = order.first {
+                cache[oldest] = nil
+                order.removeFirst()
+            }
+            cache[url] = data
+            order.append(url)
+            return data
+        } catch { return nil }
+    }
+
+    private static func looksLikeImage(_ data: Data) -> Bool {
+        data.starts(with: [0x89, 0x50, 0x4E, 0x47])
+            || data.starts(with: [0xFF, 0xD8, 0xFF])
+            || (data.count >= 12 && data.prefix(4) == Data("RIFF".utf8) && data.dropFirst(8).prefix(4) == Data("WEBP".utf8))
     }
 }
 
@@ -329,7 +393,14 @@ struct IntegrationService: Identifiable {
 
     static func matching(_ text: String) -> IntegrationService {
         popular.first(where: { $0.matches(text) })
-            ?? IntegrationService(name: "App", detail: "Connected tool", search: text, aliases: [], symbol: "puzzlepiece.extension.fill", colour: .mint)
+            ?? IntegrationService(name: text, detail: "Connected tool", search: text, aliases: [], symbol: "puzzlepiece.extension.fill", colour: colour(for: text))
+    }
+
+    private static func colour(for text: String) -> Color {
+        var value: UInt64 = 14_695_981_039_346_656_037
+        for byte in text.utf8 { value = (value ^ UInt64(byte)) &* 1_099_511_628_211 }
+        let choices: [Color] = [.mint, .cyan, .blue, .indigo, .purple, .pink, .orange, .green]
+        return choices[Int(value % UInt64(choices.count))]
     }
 
     static let popular: [IntegrationService] = [

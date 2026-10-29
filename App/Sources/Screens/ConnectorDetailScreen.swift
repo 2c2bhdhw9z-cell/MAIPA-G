@@ -34,7 +34,11 @@ struct ConnectorDetailScreen: View {
     private func savedSections(_ connector: ConnectorConfiguration) -> some View {
         Section {
             HStack(spacing: 12) {
-                IntegrationIcon(service: IntegrationService.matching(connector.displayName + " " + connector.serverID))
+                IntegrationIcon(
+                    service: IntegrationService.matching(connector.displayName + " " + connector.serverID),
+                    name: connector.displayName,
+                    remoteURL: app.connectors.catalog.first(where: { $0.name == connector.serverID })?.preferredIconURL
+                )
                 VStack(alignment: .leading, spacing: 3) {
                     Text(connector.displayName).font(.headline)
                     Text(stateText).font(.footnote).foregroundStyle(Theme.secondaryText)
@@ -73,7 +77,11 @@ struct ConnectorDetailScreen: View {
     private func registrySections(_ server: RegistryServer) -> some View {
         Section {
             HStack(alignment: .top, spacing: 12) {
-                IntegrationIcon(service: IntegrationService.matching(server.displayName + " " + server.name))
+                IntegrationIcon(
+                    service: IntegrationService.matching(server.displayName + " " + server.name),
+                    name: server.displayName,
+                    remoteURL: server.preferredIconURL
+                )
                 VStack(alignment: .leading, spacing: 4) {
                     Text(server.displayName).font(.headline)
                     Text(server.description.isEmpty ? "Connect this app to use its tools in MAIPA-G." : server.description)
