@@ -62,9 +62,31 @@ public actor JobStore {
             job.status = .queued
         }
     }
+
+    public func workflowCheckpoint(_ id: UUID) async -> WorkflowCheckpoint? {
+        guard let value = await records.load(id)?.state["workflowCheckpoint"],
+              let data = value.jsonString().data(using: .utf8)
+        else { return nil }
+        return try? JSONCoding.decoder().decode(WorkflowCheckpoint.self, from: data)
+    }
+
+    @discardableResult
+    public func checkpointWorkflow(_ id: UUID, checkpoint: WorkflowCheckpoint) async throws -> JobRecord {
+        let data = try JSONCoding.encoder().encode(checkpoint)
+        guard let value = JSONValue.parse(data) else { throw JobStoreError.invalidWorkflowCheckpoint }
+        return try await update(id) { job in
+            var object = job.state.objectValue ?? [:]
+            object["workflowCheckpoint"] = value
+            object["workflowID"] = .string(checkpoint.workflowID)
+            job.state = .object(object)
+            job.cumulativeCost = checkpoint.cumulativeCost
+            job.status = checkpoint.isCancelled ? .stopped : (checkpoint.pendingQuestion == nil ? .running : .needsAnswer)
+        }
+    }
 }
 
 public enum JobStoreError: Error, Sendable, Equatable {
     case notFound
     case questionNotFound
+    case invalidWorkflowCheckpoint
 }

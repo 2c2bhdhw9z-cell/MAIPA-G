@@ -67,6 +67,25 @@ public actor RemoteJobStore {
     }
 }
 
+private actor RemoteWorkflowCheckpointSink {
+    private var job: JobRecord
+    private let store: RemoteJobStore
+
+    init(job: JobRecord, store: RemoteJobStore) { self.job = job; self.store = store }
+
+    func save(_ checkpoint: WorkflowCheckpoint) async throws {
+        var object = job.state.objectValue ?? [:]
+        object["workflowCheckpoint"] = (try? JSONCoding.encoder().encode(checkpoint)).flatMap(JSONValue.parse)
+        job.state = .object(object)
+        job.cumulativeCost = checkpoint.cumulativeCost
+        job.status = checkpoint.isCancelled ? .stopped : (checkpoint.pendingQuestion == nil ? .running : .needsAnswer)
+        job.updatedAt = Date()
+        try await store.save(job)
+    }
+
+    func current() -> JobRecord { job }
+}
+
 /// Shared Linux execution engine. It checkpoints at every AgentLoop milestone and hands a job to
 /// a fresh workflow run before GitHub's hosted-runner limit.
 public struct CloudRunner: Sendable {
@@ -101,6 +120,11 @@ public struct CloudRunner: Sendable {
         do {
             let workBranch = try await prepareRepository(for: &job)
             try await store.save(job)
+            if let encoded = job.state["workflowDefinition"],
+               let definition = try? decode(WorkflowDefinition.self, from: encoded) {
+                try await runWorkflow(definition, job: &job, branch: workBranch, store: store, github: github)
+                return
+            }
             var chat = try chatForJob(job)
             applySavedAnswers(job, to: &chat)
 
@@ -189,6 +213,79 @@ public struct CloudRunner: Sendable {
             logger.progress("MAIPA-G Autonomous stopped safely with an error.")
             throw error
         }
+    }
+
+    private func runWorkflow(
+        _ definition: WorkflowDefinition,
+        job: inout JobRecord,
+        branch: String,
+        store: RemoteJobStore,
+        github: GitHubClient
+    ) async throws {
+        let savedCheckpoint: WorkflowCheckpoint? = job.state["workflowCheckpoint"].flatMap { try? decode(WorkflowCheckpoint.self, from: $0) }
+        let sink = RemoteWorkflowCheckpointSink(job: job, store: store)
+        var tools: [any AgentTool] = [WorkspaceInspectTool(directory: configuration.workspace), ProcessTool(directory: configuration.workspace)]
+        if let values = job.state["mcpServers"]?.arrayValue {
+            for value in values where (try? decode(StdioMCPServer.self, from: value)) != nil {
+                if let server = try? decode(StdioMCPServer.self, from: value) { tools.append(StdioMCPTool(server: server, directory: configuration.workspace)) }
+            }
+        }
+        var definitions = BuiltInAgents.all
+        if let values = job.state["customAgents"]?.arrayValue {
+            definitions += values.compactMap { try? decode(CustomAgentRecord.self, from: $0) }.map(\.definition)
+        }
+        let environment = AgentEnvironment(
+            openRouter: OpenRouterClient(transport: transport, apiKey: configuration.openRouterKey),
+            freeRoute: { ModelRouter.route(choice: .free, difficulty: .hard, thinking: .medium, account: AccountState(), catalogue: [:]) },
+            onOutOfCredits: {}
+        )
+        let workflowTools = tools
+        let spendLimit = job.state["spendLimit"]?.doubleValue
+        let runner: AgentExecutor.Runner = { invocation in
+            var chat = Chat(title: invocation.definition.name)
+            let prompt = [invocation.definition.prompt(task: invocation.task), invocation.context].filter { !$0.isEmpty }.joined(separator: "\n\nContext:\n")
+            chat.messages = [.user(prompt), ChatMessage(body: .assistant(AssistantTurn()))]
+            let choice: ModelChoice = invocation.definition.modelPolicy == .differentFromPrimary ? .free : .auto
+            let route = ModelRouter.route(choice: choice, difficulty: invocation.definition.difficulty, thinking: .medium, account: AccountState(), catalogue: [:])
+            let input = AgentTurnInput(
+                chat: chat, route: route,
+                systemPrompt: SystemPrompt.make(userLogin: nil, repo: nil, agent: invocation.definition, workflowContext: invocation.context),
+                tools: workflowTools, spendLimit: spendLimit, agent: invocation.definition
+            )
+            var final: AssistantTurn?
+            for await event in AgentLoop.run(input, environment: environment) {
+                if case .updated(let turn, _) = event { final = turn }
+            }
+            guard let turn = final, turn.status != .failed else { throw CloudRunnerError.commandFailed }
+            let output = turn.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n")
+            return AgentExecutionResult(output: output, model: turn.steps.last?.model, goalMet: output.uppercased().contains("GOAL_MET"), cost: turn.usage.cost ?? 0)
+        }
+        let engine = WorkflowEngine(definition: definition, checkpoint: savedCheckpoint, agents: definitions, runner: runner) { checkpoint in
+            try await sink.save(checkpoint)
+        }
+        if let pending = savedCheckpoint?.pendingQuestion,
+           let answer = job.questions.first(where: { $0.text == pending.text })?.answer {
+            try await engine.answer(nodeID: pending.nodeID, answer: answer)
+        }
+        let outcome = await engine.run(request: job.state["request"]?.stringValue)
+        job = await sink.current()
+        switch outcome {
+        case .completed(let checkpoint):
+            job.result = try await finishRepository(job: job, branch: branch, github: github, summaryOverride: checkpoint.outputs.last?.text)
+            job.status = .done
+            job.questions = []
+        case .waiting(_, let question):
+            job.status = .needsAnswer
+            let old = job.questions.first { $0.text == question.text }
+            job.questions = [JobQuestion(id: old?.id ?? UUID(), text: question.text, options: question.options, answer: old?.answer)]
+        case .cancelled:
+            job.status = .stopped
+        case .failed(_, let message):
+            job.status = .failed
+            job.result = JobResult(summary: message)
+        }
+        job.updatedAt = Date()
+        try await store.save(job)
     }
 
     private func chatForJob(_ job: JobRecord) throws -> Chat {
@@ -303,7 +400,7 @@ public struct CloudRunner: Sendable {
         job.state = .object(state)
     }
 
-    private func finishRepository(job: JobRecord, branch: String, github: GitHubClient, chat: Chat) async throws -> JobResult {
+    private func finishRepository(job: JobRecord, branch: String, github: GitHubClient, chat: Chat? = nil, summaryOverride: String? = nil) async throws -> JobResult {
         let status = try await git(["status", "--porcelain"], allowFailure: true)
         var commit: String?
         if !status.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -323,7 +420,7 @@ public struct CloudRunner: Sendable {
                 base: job.defaultBranch ?? "main"
             )
         }
-        let summary = chat.lastAssistantTurn?.steps.last(where: { !$0.text.isEmpty })?.text ?? "Finished the requested work."
+        let summary = summaryOverride ?? chat?.lastAssistantTurn?.steps.last(where: { !$0.text.isEmpty })?.text ?? "Finished the requested work."
         return JobResult(summary: summary, pullRequest: pullRequest, commit: commit)
     }
 

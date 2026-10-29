@@ -21,6 +21,8 @@ struct HomeScreen: View {
                 Spacer(minLength: 24)
                 if app.openRouter.isSignedIn {
                     HStack(spacing: 8) {
+                        Button { app.sheet = .agents } label: { Label("Agents", systemImage: "person.crop.circle") }
+                        Button { app.sheet = .workflows } label: { Label("Workflows", systemImage: "point.3.connected.trianglepath.dotted") }
                         if let balance = app.openRouter.balance { Label(balance.dollars, systemImage: "creditcard") }
                         if let free = app.openRouter.freeRequestsLeft { Label("\(free) free", systemImage: "sparkles") }
                         if let repo = home.repo {

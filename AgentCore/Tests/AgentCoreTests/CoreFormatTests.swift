@@ -66,6 +66,64 @@ struct CoreFormatTests {
         #expect(Chat.currentFormat == 2)
     }
 
+    @Test func builtInAgentsAndWorkflowsHaveCompletePolicies() throws {
+        #expect(BuiltInAgents.all.map(\.name) == [
+            "Planner", "Designer", "Design checker", "Coder", "Code checker", "Second opinion",
+            "Review combiner", "Investigator", "Researcher", "Builder", "Workflow maker",
+            "Request sender", "Feedback answerer",
+        ])
+        #expect(Set(BuiltInAgents.all.map(\.id)).count == 13)
+        #expect(BuiltInAgents.named("investigator")?.permits(tool: "edit_file") == false)
+        #expect(BuiltInAgents.named("code-checker")?.modelPolicy == .strong)
+        #expect(BuiltInAgents.named("second-opinion")?.modelPolicy == .differentFromPrimary)
+        #expect(BuiltInAgents.named("builder")?.behavior == .build)
+        #expect(BuiltInAgents.named("request-sender")?.behavior == .pullRequest)
+        #expect(BuiltInAgents.named("feedback-answerer")?.behavior == .feedback)
+
+        #expect(BuiltInWorkflows.all.map(\.name) == [
+            "Look into something", "Keep going until a goal is met", "Work through a checklist",
+            "Full feature", "Two-AI review", "Experiment until it's better",
+            "Send a side copy for review", "Build and check the IPA",
+        ])
+        let agentIDs = Set(BuiltInAgents.all.map(\.id))
+        #expect(BuiltInWorkflows.all.allSatisfy { $0.isApproved && $0.validationErrors(agentIDs: agentIDs).isEmpty })
+        let full = try #require(BuiltInWorkflows.named("full-feature"))
+        #expect(full.steps.map(\.title) == ["Requirements", "Design", "Checked design", "Implementation plan", "Implementation", "Independent two-AI review", "Combine reviews", "Final check"])
+        #expect(full.steps[5].children.map(\.agentID) == ["code-checker", "second-opinion"])
+    }
+
+    @Test func customAutomationRecordsRoundTripWithoutPersistingBuiltIns() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-automation-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let agents = ProductStore<CustomAgentRecord>(dataDirectory: root, folder: "agents")
+        let workflows = ProductStore<WorkflowRecord>(dataDirectory: root, folder: "workflows")
+        let custom = CustomAgentRecord(name: "Release reader", summary: "Checks releases", instructions: "Inspect releases and report.", allowedTools: ["read_releases"], difficulty: .hard, behavior: .reportOnly, maximumHelpers: 2)
+        try await agents.save(custom)
+        let draft = WorkflowDraftBuilder.initialDraft(description: "Design a feature and have two AIs review it")
+        let record = WorkflowRecord(definition: draft)
+        try await workflows.save(record)
+        let loadedAgent = try #require(await agents.load(custom.id))
+        let loadedWorkflow = try #require(await workflows.load(record.id))
+        #expect(loadedAgent.definition.name == "Release reader")
+        #expect(loadedAgent.definition.maximumHelpers == 2)
+        #expect(!loadedWorkflow.definition.isApproved)
+        #expect(loadedWorkflow.steps.contains { $0.kind == .parallel })
+        #expect(await agents.loadAll().count == 1)
+        #expect(await workflows.loadAll().count == 1)
+        #expect(!BuiltInAgents.all.contains { $0.id == loadedAgent.definition.id })
+    }
+
+    @Test func oldCustomAgentDefaultsNewPolicyFields() throws {
+        let id = UUID()
+        let data = Data("""
+        {"format":1,"id":"\(id.uuidString)","name":"Old","instructions":"Report","allowedTools":["read_file"],"createdAt":"2026-10-28T00:00:00Z","updatedAt":"2026-10-28T00:00:00Z"}
+        """.utf8)
+        let record = try JSONCoding.decoder().decode(CustomAgentRecord.self, from: data)
+        #expect(record.behavior == .changesAllowed)
+        #expect(record.difficulty == .normal)
+        #expect(record.maximumHelpers == 0)
+    }
+
     @Test func creditsCalculateAvailableMoney() {
         let credits = OpenRouterCredits(response: JSONValue.parse(#"{"data":{"total_credits":5,"total_usage":1.25}}"#)!)
         #expect(credits.purchased == 5)
@@ -110,6 +168,15 @@ struct CoreFormatTests {
         let resumed = try await store.resume(job.id)
         #expect(resumed.status == .queued)
         #expect(resumed.steps.first?.status == .done)
+
+        var workflow = WorkflowCheckpoint(workflowID: "full-feature", request: "Build it")
+        workflow.statuses["requirements"] = .completed
+        workflow.pendingQuestion = WorkflowQuestion(nodeID: "approval", text: "Continue?", options: ["Continue", "Stop"])
+        _ = try await store.checkpointWorkflow(job.id, checkpoint: workflow)
+        let restored = try #require(await store.workflowCheckpoint(job.id))
+        #expect(restored.workflowID == "full-feature")
+        #expect(restored.statuses["requirements"] == .completed)
+        #expect(await store.load(job.id)?.status == .needsAnswer)
     }
 }
 

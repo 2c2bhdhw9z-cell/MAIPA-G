@@ -87,6 +87,67 @@ public enum BoundedProcess {
     }
 }
 
+/// Read-only repository inspection for report agents on Autonomous runners.
+public struct WorkspaceInspectTool: AgentTool {
+    public let name = "inspect_workspace"
+    public var spec: ToolSpec {
+        ToolSpec(name: name, description: "Inspect the checked-out repository without changing it. List files, read one text file, search text, or show Git status/diff.", parameters: [
+            "type": "object",
+            "properties": [
+                "operation": ["type": "string", "enum": ["list", "read", "search", "status", "diff"]],
+                "path": ["type": "string"],
+                "query": ["type": "string"],
+            ],
+            "required": ["operation"],
+            "additionalProperties": false,
+        ])
+    }
+    private let directory: URL
+    public init(directory: URL) { self.directory = directory.standardizedFileURL }
+    public func runningSummary(for arguments: JSONValue) -> String { "Inspecting the workspace…" }
+
+    public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        let operation = try arguments.requiredString("operation")
+        progress("Inspecting the workspace…")
+        let text: String
+        switch operation {
+        case "list":
+            let path = arguments.optionalString("path") ?? ""
+            let root = try safeURL(path)
+            let values = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+            text = values.sorted { $0.lastPathComponent < $1.lastPathComponent }.prefix(2_000).map { url in
+                let folder = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                return url.lastPathComponent + (folder ? "/" : "")
+            }.joined(separator: "\n")
+        case "read":
+            let url = try safeURL(try arguments.requiredString("path"))
+            let data = try Data(contentsOf: url)
+            guard data.count <= 1_000_000, let value = String(data: data, encoding: .utf8) else { throw ToolInputError("That file is not readable text under 1 MB.") }
+            text = value
+        case "search":
+            let query = try arguments.requiredString("query")
+            guard !query.contains("\n"), query.count <= 500 else { throw ToolInputError("Use a shorter one-line search.") }
+            let result = try await BoundedProcess.run(executable: "/usr/bin/grep", arguments: ["-R", "-n", "-F", "--exclude-dir=.git", "--", query, "."], directory: directory, timeout: 60)
+            text = result.stdout
+        case "status":
+            let result = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["status", "--short"], directory: directory, timeout: 60)
+            text = result.stdout
+        case "diff":
+            let result = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["diff", "--", "."], directory: directory, timeout: 60)
+            text = result.stdout
+        default: throw ToolInputError("Unknown inspection operation.")
+        }
+        return ToolOutput(forModel: text.isEmpty ? "No results." : text, summary: "Inspected the workspace", detail: String(text.prefix(80_000)))
+    }
+
+    private func safeURL(_ path: String) throws -> URL {
+        guard SnapshotStore.isSafeRelativePath(path.isEmpty ? "." : path) || path.isEmpty else { throw ToolInputError("That path is outside the repository.") }
+        let value = directory.appendingPathComponent(path).standardizedFileURL
+        guard value.path == directory.path || value.path.hasPrefix(directory.path + "/") else { throw ToolInputError("That path is outside the repository.") }
+        return value
+    }
+}
+
 /// A real shell inside the checked-out target repo. Its output goes only into the private job
 /// transcript; this tool never prints commands, output, prompts, or environment values.
 public struct ProcessTool: AgentTool {

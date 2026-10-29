@@ -269,13 +269,23 @@ struct DataRepoSyncTests {
         let setup = try await Setup()
         defer { try? FileManager.default.removeItem(at: setup.directory) }
         let product = ProductStore<MemoryRecord>(dataDirectory: setup.store.dataDirectory, folder: "memories")
+        let agents = ProductStore<CustomAgentRecord>(dataDirectory: setup.store.dataDirectory, folder: "agents")
+        let workflows = ProductStore<WorkflowRecord>(dataDirectory: setup.store.dataDirectory, folder: "workflows")
         let memory = MemoryRecord(text: "Keep answers short")
+        let agent = CustomAgentRecord(name: "Reader", instructions: "Read and report.", allowedTools: ["read_file"], behavior: .reportOnly)
+        let workflow = WorkflowRecord(name: "Read twice", steps: [
+            .agent(title: "Read", agent: agent.definition.id, instruction: "Read the requested file.")
+        ], isApproved: true)
         try await product.save(memory)
+        try await agents.save(agent)
+        try await workflows.save(workflow)
         let attachmentPath = "attachments/abc/photo.jpg"
         try await setup.store.saveBlob(Data([1, 2, 3, 4]), at: attachmentPath)
 
         let report = try await setup.sync.sync()
         #expect(report.uploaded.contains("memories/\(memory.id.uuidString.lowercased()).json"))
+        #expect(report.uploaded.contains("agents/\(agent.id.uuidString.lowercased()).json"))
+        #expect(report.uploaded.contains("workflows/\(workflow.id.uuidString.lowercased()).json"))
         #expect(report.uploaded.contains(attachmentPath))
         #expect(setup.github.remoteFile(attachmentPath) == Data([1, 2, 3, 4]))
         #expect(setup.github.remoteFile("README.md") != nil)

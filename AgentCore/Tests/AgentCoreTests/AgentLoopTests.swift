@@ -72,6 +72,23 @@ struct ApprovalTool: AgentTool {
     }
 }
 
+actor WorkflowTestRecorder {
+    var calls: [String] = []
+    var checkpoints: [WorkflowCheckpoint] = []
+    var goalOnCall: Int?
+
+    init(goalOnCall: Int? = nil) { self.goalOnCall = goalOnCall }
+
+    func run(_ invocation: AgentInvocation) async throws -> AgentExecutionResult {
+        calls.append(invocation.task)
+        let number = calls.count
+        if invocation.task.contains("slow") { try await Task.sleep(nanoseconds: 40_000_000) }
+        return AgentExecutionResult(output: "result \(invocation.task)", model: invocation.definition.modelPolicy == .differentFromPrimary ? "other/model" : "main/model", goalMet: goalOnCall == number, cost: 0.01)
+    }
+
+    func save(_ checkpoint: WorkflowCheckpoint) { checkpoints.append(checkpoint) }
+}
+
 @Suite("Agent loop")
 struct AgentLoopTests {
     static func text(_ content: String, model: String = "test/model") -> String {
@@ -348,6 +365,97 @@ struct AgentLoopTests {
         #expect(TaskDifficulty.estimate("hi!", hasRepo: false) == .quick)
         #expect(TaskDifficulty.estimate("Why does the build crash on launch?", hasRepo: true) == .hard)
         #expect(TaskDifficulty.estimate("What does the main file do?", hasRepo: true) == .normal)
+    }
+
+    @Test func reportOnlyAgentCannotReceiveChangingTools() async throws {
+        let transport = ScriptedTransport([.events([Self.text("Checked."), Self.done])])
+        let agent = try #require(BuiltInAgents.named("investigator"))
+        let environment = AgentEnvironment(
+            openRouter: OpenRouterClient(transport: transport, apiKey: "sk"),
+            freeRoute: { Self.route() }, onOutOfCredits: {}
+        )
+        let input = AgentTurnInput(chat: Self.newChat("check"), route: Self.route(), systemPrompt: "s", tools: [EchoTool(), ApprovalTool(counter: ApprovalCounter())], agent: agent)
+        for await _ in AgentLoop.run(input, environment: environment) {}
+        let names = transport.sentBodies.first?["tools"]?.arrayValue?.compactMap { $0["function"]?["name"]?.stringValue }
+        #expect(names == ["read_file", "ask_user"])
+    }
+
+    @Test func helperFanOutJoinsInDeclarationOrderAndUsesDifferentModel() async throws {
+        let recorder = WorkflowTestRecorder()
+        let executor = AgentExecutor { invocation in try await recorder.run(invocation) }
+        let investigator = try #require(BuiltInAgents.named("investigator"))
+        let second = try #require(BuiltInAgents.named("second-opinion"))
+        let result = try await executor.execute(
+            agentID: "planner", task: "lead", helpers: [
+                AgentInvocation(definition: investigator, task: "slow first"),
+                AgentInvocation(definition: second, task: "fast second"),
+            ], primaryModel: "main/model"
+        )
+        #expect(result.output == "result lead")
+        let calls = await recorder.calls
+        #expect(Set(calls.prefix(2)) == Set(["slow first", "fast second"]))
+        #expect(calls.last == "lead")
+    }
+
+    @Test func workflowSequenceParallelAskResumeAndCheckpoint() async throws {
+        let recorder = WorkflowTestRecorder()
+        let definition = WorkflowDefinition(id: "test", name: "Test", summary: "", steps: [
+            .agent("one", title: "One", agent: "planner", instruction: "first"),
+            .parallel("both", title: "Both", agents: [
+                .agent("slow", title: "Slow", agent: "investigator", instruction: "slow review"),
+                .agent("fast", title: "Fast", agent: "second-opinion", instruction: "fast review"),
+            ]),
+            .ask("ask", title: "Approval", question: "Continue?", options: ["Continue", "Stop"]),
+            .agent("last", title: "Last", agent: "review-combiner", instruction: "finish"),
+        ], isApproved: true)
+        let engine = WorkflowEngine(definition: definition, runner: { try await recorder.run($0) }, checkpointer: { await recorder.save($0) })
+        let first = await engine.run(request: "request")
+        guard case .waiting(let checkpoint, let question) = first else { Issue.record("Expected pause"); return }
+        #expect(question.nodeID == "ask")
+        #expect(checkpoint.outputs.map(\.nodeID) == ["one", "slow", "fast"], "parallel results join in declared order")
+        try await engine.answer(nodeID: "ask", answer: "Continue")
+        let second = await engine.run()
+        guard case .completed(let complete) = second else { Issue.record("Expected completion"); return }
+        #expect(complete.outputs.map(\.nodeID) == ["one", "slow", "fast", "ask", "last"])
+        #expect(complete.cumulativeCost == 0.04)
+        #expect(await recorder.checkpoints.count >= 8)
+    }
+
+    @Test func workflowRepeatCompletesOrPausesAtMaximumAndCanStop() async throws {
+        let successRecorder = WorkflowTestRecorder(goalOnCall: 2)
+        let repeatNode = WorkflowNode.repeatUntil("repeat", title: "Improve", maximum: 3, goal: "verified", steps: [
+            .agent("work", title: "Work", agent: "researcher", instruction: "improve")
+        ])
+        let definition = WorkflowDefinition(id: "repeat-test", name: "Repeat", summary: "", steps: [repeatNode], isApproved: true)
+        let successful = WorkflowEngine(definition: definition, runner: { try await successRecorder.run($0) })
+        guard case .completed(let complete) = await successful.run(request: "goal") else { Issue.record("Expected repeat completion"); return }
+        #expect(complete.repeatIterations["repeat"] == 2)
+
+        let boundedRecorder = WorkflowTestRecorder()
+        let bounded = WorkflowEngine(definition: definition, runner: { try await boundedRecorder.run($0) })
+        guard case .waiting(let paused, let question) = await bounded.run(request: "goal") else { Issue.record("Expected maximum pause"); return }
+        #expect(paused.repeatIterations["repeat"] == 3)
+        #expect(question.options == ["Continue", "Stop"])
+        try await bounded.answer(nodeID: "repeat", answer: "Stop")
+        guard case .completed = await bounded.run() else { Issue.record("Expected stopped repeat to complete workflow"); return }
+    }
+
+    @Test func workflowRestoresCheckpointAndCancellationStopsRunningWork() async throws {
+        let recorder = WorkflowTestRecorder()
+        let definition = WorkflowDefinition(id: "restore", name: "Restore", summary: "", steps: [
+            .agent("done", title: "Done", agent: "planner", instruction: "already"),
+            .agent("slow", title: "Slow", agent: "planner", instruction: "slow next"),
+        ], isApproved: true)
+        var checkpoint = WorkflowCheckpoint(workflowID: definition.id, request: "request")
+        checkpoint.statuses["done"] = .completed
+        checkpoint.outputs = [WorkflowOutput(nodeID: "done", title: "Done", text: "saved")]
+        let engine = WorkflowEngine(definition: definition, checkpoint: checkpoint, runner: { try await recorder.run($0) })
+        let task = Task { await engine.run() }
+        try await Task.sleep(nanoseconds: 10_000_000)
+        await engine.cancel()
+        guard case .cancelled(let cancelled) = await task.value else { Issue.record("Expected cancellation"); return }
+        #expect(cancelled.outputs.first?.text == "saved")
+        #expect(!(await recorder.calls).contains("already"))
     }
 
     @Test func cloudShellIsBoundedApprovalGatedAndLoggerRedacts() async throws {

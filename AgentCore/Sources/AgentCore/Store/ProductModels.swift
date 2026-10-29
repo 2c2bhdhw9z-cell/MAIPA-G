@@ -37,30 +37,99 @@ public struct ChatGroupRecord: ProductRecord, Hashable {
 }
 
 public struct CustomAgentRecord: ProductRecord, Hashable {
-    public static let currentFormat = 1
-    public var format = currentFormat
+    public static let currentFormat = 2
+    public var format: Int
     public var id: UUID
     public var name: String
+    public var summary: String
     public var instructions: String
     public var allowedTools: [String]
+    public var difficulty: TaskDifficulty
+    public var modelPolicy: AgentModelPolicy
+    public var behavior: AgentBehavior
+    public var maximumHelpers: Int
     public var createdAt: Date
     public var updatedAt: Date
-    public init(id: UUID = UUID(), name: String, instructions: String, allowedTools: [String] = [], createdAt: Date = Date()) {
-        self.id = id; self.name = name; self.instructions = instructions; self.allowedTools = allowedTools
+
+    public init(
+        id: UUID = UUID(), name: String, summary: String = "", instructions: String,
+        allowedTools: [String] = [], difficulty: TaskDifficulty = .normal,
+        modelPolicy: AgentModelPolicy = .automatic, behavior: AgentBehavior = .changesAllowed,
+        maximumHelpers: Int = 0, createdAt: Date = Date()
+    ) {
+        format = Self.currentFormat; self.id = id; self.name = name; self.summary = summary
+        self.instructions = instructions; self.allowedTools = allowedTools; self.difficulty = difficulty
+        self.modelPolicy = modelPolicy; self.behavior = behavior
+        self.maximumHelpers = max(0, min(maximumHelpers, 6))
         self.createdAt = createdAt; updatedAt = createdAt
+    }
+
+    public var definition: AgentDefinition {
+        AgentDefinition(
+            id: "custom:\(id.uuidString.lowercased())", name: name, summary: summary,
+            instructions: instructions, allowedTools: allowedTools, difficulty: difficulty,
+            modelPolicy: modelPolicy, behavior: behavior, maximumHelpers: maximumHelpers
+        )
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case format, id, name, summary, instructions, allowedTools, difficulty, modelPolicy
+        case behavior, maximumHelpers, createdAt, updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        format = try c.decodeIfPresent(Int.self, forKey: .format) ?? 1
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        summary = try c.decodeIfPresent(String.self, forKey: .summary) ?? ""
+        instructions = try c.decodeIfPresent(String.self, forKey: .instructions) ?? ""
+        allowedTools = try c.decodeIfPresent([String].self, forKey: .allowedTools) ?? []
+        difficulty = try c.decodeIfPresent(TaskDifficulty.self, forKey: .difficulty) ?? .normal
+        modelPolicy = try c.decodeIfPresent(AgentModelPolicy.self, forKey: .modelPolicy) ?? .automatic
+        behavior = try c.decodeIfPresent(AgentBehavior.self, forKey: .behavior) ?? .changesAllowed
+        maximumHelpers = max(0, min(try c.decodeIfPresent(Int.self, forKey: .maximumHelpers) ?? 0, 6))
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
     }
 }
 
 public struct WorkflowRecord: ProductRecord, Hashable {
-    public static let currentFormat = 1
-    public var format = currentFormat
+    public static let currentFormat = 2
+    public var format: Int
     public var id: UUID
     public var name: String
-    public var steps: [JSONValue]
+    public var summary: String
+    public var steps: [WorkflowNode]
+    public var isApproved: Bool
     public var createdAt: Date
     public var updatedAt: Date
-    public init(id: UUID = UUID(), name: String, steps: [JSONValue] = [], createdAt: Date = Date()) {
-        self.id = id; self.name = name; self.steps = steps; self.createdAt = createdAt; updatedAt = createdAt
+
+    public init(id: UUID = UUID(), name: String, summary: String = "", steps: [WorkflowNode] = [], isApproved: Bool = false, createdAt: Date = Date()) {
+        format = Self.currentFormat; self.id = id; self.name = name; self.summary = summary
+        self.steps = steps; self.isApproved = isApproved; self.createdAt = createdAt; updatedAt = createdAt
+    }
+
+    public init(definition: WorkflowDefinition, id: UUID = UUID(), createdAt: Date = Date()) {
+        self.init(id: id, name: definition.name, summary: definition.summary, steps: definition.steps, isApproved: definition.isApproved, createdAt: createdAt)
+    }
+
+    public var definition: WorkflowDefinition {
+        WorkflowDefinition(id: "custom:\(id.uuidString.lowercased())", name: name, summary: summary, steps: steps, isApproved: isApproved)
+    }
+
+    enum CodingKeys: String, CodingKey { case format, id, name, summary, steps, isApproved, createdAt, updatedAt }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        format = try c.decodeIfPresent(Int.self, forKey: .format) ?? 1
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        summary = try c.decodeIfPresent(String.self, forKey: .summary) ?? ""
+        steps = (try? c.decode([WorkflowNode].self, forKey: .steps)) ?? []
+        isApproved = try c.decodeIfPresent(Bool.self, forKey: .isApproved) ?? false
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
     }
 }
 

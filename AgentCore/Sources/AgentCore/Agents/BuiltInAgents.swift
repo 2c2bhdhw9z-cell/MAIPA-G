@@ -1,0 +1,36 @@
+import Foundation
+
+public enum BuiltInAgents {
+    private static let inspect = ["list_files", "search_code", "read_file", "inspect_workspace", "read_attachment", "web_search", "read_web_page", "ask_user"]
+    private static let change = inspect + ["create_file", "edit_file", "delete_file", "save_changes"]
+    private static let review = inspect + ["read_pull_request", "read_pull_request_comments", "read_checks", "read_workflow_logs"]
+    private static let build = change + ["list_workflows", "dispatch_workflow", "read_checks", "read_workflow_logs", "list_artifacts", "inspect_ipa", "read_releases"]
+
+    public static let all: [AgentDefinition] = [
+        agent("planner", "Planner", "Turns a request into checked requirements and an ordered plan.", "Clarify only consequential unknowns, inspect the project, state requirements, dependencies, acceptance checks, and a practical implementation order. Do not implement.", inspect, .hard, .strong, .reportOnly, 3),
+        agent("designer", "Designer", "Designs product behavior and technical structure before implementation.", "Produce a concrete design that fits the existing product and code. Cover user-visible states, data flow, failure behavior, accessibility, and test strategy. Do not implement.", inspect, .hard, .strong, .reportOnly, 3),
+        agent("design-checker", "Design checker", "Checks a design for omissions, conflicts, and unsafe assumptions.", "Independently compare the design with the request, repository rules, and current code. Report specific findings and required corrections. Do not rewrite or implement it.", review, .hard, .differentFromPrimary, .review, 2),
+        agent("coder", "Coder", "Implements an approved plan and verifies the result.", "Read the relevant code, make the smallest complete production change, preserve existing behavior, and run the required checks. Ask before destructive or build-setup changes unless already authorized.", change, .normal, .automatic, .changesAllowed, 4),
+        agent("code-checker", "Code checker", "Reviews implemented code and verification evidence.", "Review the actual diff and surrounding code for correctness, regressions, security, missing requirements, and missing tests. Report actionable findings with file locations. Do not edit.", review, .hard, .strong, .review, 3),
+        agent("second-opinion", "Second opinion", "Performs an independent review with a different AI.", "Review independently without seeing another review's conclusions first. Look for requirement gaps, incorrect assumptions, regressions, and untested behavior. Report only.", review, .hard, .differentFromPrimary, .review, 2),
+        agent("review-combiner", "Review combiner", "Combines independent reviews without losing disagreements.", "Deduplicate findings, preserve disagreements, rank issues by impact, reject unsupported claims, and produce one checked action list. Do not edit code.", inspect, .hard, .strong, .reportOnly, 2),
+        agent("investigator", "Investigator", "Finds root causes and reports evidence without changing anything.", "Reproduce or trace the problem, inspect relevant code and logs, distinguish facts from hypotheses, and report the root cause and viable fixes. Never mutate the repo.", review, .hard, .strong, .reportOnly, 4),
+        agent("researcher", "Researcher", "Runs bounded experiments and keeps only improvements that work.", "Establish a baseline, try one measurable change at a time, verify it, keep successful changes, revert unsuccessful staged experiments, and report evidence. Never claim improvement without a comparison.", change, .hard, .automatic, .changesAllowed, 4),
+        agent("builder", "Builder", "Starts requested builds and checks their real artifacts.", "Inspect existing workflows first. Dispatch a build only when the user's request explicitly asks for one. Watch checks, read failures, inspect the produced IPA contents, and report exact evidence.", build, .normal, .automatic, .build, 2),
+        agent("workflow-maker", "Workflow maker", "Turns a plain-language goal into an editable workflow draft.", "Translate the request into typed agent, repeat, stop-and-ask, and parallel steps. Set finite repeat limits. Return a draft for explicit user approval; never run it before approval.", inspect, .hard, .strong, .reportOnly, 2),
+        agent("request-sender", "Request sender", "Opens the side-copy request after checks pass.", "Confirm the intended base and head, summarize verified changes plainly, open or update the pull request, and return its link. Never merge it.", review + ["create_pull_request"], .normal, .automatic, .pullRequest, 0),
+        agent("feedback-answerer", "Feedback answerer", "Handles review comments and verifies each resulting change.", "Read every unresolved review comment, determine whether it is valid, make focused fixes when needed, rerun relevant checks, reply with evidence, and leave disputed feedback clearly explained.", change + ["read_pull_request_comments", "reply_to_review_comment"], .hard, .automatic, .feedback, 3),
+    ]
+
+    public static var byID: [String: AgentDefinition] { Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) }) }
+
+    public static func named(_ id: String) -> AgentDefinition? { byID[id] }
+
+    private static func agent(
+        _ id: String, _ name: String, _ summary: String, _ instructions: String,
+        _ tools: [String], _ difficulty: TaskDifficulty, _ model: AgentModelPolicy,
+        _ behavior: AgentBehavior, _ helpers: Int
+    ) -> AgentDefinition {
+        AgentDefinition(id: id, name: name, summary: summary, instructions: instructions, allowedTools: tools, difficulty: difficulty, modelPolicy: model, behavior: behavior, maximumHelpers: helpers, isBuiltIn: true)
+    }
+}

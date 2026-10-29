@@ -22,7 +22,9 @@ public enum SystemPrompt {
         now: Date = Date(),
         timeZone: TimeZone = .current,
         userLogin: String?,
-        repo: RepoContext?
+        repo: RepoContext?,
+        agent: AgentDefinition? = nil,
+        workflowContext: String? = nil
     ) -> String {
         var formatter = Date.FormatStyle(date: .complete, time: .shortened)
         formatter.timeZone = timeZone
@@ -57,6 +59,12 @@ public enum SystemPrompt {
             build setup require the person's explicit approval; the app enforces that pause. Repo rules override \
             the normal side-branch and pull-request behavior.
             """)
+        }
+
+        if let agent {
+            parts.append(agent.prompt(task: workflowContext ?? "Complete the assigned step."))
+        } else if let workflowContext, !workflowContext.isEmpty {
+            parts.append("Workflow context:\n\(workflowContext)")
         }
 
         parts.append("""

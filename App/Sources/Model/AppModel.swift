@@ -18,6 +18,11 @@ enum AppSheet: Identifiable, Hashable {
     case branches(ComposerTarget)
     case files(ChatRepo)
     case jobs
+    case agents
+    case agentEditor(String?)
+    case workflows
+    case workflowEditor(String?)
+    case workflowMaker
 
     var id: String {
         switch self {
@@ -29,6 +34,11 @@ enum AppSheet: Identifiable, Hashable {
         case .branches(let target): return "branches-\(target)"
         case .files(let repo): return "files-\(repo.ref.fullName)-\(repo.branch)"
         case .jobs: return "jobs"
+        case .agents: return "agents"
+        case .agentEditor(let id): return "agent-editor-\(id ?? "new")"
+        case .workflows: return "workflows"
+        case .workflowEditor(let id): return "workflow-editor-\(id ?? "new")"
+        case .workflowMaker: return "workflow-maker"
         }
     }
 }
@@ -63,6 +73,7 @@ final class AppModel {
     let attachmentStore: AttachmentStore
     let notifications = Notifications()
     let jobs: JobCoordinator
+    let automations: AutomationLibrary
     let backgroundJobs = BackgroundJobs()
     let home = HomeDraft()
     private(set) var settings: AppSettings
@@ -84,10 +95,12 @@ final class AppModel {
         snapshots = SnapshotStore(root: paths.repoCopies)
         attachmentStore = AttachmentStore(dataDirectory: paths.data)
         jobs = JobCoordinator(dataDirectory: paths.data)
+        automations = AutomationLibrary(dataDirectory: paths.data)
         settings = Self.readSettings(paths)
         library.app = self
         sync.app = self
         jobs.app = self
+        automations.app = self
         backgroundJobs.app = self
         backgroundJobs.register()
         home.repo = settings.lastRepo
@@ -106,6 +119,7 @@ final class AppModel {
         github.restore()
         await library.load()
         await jobs.load()
+        await automations.load()
         async let models: Void = openRouter.loadModels()
         async let key: Void = openRouter.refreshKeyInfo()
         await github.refresh()
@@ -192,6 +206,9 @@ final class AppModel {
         }
         if (report.downloaded + report.deletedHere).contains(where: { $0.hasPrefix("jobs/") }) {
             await jobs.refresh()
+        }
+        if (report.downloaded + report.deletedHere).contains(where: { $0.hasPrefix("agents/") || $0.hasPrefix("workflows/") }) {
+            await automations.load()
         }
     }
 
@@ -320,6 +337,21 @@ final class AppModel {
             library.preview(summaries: summaries, open: nil)
             jobs.preview(PreviewScenes.sampleJobs(needsYou: scene == "job-needs-you"))
             sheet = .jobs
+        case "agents":
+            library.preview(summaries: summaries, open: nil)
+            sheet = .agents
+        case "agent-editor":
+            library.preview(summaries: summaries, open: nil)
+            sheet = .agentEditor("coder")
+        case "workflows":
+            library.preview(summaries: summaries, open: nil)
+            sheet = .workflows
+        case "workflow-editor":
+            library.preview(summaries: summaries, open: nil)
+            sheet = .workflowEditor("full-feature")
+        case "workflow-maker":
+            library.preview(summaries: summaries, open: nil)
+            sheet = .workflowMaker
         case "connect":
             library.preview(summaries: [], open: nil)
             sheet = .connectGitHub

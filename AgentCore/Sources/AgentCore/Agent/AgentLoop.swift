@@ -18,8 +18,10 @@ public struct AgentTurnInput: Sendable {
     public var attachmentData: [UUID: Data]
     /// OpenRouter-run paid tools, offered alongside local tools.
     public var serverTools: [ToolSpec]
+    /// Fixed role and tool policy when this turn belongs to a named agent.
+    public var agent: AgentDefinition?
 
-    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 40, spendLimit: Double? = nil, attachmentData: [UUID: Data] = [:], serverTools: [ToolSpec] = []) {
+    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 40, spendLimit: Double? = nil, attachmentData: [UUID: Data] = [:], serverTools: [ToolSpec] = [], agent: AgentDefinition? = nil) {
         self.chat = chat
         self.route = route
         self.systemPrompt = systemPrompt
@@ -29,6 +31,7 @@ public struct AgentTurnInput: Sendable {
         self.spendLimit = spendLimit
         self.attachmentData = attachmentData
         self.serverTools = serverTools
+        self.agent = agent
     }
 }
 
@@ -116,11 +119,17 @@ private struct Runner {
         route = input.route
         systemPrompt = input.systemPrompt
         var byName: [String: any AgentTool] = [:]
+        var localSpecs: [ToolSpec] = []
         if input.allowTools {
-            for tool in input.tools { byName[tool.name] = tool }
+            for tool in input.tools where input.agent?.permits(tool: tool.name) ?? true {
+                byName[tool.name] = tool
+                localSpecs.append(tool.spec)
+            }
         }
         tools = byName
-        specs = input.allowTools ? input.tools.map(\.spec) + input.serverTools + [AskUserTool.spec] : []
+        let serverSpecs = input.serverTools.filter { input.agent?.permits(tool: $0.function.name) ?? true }
+        let mayAsk = input.agent?.permits(tool: AskUserTool.name) ?? true
+        specs = input.allowTools ? localSpecs + serverSpecs + (mayAsk ? [AskUserTool.spec] : []) : []
         maxSteps = input.maxSteps
         spendLimit = input.spendLimit.flatMap { $0 > 0 ? $0 : nil }
         attachmentData = input.attachmentData

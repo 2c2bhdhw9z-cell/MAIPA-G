@@ -6,6 +6,7 @@ struct SideMenu: View {
     @Environment(AppModel.self) private var app
     @Environment(\.theme) private var theme
     @State private var query = ""
+    @State private var tab: MenuTab = .chats
     @State private var selected: ChatSummary?
     @State private var showRename = false
     @State private var showDelete = false
@@ -14,6 +15,7 @@ struct SideMenu: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            tabs
             search
             list
             footer
@@ -69,10 +71,26 @@ struct SideMenu: View {
         .padding(.bottom, 10)
     }
 
+    private enum MenuTab: String, CaseIterable, Identifiable {
+        case chats = "Chats"
+        case agents = "Agents"
+        case workflows = "Workflows"
+        var id: String { rawValue }
+    }
+
+    private var tabs: some View {
+        Picker("Library", selection: $tab) {
+            ForEach(MenuTab.allCases) { Text($0.rawValue).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+    }
+
     private var search: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(Theme.secondaryText)
-            TextField("Search chats", text: $query)
+            TextField("Search \(tab.rawValue.lowercased())", text: $query)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
             if !query.isEmpty {
@@ -87,33 +105,52 @@ struct SideMenu: View {
         .padding(.bottom, 8)
     }
 
-    private var list: some View {
-        let groups = groupedChats
-        return List {
-            if !app.library.isLoaded {
-                ProgressView().frame(maxWidth: .infinity).listRowBackground(Color.clear)
-            } else if groups.isEmpty {
-                Text(query.isEmpty ? "Your chats will show up here." : "No chats match.")
-                    .font(.subheadline)
-                    .foregroundStyle(Theme.secondaryText)
-                    .listRowBackground(Color.clear)
-            }
-            ForEach(groups, id: \.title) { group in
-                Section {
-                    ForEach(group.chats) { chat in
-                        row(chat)
+    @ViewBuilder private var list: some View {
+        switch tab {
+        case .chats:
+            let groups = groupedChats
+            List {
+                if !app.library.isLoaded {
+                    ProgressView().frame(maxWidth: .infinity).listRowBackground(Color.clear)
+                } else if groups.isEmpty {
+                    Text(query.isEmpty ? "Your chats will show up here." : "No chats match.")
+                        .font(.subheadline).foregroundStyle(Theme.secondaryText).listRowBackground(Color.clear)
+                }
+                ForEach(groups, id: \.title) { group in
+                    Section {
+                        ForEach(group.chats) { chat in row(chat) }
+                    } header: {
+                        Text(group.title).font(.caption.weight(.semibold)).foregroundStyle(Theme.secondaryText).textCase(nil)
                     }
-                } header: {
-                    Text(group.title)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Theme.secondaryText)
-                        .textCase(nil)
                 }
             }
+            .listStyle(.plain).scrollContentBackground(.hidden).environment(\.defaultMinListRowHeight, 44)
+        case .agents:
+            automationList(
+                app.automations.agents.filter { query.isEmpty || ($0.name + " " + $0.summary).localizedCaseInsensitiveContains(query) },
+                empty: "No agents match."
+            ) { agent in app.sheet = .agentEditor(agent.id) }
+        case .workflows:
+            automationList(
+                app.automations.workflows.filter { query.isEmpty || ($0.name + " " + $0.summary).localizedCaseInsensitiveContains(query) },
+                empty: "No workflows match."
+            ) { workflow in app.sheet = .workflowEditor(workflow.id) }
         }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
-        .environment(\.defaultMinListRowHeight, 44)
+    }
+
+    private func automationList<Item: Identifiable>(_ items: [Item], empty: String, action: @escaping (Item) -> Void) -> some View where Item.ID == String {
+        List {
+            if items.isEmpty { Text(empty).font(.subheadline).foregroundStyle(Theme.secondaryText).listRowBackground(Color.clear) }
+            ForEach(items) { item in
+                Button { action(item); app.isMenuOpen = false } label: {
+                    if let agent = item as? AgentDefinition {
+                        VStack(alignment: .leading, spacing: 2) { Text(agent.name); Text(agent.summary).font(.caption).foregroundStyle(Theme.secondaryText).lineLimit(2) }
+                    } else if let workflow = item as? WorkflowDefinition {
+                        VStack(alignment: .leading, spacing: 2) { Text(workflow.name); Text(workflow.summary).font(.caption).foregroundStyle(Theme.secondaryText).lineLimit(2) }
+                    }
+                }.buttonStyle(.plain)
+            }
+        }.listStyle(.plain).scrollContentBackground(.hidden)
     }
 
     private func row(_ chat: ChatSummary) -> some View {

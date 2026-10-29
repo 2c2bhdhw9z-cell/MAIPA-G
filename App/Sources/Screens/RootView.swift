@@ -98,6 +98,7 @@ struct RootView: View {
 
 /// Every sheet the app shows.
 struct SheetContent: View {
+    @Environment(AppModel.self) private var app
     var sheet: AppSheet
 
     var body: some View {
@@ -110,6 +111,23 @@ struct SheetContent: View {
         case .branches(let target): BranchPicker(target: target)
         case .files(let repo): FilesScreen(repo: repo)
         case .jobs: JobsScreen()
+        case .agents: AgentsScreen()
+        case .agentEditor(let id):
+            NavigationStack {
+                AgentEditorScreen(
+                    record: id.flatMap { value in app.automations.customAgents.first { $0.definition.id == value } },
+                    template: id.flatMap { value in app.automations.agents.first { $0.id == value } }
+                )
+            }
+        case .workflows: WorkflowsScreen()
+        case .workflowEditor(let id):
+            NavigationStack {
+                WorkflowEditorScreen(
+                    record: id.flatMap { value in app.automations.customWorkflows.first { $0.definition.id == value } },
+                    template: id.flatMap { value in app.automations.workflows.first { $0.id == value } }
+                )
+            }
+        case .workflowMaker: NavigationStack { WorkflowMakerScreen() }
         }
     }
 }
