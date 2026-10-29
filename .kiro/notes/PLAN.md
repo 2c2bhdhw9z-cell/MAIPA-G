@@ -1,11 +1,14 @@
 # MAIPA-G plan
 
-**Status (29 October 2026, 12:23 PM Eastern): the whole plan is built and on main. Build 24
-(`build-24-aa5a76b`, 4.6 MB) is installed and he is testing it. His reports so far are in "Build 24
-test reports" below. Per his rule, nothing gets fixed until he says he's done testing; then all of
-them go into one batch and one build.**
+**Status (29 October 2026, 1:40 PM Eastern): the whole plan is built and on main. Build 25
+(`build-25-480fa98`, 4.6 MB, PR #8) is the one to install. It fixes all four build 24 reports
+below: the companies' own full-colour logos on plain tiles, search that finds Hugging Face and
+well-known services, a real computer for every chat (Sprites through its connector, switchable in
+Settings, set up and used by the AI on its own), and tool-call bars that end at their arrows.
+Linux checks and the iPhone build passed; downloaded and checked: 0.1.0 (25), iPhone arm64, 19
+entries. Next: he tests build 25.**
 
-## Build 24 test reports (29 October 2026, held until he says he's done testing)
+## Build 24 test reports (29 October 2026, all fixed in build 25)
 1. **10:04 AM: the connector logos aren't the real ones.** "CAN I PLEASE JUST HAVE THE NORMAL
    ICONS/LOGOS". He circled the logo column in Discover and compared it with Grok, Claude and a
    third AI app. Build 24 drew one-colour Simple Icons shapes on brand-tinted tiles. The other apps
