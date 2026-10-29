@@ -1,14 +1,46 @@
 # MAIPA-G plan
 
-**Status (29 October 2026, 9:40 AM Eastern): the whole plan is built and on main. Build 24
-(`build-24-aa5a76b`, 4.6 MB) is the one to install. It includes Build 22's fixed Jobs, normal
-integration layout and context meter, then replaces every generic integration symbol: 18 familiar
-services have their actual bundled logo shapes; every Registry entry uses its own published safe
-raster icon when available, an older entry can use its trusted GitHub publisher identity, and only
-a publisher with no artwork gets unique initials/colour. Run 24's Linux checks, Mac tests and
-iPhone build passed; the real-logo Connectors screenshot was reviewed before the final dynamic
-fallback change. Downloaded and checked: 0.1.0 (24), iPhone only, arm64, 19 complete zip entries.
-Next: he installs and tests build 24.**
+**Status (29 October 2026, 10:21 AM Eastern): the whole plan is built and on main. Build 24
+(`build-24-aa5a76b`, 4.6 MB) is installed and he is testing it. His reports so far are in "Build 24
+test reports" below. Per his rule, nothing gets fixed until he says he's done testing; then all of
+them go into one batch and one build.**
+
+## Build 24 test reports (29 October 2026, held until he says he's done testing)
+1. **10:04 AM: the connector logos aren't the real ones.** "CAN I PLEASE JUST HAVE THE NORMAL
+   ICONS/LOGOS". He circled the logo column in Discover and compared it with Grok, Claude and a
+   third AI app. Build 24 drew one-colour Simple Icons shapes on brand-tinted tiles. The other apps
+   show each company's real full-colour logo on a plain tile (Claude and the third app: plain dark
+   tile; Grok: each app's own icon). Fix: all 18 get the company's own current official artwork
+   (Google's 2026 gradient icons, which Grok shows too), on a plain tile instead of a tinted one.
+2. **10:20 AM: Hugging Face is missing, and the list is full of connectors nobody has heard of.**
+   Hugging Face's own connector IS in the Registry (`co.huggingface/hf-mcp-server`, "Hugging Face",
+   `https://huggingface.co/mcp?login`, active). The Registry's search only matches server names,
+   so "Hugging Face" with a space finds nothing, while "hugging" or "huggingface" finds it. It is
+   also not in Discover. Fix: search must find well-known services however he types them, with the
+   company's own connector first; Hugging Face (and the other well-known ones) belong in Discover
+   with real logos; All shouldn't lead with obscure entries.
+
+Technical notes for the logo fix (for Kiro):
+- iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
+  `style="mask-type:alpha"`, plus Gaussian-blur filters). Pre-render every logo to exact-size @2x
+  and @3x PNGs with resvg (`npm i @resvg/resvg-js`; rewrite the style as a `mask-type="alpha"`
+  attribute first, or Drive, Docs and Sheets come out see-through). Check each render by eye.
+- Official sources found: Google `https://www.gstatic.com/images/branding/productlogos/<app>_2026/v2/web/192px.svg`
+  (gmail, calendar, drive, docs, sheets, slides); GitHub `https://brand.github.com/GitHub_Logos.zip`
+  (Invertocat White/Black, for Dark/Light); Figma's brand-page zip ("Figma Icon (Full-color)") or
+  `https://static.figma.com/app/icon/2/favicon.svg`; Linear's own MCP icon
+  `https://static.linear.app/integrations/mcp/icon.svg`; Microsoft
+  `https://learn.microsoft.com/en-us/entra/identity-platform/media/howto-add-branding-in-apps/ms-symbollockup_mssymbol_19.svg`;
+  Slack `https://a.slack-edge.com/1f40066/marketing/img/nav/logo.svg` (brand.slackhq.com is 404);
+  Notion: the first inline SVG on notion.com (its `--tatami-color-black` is `#000`); Dropbox glyph
+  in `https://fjord.dropboxstatic.com/warp/conversion/dropbox/warp/icons/Dropbox-logo-nav.svg`
+  (`#0061FE`); Atlassian `https://atlassian.design/assets/37b166ae7510/logos/atlassian_logo.zip`
+  ("Atlassian mark brand RGB"); Box: box.com's inline `svg.logo-box` in `#0061D5`; Asana: the
+  three-dot path in asana.com's header logo (`#F06A6A`); Canva
+  `https://static.canva.com/static/images/android-192x192-2.png` (no official SVG found; canva.com
+  blocks scripts); YouTube: the red button in
+  `https://www.gstatic.com/youtube/img/branding/youtubelogo/svg/youtubelogo.svg`. Hugging Face: not
+  fetched yet.
 
 ## What it is
 An iPhone app (.ipa) for AI agents and workflows, with GitHub built in, like Kiro (app.kiro.dev)
