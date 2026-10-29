@@ -78,6 +78,7 @@ targets:
         BGTaskSchedulerPermittedIdentifiers:
           - dev.maipag.app.refresh
           - dev.maipag.app.autonomous
+        NSCameraUsageDescription: Take a photo to attach to your MAIPA-G chat.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.maipag.app

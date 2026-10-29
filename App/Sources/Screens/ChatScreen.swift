@@ -36,7 +36,7 @@ struct ChatScreen: View {
                 .padding(.vertical, 12)
                 .animation(theme.messagesSlideIn ? .snappy : nil, value: session.chat.messages.count)
             }
-            .scrollDismissesKeyboard(.interactively)
+            .scrollDismissesKeyboard(.immediately)
             .defaultScrollAnchor(.bottom)
             .simultaneousGesture(
                 DragGesture(minimumDistance: 12).onChanged { value in
