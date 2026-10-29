@@ -282,7 +282,18 @@ struct IntegrationIcon: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 10, style: .continuous).fill(service.colour.opacity(0.18))
-            Image(systemName: service.symbol).font(.system(size: 19, weight: .semibold)).foregroundStyle(service.colour)
+            if let assetName = service.assetName {
+                Image(assetName)
+                    .resizable()
+                    .renderingMode(service.usesOriginalColours ? .original : .template)
+                    .scaledToFit()
+                    .foregroundStyle(service.colour)
+                    .padding(9)
+            } else {
+                Image(systemName: service.symbol)
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(service.colour)
+            }
         }
         .frame(width: 44, height: 44)
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.stroke))
@@ -298,6 +309,14 @@ struct IntegrationService: Identifiable {
     let aliases: [String]
     let symbol: String
     let colour: Color
+    let assetName: String?
+    let usesOriginalColours: Bool
+
+    init(name: String, detail: String, search: String, aliases: [String], symbol: String, colour: Color, assetName: String? = nil, usesOriginalColours: Bool = false) {
+        self.name = name; self.detail = detail; self.search = search; self.aliases = aliases
+        self.symbol = symbol; self.colour = colour; self.assetName = assetName
+        self.usesOriginalColours = usesOriginalColours
+    }
 
     func matches(_ text: String) -> Bool {
         let value = " " + Self.normalized(text) + " "
@@ -314,24 +333,24 @@ struct IntegrationService: Identifiable {
     }
 
     static let popular: [IntegrationService] = [
-        .init(name: "GitHub", detail: "Search repositories, manage issues and review changes", search: "github", aliases: ["github"], symbol: "chevron.left.forwardslash.chevron.right", colour: .primary),
-        .init(name: "Gmail", detail: "Read, search and draft email", search: "gmail", aliases: ["gmail", "google mail"], symbol: "envelope.fill", colour: .red),
-        .init(name: "Google Calendar", detail: "Read and manage your calendar events", search: "calendar", aliases: ["google calendar", "gcalendar", "google agenda"], symbol: "calendar", colour: .blue),
-        .init(name: "Google Drive", detail: "Search, read and upload your files", search: "drive", aliases: ["google drive", "gdrive"], symbol: "externaldrive.fill", colour: .green),
-        .init(name: "Google Docs", detail: "Read, edit and create documents", search: "docs", aliases: ["google docs", "gdocs"], symbol: "doc.text.fill", colour: .blue),
-        .init(name: "Google Sheets", detail: "Read, analyse and update spreadsheets", search: "sheets", aliases: ["google sheets", "gsheets"], symbol: "tablecells.fill", colour: .green),
-        .init(name: "Google Slides", detail: "Read and create presentations", search: "slides", aliases: ["google slides", "gslides"], symbol: "rectangle.on.rectangle.angled", colour: .orange),
-        .init(name: "Microsoft 365", detail: "Use Outlook, OneDrive, Teams and SharePoint", search: "microsoft", aliases: ["microsoft 365", "office 365", "m365", "m365 copilot"], symbol: "square.grid.2x2.fill", colour: .blue),
-        .init(name: "Slack", detail: "Search channels and send messages", search: "slack", aliases: ["slack"], symbol: "number", colour: .purple),
-        .init(name: "Notion", detail: "Search, read and update your workspace", search: "notion", aliases: ["notion"], symbol: "doc.text", colour: .primary),
-        .init(name: "Linear", detail: "Search and manage issues and projects", search: "linear", aliases: ["linear"], symbol: "circle.lefthalf.filled", colour: .indigo),
-        .init(name: "Figma", detail: "Read designs, comments and project details", search: "figma", aliases: ["figma"], symbol: "paintbrush.pointed.fill", colour: .pink),
-        .init(name: "Dropbox", detail: "Search, read and manage cloud files", search: "dropbox", aliases: ["dropbox"], symbol: "shippingbox.fill", colour: .blue),
-        .init(name: "Atlassian", detail: "Use Jira and Confluence projects", search: "atlassian", aliases: ["atlassian", "jira", "confluence"], symbol: "triangle.fill", colour: .blue),
-        .init(name: "Box", detail: "Search and work with company files", search: "box", aliases: ["box", "box mcp"], symbol: "archivebox.fill", colour: .blue),
-        .init(name: "Asana", detail: "Read and manage tasks and projects", search: "asana", aliases: ["asana"], symbol: "circle.grid.3x3.fill", colour: .pink),
-        .init(name: "Canva", detail: "Search and work with Canva designs", search: "canva", aliases: ["canva"], symbol: "wand.and.stars", colour: .cyan),
-        .init(name: "YouTube", detail: "Search videos and work with channel information", search: "youtube", aliases: ["youtube"], symbol: "play.rectangle.fill", colour: .red),
+        .init(name: "GitHub", detail: "Search repositories, manage issues and review changes", search: "github", aliases: ["github"], symbol: "chevron.left.forwardslash.chevron.right", colour: .primary, assetName: "IntegrationGitHub"),
+        .init(name: "Gmail", detail: "Read, search and draft email", search: "gmail", aliases: ["gmail", "google mail"], symbol: "envelope.fill", colour: .red, assetName: "IntegrationGmail"),
+        .init(name: "Google Calendar", detail: "Read and manage your calendar events", search: "calendar", aliases: ["google calendar", "gcalendar", "google agenda"], symbol: "calendar", colour: .blue, assetName: "IntegrationGoogleCalendar"),
+        .init(name: "Google Drive", detail: "Search, read and upload your files", search: "drive", aliases: ["google drive", "gdrive"], symbol: "externaldrive.fill", colour: .green, assetName: "IntegrationGoogleDrive"),
+        .init(name: "Google Docs", detail: "Read, edit and create documents", search: "docs", aliases: ["google docs", "gdocs"], symbol: "doc.text.fill", colour: .blue, assetName: "IntegrationGoogleDocs"),
+        .init(name: "Google Sheets", detail: "Read, analyse and update spreadsheets", search: "sheets", aliases: ["google sheets", "gsheets"], symbol: "tablecells.fill", colour: .green, assetName: "IntegrationGoogleSheets"),
+        .init(name: "Google Slides", detail: "Read and create presentations", search: "slides", aliases: ["google slides", "gslides"], symbol: "rectangle.on.rectangle.angled", colour: .orange, assetName: "IntegrationGoogleSlides"),
+        .init(name: "Microsoft 365", detail: "Use Outlook, OneDrive, Teams and SharePoint", search: "microsoft", aliases: ["microsoft 365", "office 365", "m365", "m365 copilot"], symbol: "square.grid.2x2.fill", colour: .blue, assetName: "IntegrationMicrosoft", usesOriginalColours: true),
+        .init(name: "Slack", detail: "Search channels and send messages", search: "slack", aliases: ["slack"], symbol: "number", colour: .purple, assetName: "IntegrationSlack", usesOriginalColours: true),
+        .init(name: "Notion", detail: "Search, read and update your workspace", search: "notion", aliases: ["notion"], symbol: "doc.text", colour: .primary, assetName: "IntegrationNotion"),
+        .init(name: "Linear", detail: "Search and manage issues and projects", search: "linear", aliases: ["linear"], symbol: "circle.lefthalf.filled", colour: .indigo, assetName: "IntegrationLinear"),
+        .init(name: "Figma", detail: "Read designs, comments and project details", search: "figma", aliases: ["figma"], symbol: "paintbrush.pointed.fill", colour: .pink, assetName: "IntegrationFigma"),
+        .init(name: "Dropbox", detail: "Search, read and manage cloud files", search: "dropbox", aliases: ["dropbox"], symbol: "shippingbox.fill", colour: .blue, assetName: "IntegrationDropbox"),
+        .init(name: "Atlassian", detail: "Use Jira and Confluence projects", search: "atlassian", aliases: ["atlassian", "jira", "confluence"], symbol: "triangle.fill", colour: .blue, assetName: "IntegrationAtlassian"),
+        .init(name: "Box", detail: "Search and work with company files", search: "box", aliases: ["box", "box mcp"], symbol: "archivebox.fill", colour: .blue, assetName: "IntegrationBox"),
+        .init(name: "Asana", detail: "Read and manage tasks and projects", search: "asana", aliases: ["asana"], symbol: "circle.grid.3x3.fill", colour: .pink, assetName: "IntegrationAsana"),
+        .init(name: "Canva", detail: "Search and work with Canva designs", search: "canva", aliases: ["canva"], symbol: "wand.and.stars", colour: .cyan, assetName: "IntegrationCanva"),
+        .init(name: "YouTube", detail: "Search videos and work with channel information", search: "youtube", aliases: ["youtube"], symbol: "play.rectangle.fill", colour: .red, assetName: "IntegrationYouTube"),
     ]
 }
 
