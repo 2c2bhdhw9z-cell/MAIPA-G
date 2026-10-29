@@ -41,6 +41,52 @@ invoke_sub_agent, disclose_context, introspect): **"Whatever tools it doesn't ha
   8. **Regex search** (grep_search): check that search_code takes regular expressions; add them
      if not. List and search respect .gitignore and .kiroignore.
 
+## Stability list (owner, 29 October 2026, 4:50 PM: "everything else ... that make it work and stable"; not built yet)
+On top of reports 5-18 and the tools list. Kiro's suggested order: 1-11 first (no lost work, and
+Kiro can read errors itself).
+- Data: 1 the new-build check warns when anything isn't backed up (don't delete the app before
+  installing); 2 one bad file can't abort the whole DataRepoSync commit (isolate per file, say
+  which); 3 big media stored or compressed so it can't break sync, MAIPA-G-data kept small (prune
+  old job logs); 4 Recently deleted (30 days) for chats, memories, agents and workflows; 5 Export
+  everything to Files (zip); 6 the composer draft (text and attachments) persists; 7 unreadable
+  stored files are quarantined, never overwritten.
+- Diagnostics: 8 a redacted error log synced to MAIPA-G-data `diagnostics/` so Kiro can read real
+  errors; 9 MetricKit crash and hang diagnostics saved the same way; 10 a Settings "Check
+  everything" health check (GitHub, OpenRouter, saving, each connector, the computer, Actions)
+  with fixes; 11 no catch-all error messages anywhere: always the real cause and the next step.
+- Jobs: 12 a prebuilt, checksummed MAIPAGRunner release binary instead of `swift build` on every
+  run (~95 s build, ~2.5 min to start); 13 no progress for 10 min → stuck, with Stop and Resume;
+  14 show private-repo Actions minutes left (2,000 a month) and warn; 15 auto-update the
+  `maipa-g.yml` added to target repos; 16 update `actions/create-github-app-token@v2` in
+  `.github/workflows/agent.yml` (Node.js 20 deprecation warning in Built-Helion's run); 17 explain
+  iOS's "Task failed" background banner in the app (which job, why).
+- AI: 18 OpenRouter fallback models (`models` list) after repeated failures or a removed model,
+  with a notice; 19 429 handling with Retry-After, and a clear free-daily-limit message; 20 loop
+  guard: repeated identical failing tool calls → change approach or ask_user; 21 unknown tool
+  name → reply with the real tool list; 22 cap connector (MCP) tool results (no cap today; repo
+  tools have caps); 23 load repo rule documents on demand (today up to 20 × 20,000 characters go
+  into every request, `SystemPrompt.swift`).
+- Saving changes: 24 a diff view of staged changes (this turn or the whole branch), none today;
+  25 a protected branch → side branch and PR automatically; 26 merge conflicts on Add it
+  explained, with a fix offered; 27 show PR check status, ask before adding a failing one;
+  28 keep line endings and encoding, refuse text edits to binary files; 29 big repos: large
+  tarballs, Git LFS, submodules, snapshot cache size shown, low-storage warning, clear cache.
+- Computer: 30 a per-command timeout, output cut to head and tail; 31 long commands in the
+  background with the computer kept awake (Sprites Tasks API); 32 Stop also kills running
+  commands; 33 staged changes synced onto the computer before tests run; 34 auto-recreate a
+  missing or broken machine; 35 computer checkpoints (Sprites) and an approximate cost.
+- Connectors: 36 refresh OAuth tokens before expiry and reconnect after a restart; 37 send only
+  enabled tools, with per-connector tool switches (some connectors expose 50+).
+- iPhone: 38 long chats render lazily, with downsampled images; 39 resume an interrupted turn
+  when the app comes back; 40 read `embedded.mobileprovision`, show the signing expiry and remind
+  a few days before.
+- Safety: 41 deleting, direct saves to the default branch, risky commands and spending always ask,
+  whatever the wording; 42 tool, web and connector text is data, never orders (prompt-injection
+  guard); 43 redact tokens from saved chats (including build 25's clone URL).
+- Tests: 44 a regression test for every bug found on 29 October, run in CI.
+- From Kiro and Arena: 45 edit and resend an earlier message, retry any answer (rewind), and a
+  Compact button; 46 hooks (actions on events, like running the tests after every save).
+
 ## Build 24 test reports (29 October 2026, all fixed in build 25)
 1. **10:04 AM: the connector logos aren't the real ones.** "CAN I PLEASE JUST HAVE THE NORMAL
    ICONS/LOGOS". He circled the logo column in Discover and compared it with Grok, Claude and a
