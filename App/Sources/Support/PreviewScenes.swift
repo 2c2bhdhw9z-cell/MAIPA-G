@@ -30,7 +30,9 @@ enum PreviewScenes {
         search.detail = "AgentCore/Sources/AgentCore/Store/DataRepoSync.swift\n  14: public static let repoName = \"MAIPA-G-data\""
         var read = ToolCallRecord(id: "c2", name: "read_file", arguments: #"{"path":"AgentCore/Sources/AgentCore/Store/DataRepoSync.swift"}"#, summary: "Read AgentCore/Sources/AgentCore/Store/DataRepoSync.swift", status: .done)
         read.detail = "     1\timport Foundation\n     2\t\n     3\t/// Mirrors MAIPA-G's saved data…"
-        step1.toolCalls = [search, read]
+        var command = ToolCallRecord(id: "c3", name: "run_shell", arguments: #"{"command":"swift test --package-path AgentCore"}"#, summary: "Command finished", status: .done)
+        command.detail = "Exit code: 0\nAll checks passed."
+        step1.toolCalls = [search, read, command]
 
         var step2 = AssistantStep(startedAt: Date().addingTimeInterval(-50))
         step2.finishedAt = Date().addingTimeInterval(-40)

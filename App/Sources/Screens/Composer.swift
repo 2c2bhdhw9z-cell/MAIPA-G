@@ -50,7 +50,6 @@ struct Composer: View {
     @State private var photoItem: PhotosPickerItem?
     @State private var choosingPhoto = false
     @State private var takingPhoto = false
-    @State private var choosingFile = false
     @State private var importError: String?
 
     private var canSend: Bool {
@@ -85,7 +84,9 @@ struct Composer: View {
                     }
                 }
                 HStack(spacing: 6) {
-                    Spacer(minLength: 0)
+                    attachmentMenu
+                    webButton
+                    Spacer(minLength: 4)
                     compactModelButton
                     if !thinkingLevels.isEmpty { compactThinkingMenu }
                     sendButton
@@ -95,8 +96,6 @@ struct Composer: View {
             .glassPanel(cornerRadius: 26)
 
             FlowLayout(spacing: 7, lineSpacing: 6) {
-                attachmentMenu
-                webButton
                 Button(action: onSpec) { Label("Spec", systemImage: "list.clipboard").font(.caption.weight(.semibold)) }
                 Button(action: onPickGroup) { Label(groupName ?? "Group", systemImage: "folder.badge.plus").font(.caption.weight(.semibold)) }
                 Toggle("Autonomous", isOn: $autonomous)
@@ -148,13 +147,6 @@ struct Composer: View {
                 do { attachments.append(try await AttachmentImporter.importPhoto(item, store: app.attachmentStore)) }
                 catch { importError = "Couldn't add that photo." }
                 photoItem = nil
-            }
-        }
-        .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.item]) { result in
-            guard case .success(let url) = result else { return }
-            Task {
-                do { attachments.append(try await AttachmentImporter.importFile(url, store: app.attachmentStore)) }
-                catch { importError = "Couldn't add that file." }
             }
         }
         .alert("Attachment", isPresented: Binding(get: { importError != nil }, set: { if !$0 { importError = nil } })) {
@@ -224,7 +216,7 @@ struct Composer: View {
 
     private var attachmentMenu: some View {
         Menu {
-            Button { choosingFile = true } label: { Label("File", systemImage: "doc") }
+            Button { pickFile() } label: { Label("File", systemImage: "doc") }
             Button { choosingPhoto = true } label: { Label("Photo Library", systemImage: "photo.on.rectangle") }
             Button {
                 if CameraPicker.isAvailable { takingPhoto = true }
@@ -250,6 +242,19 @@ struct Composer: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(webEnabled ? "Web tools on" : "Web tools off")
+    }
+
+    private func pickFile() {
+        focused = false
+        AttachmentFilePicker.shared.present(
+            onPick: { data, name in
+                Task {
+                    do { attachments.append(try await AttachmentImporter.importFile(data, name: name, store: app.attachmentStore)) }
+                    catch { importError = "Couldn't add that file." }
+                }
+            },
+            onFailure: { importError = $0 }
+        )
     }
 
     @ViewBuilder
