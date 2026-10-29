@@ -23,6 +23,7 @@ struct Composer: View {
     @Binding var text: String
     @Binding var attachments: [AttachmentReference]
     @Binding var webEnabled: Bool
+    @Binding var autonomous: Bool
     var modelLabel: String
     var thinking: ThinkingLevel
     var thinkingLevels: [ThinkingLevel]
@@ -128,6 +129,12 @@ struct Composer: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(webEnabled ? "Web tools on" : "Web tools off")
+                Toggle("Autonomous", isOn: $autonomous)
+                    .toggleStyle(.button)
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    .font(.caption.weight(.semibold))
+                    .accessibilityHint("Runs repo work on GitHub's computer")
                 PhotosPicker(selection: $photoItem, matching: .images) {
                     Label("Photo", systemImage: "photo").font(.caption.weight(.semibold))
                 }

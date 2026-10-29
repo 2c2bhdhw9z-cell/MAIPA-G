@@ -16,12 +16,16 @@ let package = Package(
     products: [
         .library(name: "AgentCore", targets: ["AgentCore"]),
         .library(name: "ChatMarkdown", targets: ["ChatMarkdown"]),
+        .executable(name: "MAIPAGRunner", targets: ["MAIPAGRunner"]),
     ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-markdown.git", from: "0.9.0"),
         // Hashes (SHA-256 for sign-in codes, SHA-1 for Git object ids). On Apple platforms this is
         // CryptoKit itself; on Linux it is the same API over BoringSSL.
         .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"6.0.0"),
+        // GitHub requires libsodium sealed boxes when repository Actions secrets are uploaded.
+        // SwiftNaCl vendors libsodium source for Linux and an xcframework for Apple platforms.
+        .package(url: "https://github.com/Kingpin-Apps/swift-nacl.git", from: "1.0.3"),
     ],
     targets: [
         // zlib, for unpacking the gzip'd tarballs GitHub serves. A C target rather than a system
@@ -32,7 +36,11 @@ let package = Package(
         ),
         .target(
             name: "AgentCore",
-            dependencies: ["CZlib", .product(name: "Crypto", package: "swift-crypto")]
+            dependencies: ["CZlib", .product(name: "Crypto", package: "swift-crypto"), .product(name: "Clibsodium", package: "swift-nacl")]
+        ),
+        .executableTarget(
+            name: "MAIPAGRunner",
+            dependencies: ["AgentCore"]
         ),
         .target(
             name: "ChatMarkdown",
@@ -40,7 +48,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AgentCoreTests",
-            dependencies: ["AgentCore"]
+            dependencies: ["AgentCore", .product(name: "Clibsodium", package: "swift-nacl")]
         ),
         .testTarget(
             name: "ChatMarkdownTests",

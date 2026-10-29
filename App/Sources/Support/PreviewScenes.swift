@@ -113,6 +113,33 @@ enum PreviewScenes {
         return chat
     }
 
+    static func sampleJobs(needsYou: Bool) -> [JobRecord] {
+        let repo = RepoRef(owner: "2c2bhdhw9z-cell", name: "MAIPA-G")
+        var active = JobRecord(
+            status: needsYou ? .needsApproval : .running,
+            title: "Finish the settings screen",
+            targetRepo: repo,
+            targetRef: "main",
+            defaultBranch: "main",
+            steps: [
+                JobStepRecord(title: "Read the project", detail: "Found the existing settings and tests", status: .done, startedAt: Date().addingTimeInterval(-300), finishedAt: Date().addingTimeInterval(-260)),
+                JobStepRecord(title: "Update the app", detail: needsYou ? "Needs approval before changing the build setup" : "Editing SettingsScreen.swift", status: needsYou ? .waiting : .running, startedAt: Date().addingTimeInterval(-250)),
+                JobStepRecord(title: "Check the work"),
+            ],
+            cumulativeCost: 0.18,
+            workflowRunID: 123,
+            workflowRunURL: "https://github.com/2c2bhdhw9z-cell/MAIPA-G/actions/runs/123",
+            logsURL: "https://github.com/2c2bhdhw9z-cell/MAIPA-G/actions/runs/123"
+        )
+        if needsYou {
+            active.questions = [JobQuestion(text: "Allow this command to change the repo's build setup?", options: ["Allow", "Don't allow"], isApproval: true)]
+        }
+        var done = JobRecord(status: .done, title: "Fix the launch crash", targetRepo: repo, targetRef: "main", defaultBranch: "main", cumulativeCost: 0.09)
+        done.steps = [JobStepRecord(title: "Fix and test", detail: "All checks passed", status: .done, startedAt: Date().addingTimeInterval(-3_600), finishedAt: Date().addingTimeInterval(-3_200))]
+        done.result = JobResult(summary: "Fixed the launch crash and checked the app.")
+        return [active, done]
+    }
+
     static func sampleSummaries() -> [ChatSummary] {
         let titles: [(String, String?, Double)] = [
             ("How saving chats works", "2c2bhdhw9z-cell/MAIPA-G", -60),

@@ -83,6 +83,7 @@ struct ChatScreen: View {
                     text: $session.draft,
                     attachments: $session.draftAttachments,
                     webEnabled: $session.webEnabled,
+                    autonomous: $session.autonomous,
                     modelLabel: app.openRouter.label(for: session.chat.model),
                     thinking: session.chat.thinking,
                     thinkingLevels: app.openRouter.thinkingLevels(for: session.chat.model),

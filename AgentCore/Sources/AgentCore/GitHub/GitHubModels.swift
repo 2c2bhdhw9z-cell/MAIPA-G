@@ -383,3 +383,87 @@ public struct GitHubRelease: Codable, Sendable, Hashable {
         return Int(parts[1])
     }
 }
+
+public struct GitHubWorkflowRun: Codable, Sendable, Hashable, Identifiable {
+    public var id: Int
+    public var name: String
+    public var status: String
+    public var conclusion: String?
+    public var event: String
+    public var headBranch: String?
+    public var headSHA: String
+    public var htmlURL: String
+    public var runNumber: Int
+    public var createdAt: Date
+    public var updatedAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, status, conclusion, event
+        case headBranch = "head_branch"
+        case headSHA = "head_sha"
+        case htmlURL = "html_url"
+        case runNumber = "run_number"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
+public struct GitHubWorkflowJob: Codable, Sendable, Hashable, Identifiable {
+    public struct Step: Codable, Sendable, Hashable {
+        public var name: String
+        public var status: String
+        public var conclusion: String?
+        public var number: Int
+    }
+    public var id: Int
+    public var name: String
+    public var status: String
+    public var conclusion: String?
+    public var htmlURL: String
+    public var steps: [Step]
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, status, conclusion, steps
+        case htmlURL = "html_url"
+    }
+}
+
+public struct GitHubArtifact: Codable, Sendable, Hashable, Identifiable {
+    public var id: Int
+    public var name: String
+    public var sizeInBytes: Int
+    public var archiveDownloadURL: String
+    public var expired: Bool
+    public var createdAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, expired
+        case sizeInBytes = "size_in_bytes"
+        case archiveDownloadURL = "archive_download_url"
+        case createdAt = "created_at"
+    }
+}
+
+public struct GitHubCheckRun: Codable, Sendable, Hashable, Identifiable {
+    public var id: Int
+    public var name: String
+    public var status: String
+    public var conclusion: String?
+    public var htmlURL: String?
+    enum CodingKeys: String, CodingKey { case id, name, status, conclusion; case htmlURL = "html_url" }
+}
+
+public struct GitHubCommitStatus: Codable, Sendable, Hashable, Identifiable {
+    public var id: Int
+    public var state: String
+    public var context: String
+    public var description: String?
+    public var targetURL: String?
+    enum CodingKeys: String, CodingKey { case id, state, context, description; case targetURL = "target_url" }
+}
+
+public struct GitHubActionsPublicKey: Codable, Sendable, Hashable {
+    public var keyID: String
+    public var key: String
+    enum CodingKeys: String, CodingKey { case keyID = "key_id"; case key }
+}

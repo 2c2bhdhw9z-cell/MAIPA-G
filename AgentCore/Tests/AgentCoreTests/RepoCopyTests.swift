@@ -1,6 +1,47 @@
+import Clibsodium
 import Foundation
 import Testing
 @testable import AgentCore
+
+private struct FixedGitHubToken: GitHubTokenProvider {
+    func installationToken() async throws -> String { "token" }
+    func userToken() async throws -> String { "token" }
+}
+
+private final class ActionsTransport: HTTPTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var requestsStorage: [HTTPRequest] = []
+    var publicKey: [UInt8]
+    var secretKey: [UInt8]
+
+    init() {
+        publicKey = [UInt8](repeating: 0, count: Int(crypto_box_publickeybytes()))
+        secretKey = [UInt8](repeating: 0, count: Int(crypto_box_secretkeybytes()))
+        _ = sodium_init()
+        _ = crypto_box_keypair(&publicKey, &secretKey)
+    }
+
+    var requests: [HTTPRequest] { lock.withLock { requestsStorage } }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        lock.withLock { requestsStorage.append(request) }
+        let path = request.url.path
+        if path.hasSuffix("/actions/secrets/public-key") {
+            let body: JSONValue = ["key_id": "key-1", "key": .string(Data(publicKey).base64EncodedString())]
+            return HTTPResponse(status: 200, body: try JSONCoding.encoder().encode(body))
+        }
+        if path.contains("/actions/secrets/") { return HTTPResponse(status: 201) }
+        if path.hasSuffix("/actions/workflows/maipa-g.yml/dispatches") { return HTTPResponse(status: 204) }
+        if path.hasSuffix("/actions/runs") {
+            return HTTPResponse(status: 200, body: Data(#"{"workflow_runs":[{"id":7,"name":"iOS","status":"completed","conclusion":"success","event":"push","head_branch":"main","head_sha":"abc","html_url":"https://example.test/run/7","run_number":12,"created_at":"2026-10-28T00:00:00Z","updated_at":"2026-10-28T00:01:00Z"}]}"#.utf8))
+        }
+        return HTTPResponse(status: 404, body: Data(#"{"message":"missing"}"#.utf8))
+    }
+
+    func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse {
+        HTTPStreamResponse(status: 404, headers: [:], body: AsyncThrowingStream { $0.finish() })
+    }
+}
 
 @Suite("Repo copies and search")
 struct RepoCopyTests {
@@ -155,6 +196,40 @@ struct RepoCopyTests {
     @Test func pathEscapingKeepsSlashes() {
         #expect(GitHubClient.escapePath("docs/My File#1.md") == "docs/My%20File%231.md")
         #expect(GitHubClient.escape("feature/x") == "feature%2Fx")
+    }
+
+    @Test func actionsRequestsDispatchRunsAndEncryptedSecrets() async throws {
+        let transport = ActionsTransport()
+        let client = GitHubClient(transport: transport, tokens: FixedGitHubToken())
+        let repo = RepoRef(owner: "octo", name: "repo")
+        try await client.dispatchWorkflow(repo, workflow: "maipa-g.yml", ref: "main", inputs: ["job_id": "opaque-id"])
+        let runs = try await client.workflowRuns(repo)
+        #expect(runs.first?.runNumber == 12)
+        try await client.putActionsSecret(repo, name: "OPENROUTER_API_KEY", value: "private-value")
+
+        let dispatch = try #require(transport.requests.first { $0.url.path.hasSuffix("/dispatches") })
+        let dispatchBody = try #require(dispatch.body.flatMap(JSONValue.parse))
+        #expect(dispatchBody["inputs"]?["job_id"] == "opaque-id")
+        let upload = try #require(transport.requests.first { $0.url.path.hasSuffix("/actions/secrets/OPENROUTER_API_KEY") })
+        let uploadBody = try #require(upload.body.flatMap(JSONValue.parse))
+        #expect(uploadBody["key_id"] == "key-1")
+        #expect(uploadBody["encrypted_value"] != "private-value")
+        let encrypted = try #require(uploadBody["encrypted_value"]?.stringValue)
+        let cipher = try #require(Data(base64Encoded: encrypted))
+        var clear = [UInt8](repeating: 0, count: cipher.count - Int(crypto_box_sealbytes()))
+        let opened = cipher.withUnsafeBytes { bytes in
+            crypto_box_seal_open(&clear, bytes.bindMemory(to: UInt8.self).baseAddress!, UInt64(cipher.count), &transport.publicKey, &transport.secretKey)
+        }
+        #expect(opened == 0)
+        #expect(String(decoding: clear, as: UTF8.self) == "private-value")
+    }
+
+    @Test func buildInspectionDoesNotDispatch() async throws {
+        let transport = ActionsTransport()
+        let client = GitHubClient(transport: transport, tokens: FixedGitHubToken())
+        let inspector = GitHubBuildInspector(github: client)
+        try await inspector.dispatch(repo: RepoRef(owner: "octo", name: "repo"), workflow: "ios.yml", ref: "main", explicitlyRequested: false)
+        #expect(transport.requests.isEmpty)
     }
 }
 

@@ -36,6 +36,7 @@ struct SettingsScreen: View {
 
                 accounts
                 look
+                workflowPolicy
                 money
                 notifications
                 repoSaving
@@ -64,6 +65,7 @@ struct SettingsScreen: View {
                     settings.spendLimit = edited.spendLimit
                     settings.notificationsOn = edited.notificationsOn
                     settings.directSaveRepos = edited.directSaveRepos
+                    settings.workflowPolicy = edited.workflowPolicy
                 }
             }
             .task {
@@ -180,6 +182,20 @@ struct SettingsScreen: View {
             if theme.reduceMotion {
                 Text("Reduce Motion is on in your iPhone's settings, so nothing moves.")
             }
+        }
+    }
+
+    // MARK: Autonomous
+
+    private var workflowPolicy: some View {
+        Section {
+            Picker("Use Autonomous", selection: $draft.workflowPolicy) {
+                ForEach(WorkflowPolicy.allCases) { policy in Text(policy.label).tag(policy) }
+            }
+        } header: {
+            Text("Workflows")
+        } footer: {
+            Text("Autonomous uses GitHub's computer for repo work. Jobs without a repo stay on this iPhone.")
         }
     }
 

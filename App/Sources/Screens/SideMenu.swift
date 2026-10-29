@@ -182,6 +182,26 @@ struct SideMenu: View {
                 }
                 Spacer()
                 Button {
+                    app.jobs.show()
+                } label: {
+                    Image(systemName: "gearshape.2")
+                        .font(.body.weight(.semibold))
+                        .frame(width: 36, height: 36)
+                        .background(Theme.raised, in: Circle())
+                        .overlay(Circle().strokeBorder(Theme.stroke))
+                        .overlay(alignment: .topTrailing) {
+                            if app.jobs.activeCount > 0 {
+                                Text("\(min(app.jobs.activeCount, 9))")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 16, height: 16)
+                                    .background(theme.accent, in: Circle())
+                            }
+                        }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Jobs")
+                Button {
                     app.sheet = .settings
                 } label: {
                     Image(systemName: "gearshape")

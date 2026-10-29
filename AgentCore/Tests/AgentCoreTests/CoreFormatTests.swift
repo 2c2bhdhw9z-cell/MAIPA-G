@@ -1,3 +1,4 @@
+import Clibsodium
 import Foundation
 import Testing
 @testable import AgentCore
@@ -70,6 +71,45 @@ struct CoreFormatTests {
         #expect(credits.purchased == 5)
         #expect(credits.used == 1.25)
         #expect(credits.balance == 3.75)
+    }
+
+    @Test func githubSecretUsesASealedBox() throws {
+        var publicKey = [UInt8](repeating: 0, count: Int(crypto_box_publickeybytes()))
+        var secretKey = [UInt8](repeating: 0, count: Int(crypto_box_secretkeybytes()))
+        #expect(sodium_init() >= 0)
+        #expect(crypto_box_keypair(&publicKey, &secretKey) == 0)
+        let encoded = try GitHubSealedBox.encrypt("private-value", publicKeyBase64: Data(publicKey).base64EncodedString())
+        let cipher = try #require(Data(base64Encoded: encoded))
+        #expect(cipher.count == "private-value".utf8.count + Int(crypto_box_sealbytes()))
+        var clear = [UInt8](repeating: 0, count: cipher.count - Int(crypto_box_sealbytes()))
+        let opened = cipher.withUnsafeBytes { bytes in
+            crypto_box_seal_open(&clear, bytes.bindMemory(to: UInt8.self).baseAddress!, UInt64(cipher.count), &publicKey, &secretKey)
+        }
+        #expect(opened == 0)
+        #expect(String(decoding: clear, as: UTF8.self) == "private-value")
+    }
+
+    @Test func oldJobRecordsDecodeAndCheckpointAsRestartableState() async throws {
+        let id = UUID()
+        let old = Data("""
+        {"format":1,"id":"\(id.uuidString)","status":"running","title":"Old job","state":{},"createdAt":"2026-10-28T00:00:00Z","updatedAt":"2026-10-28T00:00:00Z"}
+        """.utf8)
+        let decoded = try JSONCoding.decoder().decode(JobRecord.self, from: old)
+        #expect(decoded.targetRepo == nil)
+        #expect(decoded.steps.isEmpty)
+        #expect(decoded.cumulativeCost == 0)
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-jobs-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = JobStore(dataDirectory: root)
+        var job = JobRecord(title: "Restart me", targetRepo: RepoRef(owner: "octo", name: "repo"), targetRef: "main", defaultBranch: "main")
+        job.steps = [JobStepRecord(title: "First", status: .done)]
+        _ = try await store.create(job)
+        let stopped = try await store.stop(job.id)
+        #expect(stopped.status == .stopped)
+        let resumed = try await store.resume(job.id)
+        #expect(resumed.status == .queued)
+        #expect(resumed.steps.first?.status == .done)
     }
 }
 

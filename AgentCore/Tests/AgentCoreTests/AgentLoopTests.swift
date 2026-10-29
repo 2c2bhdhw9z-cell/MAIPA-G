@@ -349,4 +349,15 @@ struct AgentLoopTests {
         #expect(TaskDifficulty.estimate("Why does the build crash on launch?", hasRepo: true) == .hard)
         #expect(TaskDifficulty.estimate("What does the main file do?", hasRepo: true) == .normal)
     }
+
+    @Test func cloudShellIsBoundedApprovalGatedAndLoggerRedacts() async throws {
+        let root = FileManager.default.temporaryDirectory
+        let tool = ProcessTool(directory: root)
+        #expect(await tool.approvalRequest(for: ["command": "rm old.txt"]) != nil)
+        #expect(await tool.approvalRequest(for: ["command": "git status"]) == nil)
+        let output = try await tool.run(arguments: ["command": "printf cloud-runner"], progress: { _ in })
+        #expect(output.forModel == "Exit code: 0\ncloud-runner")
+        let logger = RedactingLogger(secrets: ["secret-token"])
+        #expect(logger.redact("value secret-token value") == "value *** value")
+    }
 }

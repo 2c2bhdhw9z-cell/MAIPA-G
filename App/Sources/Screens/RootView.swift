@@ -109,6 +109,7 @@ struct SheetContent: View {
         case .repos(let target): RepoPicker(target: target)
         case .branches(let target): BranchPicker(target: target)
         case .files(let repo): FilesScreen(repo: repo)
+        case .jobs: JobsScreen()
         }
     }
 }

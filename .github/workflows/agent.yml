@@ -1,0 +1,67 @@
+name: MAIPA-G Autonomous runner
+
+on:
+  workflow_call:
+    inputs:
+      job_id:
+        description: Private MAIPA-G job id
+        required: true
+        type: string
+    secrets:
+      MAIPAG_APP_ID:
+        required: true
+      MAIPAG_APP_PRIVATE_KEY:
+        required: true
+      OPENROUTER_API_KEY:
+        required: true
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  checks: read
+  statuses: read
+
+jobs:
+  autonomous:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Make a fresh MAIPA-G bot token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.MAIPAG_APP_ID }}
+          private-key: ${{ secrets.MAIPAG_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            ${{ github.event.repository.name }}
+            MAIPA-G
+            MAIPA-G-data
+
+      - name: Check out the target repo
+        uses: actions/checkout@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Check out the shared runner
+        uses: actions/checkout@v5
+        with:
+          repository: 2c2bhdhw9z-cell/MAIPA-G
+          ref: main
+          path: .maipag-runner
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Keep runner files outside target changes
+        shell: bash
+        run: printf '/.maipag-runner/\n' >> .git/info/exclude
+
+      - name: Run the private job
+        shell: bash
+        env:
+          MAIPAG_JOB_ID: ${{ inputs.job_id }}
+          MAIPAG_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: swift run --package-path .maipag-runner/AgentCore -c release MAIPAGRunner

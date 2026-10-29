@@ -26,6 +26,11 @@ struct HomeScreen: View {
                         if let repo = home.repo {
                             Button { app.sheet = .files(repo) } label: { Label("Files", systemImage: "folder") }
                         }
+                        if !app.jobs.jobs.isEmpty {
+                            Button { app.jobs.show() } label: {
+                                Label(app.jobs.activeCount > 0 ? "\(app.jobs.activeCount) working" : "Jobs", systemImage: "gearshape.2")
+                            }
+                        }
                     }
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Theme.secondaryText)
@@ -37,6 +42,7 @@ struct HomeScreen: View {
                     text: $home.text,
                     attachments: $home.attachments,
                     webEnabled: $home.webEnabled,
+                    autonomous: $home.autonomous,
                     modelLabel: app.openRouter.label(for: home.model),
                     thinking: home.thinking,
                     thinkingLevels: app.openRouter.thinkingLevels(for: home.model),

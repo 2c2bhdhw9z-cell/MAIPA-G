@@ -17,6 +17,7 @@ enum AppSheet: Identifiable, Hashable {
     case repos(ComposerTarget)
     case branches(ComposerTarget)
     case files(ChatRepo)
+    case jobs
 
     var id: String {
         switch self {
@@ -27,6 +28,7 @@ enum AppSheet: Identifiable, Hashable {
         case .repos(let target): return "repos-\(target)"
         case .branches(let target): return "branches-\(target)"
         case .files(let repo): return "files-\(repo.ref.fullName)-\(repo.branch)"
+        case .jobs: return "jobs"
         }
     }
 }
@@ -42,6 +44,8 @@ final class HomeDraft {
     var repo: ChatRepo?
     var attachments: [AttachmentReference] = []
     var webEnabled = true
+    /// Always starts off for a new chat.
+    var autonomous = false
 }
 
 /// The app's state, shared by every screen.
@@ -58,6 +62,8 @@ final class AppModel {
     let snapshots: SnapshotStore
     let attachmentStore: AttachmentStore
     let notifications = Notifications()
+    let jobs: JobCoordinator
+    let backgroundJobs = BackgroundJobs()
     let home = HomeDraft()
     private(set) var settings: AppSettings
 
@@ -77,9 +83,13 @@ final class AppModel {
         updates = UpdateChecker()
         snapshots = SnapshotStore(root: paths.repoCopies)
         attachmentStore = AttachmentStore(dataDirectory: paths.data)
+        jobs = JobCoordinator(dataDirectory: paths.data)
         settings = Self.readSettings(paths)
         library.app = self
         sync.app = self
+        jobs.app = self
+        backgroundJobs.app = self
+        backgroundJobs.register()
         home.repo = settings.lastRepo
     }
 
@@ -95,6 +105,7 @@ final class AppModel {
         openRouter.restore()
         github.restore()
         await library.load()
+        await jobs.load()
         async let models: Void = openRouter.loadModels()
         async let key: Void = openRouter.refreshKeyInfo()
         await github.refresh()
@@ -125,9 +136,13 @@ final class AppModel {
         guard !PreviewScenes.isActive else { return }
         switch phase {
         case .background:
+            backgroundJobs.schedule(hasActiveJobs: jobs.activeCount > 0)
+            // iOS 17–25 keep the established short grace period. It also safely covers a final
+            // save if iOS 26 declines a continued-processing request.
             let grace = BackgroundGrace(name: "MAIPA-G save") {}
             Task {
                 await sync.syncNow()
+                await jobs.refresh()
                 grace.end()
             }
         case .active:
@@ -175,6 +190,9 @@ final class AppModel {
         if (report.downloaded + report.deletedHere).contains(where: { $0.hasPrefix("chats/") }) {
             await library.reloadFromDisk()
         }
+        if (report.downloaded + report.deletedHere).contains(where: { $0.hasPrefix("jobs/") }) {
+            await jobs.refresh()
+        }
     }
 
     // MARK: Chats
@@ -187,11 +205,17 @@ final class AppModel {
             return
         }
         notifications.requestIfNeeded(enabled: settings.notificationsOn)
-        library.startChat(text: text, attachments: home.attachments, repo: home.repo, model: home.model, thinking: home.thinking)
+        if home.attachments.isEmpty, let repo = home.repo, jobs.shouldRunAutonomously(request: text, repo: repo, explicitlyEnabled: home.autonomous) {
+            let request = text
+            Task { await jobs.start(request: request, repo: repo) }
+        } else {
+            library.startChat(text: text, attachments: home.attachments, repo: home.repo, model: home.model, thinking: home.thinking)
+        }
         home.text = ""
         home.attachments = []
         home.model = .auto
         home.thinking = .default
+        home.autonomous = false
         let repo = home.repo
         updateSettings { $0.lastRepo = repo }
         Haptics.tap(enabled: true)
@@ -292,6 +316,10 @@ final class AppModel {
         case "settings":
             library.preview(summaries: summaries, open: nil)
             sheet = .settings
+        case "jobs", "job-needs-you":
+            library.preview(summaries: summaries, open: nil)
+            jobs.preview(PreviewScenes.sampleJobs(needsYou: scene == "job-needs-you"))
+            sheet = .jobs
         case "connect":
             library.preview(summaries: [], open: nil)
             sheet = .connectGitHub
