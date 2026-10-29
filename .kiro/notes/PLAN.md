@@ -195,7 +195,14 @@ entries. Next: he tests build 25.**
 15. **A finished Spec step doesn't lead to its OK button.** The Requirements job page only offers
     "Delete job". "Approve requirements" is on the spec's own page (Specs → the spec,
     `SpecReviewScreen.swift:87`). Fix: when a spec step finishes, link or open the spec page from
-    the job and the chat.
+    the job and the chat. (Owner, 3:41 PM: this isn't how he wants specs at all. He meant "Build
+    with spec" in the chat, like Kiro. Then: "Just forget about it." Leave Spec alone unless he
+    brings it up again.)
+16. **Undo refuses whenever anything newer is on the branch.** His Undo of `62518fc` said "The
+    branch moved after MAIPA-G's save (expected 62518fc, now 93e49d1)", because Kiro pushed a plan
+    note to main in between. Safe, but too strict: Undo should make a commit that reverses only
+    its own change when the newer commits don't touch the same files. Kiro reverted `62518fc`
+    by hand at 3:45 PM. While he tests saving on the MAIPA-G repo, Kiro must not push to its main.
 
 Technical notes for the logo fix (for Kiro):
 - iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
