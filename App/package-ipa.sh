@@ -71,6 +71,14 @@ mkdir -p "$STAGE/Payload"
 cp -R "$APP" "$STAGE/Payload/"
 BUNDLE="$STAGE/Payload/$APP_NAME.app"
 
+# A smaller download: drop the symbol table from the app's code, as Xcode does for App Store
+# builds. It's only for reading crash logs; the app runs the same. Done before signing.
+echo "==> stripping symbols"
+BIN="$BUNDLE/$APP_NAME"
+BEFORE=$(stat -f%z "$BIN")
+xcrun strip "$BIN" 2>/dev/null || xcrun strip -x "$BIN"
+echo "    $APP_NAME: $BEFORE -> $(stat -f%z "$BIN") bytes"
+
 # Nested code first: codesign refuses to seal a bundle whose contents change afterwards.
 echo "==> ad-hoc signing"
 if [ -d "$BUNDLE/Frameworks" ]; then
@@ -84,7 +92,7 @@ codesign --force --sign - --timestamp=none --generate-entitlement-der "$BUNDLE"
 IPA="$OUT/$APP_NAME.ipa"
 rm -f "$IPA"
 echo "==> zipping"
-(cd "$STAGE" && zip -qry "$IPA" Payload)
+(cd "$STAGE" && zip -qry -9 "$IPA" Payload)
 
 echo
 python3 "$ROOT/scripts/check-ipa.py" "$IPA" --build "$BUILD_NUMBER" --version "0.1.0"
