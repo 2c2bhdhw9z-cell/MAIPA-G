@@ -37,6 +37,7 @@ struct SettingsScreen: View {
                 accounts
                 look
                 workflowPolicy
+                chatComputer
                 memories
                 money
                 notifications
@@ -68,6 +69,9 @@ struct SettingsScreen: View {
                     settings.directSaveRepos = edited.directSaveRepos
                     settings.workflowPolicy = edited.workflowPolicy
                     settings.memoriesOn = edited.memoriesOn
+                    settings.chatComputerServer = edited.chatComputerServer
+                    settings.chatComputerOff = edited.chatComputerOff
+                    settings.chatComputerMachine = edited.chatComputerMachine
                 }
             }
             .task {
@@ -199,6 +203,86 @@ struct SettingsScreen: View {
         } footer: {
             Text("Autonomous uses GitHub's computer for repo work. Jobs without a repo stay on this iPhone.")
         }
+    }
+
+    // MARK: Computer for chats
+
+    /// The choices in "Computer for chats". A connector is picked by its serverID.
+    private enum ComputerChoice: Hashable {
+        case automatic, off
+        case connector(String)
+    }
+
+    private var chatComputer: some View {
+        Section {
+            Picker("Computer", selection: computerChoice) {
+                Text("Automatic").tag(ComputerChoice.automatic)
+                Text("Off").tag(ComputerChoice.off)
+                ForEach(computerConnectors) { connector in
+                    Text(connector.displayName).tag(ComputerChoice.connector(connector.serverID))
+                }
+                if let removed = removedComputerServer {
+                    Text("Removed connector").tag(ComputerChoice.connector(removed))
+                }
+            }
+            if !draft.chatComputerOff {
+                LabeledContent("Machine name") {
+                    TextField(AppSettings.defaultChatComputerMachine, text: $draft.chatComputerMachine)
+                        .multilineTextAlignment(.trailing)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .onChange(of: draft.chatComputerMachine) { _, typed in
+                            let clean = AppSettings.machineNameCharacters(typed)
+                            if clean != typed { draft.chatComputerMachine = clean }
+                        }
+                }
+                if !draft.chatComputerMachineName.hasPrefix("mcp-") {
+                    Text("Sprites' default sign-in only allows names that start with mcp-.")
+                        .font(.footnote)
+                        .foregroundStyle(Theme.secondaryText)
+                }
+            }
+        } header: {
+            Text("Computer for chats")
+        } footer: {
+            Text("The AI uses this computer by itself whenever a job needs commands. Connect Sprites or another computer service in Connectors first.")
+        }
+    }
+
+    private var computerChoice: Binding<ComputerChoice> {
+        Binding(
+            get: {
+                if draft.chatComputerOff { return ComputerChoice.off }
+                guard let serverID = draft.chatComputerServer else { return ComputerChoice.automatic }
+                return ComputerChoice.connector(serverID)
+            },
+            set: { choice in
+                switch choice {
+                case .automatic:
+                    draft.chatComputerOff = false
+                    draft.chatComputerServer = nil
+                case .off:
+                    draft.chatComputerOff = true
+                case .connector(let serverID):
+                    draft.chatComputerOff = false
+                    draft.chatComputerServer = serverID
+                }
+            }
+        )
+    }
+
+    /// Remote connectors, one per server, that can be picked as the computer.
+    private var computerConnectors: [ConnectorConfiguration] {
+        var seen = Set<String>()
+        return app.connectors.connected.filter { $0.kind == .remote && seen.insert($0.serverID).inserted }
+    }
+
+    /// The chosen connector's serverID when that connector has since been removed, so the picker
+    /// still has a row for what is saved.
+    private var removedComputerServer: String? {
+        guard !draft.chatComputerOff, let serverID = draft.chatComputerServer,
+              !computerConnectors.contains(where: { $0.serverID == serverID }) else { return nil }
+        return serverID
     }
 
     private var memories: some View {

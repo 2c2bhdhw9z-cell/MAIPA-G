@@ -1,4 +1,20 @@
-Integration logo shapes from Simple Icons (https://simpleicons.org), CC0 1.0 Universal.
-Microsoft and Slack logo artwork adapted from SuperTinyIcons (https://github.com/edent/SuperTinyIcons):
-Copyright © 2017 Terence Eden, used under the MIT License.
-Brand names and logos remain trademarks of their respective owners and are used only to identify the service a person chooses to connect.
+Integration logos
+
+The logos shown for integrations are trademarks of their respective owners. MAIPA-G shows them only to identify the service a person chooses to connect; this does not mean the owners endorse MAIPA-G.
+
+Each logo comes from the company's own published files:
+
+- Google (Gmail, Google Calendar, Google Drive, Google Docs, Google Sheets, Google Slides): gstatic.com
+- GitHub: brand.github.com
+- Figma: figma.com
+- Atlassian: atlassian.design
+- Linear: static.linear.app
+- Microsoft: learn.microsoft.com
+- Slack: slack.com
+- Notion: notion.com
+- Dropbox: dropbox.com
+- Box: box.com
+- Asana: asana.com
+- Canva: static.canva.com
+- YouTube: gstatic.com
+- Hugging Face: huggingface.co

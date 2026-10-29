@@ -141,17 +141,42 @@ struct ConnectorsScreen: View {
     private var filteredPopular: [IntegrationService] {
         let query = app.connectors.query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return IntegrationService.popular }
-        return IntegrationService.popular.filter { $0.name.localizedCaseInsensitiveContains(query) || $0.detail.localizedCaseInsensitiveContains(query) }
+        return IntegrationService.popular.filter { Self.text($0.name, matches: query) || Self.text($0.detail, matches: query) }
     }
 
     private var filteredCatalog: [RegistryServer] {
+        let catalog = app.connectors.catalog
         let query = app.connectors.query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return app.connectors.catalog }
-        return app.connectors.catalog.filter {
-            $0.displayName.localizedCaseInsensitiveContains(query)
-                || $0.description.localizedCaseInsensitiveContains(query)
-                || $0.name.localizedCaseInsensitiveContains(query)
+        guard !query.isEmpty else {
+            // Familiar apps first, then the rest of the Registry in its usual order.
+            var familiar: [RegistryServer] = []
+            var others: [RegistryServer] = []
+            for server in catalog {
+                if IntegrationService.popular.contains(where: { $0.matches(server.displayName + " " + server.name) }) {
+                    familiar.append(server)
+                } else {
+                    others.append(server)
+                }
+            }
+            return familiar + others
         }
+        return catalog.filter {
+            Self.text($0.displayName, matches: query)
+                || Self.text($0.description, matches: query)
+                || Self.text($0.name, matches: query)
+        }
+    }
+
+    /// Substring match as typed, or once case, spaces and punctuation are ignored on both sides,
+    /// so "Hugging Face" finds "huggingface" and "co.huggingface/hf-mcp-server".
+    private static func text(_ field: String, matches query: String) -> Bool {
+        if field.localizedCaseInsensitiveContains(query) { return true }
+        let compactQuery = compacted(query)
+        return !compactQuery.isEmpty && compacted(field).contains(compactQuery)
+    }
+
+    private static func compacted(_ text: String) -> String {
+        text.lowercased().filter { $0.isLetter || $0.isNumber }
     }
 
     @ViewBuilder
@@ -288,14 +313,14 @@ struct IntegrationIcon: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 10, style: .continuous).fill(service.colour.opacity(0.18))
+            RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.raised)
             if let assetName = service.assetName {
                 Image(assetName)
                     .resizable()
-                    .renderingMode(service.usesOriginalColours ? .original : .template)
+                    .renderingMode(.original)
+                    .interpolation(.high)
                     .scaledToFit()
-                    .foregroundStyle(service.colour)
-                    .padding(9)
+                    .frame(width: 26, height: 26)
             } else if let remoteURL {
                 RemoteConnectorLogo(url: remoteURL, fallback: initials)
             } else {
@@ -324,12 +349,16 @@ private struct RemoteConnectorLogo: View {
     var body: some View {
         Group {
             if let data, let image = UIImage(data: data) {
-                Image(uiImage: image).resizable().scaledToFit()
+                Image(uiImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(width: 26, height: 26)
             } else {
                 Text(fallback).font(.system(size: fallback.count > 1 ? 13 : 18, weight: .bold, design: .rounded))
+                    .padding(8)
             }
         }
-        .padding(8)
         .task(id: url) { data = await ConnectorLogoLoader.shared.data(for: url) }
     }
 }
@@ -374,12 +403,10 @@ struct IntegrationService: Identifiable {
     let symbol: String
     let colour: Color
     let assetName: String?
-    let usesOriginalColours: Bool
 
-    init(name: String, detail: String, search: String, aliases: [String], symbol: String, colour: Color, assetName: String? = nil, usesOriginalColours: Bool = false) {
+    init(name: String, detail: String, search: String, aliases: [String], symbol: String, colour: Color, assetName: String? = nil) {
         self.name = name; self.detail = detail; self.search = search; self.aliases = aliases
         self.symbol = symbol; self.colour = colour; self.assetName = assetName
-        self.usesOriginalColours = usesOriginalColours
     }
 
     func matches(_ text: String) -> Bool {
@@ -411,10 +438,11 @@ struct IntegrationService: Identifiable {
         .init(name: "Google Docs", detail: "Read, edit and create documents", search: "docs", aliases: ["google docs", "gdocs"], symbol: "doc.text.fill", colour: .blue, assetName: "IntegrationGoogleDocs"),
         .init(name: "Google Sheets", detail: "Read, analyse and update spreadsheets", search: "sheets", aliases: ["google sheets", "gsheets"], symbol: "tablecells.fill", colour: .green, assetName: "IntegrationGoogleSheets"),
         .init(name: "Google Slides", detail: "Read and create presentations", search: "slides", aliases: ["google slides", "gslides"], symbol: "rectangle.on.rectangle.angled", colour: .orange, assetName: "IntegrationGoogleSlides"),
-        .init(name: "Microsoft 365", detail: "Use Outlook, OneDrive, Teams and SharePoint", search: "microsoft", aliases: ["microsoft 365", "office 365", "m365", "m365 copilot"], symbol: "square.grid.2x2.fill", colour: .blue, assetName: "IntegrationMicrosoft", usesOriginalColours: true),
-        .init(name: "Slack", detail: "Search channels and send messages", search: "slack", aliases: ["slack"], symbol: "number", colour: .purple, assetName: "IntegrationSlack", usesOriginalColours: true),
+        .init(name: "Microsoft 365", detail: "Use Outlook, OneDrive, Teams and SharePoint", search: "microsoft", aliases: ["microsoft 365", "office 365", "m365", "m365 copilot"], symbol: "square.grid.2x2.fill", colour: .blue, assetName: "IntegrationMicrosoft"),
+        .init(name: "Slack", detail: "Search channels and send messages", search: "slack", aliases: ["slack"], symbol: "number", colour: .purple, assetName: "IntegrationSlack"),
         .init(name: "Notion", detail: "Search, read and update your workspace", search: "notion", aliases: ["notion"], symbol: "doc.text", colour: .primary, assetName: "IntegrationNotion"),
         .init(name: "Linear", detail: "Search and manage issues and projects", search: "linear", aliases: ["linear"], symbol: "circle.lefthalf.filled", colour: .indigo, assetName: "IntegrationLinear"),
+        .init(name: "Hugging Face", detail: "Search models, datasets and Spaces", search: "huggingface", aliases: ["hugging face", "huggingface", "hf mcp server"], symbol: "face.smiling", colour: .yellow, assetName: "IntegrationHuggingFace"),
         .init(name: "Figma", detail: "Read designs, comments and project details", search: "figma", aliases: ["figma"], symbol: "paintbrush.pointed.fill", colour: .pink, assetName: "IntegrationFigma"),
         .init(name: "Dropbox", detail: "Search, read and manage cloud files", search: "dropbox", aliases: ["dropbox"], symbol: "shippingbox.fill", colour: .blue, assetName: "IntegrationDropbox"),
         .init(name: "Atlassian", detail: "Use Jira and Confluence projects", search: "atlassian", aliases: ["atlassian", "jira", "confluence"], symbol: "triangle.fill", colour: .blue, assetName: "IntegrationAtlassian"),

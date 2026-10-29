@@ -79,6 +79,14 @@ struct AppSettings: Codable, Equatable, Sendable {
     var workflowPolicy: WorkflowPolicy = .bigJobs
     /// Master switch for adding enabled memories to newly started chats.
     var memoriesOn = true
+    /// The connector (its serverID) that gives chats a Linux computer to run commands on. Nil is
+    /// Automatic: the first connected connector on sprites.dev.
+    var chatComputerServer: String?
+    /// No computer for chats, whatever is connected.
+    var chatComputerOff = false
+    /// The machine chats use on that computer. Sprites' default sign-in only allows names that
+    /// start with mcp-.
+    var chatComputerMachine = AppSettings.defaultChatComputerMachine
 
     init() {}
 
@@ -95,9 +103,27 @@ struct AppSettings: Codable, Equatable, Sendable {
         directSaveRepos = try c.decodeIfPresent([String: Bool].self, forKey: .directSaveRepos) ?? [:]
         workflowPolicy = (try? c.decodeIfPresent(WorkflowPolicy.self, forKey: .workflowPolicy)) ?? .bigJobs
         memoriesOn = try c.decodeIfPresent(Bool.self, forKey: .memoriesOn) ?? true
+        chatComputerServer = try? c.decodeIfPresent(String.self, forKey: .chatComputerServer)
+        chatComputerOff = (try? c.decodeIfPresent(Bool.self, forKey: .chatComputerOff)) ?? false
+        chatComputerMachine = (try? c.decodeIfPresent(String.self, forKey: .chatComputerMachine)) ?? AppSettings.defaultChatComputerMachine
     }
 
     func savesDirectly(to repo: RepoRef) -> Bool { directSaveRepos[repo.fullName] ?? false }
+
+    static let defaultChatComputerMachine = "mcp-maipa-g"
+    private static let machineNameAllowed = Set("abcdefghijklmnopqrstuvwxyz0123456789-")
+
+    /// What a machine name may hold while it is typed: lowercase letters, digits and dashes.
+    static func machineNameCharacters(_ typed: String) -> String {
+        typed.lowercased().filter { machineNameAllowed.contains($0) }
+    }
+
+    /// The machine name chats really use: the typed one without other characters or end dashes,
+    /// or mcp-maipa-g when nothing is left.
+    var chatComputerMachineName: String {
+        let clean = Self.machineNameCharacters(chatComputerMachine).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return clean.isEmpty ? Self.defaultChatComputerMachine : clean
+    }
 
     static let fileName = "settings.json"
 }
