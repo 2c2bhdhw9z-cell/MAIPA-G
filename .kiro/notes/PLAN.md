@@ -1,6 +1,6 @@
 # MAIPA-G plan
 
-**Status (29 October 2026, 10:21 AM Eastern): the whole plan is built and on main. Build 24
+**Status (29 October 2026, 10:43 AM Eastern): the whole plan is built and on main. Build 24
 (`build-24-aa5a76b`, 4.6 MB) is installed and he is testing it. His reports so far are in "Build 24
 test reports" below. Per his rule, nothing gets fixed until he says he's done testing; then all of
 them go into one batch and one build.**
@@ -19,6 +19,20 @@ them go into one batch and one build.**
    also not in Discover. Fix: search must find well-known services however he types them, with the
    company's own connector first; Hugging Face (and the other well-known ones) belong in Discover
    with real logos; All shouldn't lead with obscure entries.
+3. **By 10:43 AM: the chat AI can't count a repo's lines of code.** It answered "I cannot run a
+   command like wc -l or build a line-counting tool." He said MAIPA-G must work like Kiro and
+   Arena, which can. Cause: a normal phone chat only gets list_files, search_code, read_file,
+   read_repo_file, the edit/save tools, web, connectors, memories, pictures and ask_user
+   (`App/Sources/Model/ChatSession.swift` ~249-281). The only real shell is `run_shell`
+   (`AgentCore/Sources/AgentCore/Jobs/ProcessTool.swift`), which exists only inside an Autonomous
+   job on GitHub's Linux computer, and the phone chat's system prompt
+   (`AgentCore/Sources/AgentCore/Agent/SystemPrompt.swift`) never tells the AI that computer
+   exists. Kiro and Arena give every chat a real computer. Fix: every repo chat gets a real
+   command tool on a GitHub Linux computer checked out at the chat's branch, kept running for the
+   chat so later commands come back quickly, and the AI is told it has it. Also an instant on-phone
+   script runner (JavaScriptCore) over the repo copy for quick jobs like counting lines, which
+   also works in chats with no repo (GitHub's terms rule out runners for repo-less work). Works
+   now in build 24: switch Autonomous on before asking (a few minutes' wait).
 
 Technical notes for the logo fix (for Kiro):
 - iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
