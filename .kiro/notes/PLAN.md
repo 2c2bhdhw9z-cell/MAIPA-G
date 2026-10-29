@@ -176,6 +176,26 @@ entries. Next: he tests build 25.**
     build over the top, without deleting the app first, so today's chats stay on the phone.
 12. **The chat AI can't see Autonomous jobs.** Asked about "active ongoing jobs", it listed
     Sprites instead.
+    Worked (3:26-3:37 PM): web search (current answer with Apple and MacRumors sources), and the
+    Spec requirements step.
+13. **A sentence about notes made the whole MAIPA-G repo save straight to main.** "Add a line
+    saying Hello to README" committed `62518fc` (maipa-g[bot]) to main instead of opening a side
+    branch and PR. Cause: `RepoWriteRules.resolve`
+    (`AgentCore/Sources/AgentCore/GitHub/GitHubChangeService.swift:40-52`) sets `directSave` for
+    the whole repo when any rules line contains phrases like "straight to main". Our
+    owner-rules.md says "Notes and rules files ... can go straight to main", which only covers
+    those files. Fix: only an unconditional repo-wide rule (like Continuum's "no branches") or
+    his per-repo setting turns on direct save. Scoped or conditional sentences don't, and the AI
+    gets the rules text to apply per change, with a side branch and PR as the default. Told him to
+    tap Undo, which also tests Undo.
+14. **Preview can't find a website inside a folder.** Powder-Element-and-Particle-Sim has a Vite
+    project in `web/` (package.json, vite.config.ts), plus `native/`. Preview said "No website
+    entry point was found". Fix: detect web projects in subfolders, build them (npm install,
+    npm run build) on the chat computer, and show the built site.
+15. **A finished Spec step doesn't lead to its OK button.** The Requirements job page only offers
+    "Delete job". "Approve requirements" is on the spec's own page (Specs → the spec,
+    `SpecReviewScreen.swift:87`). Fix: when a spec step finishes, link or open the spec page from
+    the job and the chat.
 
 Technical notes for the logo fix (for Kiro):
 - iOS's asset-catalog SVG renderer can't draw Google's new icons (masks written as
