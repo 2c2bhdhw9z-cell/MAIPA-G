@@ -71,4 +71,148 @@ struct StabilityCompletionTests {
         #expect(await wrapped.approvalRequest(for: ["name": "mcp-maipa-g"]) != nil)
         await #expect(throws: ToolApprovalRequired.self) { _ = try await wrapped.run(arguments: ["name": "mcp-maipa-g"]) { _ in } }
     }
+
+    // A pretend computer service whose command tool really runs bash in a temporary home folder.
+    actor LocalMachine {
+        let home: URL
+        var exists: Bool
+        var calls: [String] = []
+        var checkpoints = 0
+        init(home: URL, exists: Bool) { self.home = home; self.exists = exists }
+
+        func call(_ tool: String, _ arguments: JSONValue) throws -> (text: String, isError: Bool) {
+            calls.append(tool)
+            switch tool {
+            case "list_sprites":
+                return (exists ? #"{"sprites":[{"name":"mcp-maipa-g","status":"warm"}]}"# : #"{"sprites":[]}"#, false)
+            case "create_sprite":
+                #expect(arguments["name"]?.stringValue == "mcp-maipa-g")
+                exists = true
+                return ("created", false)
+            case "create_checkpoint":
+                checkpoints += 1
+                return ("checkpoint v\(checkpoints)", false)
+            case "exec":
+                guard exists else { return ("sprite mcp-maipa-g not found", true) }
+                #expect(arguments["sprite"]?.stringValue == "mcp-maipa-g")
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/bin/bash")
+                process.arguments = ["-c", arguments["command"]?.stringValue ?? ""]
+                var environment = ProcessInfo.processInfo.environment
+                environment["HOME"] = home.path
+                environment["GIT_CONFIG_NOSYSTEM"] = "1"
+                process.environment = environment
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = pipe
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                return (String(decoding: data, as: UTF8.self), process.terminationStatus != 0)
+            default:
+                return ("unknown tool", true)
+            }
+        }
+    }
+
+    static func machineTools() -> [ConnectorToolDefinition] {
+        [
+            ConnectorToolDefinition(serverID: "s", serverName: "Sprites", originalName: "list_exec_sessions"),
+            ConnectorToolDefinition(serverID: "s", serverName: "Sprites", originalName: "exec", inputSchema: ["type": "object", "properties": ["sprite": ["type": "string"], "command": ["type": "string"]]]),
+            ConnectorToolDefinition(serverID: "s", serverName: "Sprites", originalName: "list_sprites"),
+            ConnectorToolDefinition(serverID: "s", serverName: "Sprites", originalName: "create_sprite", inputSchema: ["type": "object", "properties": ["name": ["type": "string"]]]),
+            ConnectorToolDefinition(serverID: "s", serverName: "Sprites", originalName: "create_checkpoint", inputSchema: ["type": "object", "properties": ["sprite": ["type": "string"], "comment": ["type": "string"]]]),
+        ]
+    }
+
+    static func shell(_ command: String, in directory: URL) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-c", command]
+        process.currentDirectoryURL = directory
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let text = String(decoding: data, as: UTF8.self)
+        guard process.terminationStatus == 0 else { throw ToolInputError("\(command) failed: \(text)") }
+        return text
+    }
+
+    // Stability 10 and 34: the check runs a real command, and a missing machine is recreated by
+    // the app's own code with the exact configured name.
+    @Test func S10_S34_realCommandCheckAndMissingMachineRecreation() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let machine = LocalMachine(home: home, exists: false)
+        let control = ComputerControl(tools: Self.machineTools(), machine: "mcp-maipa-g") { tool, arguments in
+            try await machine.call(tool, arguments)
+        }
+        #expect(control.commandTool?.originalName == "exec")
+        await #expect(throws: ComputerControl.Failure.self) { _ = try await control.ensureMachine(allowCreate: false) }
+        guard case .recreated(let output) = try await control.ensureMachine(allowCreate: true) else {
+            Issue.record("A missing machine should be recreated"); return
+        }
+        #expect(output.contains("maipa-g-health-ok") && output.contains("Linux"))
+        #expect(await machine.calls.contains("create_sprite"))
+        guard case .healthy = try await control.ensureMachine(allowCreate: true) else { Issue.record("Expected healthy"); return }
+
+        // A machine that exists but fails is not deleted unless the person chose Replace.
+        let broken = ComputerControl(tools: Self.machineTools(), machine: "mcp-maipa-g") { tool, arguments in
+            if tool == "exec" { return ("exec timed out", true) }
+            return try await machine.call(tool, arguments)
+        }
+        do {
+            _ = try await broken.ensureMachine(allowCreate: true)
+            Issue.record("A broken machine must not be silently replaced")
+        } catch let failure as ComputerControl.Failure {
+            guard case .machineUnavailable = failure else { Issue.record("Wrong failure \(failure)"); return }
+        }
+        #expect(ComputerControl.cost(seconds: 1_800, hourlyRate: 0.10) == 0.05)
+        #expect(ComputerControl.cost(seconds: 60, hourlyRate: nil) == 0)
+    }
+
+    // Stability 33 and 35: trusted code (not the model) makes the computer copy match the staged
+    // files exactly, and takes a provider checkpoint first.
+    @Test func S33_S35_trustedCodeSyncsExactStagedFilesAndCheckpoints() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repo = home.appendingPathComponent("repos/me/app", isDirectory: true)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        _ = try Self.shell("git init -q . && git config user.email t@example.com && git config user.name T && printf 'one\\n' > keep.txt && printf 'old\\n' > change.txt && printf 'bye\\n' > gone.txt && git add . && git commit -qm base", in: repo)
+        let commit = try Self.shell("git rev-parse HEAD", in: repo).trimmingCharacters(in: .whitespacesAndNewlines)
+        // Leftovers from earlier model commands must not survive.
+        try Data("stray".utf8).write(to: repo.appendingPathComponent("stray.txt"))
+        try Data("edited by hand\n".utf8).write(to: repo.appendingPathComponent("keep.txt"))
+
+        let machine = LocalMachine(home: home, exists: true)
+        let control = ComputerControl(tools: Self.machineTools(), machine: "mcp-maipa-g") { tool, arguments in
+            try await machine.call(tool, arguments)
+        }
+        let binary = Data([0, 255, 1, 254, 10, 13, 39, 34])
+        let changes: [StagedChange] = [
+            .write(path: "change.txt", data: Data("new line\nwith 'quotes' and $HOME\n".utf8), existed: true),
+            .write(path: "src/it's new.swift", data: Data("print(\"hi\")\n".utf8), existed: false),
+            .write(path: "assets/blob.bin", data: binary, existed: false),
+            .delete(path: "gone.txt", previous: Data("bye\n".utf8)),
+        ]
+        #expect(try await control.createCheckpoint(comment: "before sync") == "checkpoint v1")
+        let status = try await control.syncStagedChanges(homePath: "repos/me/app", cloneURL: nil, commit: commit, changes: changes)
+        #expect(status.contains("change.txt") && status.contains("gone.txt"))
+        #expect(try String(contentsOf: repo.appendingPathComponent("change.txt"), encoding: .utf8) == "new line\nwith 'quotes' and $HOME\n")
+        #expect(try String(contentsOf: repo.appendingPathComponent("src/it's new.swift"), encoding: .utf8) == "print(\"hi\")\n")
+        #expect(try Data(contentsOf: repo.appendingPathComponent("assets/blob.bin")) == binary)
+        #expect(!FileManager.default.fileExists(atPath: repo.appendingPathComponent("gone.txt").path))
+        #expect(!FileManager.default.fileExists(atPath: repo.appendingPathComponent("stray.txt").path))
+        #expect(try String(contentsOf: repo.appendingPathComponent("keep.txt"), encoding: .utf8) == "one\n")
+        await #expect(throws: ComputerControl.Failure.self) {
+            _ = try await control.syncStagedChanges(homePath: "../etc", cloneURL: nil, commit: nil, changes: [])
+        }
+        await #expect(throws: ComputerControl.Failure.self) {
+            _ = try await control.syncStagedChanges(homePath: "repos/me/app", cloneURL: nil, commit: nil, changes: [.write(path: "../outside", data: Data(), existed: false)])
+        }
+    }
 }

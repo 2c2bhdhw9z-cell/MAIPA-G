@@ -147,8 +147,9 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
     /// Everything the chat has cost so far, in dollars, as OpenRouter reported it.
     public var totalUsage: Usage {
         var usage = messages.compactMap(\.assistantTurn).flatMap(\.steps).compactMap(\.usage).reduce(Usage(), +)
-        let imageCosts = messages.compactMap(\.assistantTurn).flatMap(\.steps).flatMap { $0.generatedImages ?? [] }.compactMap(\.cost)
-        if !imageCosts.isEmpty { usage.cost = (usage.cost ?? 0) + imageCosts.reduce(0, +) }
+        let steps = messages.compactMap(\.assistantTurn).flatMap(\.steps)
+        let extraCosts = steps.flatMap { $0.generatedImages ?? [] }.compactMap(\.cost) + steps.flatMap(\.toolCalls).compactMap(\.billedCost)
+        if !extraCosts.isEmpty { usage.cost = (usage.cost ?? 0) + extraCosts.reduce(0, +) }
         return usage
     }
 
@@ -307,8 +308,8 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
 
     public var usage: Usage {
         var usage = steps.compactMap(\.usage).reduce(Usage(), +)
-        let imageCosts = steps.flatMap { $0.generatedImages ?? [] }.compactMap(\.cost)
-        if !imageCosts.isEmpty { usage.cost = (usage.cost ?? 0) + imageCosts.reduce(0, +) }
+        let extraCosts = steps.flatMap { $0.generatedImages ?? [] }.compactMap(\.cost) + steps.flatMap(\.toolCalls).compactMap(\.billedCost)
+        if !extraCosts.isEmpty { usage.cost = (usage.cost ?? 0) + extraCosts.reduce(0, +) }
         return usage
     }
 
@@ -429,6 +430,8 @@ public struct ToolCallRecord: Codable, Sendable, Hashable, Identifiable {
     public var questions: QuestionSet?
     public var startedAt: Date
     public var finishedAt: Date?
+    /// Dollars a tool cost outside the AI request, such as measured chat-computer time.
+    public var billedCost: Double?
 
     public init(id: String, name: String, arguments: String, summary: String, status: Status = .running, startedAt: Date = Date()) {
         self.id = id

@@ -21,6 +21,9 @@ final class ChatSession: Identifiable {
     @ObservationIgnored private var run: AgentRun?
     @ObservationIgnored private var workspace: RepoWorkspace?
     @ObservationIgnored private var changeWorkspace: ChangeWorkspace?
+    /// What MAIPA-G last put on the chat computer, so unchanged staged edits aren't sent again.
+    @ObservationIgnored private var lastComputerSync: String?
+    @ObservationIgnored private var lastComputerCheck: Date?
     @ObservationIgnored private var changeSession: ChangeSession?
     @ObservationIgnored private var pendingTurn: AssistantTurn?
     @ObservationIgnored private var flushScheduled = false
@@ -424,7 +427,20 @@ final class ChatSession: Identifiable {
                 return
             }
         }
-        let computer = await computerContext(app: app, repo: repoContext, stagedPatch: await changeWorkspace?.stagedDiff())
+        let computerNote = await prepareComputer(app: app, repo: repoContext)
+        var canSyncStaged = false
+        if let repoContext, let workspace = changeWorkspace, let control = app.connectors.computerControl(), control.commandTool != nil, app.openRouter.supportsTools(chat.model) {
+            tools.append(SyncStagedToComputerTool(
+                control: control, workspace: workspace,
+                homePath: "repos/\(repoContext.ref.owner)/\(repoContext.ref.name)",
+                cloneURL: repoContext.isPrivate ? nil : "https://github.com/\(repoContext.ref.owner)/\(repoContext.ref.name).git",
+                commit: repoContext.commit
+            ))
+            canSyncStaged = true
+        }
+        var computer = await computerContext(app: app, repo: repoContext, stagedPatch: await changeWorkspace?.stagedDiff())
+        computer?.appNote = computerNote
+        computer?.canSyncStaged = canSyncStaged
 
         let hasRepo = chat.repo != nil
         var difficulty = TaskDifficulty.estimate(lastMessage, hasRepo: hasRepo)
@@ -571,15 +587,51 @@ final class ChatSession: Identifiable {
     /// the chosen one, or for Automatic the first one on sprites.dev. Only a connector that is
     /// connected right now counts, as only those give the AI their tools.
     private func computerConnector(_ app: AppModel) -> ConnectorConfiguration? {
-        guard !app.settings.chatComputerOff else { return nil }
-        let ready = app.connectors.connected.filter { app.connectors.states[$0.id] == .connected }
-        if let chosen = app.settings.chatComputerServer {
-            return ready.first { $0.serverID == chosen }
+        app.connectors.computerConnector()
+    }
+
+    /// Before the AI starts, MAIPA-G's own code checks the machine with a real command, creates
+    /// it again when it is missing, takes a provider checkpoint when the service has one, and puts
+    /// the phone-staged changes onto its copy of the repo. Returns what the AI is told.
+    private func prepareComputer(app: AppModel, repo: SystemPrompt.RepoContext?) async -> String? {
+        guard app.openRouter.supportsTools(chat.model), let control = app.connectors.computerControl(), control.commandTool != nil else { return nil }
+        var notes: [String] = []
+        if lastComputerCheck.map({ Date().timeIntervalSince($0) > 600 }) ?? true {
+            do {
+                switch try await control.ensureMachine(allowCreate: true) {
+                case .healthy: notes.append("MAIPA-G checked `\(control.machine)` with a real command before this message; it answered.")
+                case .recreated: notes.append("`\(control.machine)` was missing, so MAIPA-G's own code created it again with that exact name and checked it with a real command.")
+                }
+                lastComputerCheck = Date()
+            } catch {
+                lastComputerCheck = nil
+                return "MAIPA-G's own check of `\(control.machine)` failed before this message: \(ErrorExplainer.explain(error).message) Tell the person; don't pretend commands ran."
+            }
         }
-        return ready.first { connector in
-            guard let host = connector.endpoint?.host?.lowercased() else { return false }
-            return host == "sprites.dev" || host.hasSuffix(".sprites.dev")
+        if let repo, let workspace = changeWorkspace {
+            let changes = await workspace.stagedChanges()
+            let fingerprint = changes.map { "\($0.path):\($0.hashValue)" }.joined(separator: "|") + repo.commit
+            if !changes.isEmpty, fingerprint != lastComputerSync {
+                if control.checkpointTool != nil {
+                    do {
+                        _ = try await control.createCheckpoint(comment: "MAIPA-G before syncing staged changes for \(repo.ref.fullName)")
+                        notes.append("MAIPA-G took a provider checkpoint of `\(control.machine)` before changing its copy of the repo.")
+                    } catch {
+                        notes.append("A provider checkpoint couldn't be taken: \(ErrorExplainer.explain(error).message)")
+                    }
+                } else {
+                    notes.append("This computer service has no checkpoint tool, so no checkpoint was taken.")
+                }
+                do {
+                    let status = try await control.syncStagedChanges(homePath: "repos/\(repo.ref.owner)/\(repo.ref.name)", cloneURL: repo.isPrivate ? nil : "https://github.com/\(repo.ref.owner)/\(repo.ref.name).git", commit: repo.commit, changes: changes)
+                    lastComputerSync = fingerprint
+                    notes.append("MAIPA-G's own code already made ~/repos/\(repo.ref.owner)/\(repo.ref.name) match the phone-staged changes. git status:\n\(status.isEmpty ? "clean" : status)")
+                } catch {
+                    notes.append("MAIPA-G couldn't put the staged changes on the computer: \(ErrorExplainer.explain(error).message)")
+                }
+            }
         }
+        return notes.joined(separator: "\n")
     }
 
     /// What the AI is told about this chat's computer, or nil when the chat has none.

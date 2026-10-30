@@ -37,8 +37,15 @@ public enum SystemPrompt {
         /// Current phone-staged patch that must be applied before running checks.
         public var stagedPatch: String?
         public var approximateHourlyCost: Double?
+        /// What MAIPA-G's own code did on the computer before this message (health command,
+        /// recreation, checkpoint, staged-change sync).
+        public var appNote: String?
+        /// True when the sync_staged_to_computer tool is available.
+        public var canSyncStaged: Bool
 
-        public init(service: String, machine: String, repoFullName: String? = nil, cloneURL: String? = nil, branch: String? = nil, commit: String? = nil, repoPath: String? = nil, stagedPatch: String? = nil, approximateHourlyCost: Double? = nil) {
+        public init(service: String, machine: String, repoFullName: String? = nil, cloneURL: String? = nil, branch: String? = nil, commit: String? = nil, repoPath: String? = nil, stagedPatch: String? = nil, approximateHourlyCost: Double? = nil, appNote: String? = nil, canSyncStaged: Bool = false) {
+            self.appNote = appNote
+            self.canSyncStaged = canSyncStaged
             self.service = service
             self.machine = machine
             self.repoFullName = repoFullName
@@ -144,7 +151,7 @@ public enum SystemPrompt {
 
     static func computerSection(_ computer: ComputerContext) -> String {
         var steps = [
-            "- The machine is named `\(computer.machine)`. Check it before the first command. If it is missing, create it with exactly that name. If its health check or a simple `pwd` fails twice, replace that machine automatically, then restore the repository from GitHub before continuing.",
+            "- The machine is named `\(computer.machine)`. MAIPA-G's own code checks it with a real command before each message and creates it again when it is missing. If commands still fail, say so and suggest Settings → Check everything, which can replace a broken machine.",
             "- Use the tools already present in the provider's reviewed machine image. Do not download or run setup scripts, moving `latest` installers, or `curl | bash`. If a required tool is missing, explain which exact tool is unavailable instead of installing unverified code.",
         ]
         if let fullName = computer.repoFullName, let cloneURL = computer.cloneURL, let path = computer.repoPath {
@@ -152,9 +159,13 @@ public enum SystemPrompt {
             let commit = computer.commit.map { " at commit \($0.prefix(7))" } ?? ""
             steps.append("- Keep a copy of \(fullName) at `\(path)`\(branch)\(commit). If it is public and missing, clone it with `git clone \(cloneURL) \(path)`. For a private repo, use MAIPA-G's trusted computer setup; never ask for or construct a credential URL.")
             steps.append("- Never place a token, password, secret, or credential-file location in a command, tool argument, answer, or saved chat.")
-            steps.append("- The copy on the computer is for running and checking. To change the repo, still use create_file, edit_file, delete_file and save_changes, and make the same edits on the computer when you need to test them.")
-            if let patch = computer.stagedPatch, patch != "No staged changes." {
-                steps.append("- Before any build or test, make the computer checkout match these phone-staged changes exactly. Do not test the old checkout:\n```diff\n\(String(patch.prefix(80_000)))\n```")
+            if computer.canSyncStaged {
+                steps.append("- The copy on the computer is for running and checking. To change the repo, use create_file, edit_file, delete_file and save_changes, then call sync_staged_to_computer before any build or test: MAIPA-G's own code makes the computer copy match the staged files exactly. Never retype staged changes into commands.")
+            } else {
+                steps.append("- The copy on the computer is for running and checking. To change the repo, still use create_file, edit_file, delete_file and save_changes, and make the same edits on the computer when you need to test them.")
+                if let patch = computer.stagedPatch, patch != "No staged changes." {
+                    steps.append("- Before any build or test, make the computer checkout match these phone-staged changes exactly. Do not test the old checkout:\n```diff\n\(String(patch.prefix(80_000)))\n```")
+                }
             }
         }
         steps.append("- Before risky or long work, create a provider checkpoint when the computer service supports it. Reuse it for recovery and say when a checkpoint was unavailable.")
@@ -162,6 +173,9 @@ public enum SystemPrompt {
             steps.append("- The configured approximate running cost is $\(String(format: "%.3f", hourly)) per hour. Include elapsed time and an approximate cost when reporting long computer work.")
         }
         steps.append("- Report command output honestly. Never claim a command ran if it didn't.")
+        if let note = computer.appNote, !note.isEmpty {
+            steps.append("- Already done by MAIPA-G's own code before this message:\n\(note)")
+        }
         return """
         This chat has a real Linux computer through the \(computer.service) connector. Its tools start with mcp_. \
         Use it on your own, without waiting to be asked, whenever a task needs running commands, counting, \

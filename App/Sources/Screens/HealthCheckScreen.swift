@@ -6,10 +6,11 @@ struct HealthCheckScreen: View {
     @Environment(\.dismiss) private var dismiss
     @State private var items: [Item] = []
     @State private var running = false
+    @State private var confirmReplace = false
 
     private struct Item: Identifiable {
         enum State { case good, warning, failed }
-        enum Action { case github, openRouter, save, connector(UUID), computer, jobs }
+        enum Action { case github, openRouter, save, connector(UUID), computer, replaceComputer, jobs }
         let id: String
         var title: String
         var detail: String
@@ -48,7 +49,26 @@ struct HealthCheckScreen: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .task { await run() }
+            .confirmationDialog("Replace the chat computer?", isPresented: $confirmReplace, titleVisibility: .visible) {
+                Button("Replace \(app.settings.chatComputerMachineName)", role: .destructive) {
+                    Task { await replaceComputer() }
+                }
+            } message: {
+                Text("MAIPA-G deletes the machine that isn't answering and creates a new one with the same name. Files on it are lost; your repos on GitHub and the phone's staged changes are not.")
+            }
         }
+    }
+
+    private func replaceComputer() async {
+        guard let control = app.connectors.computerControl() else { return }
+        running = true
+        do {
+            _ = try await control.ensureMachine(allowCreate: true, replaceBroken: true)
+        } catch {
+            items.append(Item(id: "computer-replace", title: "Replacing the computer", detail: ErrorExplainer.explain(error).message, nextStep: "Open the computer service's connector and check its sign-in and limits.", state: .failed, action: .computer))
+        }
+        running = false
+        await run()
     }
 
     private func run() async {
@@ -100,25 +120,47 @@ struct HealthCheckScreen: View {
 
         if app.settings.chatComputerOff {
             items.append(Item(id: "computer", title: "Chat computer", detail: "Turned off.", nextStep: "Turn it on in Settings if chats need commands.", state: .warning, action: .computer))
-        } else {
-            let ready = app.connectors.connected.contains { configuration in
-                app.connectors.states[configuration.id] == .connected &&
-                    (app.settings.chatComputerServer == nil || app.settings.chatComputerServer == configuration.serverID)
+        } else if let control = app.connectors.computerControl() {
+            // A real command on the real machine, not just "the connector is signed in".
+            do {
+                switch try await control.ensureMachine(allowCreate: true) {
+                case .healthy(let output):
+                    items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) ran a command: \(Self.firstLine(output, skipping: "maipa-g-health-ok"))", state: .good))
+                case .recreated(let output):
+                    items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) was missing, so MAIPA-G created it again. It ran a command: \(Self.firstLine(output, skipping: "maipa-g-health-ok"))", state: .good))
+                }
+            } catch {
+                let broken = Self.isBrokenMachine(error)
+                items.append(Item(
+                    id: "computer", title: "Chat computer", detail: ErrorExplainer.explain(error).message,
+                    nextStep: broken ? "Replace the machine, or open its connector to check the service." : "Open the computer service's connector and reconnect it.",
+                    state: .failed, action: broken ? .replaceComputer : .computer
+                ))
             }
-            items.append(Item(id: "computer", title: "Chat computer", detail: ready ? "Connector is ready." : "No selected computer connector is connected.", nextStep: ready ? nil : "Connect the selected computer service.", state: ready ? .good : .failed, action: ready ? nil : .computer))
+        } else {
+            items.append(Item(id: "computer", title: "Chat computer", detail: "No selected computer connector is connected.", nextStep: "Connect the selected computer service.", state: .failed, action: .computer))
         }
 
         await app.jobs.refresh()
         var actionsError = app.jobs.lastError
+        var probed: [String] = []
         if actionsError == nil, let github = app.github.client {
-            for repo in Set(app.jobs.jobs.compactMap(\.targetRepo)).prefix(5) {
-                do { _ = try await github.workflowRuns(repo, limit: 1) }
+            // With no jobs yet, Actions is still checked against the data repo or the open repo.
+            var repos = Array(Set(app.jobs.jobs.compactMap(\.targetRepo))).sorted { $0.fullName < $1.fullName }
+            if repos.isEmpty { repos = [app.sync.repo, app.repo?.ref].compactMap { $0 } }
+            for repo in repos.prefix(5) {
+                do { _ = try await github.workflowRuns(repo, limit: 1); probed.append(repo.fullName) }
                 catch { actionsError = ErrorExplainer.explain(error).message; break }
             }
+            if repos.isEmpty, actionsError == nil {
+                actionsError = "There is no repo to check Actions against yet."
+            }
+        } else if actionsError == nil {
+            actionsError = "GitHub isn't connected, so Actions can't be checked."
         }
         items.append(Item(
             id: "actions", title: "GitHub Actions",
-            detail: actionsError ?? "Actions responded and job status refreshed.",
+            detail: actionsError ?? "Actions answered for \(probed.joined(separator: ", ")) and job status refreshed.",
             nextStep: actionsError == nil ? nil : "Open Jobs, fix the shown GitHub error, and retry.",
             state: actionsError == nil ? .good : .failed,
             action: actionsError == nil ? nil : .jobs
@@ -133,8 +175,19 @@ struct HealthCheckScreen: View {
         case .save: Task { await app.sync.syncNow(); await run() }
         case .connector(let id): app.sheet = .connectorDetail(id)
         case .computer: app.sheet = .connectors
+        case .replaceComputer: confirmReplace = true
         case .jobs: app.jobs.show()
         }
+    }
+
+    static func isBrokenMachine(_ error: Error) -> Bool {
+        guard let failure = error as? ComputerControl.Failure, case .machineUnavailable = failure else { return false }
+        return true
+    }
+
+    static func firstLine(_ text: String, skipping marker: String) -> String {
+        let line = text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty && $0 != marker }
+        return String((line ?? "ok").prefix(120))
     }
 
     private func icon(_ state: Item.State) -> String {

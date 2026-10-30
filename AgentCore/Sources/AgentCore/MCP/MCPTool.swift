@@ -4,10 +4,13 @@ import Foundation
 public struct MCPTool: AgentTool {
     public let definition: ConnectorToolDefinition
     public let session: MCPConnectorSession
+    /// Set for the chat computer's connector: each call's measured time is charged at this
+    /// approximate hourly rate in the chat's cost counter.
+    public let computerHourlyRate: Double?
     public var name: String { definition.namespacedName }
 
-    public init(definition: ConnectorToolDefinition, session: MCPConnectorSession) {
-        self.definition = definition; self.session = session
+    public init(definition: ConnectorToolDefinition, session: MCPConnectorSession, computerHourlyRate: Double? = nil) {
+        self.definition = definition; self.session = session; self.computerHourlyRate = computerHourlyRate
     }
 
     public var spec: ToolSpec {
@@ -30,13 +33,18 @@ public struct MCPTool: AgentTool {
 
     public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         progress("Waiting for \(definition.serverName)…")
+        let started = Date()
         let response = try await session.call(tool: definition.originalName, arguments: arguments)
+        let seconds = Date().timeIntervalSince(started)
         let text = ConnectorOutputLimit.cap(response.text)
+        let cost = ComputerControl.cost(seconds: seconds, hourlyRate: computerHourlyRate)
+        let measured = computerHourlyRate == nil ? "" : String(format: "\n[Computer time %.1f s, about $%.4f]", seconds, cost)
         return ToolOutput(
-            forModel: text,
+            forModel: text + measured,
             summary: "Used \(definition.serverName) · \(definition.title)",
-            detail: text,
-            isError: response.isError
+            detail: text + measured,
+            isError: response.isError,
+            billedCost: cost
         )
     }
 }

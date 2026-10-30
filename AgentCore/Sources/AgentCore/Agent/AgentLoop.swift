@@ -512,6 +512,7 @@ private struct Runner {
             record.detail = output.detail
             record.result = Self.capped(output.forModel)
             record.finishedAt = Date()
+            if output.billedCost > 0 { record.billedCost = output.billedCost }
             turn.steps[stepIndex].toolCalls[callIndex] = record
             if !output.generatedImages.isEmpty {
                 turn.steps[stepIndex].generatedImages = (turn.steps[stepIndex].generatedImages ?? []) + output.generatedImages
