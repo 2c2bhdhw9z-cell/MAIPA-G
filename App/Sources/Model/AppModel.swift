@@ -243,6 +243,10 @@ final class AppModel {
         await github.refresh()
         await startSaving()
         await jobs.updateAutonomousWorkflows()
+        // Builds before the secret record existed: find the repos they set up, once.
+        if github.isConnected, !UserDefaults.standard.bool(forKey: JobCoordinator.ledgerMigratedKey) {
+            await jobs.migrateAutonomousLedger()
+        }
         await updates.check(using: github.publicClient)
         _ = await (models, key)
     }
@@ -251,6 +255,9 @@ final class AppModel {
     func githubDidConnect() async {
         await github.refresh()
         await startSaving()
+        // A new or reconnected GitHub app has a new key: repos holding the old one get the new one.
+        await jobs.migrateAutonomousLedger()
+        await jobs.rotateAutonomousSecrets()
     }
 
     private func startSaving() async {

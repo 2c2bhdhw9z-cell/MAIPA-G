@@ -589,8 +589,63 @@ final class JobCoordinator {
         lastError = failures.isEmpty ? nil : "Autonomous secret cleanup failed for " + failures.joined(separator: "; ")
     }
 
+    /// Repos set up by builds before the record existed are found by their secret names and
+    /// caller workflow, and added so later cleanups and sign-in changes reach them too.
+    func migrateAutonomousLedger() async {
+        guard let app, let github = app.github.client else { return }
+        let repos = app.github.repos.map(\.ref)
+        var branches: [RepoRef: String] = [:]
+        for repo in app.github.repos { branches[repo.ref] = repo.defaultBranch }
+        let defaultBranches = branches
+        let existing = await provisioningStore.loadAll()
+        let result = await AutonomousSecretLedger.migrate(
+            repos: repos, existing: existing,
+            secretNames: { repo in try await github.actionsSecretNames(repo) },
+            // A missing caller file is an expected "no"; the secret-name check above already
+            // reported any access problem for this repo.
+            hasCaller: { repo in (try? await github.fileContents(repo, path: AutonomousSetup.callerPath, ref: defaultBranches[repo] ?? "main")) != nil }
+        )
+        for record in result.added {
+            do { try await provisioningStore.save(record) }
+            catch { lastError = "Couldn't record \(record.repo.fullName)'s Autonomous secrets: \(ErrorExplainer.explain(error).message)" }
+        }
+        if !result.added.isEmpty { app.sync.request() }
+        if !result.failures.isEmpty {
+            lastError = "Couldn't check these repos for old Autonomous secrets: " + result.failures.prefix(5).joined(separator: "; ") + ". Tap Find repos with old Autonomous secrets to retry."
+        }
+        UserDefaults.standard.set(true, forKey: Self.ledgerMigratedKey)
+    }
+
+    static let ledgerMigratedKey = "autonomousLedgerMigrated"
+
+    /// After the OpenRouter key or the GitHub app's key changes, every recorded repo gets the new
+    /// values, so no repo keeps a revoked or old credential.
+    func rotateAutonomousSecrets() async {
+        guard let app, let github = app.github.client, let credentials = app.github.credentials else { return }
+        let records = await provisioningStore.loadAll()
+        guard !records.isEmpty else { return }
+        var values = [
+            "MAIPAG_APP_ID": String(credentials.appID),
+            "MAIPAG_APP_PRIVATE_KEY": credentials.privateKeyPEM,
+        ]
+        if let key = app.openRouter.apiKey, app.settings.autonomousEnabled { values["OPENROUTER_API_KEY"] = key }
+        if let connectors = app.connectors.autonomousSecretsJSON() { values["MAIPAG_MCP_SECRETS"] = connectors }
+        if !app.settings.autonomousEnabled { values = [:] }
+        let result = await AutonomousSecretLedger.rotate(
+            records: records, values: values,
+            put: { repo, name, value in try await github.putActionsSecret(repo, name: name, value: value) },
+            delete: { repo, name in try await github.deleteActionsSecret(repo, name: name) }
+        )
+        for record in result.records {
+            do { try await provisioningStore.save(record) }
+            catch { lastError = "Couldn't update the record for \(record.repo.fullName): \(ErrorExplainer.explain(error).message)" }
+        }
+        app.sync.request()
+        lastError = result.failures.isEmpty ? nil : "Updating Autonomous secrets failed for " + result.failures.joined(separator: "; ") + ". Retry from Settings."
+    }
+
     func retryPendingSecretCleanup() async {
-        if app?.openRouter.isSignedIn == true { await reconcileAutonomousConnectorSecrets() }
+        if app?.openRouter.isSignedIn == true, app?.settings.autonomousEnabled == true { await rotateAutonomousSecrets() }
         else { await cleanupAllAutonomousSecrets() }
     }
 

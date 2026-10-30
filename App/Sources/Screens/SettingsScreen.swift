@@ -414,9 +414,12 @@ struct SettingsScreen: View {
                         .foregroundStyle(Theme.danger)
                 }
             }
-            if let error = app.jobs.lastError, error.contains("secret cleanup") {
+            if let error = app.jobs.lastError, error.contains("secret cleanup") || error.contains("Autonomous secrets") {
                 Text(error).font(.footnote).foregroundStyle(Theme.danger)
                 Button("Retry Autonomous cleanup") { Task { await app.jobs.retryPendingSecretCleanup() } }
+            }
+            if app.github.isConnected {
+                Button("Find repos with old Autonomous secrets") { Task { await app.jobs.migrateAutonomousLedger() } }
             }
             if app.github.isConnected {
                 Button("Save now") { Task { await app.sync.syncNow() } }

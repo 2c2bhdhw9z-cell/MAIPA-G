@@ -45,6 +45,13 @@ public extension GitHubClient {
         }
     }
 
+    /// The names (never the values) of a repo's Actions secrets.
+    func actionsSecretNames(_ repo: RepoRef) async throws -> Set<String> {
+        struct Page: Decodable { struct Secret: Decodable { let name: String }; let secrets: [Secret] }
+        let page = try await get(Page.self, Self.path(repo, "/actions/secrets"), query: ["per_page": "100"])
+        return Set(page.secrets.map(\.name))
+    }
+
     /// Encrypts locally before sending. The clear value is never part of an HTTP body or URL.
     func putActionsSecret(_ repo: RepoRef, name: String, value: String) async throws {
         let key = try await actionsPublicKey(repo)
@@ -155,5 +162,67 @@ public actor AutonomousSetup {
         )
         try await github.updateBranch(repo, branch: branch, to: commit)
         return commit
+    }
+}
+
+/// Keeps the record of which repos hold MAIPA-G's Actions secrets complete and current.
+public enum AutonomousSecretLedger {
+    /// Every secret name MAIPA-G has ever put in a repo.
+    public static let managedNames: Set<String> = ["MAIPAG_APP_ID", "MAIPAG_APP_PRIVATE_KEY", "OPENROUTER_API_KEY", "MAIPAG_MCP_SECRETS"]
+
+    /// Finds repos set up before the record existed: any repo holding one of MAIPA-G's secret
+    /// names, or carrying MAIPA-G's caller workflow, is added with the names it actually holds.
+    public static func migrate(
+        repos: [RepoRef],
+        existing: [AutonomousInstallationRecord],
+        secretNames: @Sendable (RepoRef) async throws -> Set<String>,
+        hasCaller: @Sendable (RepoRef) async -> Bool
+    ) async -> (added: [AutonomousInstallationRecord], failures: [String]) {
+        let known = Set(existing.map(\.repo))
+        var added: [AutonomousInstallationRecord] = []
+        var failures: [String] = []
+        for repo in repos where !known.contains(repo) {
+            do {
+                let held = try await secretNames(repo).intersection(managedNames)
+                if !held.isEmpty {
+                    added.append(AutonomousInstallationRecord(repo: repo, managedSecrets: held, reviewedRevision: ""))
+                } else if await hasCaller(repo) {
+                    added.append(AutonomousInstallationRecord(repo: repo, managedSecrets: [], reviewedRevision: ""))
+                }
+            } catch {
+                failures.append("\(repo.fullName): \(ErrorExplainer.explain(error).message)")
+            }
+        }
+        return (added, failures)
+    }
+
+    /// Puts the current values in every recorded repo after a sign-in changed, and deletes the
+    /// ones that no longer have a value. Returns the updated records and what failed.
+    public static func rotate(
+        records: [AutonomousInstallationRecord],
+        values: [String: String],
+        put: @Sendable (RepoRef, String, String) async throws -> Void,
+        delete: @Sendable (RepoRef, String) async throws -> Void
+    ) async -> (records: [AutonomousInstallationRecord], failures: [String]) {
+        var updated: [AutonomousInstallationRecord] = []
+        var failures: [String] = []
+        for var record in records {
+            for name in managedNames.union(record.managedSecrets).sorted() {
+                do {
+                    if let value = values[name], !value.isEmpty {
+                        try await put(record.repo, name, value)
+                        record.managedSecrets.insert(name)
+                    } else if record.managedSecrets.contains(name) || managedNames.contains(name) {
+                        try await delete(record.repo, name)
+                        record.managedSecrets.remove(name)
+                    }
+                } catch {
+                    failures.append("\(record.repo.fullName) / \(name): \(ErrorExplainer.explain(error).message)")
+                }
+            }
+            record.updatedAt = Date()
+            updated.append(record)
+        }
+        return (updated, failures)
     }
 }

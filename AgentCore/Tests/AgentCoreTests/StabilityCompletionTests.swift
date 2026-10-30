@@ -347,4 +347,65 @@ struct StabilityCompletionTests {
         let unrun = try await noComputer[0].run(arguments: [:]) { _ in }
         #expect(unrun.forModel.contains("this chat has no computer"))
     }
+
+    actor SecretVault {
+        var secrets: [RepoRef: [String: String]] = [:]
+        var failing: Set<RepoRef> = []
+        func put(_ repo: RepoRef, _ name: String, _ value: String) throws {
+            if failing.contains(repo) { throw HTTPError.status(code: 403, body: "no", headers: [:]) }
+            secrets[repo, default: [:]][name] = value
+        }
+        func delete(_ repo: RepoRef, _ name: String) throws {
+            if failing.contains(repo) { throw HTTPError.status(code: 403, body: "no", headers: [:]) }
+            secrets[repo]?[name] = nil
+        }
+        func names(_ repo: RepoRef) throws -> Set<String> {
+            if failing.contains(repo) { throw HTTPError.status(code: 404, body: "gone", headers: [:]) }
+            return Set((secrets[repo] ?? [:]).keys)
+        }
+        func fail(_ repo: RepoRef) { failing.insert(repo) }
+    }
+
+    // Necessary 1: repos set up before the record existed are found and recorded, and a changed
+    // sign-in replaces the old secret in every recorded repo, saying which failed.
+    @Test func N01_ledgerMigrationAndCredentialRotation() async throws {
+        let old = RepoRef(owner: "me", name: "old-app"), callerOnly = RepoRef(owner: "me", name: "caller-only")
+        let clean = RepoRef(owner: "me", name: "never-used"), broken = RepoRef(owner: "me", name: "no-access")
+        let recorded = RepoRef(owner: "me", name: "recorded")
+        let vault = SecretVault()
+        try await vault.put(old, "OPENROUTER_API_KEY", "old-key")
+        try await vault.put(old, "MAIPAG_APP_PRIVATE_KEY", "old-pem")
+        try await vault.put(old, "UNRELATED", "theirs")
+        try await vault.put(recorded, "OPENROUTER_API_KEY", "old-key")
+        await vault.fail(broken)
+        let existing = [AutonomousInstallationRecord(repo: recorded, managedSecrets: ["OPENROUTER_API_KEY"], reviewedRevision: "abc")]
+
+        let migrated = await AutonomousSecretLedger.migrate(
+            repos: [old, callerOnly, clean, broken, recorded], existing: existing,
+            secretNames: { try await vault.names($0) },
+            hasCaller: { $0 == callerOnly }
+        )
+        #expect(Set(migrated.added.map(\.repo)) == [old, callerOnly])
+        #expect(migrated.added.first { $0.repo == old }?.managedSecrets == ["OPENROUTER_API_KEY", "MAIPAG_APP_PRIVATE_KEY"])
+        #expect(migrated.failures.count == 1 && migrated.failures[0].hasPrefix("me/no-access"))
+
+        let rotated = await AutonomousSecretLedger.rotate(
+            records: existing + migrated.added,
+            values: ["OPENROUTER_API_KEY": "new-key", "MAIPAG_APP_ID": "42", "MAIPAG_APP_PRIVATE_KEY": "new-pem"],
+            put: { try await vault.put($0, $1, $2) }, delete: { try await vault.delete($0, $1) }
+        )
+        #expect(rotated.failures.isEmpty)
+        let oldSecrets = await vault.secrets[old] ?? [:]
+        #expect(oldSecrets["OPENROUTER_API_KEY"] == "new-key" && oldSecrets["MAIPAG_APP_PRIVATE_KEY"] == "new-pem" && oldSecrets["MAIPAG_APP_ID"] == "42")
+        #expect(oldSecrets["UNRELATED"] == "theirs" && oldSecrets["MAIPAG_MCP_SECRETS"] == nil)
+        #expect(await vault.secrets[recorded]?["OPENROUTER_API_KEY"] == "new-key")
+        #expect(rotated.records.allSatisfy { $0.managedSecrets == ["OPENROUTER_API_KEY", "MAIPAG_APP_ID", "MAIPAG_APP_PRIVATE_KEY"] })
+
+        // Turning Autonomous off (no values) removes every MAIPA-G secret, and a repo that
+        // refuses is named so Retry can reach it.
+        await vault.fail(recorded)
+        let cleared = await AutonomousSecretLedger.rotate(records: rotated.records, values: [:], put: { try await vault.put($0, $1, $2) }, delete: { try await vault.delete($0, $1) })
+        #expect(await vault.secrets[old] == ["UNRELATED": "theirs"])
+        #expect(!cleared.failures.isEmpty && cleared.failures.allSatisfy { $0.hasPrefix("me/recorded") })
+    }
 }

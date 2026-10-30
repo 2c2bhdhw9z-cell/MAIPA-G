@@ -78,8 +78,11 @@ final class OpenRouterAccount {
                 return
             }
             let key = try await client.exchangeSignInCode(code, pkce: pkce)
+            let previous = apiKey
             Keychain.setString(key, for: .openRouterKey)
             apiKey = key
+            // A new key replaces the old one in every repo that holds MAIPA-G's Autonomous secrets.
+            if previous != nil, previous != key { Task { await app?.jobs.rotateAutonomousSecrets() } }
             accountState = AccountState()
             saveState()
             await refreshKeyInfo()
