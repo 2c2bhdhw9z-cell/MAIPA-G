@@ -113,10 +113,30 @@ for appearance in dark light; do
   for scene in $SCENES; do
     xcrun simctl terminate "$UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
     sleep 1
+    if [ "$scene" = "preview-isolation" ]; then
+      data_dir="$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data 2>/dev/null || true)"
+      [ -n "$data_dir" ] && rm -f "$data_dir/Documents/preview-isolation.json"
+    fi
     xcrun simctl launch "$UDID" "$BUNDLE_ID" -preview "$scene" >/dev/null
     # Long enough for sheets to slide up and the list of AIs to download, then retried while
     # the screen still looks empty (a slow launch on a busy machine).
-    if [ "$scene" = "models" ]; then sleep 9; else sleep 5; fi
+    if [ "$scene" = "models" ]; then sleep 9; elif [ "$scene" = "preview-isolation" ]; then sleep 12; else sleep 5; fi
+    if [ "$scene" = "preview-isolation" ]; then
+      # A real WebKit check: the hostile made-up site must not read an unpublished file or reach
+      # another host. The app writes the page's own verdict to its Documents folder.
+      verdict=""
+      for wait in 1 2 3 4 5 6 7 8; do
+        data_dir="$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data 2>/dev/null || true)"
+        verdict="$(cat "$data_dir/Documents/preview-isolation.json" 2>/dev/null || true)"
+        [ -n "$verdict" ] && break
+        sleep 2
+      done
+      echo "    preview isolation ($appearance): ${verdict:-no result}"
+      if ! python3 -c 'import json,sys; r=json.loads(sys.argv[1]); sys.exit(0 if len(r) >= 5 and all(v == "blocked" for v in r.values()) else 1)' "${verdict:-{\}}"; then
+        echo "::error::the preview isolation check failed ($appearance): ${verdict:-no result}"
+        failures=$((failures + 1))
+      fi
+    fi
     shot="$OUT/$appearance-$scene.png"
     for attempt in 1 2 3 4 5 6; do
       xcrun simctl io "$UDID" screenshot "$shot" >/dev/null 2>&1 || true

@@ -618,9 +618,10 @@ final class AppModel {
         case "picture-result":
             let chat = PreviewScenes.pictureChat(); library.preview(summaries: summaries, open: chat)
             if let id = chat.lastAssistantTurn?.steps.first?.generatedImages?.first?.id { sheet = .picture(id) }
-        case "preview", "preview-error", "files-web":
+        case "preview", "preview-error", "files-web", "preview-isolation":
             library.preview(summaries: summaries, open: nil)
             if scene == "preview" { previews.previewFixture(); if let repo = home.repo { sheet = .webPreview(repo) } }
+            else if scene == "preview-isolation" { previews.previewIsolationFixture(); if let repo = home.repo { sheet = .webPreview(repo) } }
             else if scene == "files-web", let repo = home.repo { sheet = .files(repo, .home) }
             else if let repo = home.repo { previews.previewError(); sheet = .webPreview(repo) }
         default:

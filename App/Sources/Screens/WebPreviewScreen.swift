@@ -108,20 +108,28 @@ struct PreviewWebView: UIViewRepresentable {
             ? ["url-filter": "^(https?|wss?)://"]
             : ["url-filter": "^(https?|wss?)://", "unless-domain": manifest.allowedHTTPSHosts.sorted()]
         let rules: [[String: Any]] = [["trigger": trigger, "action": ["type": "block"]]]
-        if let data = try? JSONSerialization.data(withJSONObject: rules),
-           let source = String(data: data, encoding: .utf8) {
-            WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "maipag-preview-\(manifest.allowedHTTPSHosts.sorted().joined(separator: "-"))", encodedContentRuleList: source) { list, _ in
-                guard let list else { return }
-                Task { @MainActor in
-                    view.configuration.userContentController.add(list)
-                    view.reload()
-                }
-            }
-        }
         view.navigationDelegate = context.coordinator
         let model = PreviewBrowserModel(); model.webView = view
         DispatchQueue.main.async { browser = model; context.coordinator.browser = model }
-        view.load(URLRequest(url: URL(string: "maipag-preview://site/\(project.entryPath)")!))
+        let entry = URL(string: "maipag-preview://site/\(project.entryPath)")!
+        let owner = coordinator
+        // The page loads only after the network block list is in place, so not even its first
+        // script runs without it. If the list can't be built, the page doesn't load at all.
+        if let data = try? JSONSerialization.data(withJSONObject: rules),
+           let source = String(data: data, encoding: .utf8) {
+            WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "maipag-preview-\(manifest.allowedHTTPSHosts.sorted().joined(separator: "-"))", encodedContentRuleList: source) { list, error in
+                Task { @MainActor in
+                    guard let list else {
+                        owner.recordConsole("error: the preview's network block list couldn't be built (\(error?.localizedDescription ?? "unknown")), so the page wasn't opened.")
+                        return
+                    }
+                    view.configuration.userContentController.add(list)
+                    view.load(URLRequest(url: entry))
+                }
+            }
+        } else {
+            owner.recordConsole("error: the preview's network block list couldn't be built, so the page wasn't opened.")
+        }
         return view
     }
     func updateUIView(_ uiView: WKWebView, context: Context) {}
@@ -132,6 +140,15 @@ struct PreviewWebView: UIViewRepresentable {
         init(owner: PreviewCoordinator, browser: PreviewBrowserModel?) { self.owner = owner; self.browser = browser }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             browser?.update()
+            collectConsole(webView)
+            // Messages a page logs after it finishes loading are collected a little later too.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self, weak webView] in
+                guard let webView else { return }
+                self?.collectConsole(webView)
+            }
+        }
+
+        private func collectConsole(_ webView: WKWebView) {
             webView.evaluateJavaScript("window._maipagConsole || []") { [weak self] value, _ in
                 guard let messages = value as? [String] else { return }
                 Task { @MainActor in messages.forEach { self?.owner?.recordConsole($0) } }

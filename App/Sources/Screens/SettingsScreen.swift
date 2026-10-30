@@ -52,6 +52,7 @@ struct SettingsScreen: View {
                 look
                 workflowPolicy
                 chatComputer
+                previewHosts
                 memories
                 money
                 notifications
@@ -250,6 +251,42 @@ struct SettingsScreen: View {
     private enum ComputerChoice: Hashable {
         case automatic, off
         case connector(String)
+    }
+
+    /// Every outside host a website preview may reach, by repo, each removable. Previews reach
+    /// nothing outside the phone until a host is added from that repo's preview.
+    private var previewHosts: some View {
+        Section {
+            let repos = draft.previewAllowedHosts.filter { !$0.value.isEmpty }.keys.sorted()
+            if repos.isEmpty {
+                Text("None. Website previews can't reach any outside host.")
+                    .foregroundStyle(Theme.secondaryText)
+            }
+            ForEach(repos, id: \.self) { repo in
+                ForEach((draft.previewAllowedHosts[repo] ?? []).sorted(), id: \.self) { host in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(host).font(.body.monospaced())
+                        Text(repo).font(.caption).foregroundStyle(Theme.secondaryText)
+                    }
+                    .swipeActions {
+                        Button("Remove", role: .destructive) { removePreviewHost(host, from: repo) }
+                    }
+                    .contextMenu {
+                        Button("Remove", role: .destructive) { removePreviewHost(host, from: repo) }
+                    }
+                    .accessibilityAction(named: "Remove") { removePreviewHost(host, from: repo) }
+                }
+            }
+        } header: {
+            Text("Preview network access")
+        } footer: {
+            Text("Add a host from a repo's preview with the network button. Swipe a host to remove it; the preview loses access the next time it opens.")
+        }
+    }
+
+    private func removePreviewHost(_ host: String, from repo: String) {
+        draft.previewAllowedHosts[repo]?.remove(host)
+        if draft.previewAllowedHosts[repo]?.isEmpty == true { draft.previewAllowedHosts[repo] = nil }
     }
 
     private var chatComputer: some View {

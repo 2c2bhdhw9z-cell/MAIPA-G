@@ -88,7 +88,18 @@ final class PreviewCoordinator {
         return await app.jobs.startPreviewBuild(repo: repo, project: project, commit: commit) != nil
     }
 
-    func recordConsole(_ message: String) { if !message.isEmpty { console.append(String(message.prefix(1_000))); if console.count > 100 { console.removeFirst() } } }
+    func recordConsole(_ message: String) {
+        guard !message.isEmpty else { return }
+        if !console.contains(message) { console.append(String(message.prefix(1_000))) }
+        if console.count > 100 { console.removeFirst() }
+        // The simulator's isolation check reads the hostile fixture's verdict from this file.
+        if PreviewScenes.scene == "preview-isolation", let range = message.range(of: "MAIPAG-ISOLATION ") {
+            let result = String(message[range.upperBound...])
+            if let folder = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                try? Data(result.utf8).write(to: folder.appendingPathComponent("preview-isolation.json"), options: .atomic)
+            }
+        }
+    }
 
     private static func relativeFiles(_ root: URL) -> [String] {
         guard let values = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else { return [] }
@@ -96,6 +107,14 @@ final class PreviewCoordinator {
     }
 
     func previewError() { directory = nil; project = nil; manifest = nil; error = "The built preview artifact did not contain an index.html file." }
+
+    /// A hostile made-up site that tries to read a file outside the published set and to send
+    /// data to another host. Only its own page is published.
+    func previewIsolationFixture() {
+        directory = Bundle.main.resourceURL
+        project = WebPreviewProject(kind: .staticSite, entryPath: "PreviewIsolationFixture.html")
+        manifest = PublishedPreviewManifest(entryPath: "PreviewIsolationFixture.html", files: ["PreviewIsolationFixture.html"])
+    }
 
     func previewFixture() {
         directory = Bundle.main.resourceURL
