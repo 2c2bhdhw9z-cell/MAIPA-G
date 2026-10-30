@@ -121,7 +121,7 @@ final class HomeDraft {
 @Observable
 final class AppModel {
     let paths: AppPaths
-    let transport: URLSessionTransport
+    let transport: AppTransport
     let github: GitHubAccount
     let openRouter: OpenRouterAccount
     let library: ChatLibrary
@@ -151,7 +151,8 @@ final class AppModel {
     init() {
         let paths = AppPaths.make()
         self.paths = paths
-        let transport = URLSessionTransport()
+        // Big uploads keep going in the background; everything else is the normal session.
+        let transport = AppTransport()
         self.transport = transport
         github = GitHubAccount(transport: transport)
         openRouter = OpenRouterAccount(transport: transport, paths: paths)

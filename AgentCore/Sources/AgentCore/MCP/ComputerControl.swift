@@ -39,10 +39,16 @@ public struct ComputerControl: Sendable {
         tools.first { predicate(Self.words($0.originalName)) }
     }
 
+    /// The tool that runs one command. Sprites names it `exec`, next to `exec_list` and
+    /// `exec_kill`, which only list or stop sessions; picking one of those by mistake made every
+    /// check fail with `{"count":0,"sessions":[]}`.
     public var commandTool: ConnectorToolDefinition? {
-        tool { words in
-            let first = words.first ?? ""
-            return !["list", "get", "kill", "stop"].contains(first) && words.contains(where: { ["exec", "execute", "run", "command", "shell", "bash"].contains($0) }) && !words.contains("session") && !words.contains("sessions")
+        for exact in ["exec", "execute", "run_command", "exec_command", "run_shell", "shell", "bash", "run"] {
+            if let match = tools.first(where: { $0.originalName.lowercased() == exact }) { return match }
+        }
+        let notRunning: Set<String> = ["list", "get", "kill", "stop", "session", "sessions", "status", "logs", "log", "info", "inspect"]
+        return tool { words in
+            words.contains(where: { ["exec", "execute", "run", "command", "shell", "bash"].contains($0) }) && !words.contains(where: notRunning.contains)
         }
     }
 
@@ -83,12 +89,24 @@ public struct ComputerControl: Sendable {
         var arguments: [String: JSONValue] = [:]
         if let key = Self.machineKey(tool.inputSchema) { arguments[key] = .string(machine) }
         let key = Self.commandKey(tool.inputSchema) ?? "command"
-        if Self.properties(tool.inputSchema)[key]?["type"]?.stringValue == "array" {
+        // Sprites' `exec` takes the program and its arguments as a list (`cmd`, repeatable), so
+        // the script runs as `bash -lc <script>` whenever the schema allows a list.
+        if Self.allowsArray(Self.properties(tool.inputSchema)[key]) {
             arguments[key] = .array(["bash", "-lc", .string(command)])
         } else {
             arguments[key] = .string(command)
         }
         return .object(arguments)
+    }
+
+    static func allowsArray(_ schema: JSONValue?) -> Bool {
+        guard let schema else { return false }
+        if schema["type"]?.stringValue == "array" || schema["items"] != nil { return true }
+        if schema["type"]?.arrayValue?.contains(where: { $0.stringValue == "array" }) == true { return true }
+        for key in ["anyOf", "oneOf"] {
+            if schema[key]?.arrayValue?.contains(where: { allowsArray($0) }) == true { return true }
+        }
+        return false
     }
 
     // MARK: Operations
@@ -162,6 +180,8 @@ public struct ComputerControl: Sendable {
         guard let create = createTool else { throw Failure.noCreateTool }
         var arguments: [String: JSONValue] = [:]
         arguments[Self.machineKey(create.inputSchema) ?? "name"] = .string(machine)
+        // Sprites can wait for capacity instead of failing when its region is busy.
+        if Self.properties(create.inputSchema)["wait_for_capacity"] != nil { arguments["wait_for_capacity"] = true }
         let result = try await call(create.originalName, .object(arguments))
         if result.isError { throw Failure.machineUnavailable(result.text) }
     }

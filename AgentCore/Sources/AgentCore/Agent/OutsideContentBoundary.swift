@@ -16,13 +16,15 @@ enum OutsideContentBoundary {
     static func connectorApproval(_ definition: ConnectorToolDefinition, arguments: JSONValue) -> ToolApprovalRequest? {
         let words = ConnectorActionPolicy.words(definition.originalName)
         let action = "\(String(definition.serverName.prefix(60))) · \(String(definition.title.prefix(80)))"
-        if words.contains(where: ConnectorActionPolicy.commandWords.contains), words.first.map(ConnectorActionPolicy.readWords.contains) != true {
+        let looksOnly = words.contains(where: { ["list", "get", "status", "logs", "log", "info", "inspect"].contains($0) })
+        if words.contains(where: ConnectorActionPolicy.commandWords.contains), !looksOnly, words.first.map(ConnectorActionPolicy.readWords.contains) != true {
             let command = ConnectorActionPolicy.commandText(arguments)
             guard ShellRisk.reachesNetwork(command) else { return nil }
             return ToolApprovalRequest(question: "This chat now contains text from the web, a repo or a connector. Allow \(action) to run a command that reaches the network?\n\(String(command.prefix(500)))", allowLabel: "Run command")
         }
         // Reading stays free; anything else a connector does could act on someone else's words.
         if let first = words.first, ConnectorActionPolicy.readWords.contains(first), definition.destructiveHint != true { return nil }
+        if looksOnly, words.contains(where: ConnectorActionPolicy.commandWords.contains), definition.destructiveHint != true { return nil }
         if definition.readOnlyHint == true, definition.destructiveHint != true, !words.contains(where: { ConnectorActionPolicy.spendingWords.contains($0) || ConnectorActionPolicy.deletingWords.contains($0) || ConnectorActionPolicy.accessWords.contains($0) }) { return nil }
         return ToolApprovalRequest(question: "This chat now contains text from the web, a repo or a connector. Allow \(action)? It acts outside MAIPA-G.", allowLabel: "Allow")
     }

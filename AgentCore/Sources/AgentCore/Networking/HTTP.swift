@@ -135,9 +135,18 @@ public enum HTTPError: Error, Sendable, CustomStringConvertible {
 public protocol HTTPTransport: Sendable {
     func send(_ request: HTTPRequest) async throws -> HTTPResponse
     func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse
+    /// Sends `file` as the request body without loading it into memory.
+    func upload(_ request: HTTPRequest, fromFile file: URL) async throws -> HTTPResponse
 }
 
 public extension HTTPTransport {
+    /// For test transports: reads the file and sends it as an ordinary body.
+    func upload(_ request: HTTPRequest, fromFile file: URL) async throws -> HTTPResponse {
+        var copy = request
+        copy.body = try Data(contentsOf: file)
+        return try await send(copy)
+    }
+
     /// Streams a response body straight to a file, so a 100 MB repo download never sits in memory.
     /// Returns the response head. `progress` receives the number of bytes written so far.
     func download(
@@ -216,6 +225,31 @@ public final class URLSessionTransport: HTTPTransport, @unchecked Sendable {
         do {
             let session = request.followsRedirects ? plainSession : noRedirectSession
             let (data, response) = try await session.data(for: urlRequest)
+            guard let http = response as? HTTPURLResponse else {
+                throw HTTPError.transport("Not an HTTP response", isOffline: false)
+            }
+            return HTTPResponse(status: http.statusCode, headers: Self.headers(of: http), body: data, finalURL: http.url)
+        } catch let error as HTTPError {
+            throw error
+        } catch {
+            throw Self.transportError(error)
+        }
+    }
+
+    public func upload(_ request: HTTPRequest, fromFile file: URL) async throws -> HTTPResponse {
+        var urlRequest = Self.makeURLRequest(request)
+        urlRequest.httpBody = nil
+        // A long upload may pause while the server takes in a big body; allow it.
+        urlRequest.timeoutInterval = max(request.idleTimeout, 300)
+        do {
+            #if canImport(FoundationNetworking)
+            var bodied = urlRequest
+            bodied.httpBody = try Data(contentsOf: file)
+            let (data, response) = try await plainSession.data(for: bodied)
+            #else
+            let session = request.followsRedirects ? plainSession : noRedirectSession
+            let (data, response) = try await session.upload(for: urlRequest, fromFile: file)
+            #endif
             guard let http = response as? HTTPURLResponse else {
                 throw HTTPError.transport("Not an HTTP response", isOffline: false)
             }

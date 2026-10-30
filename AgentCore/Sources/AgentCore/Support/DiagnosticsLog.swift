@@ -49,6 +49,9 @@ public actor DiagnosticsLog {
         if let index = document.entries.lastIndex(where: {
             $0.area == area && $0.operation == operation && $0.path == path && $0.technical == technical && now.timeIntervalSince($0.at) < 600
         }) {
+            // The same failure again within 5 minutes isn't rewritten: otherwise a repeating
+            // failure changes this file, and so causes another save, every few seconds.
+            if now.timeIntervalSince(document.entries[index].at) < 300 { return }
             document.entries[index].count += 1
             document.entries[index].at = now
         } else {
