@@ -29,10 +29,12 @@ settings:
     # The build number. package-ipa.sh passes the CI run number here, so every build is newer
     # than the last and sideloading apps replace the installed copy.
     CURRENT_PROJECT_VERSION: "1"
+    # Exact reviewed source revision embedded into generated Autonomous callers.
+    MAIPAG_REVIEWED_REVISION: ""
     DEAD_CODE_STRIPPING: YES
     SWIFT_COMPILATION_MODE: wholemodule
     SWIFT_OPTIMIZATION_LEVEL: -O
-    DEBUG_INFORMATION_FORMAT: dwarf
+    DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
 
 packages:
   AgentCore:
@@ -53,6 +55,7 @@ targets:
         CFBundleName: MAIPA-G
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        MAIPAGReviewedRevision: "$(MAIPAG_REVIEWED_REVISION)"
         CFBundleDevelopmentRegion: en
         LSRequiresIPhoneOS: true
         ITSAppUsesNonExemptEncryption: false
@@ -79,6 +82,7 @@ targets:
           - dev.maipag.app.refresh
           - dev.maipag.app.autonomous
         NSCameraUsageDescription: Take a photo to attach to your MAIPA-G chat.
+        NSPhotoLibraryAddUsageDescription: Save pictures you generate in MAIPA-G to your Photos library.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.maipag.app

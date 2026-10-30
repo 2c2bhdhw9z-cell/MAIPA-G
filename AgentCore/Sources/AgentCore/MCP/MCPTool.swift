@@ -19,11 +19,23 @@ public struct MCPTool: AgentTool {
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         progress("Waiting for \(definition.serverName)…")
         let response = try await session.call(tool: definition.originalName, arguments: arguments)
+        let text = ConnectorOutputLimit.cap(response.text)
         return ToolOutput(
-            forModel: response.text,
+            forModel: text,
             summary: "Used \(definition.serverName) · \(definition.title)",
-            detail: response.text,
+            detail: text,
             isError: response.isError
         )
+    }
+}
+
+
+enum ConnectorOutputLimit {
+    static let characters = 80_000
+
+    static func cap(_ text: String) -> String {
+        guard text.count > characters else { return text }
+        let half = characters / 2
+        return String(text.prefix(half)) + "\n[Connector output cut: \(text.count - characters) characters omitted]\n" + String(text.suffix(half))
     }
 }

@@ -9,8 +9,8 @@ import Observation
 final class ChatSession: Identifiable {
     let id: UUID
     private(set) var chat: Chat
-    var draft = ""
-    var draftAttachments: [AttachmentReference] = []
+    var draft = "" { didSet { scheduleDraftSave() } }
+    var draftAttachments: [AttachmentReference] = [] { didSet { scheduleDraftSave() } }
     var webEnabled = true
     var autonomous = false
     private(set) var isRunning = false
@@ -23,14 +23,33 @@ final class ChatSession: Identifiable {
     @ObservationIgnored private var pendingTurn: AssistantTurn?
     @ObservationIgnored private var flushScheduled = false
     @ObservationIgnored private var saveTask: Task<Void, Never>?
+    @ObservationIgnored private var draftSaveTask: Task<Void, Never>?
     @ObservationIgnored private var lastSaved = Date()
     /// The read-only token for cloning this chat's private repo onto its computer.
     @ObservationIgnored private var computerToken: (repo: RepoRef, token: String, expiresAt: Date)?
 
-    init(chat: Chat, app: AppModel?) {
+    init(chat: Chat, app: AppModel?, draft: ComposerDraft? = nil) {
         self.id = chat.id
         self.chat = chat
         self.app = app
+        self.draft = draft?.text ?? ""
+        self.draftAttachments = draft?.attachments ?? []
+    }
+
+    private func scheduleDraftSave() {
+        guard !PreviewScenes.isActive, let store = app?.library.store else { return }
+        draftSaveTask?.cancel()
+        let value = ComposerDraft(text: draft, attachments: draftAttachments)
+        let path = ComposerDraft.path(for: id.uuidString.lowercased())
+        draftSaveTask = Task {
+            do { try await Task.sleep(nanoseconds: 400_000_000) } catch { return }
+            do {
+                if value.isEmpty { try await store.deleteItem(at: path) }
+                else { try await store.saveDocument(value, at: path) }
+            } catch {
+                // The chat itself still remains on the phone; the next edit retries this draft.
+            }
+        }
     }
 
     var lastTurn: AssistantTurn? { chat.lastAssistantTurn }

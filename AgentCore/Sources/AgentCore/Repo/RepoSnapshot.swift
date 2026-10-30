@@ -85,8 +85,8 @@ public enum SnapshotProgress: Sendable, Equatable {
 /// chat that is mid-answer never sees files change under it.
 public actor SnapshotStore {
     public static let maxStoredFileSize = 2 * 1024 * 1024
-    /// Git's own test for "binary": a zero byte in the first 8,000 bytes.
-    static let binarySniffLength = 8_000
+    /// Incremented when text classification changes so stale caches are rebuilt safely.
+    static let manifestFormatVersion = 2
     static let copiesPerRepo = 3
 
     public let root: URL
@@ -119,7 +119,7 @@ public actor SnapshotStore {
         let manifestURL = directory.appendingPathComponent("manifest.json")
         guard let data = try? Data(contentsOf: manifestURL),
               let manifest = try? JSONCoding.decoder().decode(SnapshotManifest.self, from: data),
-              manifest.formatVersion == 1
+              manifest.formatVersion == Self.manifestFormatVersion
         else { return nil }
         touch(directory)
         return RepoSnapshot(directory: directory, manifest: manifest)
@@ -234,7 +234,7 @@ public actor SnapshotStore {
         try? manager.removeItem(at: archive)
         progress(.unpacking(files: unpacker.files.count))
         return SnapshotManifest(
-            formatVersion: 1,
+            formatVersion: manifestFormatVersion,
             repo: repo,
             commit: commit,
             createdAt: Date(),
@@ -309,7 +309,7 @@ public actor SnapshotStore {
             let kind: SnapshotFile.Kind
             if data.count > maxStoredFileSize {
                 kind = .tooLarge
-            } else if data.prefix(binarySniffLength).contains(0) {
+            } else if TextFileCodec.decode(data) == nil {
                 kind = .binary
             } else {
                 kind = .text
@@ -321,7 +321,7 @@ public actor SnapshotStore {
         }
 
         return SnapshotManifest(
-            formatVersion: 1,
+            formatVersion: manifestFormatVersion,
             repo: base.repo,
             commit: commit,
             createdAt: Date(),
@@ -414,9 +414,9 @@ struct SnapshotUnpacker: TarHandler {
     private(set) var commitComment: String?
 
     private var current: (path: String, size: Int)?
-    private var head = Data()
-    private var decided: SnapshotFile.Kind?
-    private var handle: FileHandle?
+    // Files are capped at 2 MB, so retaining one complete file lets strict decoding validate
+    // every byte before anything is classified as editable text.
+    private var contents = Data()
     private var createdDirectories: Set<String> = []
 
     init(filesDirectory: URL) {
@@ -458,12 +458,7 @@ struct SnapshotUnpacker: TarHandler {
                 return false
             }
             current = (path, entry.size)
-            head.removeAll(keepingCapacity: true)
-            decided = nil
-            if entry.size == 0 {
-                decided = .text
-                try openFile()
-            }
+            contents.removeAll(keepingCapacity: true)
             return true
         default:
             return false
@@ -472,40 +467,24 @@ struct SnapshotUnpacker: TarHandler {
 
     mutating func data(_ bytes: UnsafeRawBufferPointer) throws {
         guard current != nil else { return }
-        switch decided {
-        case .text:
-            try handle?.write(contentsOf: bytes)
-        case .binary, .tooLarge, .symlink:
-            return
-        case nil:
-            head.append(contentsOf: bytes)
-            if head.count >= SnapshotStore.binarySniffLength {
-                try decide()
-            }
-        }
+        contents.append(contentsOf: bytes)
     }
 
     mutating func end() throws {
         guard let current else { return }
-        if decided == nil { try decide() }
-        try? handle?.close()
-        handle = nil
-        files.append(SnapshotFile(path: current.path, size: current.size, kind: decided ?? .text))
+        let kind: SnapshotFile.Kind
+        if TextFileCodec.decode(contents) != nil {
+            kind = .text
+            try writeCurrentFile(contents)
+        } else {
+            kind = .binary
+        }
+        files.append(SnapshotFile(path: current.path, size: current.size, kind: kind))
+        contents.removeAll(keepingCapacity: true)
         self.current = nil
     }
 
-    private mutating func decide() throws {
-        if head.prefix(SnapshotStore.binarySniffLength).contains(0) {
-            decided = .binary
-        } else {
-            decided = .text
-            try openFile()
-            try handle?.write(contentsOf: head)
-        }
-        head.removeAll(keepingCapacity: true)
-    }
-
-    private mutating func openFile() throws {
+    private mutating func writeCurrentFile(_ data: Data) throws {
         guard let current else { return }
         let url = filesDirectory.appendingPathComponent(current.path, isDirectory: false)
         let folder = url.deletingLastPathComponent()
@@ -513,9 +492,10 @@ struct SnapshotUnpacker: TarHandler {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             createdDirectories.insert(folder.path)
         }
-        guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
-            throw SnapshotError.failed("Could not save \(current.path)")
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            throw SnapshotError.failed("Could not save \(current.path): \(error.localizedDescription)")
         }
-        handle = try FileHandle(forWritingTo: url)
     }
 }

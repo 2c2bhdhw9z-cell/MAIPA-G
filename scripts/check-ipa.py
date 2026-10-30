@@ -47,6 +47,12 @@ def main() -> None:
         schemes = [scheme for item in info.get("CFBundleURLTypes", []) for scheme in item.get("CFBundleURLSchemes", [])]
         if "maipag" not in schemes:
             fail("maipag URL scheme is missing")
+        reviewed_revision = info.get("MAIPAGReviewedRevision")
+        if not isinstance(reviewed_revision, str) or len(reviewed_revision) != 40 or any(char not in "0123456789abcdef" for char in reviewed_revision.lower()):
+            fail(f"reviewed source revision is invalid: {reviewed_revision!r}")
+        photo_add_description = info.get("NSPhotoLibraryAddUsageDescription")
+        if not isinstance(photo_add_description, str) or not photo_add_description.strip():
+            fail("Photos add-only usage description is missing")
         backgrounds = set(info.get("UIBackgroundModes", []))
         if not {"processing", "fetch"}.issubset(backgrounds):
             fail(f"background declarations are incomplete: {sorted(backgrounds)}")

@@ -28,11 +28,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Tool versions
         run: swift --version
       - name: Cache SwiftPM builds
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: AgentCore/.build
           key: agentcore-linux-${{ hashFiles('AgentCore/Package.resolved') }}-${{ hashFiles('AgentCore/Sources/**', 'AgentCore/Tests/**') }}
@@ -54,16 +54,18 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Take every screenshot
+        env:
+          MAIPAG_REQUIRE_COMPLETE: "1"
         run: |
           chmod +x scripts/screenshots.sh
           scripts/screenshots.sh
       - name: Upload screenshots
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: MAIPA-G-screenshots-${{ github.run_number }}
           path: |
@@ -74,11 +76,11 @@ jobs:
 
   ipa:
     name: iPhone release candidate
-    needs: checks
+    needs: [checks, screens]
     runs-on: macos-26
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Runner and toolchain versions
         run: |
           sw_vers
@@ -104,9 +106,11 @@ jobs:
       - name: Independently check the IPA
         run: python3 scripts/check-ipa.py App/build/MAIPA-G.ipa --build "${{ github.run_number }}" --version "0.1.0"
       - name: Upload checked release candidate
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: MAIPA-G-ipa-${{ github.run_number }}
-          path: App/build/MAIPA-G.ipa
+          path: |
+            App/build/MAIPA-G.ipa
+            App/build/DerivedData/Build/Products/Release-iphoneos/MAIPA-G.app.dSYM
           if-no-files-found: error
           retention-days: 14

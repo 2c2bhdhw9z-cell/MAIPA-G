@@ -11,50 +11,90 @@ import FoundationNetworking
 public struct MCPOAuthClient: Sendable {
     public static let clientMetadataURL = URL(string: "https://2c2bhdhw9z-cell.github.io/MAIPA-G/mcp/client.json")!
     public static let redirectURI = URL(string: "https://2c2bhdhw9z-cell.github.io/MAIPA-G/mcp/")!
+    public static let appCallbackURL = URL(string: "maipag://mcp")!
     private let transport: any HTTPTransport
     public init(transport: any HTTPTransport) { self.transport = transport }
 
     public func discover(endpoint: URL) async throws -> (MCPProtectedResourceMetadata, MCPAuthorizationServerMetadata) {
-        guard endpoint.scheme == "https", let host = endpoint.host else { throw MCPAuthorizationError.insecureURL }
-        var candidates = [URL(string: "https://\(host)/.well-known/oauth-protected-resource")!]
-        if endpoint.path != "/" && !endpoint.path.isEmpty {
-            candidates.insert(URL(string: "https://\(host)/.well-known/oauth-protected-resource\(endpoint.path)")!, at: 0)
-        }
+        let endpoint = try OAuthURLPolicy.validate(endpoint)
+        let candidates = try OAuthURLPolicy.protectedResourceMetadataURLs(for: endpoint)
         var resourceJSON: JSONValue?
         for url in candidates {
-            let response = try await transport.send(HTTPRequest(url: url, headers: ["Accept": "application/json"]))
-            if response.isSuccess, let json = JSONValue.parse(response.body) { resourceJSON = json; break }
+            var request = HTTPRequest(url: url, headers: ["Accept": "application/json"])
+            request.followsRedirects = false
+            let response = try await transport.send(request)
+            if let final = response.finalURL { _ = try OAuthURLPolicy.requireSameOrigin(final, as: url) }
+            if response.isSuccess, let json = JSONValue.parse(response.body) {
+                resourceJSON = json
+                break
+            }
         }
-        guard let resourceJSON else { throw MCPAuthorizationError.discovery("The server did not publish protected-resource metadata.") }
-        let resource = resourceJSON["resource"]?.stringValue.flatMap(URL.init(string:)) ?? endpoint
-        let authorizationServers = (resourceJSON["authorization_servers"]?.arrayValue ?? []).compactMap { $0.stringValue.flatMap(URL.init(string:)) }
-        guard let issuer = authorizationServers.first else { throw MCPAuthorizationError.discovery("No authorization server was listed.") }
-        let resourceMetadata = MCPProtectedResourceMetadata(resource: resource, authorizationServers: authorizationServers, scopesSupported: Set(resourceJSON["scopes_supported"]?.arrayValue?.compactMap(\.stringValue) ?? []))
+        guard let resourceJSON else {
+            throw MCPAuthorizationError.discovery("The server did not publish protected-resource metadata.")
+        }
 
-        let metadataURL = try authorizationMetadataURL(issuer)
-        let response = try await transport.send(HTTPRequest(url: metadataURL, headers: ["Accept": "application/json"]))
+        let resource = try OAuthURLPolicy.requireSameOrigin(
+            resourceJSON["resource"]?.stringValue.flatMap(URL.init(string:)) ?? endpoint,
+            as: endpoint
+        )
+        let listedValues = resourceJSON["authorization_servers"]?.arrayValue ?? []
+        let authorizationServers = try listedValues.map { value -> URL in
+            guard let text = value.stringValue, let url = URL(string: text) else {
+                throw MCPAuthorizationError.discovery("An authorization-server address was invalid.")
+            }
+            return try OAuthURLPolicy.validate(url)
+        }
+        guard let issuer = authorizationServers.first else {
+            throw MCPAuthorizationError.discovery("No authorization server was listed.")
+        }
+        let resourceMetadata = MCPProtectedResourceMetadata(
+            resource: resource,
+            authorizationServers: authorizationServers,
+            scopesSupported: Set(resourceJSON["scopes_supported"]?.arrayValue?.compactMap(\.stringValue) ?? [])
+        )
+
+        let metadataURL = try OAuthURLPolicy.authorizationMetadataURL(for: issuer)
+        var metadataRequest = HTTPRequest(url: metadataURL, headers: ["Accept": "application/json"])
+        metadataRequest.followsRedirects = false
+        let response = try await transport.send(metadataRequest)
+        if let final = response.finalURL { _ = try OAuthURLPolicy.requireSameOrigin(final, as: metadataURL) }
         guard response.isSuccess, let json = JSONValue.parse(response.body),
+              let returnedIssuer = json["issuer"]?.stringValue.flatMap(URL.init(string:)),
               let authorization = json["authorization_endpoint"]?.stringValue.flatMap(URL.init(string:)),
               let token = json["token_endpoint"]?.stringValue.flatMap(URL.init(string:))
         else { throw MCPAuthorizationError.discovery("The authorization server metadata was incomplete.") }
+        let checkedIssuer = try OAuthURLPolicy.validate(returnedIssuer)
+        guard normalizedIssuer(checkedIssuer) == normalizedIssuer(issuer) else {
+            throw MCPAuthorizationError.discovery("The authorization server identity did not match the listed issuer.")
+        }
+        let checkedAuthorization = try OAuthURLPolicy.requireSameOrigin(authorization, as: issuer)
+        let checkedToken = try OAuthURLPolicy.requireSameOrigin(token, as: issuer)
+        let checkedRegistration: URL?
+        if let value = json["registration_endpoint"]?.stringValue.flatMap(URL.init(string:)) {
+            checkedRegistration = try OAuthURLPolicy.requireSameOrigin(value, as: issuer)
+        } else {
+            checkedRegistration = nil
+        }
         let serverMetadata = MCPAuthorizationServerMetadata(
-            issuer: json["issuer"]?.stringValue.flatMap(URL.init(string:)) ?? issuer,
-            authorizationEndpoint: authorization,
-            tokenEndpoint: token,
-            registrationEndpoint: json["registration_endpoint"]?.stringValue.flatMap(URL.init(string:)),
+            issuer: checkedIssuer,
+            authorizationEndpoint: checkedAuthorization,
+            tokenEndpoint: checkedToken,
+            registrationEndpoint: checkedRegistration,
             scopesSupported: Set(json["scopes_supported"]?.arrayValue?.compactMap(\.stringValue) ?? [])
         )
         return (resourceMetadata, serverMetadata)
     }
 
-    private func authorizationMetadataURL(_ issuer: URL) throws -> URL {
-        guard issuer.scheme == "https", let host = issuer.host else { throw MCPAuthorizationError.insecureURL }
-        let path = issuer.path == "/" ? "" : issuer.path
-        return URL(string: "https://\(host)/.well-known/oauth-authorization-server\(path)")!
+    private func normalizedIssuer(_ url: URL) -> String {
+        var value = url.absoluteString
+        while value.hasSuffix("/") { value.removeLast() }
+        return value
     }
 
     /// Registers only when Client ID Metadata Documents are not accepted by the server.
     public func register(at endpoint: URL, redirectURI: URL = Self.redirectURI) async throws -> MCPRegisteredClient {
+        let endpoint = try OAuthURLPolicy.validate(endpoint)
+        _ = try OAuthURLPolicy.validate(redirectURI)
         let body: JSONValue = [
             "client_name": "MAIPA-G",
             "client_uri": .string(OpenRouterClient.appURL),
@@ -63,8 +103,10 @@ public struct MCPOAuthClient: Sendable {
             "response_types": ["code"],
             "token_endpoint_auth_method": "none",
         ]
-        let request = try HTTPRequest.json("POST", endpoint, body: body, headers: ["Accept": "application/json"])
+        var request = try HTTPRequest.json("POST", endpoint, body: body, headers: ["Accept": "application/json"])
+        request.followsRedirects = false
         let response = try await transport.send(request)
+        if let final = response.finalURL { _ = try OAuthURLPolicy.requireSameOrigin(final, as: endpoint) }
         guard response.isSuccess, let json = JSONValue.parse(response.body), let id = json["client_id"]?.stringValue else {
             throw MCPAuthorizationError.rejected(response.text.isEmpty ? "The connector did not accept dynamic registration." : response.text)
         }
@@ -72,6 +114,7 @@ public struct MCPOAuthClient: Sendable {
     }
 
     public func authorizationRequest(endpoint: URL, requestedScopes: Set<String> = [], registeredClient: MCPRegisteredClient? = nil, redirectURI: URL = Self.redirectURI) async throws -> MCPAuthorizationRequest {
+        _ = try OAuthURLPolicy.validate(redirectURI)
         let (resource, server) = try await discover(endpoint: endpoint)
         let client: MCPRegisteredClient
         if let registeredClient { client = registeredClient }
@@ -94,6 +137,7 @@ public struct MCPOAuthClient: Sendable {
         ]
         if !scopes.isEmpty { components.queryItems?.append(URLQueryItem(name: "scope", value: scopes.sorted().joined(separator: " "))) }
         guard let url = components.url else { throw MCPAuthorizationError.discovery("The authorization URL was invalid.") }
+        _ = try OAuthURLPolicy.requireSameOrigin(url, as: server.issuer)
         return MCPAuthorizationRequest(url: url, resource: resource.resource, redirectURI: redirectURI, state: state, pkce: pkce, server: server, client: client, scopes: scopes)
     }
 
@@ -123,8 +167,10 @@ public struct MCPOAuthClient: Sendable {
     }
 
     private func tokenRequest(_ endpoint: URL, fields: [String: String], client: MCPRegisteredClient) async throws -> ConnectorCredential {
+        let endpoint = try OAuthURLPolicy.validate(endpoint)
         let body = fields.sorted { $0.key < $1.key }.map { "\(Self.form($0.key))=\(Self.form($0.value))" }.joined(separator: "&")
-        let response = try await transport.send(HTTPRequest(method: "POST", url: endpoint, headers: ["Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"], body: Data(body.utf8)))
+        let response = try await transport.send(HTTPRequest(method: "POST", url: endpoint, headers: ["Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"], body: Data(body.utf8), followsRedirects: false))
+        if let final = response.finalURL { _ = try OAuthURLPolicy.requireSameOrigin(final, as: endpoint) }
         guard response.isSuccess, let json = JSONValue.parse(response.body), let token = json["access_token"]?.stringValue else {
             throw MCPAuthorizationError.rejected(response.text.isEmpty ? "The connector did not return an access token." : response.text)
         }
@@ -401,7 +447,8 @@ public struct AutonomousMCPTool: AgentTool {
         let response = try await WorkspaceTurnstile.shared.run {
             try await connector.call(tool: name, arguments: arguments)
         }
-        return ToolOutput(forModel: response, summary: "Used \(definition.serverName) · \(definition.title)", detail: response)
+        let text = ConnectorOutputLimit.cap(response)
+        return ToolOutput(forModel: text, summary: "Used \(definition.serverName) · \(definition.title)", detail: text)
     }
 }
 #endif

@@ -76,8 +76,10 @@ public enum CodeSearch {
                     var found: [(String, [SearchMatch], Int)] = []
                     for file in chunk {
                         try Task.checkCancellation()
-                        guard let data = snapshot.contents(of: file.path) else { continue }
-                        let text = String(decoding: data, as: UTF8.self)
+                        guard let data = snapshot.contents(of: file.path),
+                              let document = TextFileCodec.decode(data)
+                        else { continue }
+                        let text = document.text
                         guard matcher.matchesAnywhere(text) else { continue }
                         var matches: [SearchMatch] = []
                         var total = 0

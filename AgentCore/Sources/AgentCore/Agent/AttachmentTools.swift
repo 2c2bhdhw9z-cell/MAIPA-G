@@ -23,6 +23,10 @@ public actor AttachmentStore {
     }
 
     private func write(_ data: Data, name: String, mimeType: String, kind: AttachmentKind, folder: String) throws -> AttachmentReference {
+        let maximumBytes = 25 * 1024 * 1024
+        guard data.count <= maximumBytes else {
+            throw ToolInputError("That file is too large to save safely. Use a file smaller than 25 MB.")
+        }
         let id = UUID()
         let cleanName = name.replacingOccurrences(of: "/", with: "-")
         let path = "\(folder)/\(id.uuidString.lowercased())/\(cleanName.isEmpty ? "attachment" : cleanName)"

@@ -14,6 +14,8 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
     var pullState = "open"
     /// Runs once, just before the next branch update, to simulate another phone saving first.
     var beforeNextUpdate: (() -> Void)?
+    /// Rejects one exact blob payload so per-file sync isolation can be tested.
+    var rejectedBlob: Data?
 
     struct Tokens: GitHubTokenProvider {
         func installationToken() async throws -> String { "installation" }
@@ -107,6 +109,7 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
             return json(["object": ["sha": .string(sha)]])
         case ("POST", prefix + "/git/blobs"):
             let data = Data(base64Encoded: body?["content"]?.stringValue ?? "") ?? Data()
+            if data == rejectedBlob { return json(["message": "fixture rejected this blob"], status: 500) }
             let sha = Hashing.gitBlobID(data)
             blobs[sha] = data
             return json(["sha": .string(sha)], status: 201)
@@ -300,6 +303,48 @@ struct DataRepoSyncTests {
         #expect(report.uploaded.contains(attachmentPath))
         #expect(setup.github.remoteFile(attachmentPath) == Data([1, 2, 3, 4]))
         #expect(setup.github.remoteFile("README.md") != nil)
+    }
+
+    @Test func quarantinedFileIsNeverDeletedFromGitHub() async throws {
+        let setup = try await Setup()
+        defer { try? FileManager.default.removeItem(at: setup.directory) }
+        let chat = Self.chat("recover me", updated: Date())
+        try await setup.store.save(chat)
+        try await setup.sync.sync()
+        let path = ChatStore.relativePath(for: chat.id)
+        let remoteBefore = try #require(setup.github.remoteFile(path))
+
+        try Data("{not valid json".utf8).write(to: await setup.store.url(for: chat.id), options: .atomic)
+        #expect(await setup.store.load(chat.id) == nil)
+        #expect(Quarantine.records(dataDirectory: await setup.store.dataDirectory).contains { $0.originalPath == path })
+
+        let report = try await setup.sync.sync()
+        #expect(report.problems.contains { $0.path == path && $0.stage == .read })
+        #expect(setup.github.remoteFile(path) == remoteBefore)
+        #expect(!report.deletedThere.contains(path))
+    }
+
+    @Test func oneBadUploadDoesNotAbortOtherFiles() async throws {
+        let setup = try await Setup()
+        defer { try? FileManager.default.removeItem(at: setup.directory) }
+        let goodPath = "attachments/good/file.txt"
+        let badPath = "attachments/bad/file.txt"
+        let good = Data("good".utf8)
+        let bad = Data("bad".utf8)
+        try await setup.store.saveBlob(good, at: goodPath)
+        try await setup.store.saveBlob(bad, at: badPath)
+        setup.github.rejectedBlob = bad
+
+        let first = try await setup.sync.sync()
+        #expect(first.uploaded == [goodPath])
+        #expect(first.problems.contains { $0.path == badPath && $0.stage == .upload })
+        #expect(setup.github.remoteFile(goodPath) == good)
+        #expect(setup.github.remoteFile(badPath) == nil)
+
+        setup.github.rejectedBlob = nil
+        let retry = try await setup.sync.sync()
+        #expect(retry.uploaded == [badPath])
+        #expect(setup.github.remoteFile(badPath) == bad)
     }
 
     @Test func commitMessagesAreReadable() {

@@ -334,7 +334,8 @@ final class JobCoordinator {
             let setupCommit = try await setup.install(
                 in: repo,
                 branch: job.defaultBranch ?? "main",
-                secrets: setupSecrets
+                secrets: setupSecrets,
+                reviewedRevision: Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
             )
             job.recordAutonomousSetupCommit(setupCommit)
             job.status = .queued

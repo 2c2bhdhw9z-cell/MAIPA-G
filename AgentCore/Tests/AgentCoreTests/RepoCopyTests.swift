@@ -222,6 +222,13 @@ struct RepoCopyTests {
         #expect(rules.promptText.contains("Sources/Generated/AGENTS.md"))
     }
 
+    @Test func scopedDirectSaveSentenceDoesNotChangeTheWholeRepository() {
+        let rules = RepoWriteRules.resolve(documents: [
+            (".kiro/steering/owner-rules.md", "Notes and rules files can go straight to main. Other work uses a pull request."),
+        ], directSaveSetting: false)
+        #expect(!rules.directSave)
+    }
+
     @Test func linkHeaderPagination() {
         let header = #"<https://api.github.com/installation/repositories?per_page=100&page=2>; rel="next", <https://api.github.com/installation/repositories?per_page=100&page=5>; rel="last""#
         #expect(GitHubClient.nextPage(from: header)?.absoluteString == "https://api.github.com/installation/repositories?per_page=100&page=2")
@@ -271,6 +278,20 @@ struct RepoCopyTests {
         #expect(!reusable.contains("GH_TOKEN:"))
         #expect(reusable.contains("MAIPAG_TARGET_TOKEN"))
         #expect(reusable.contains("MAIPAG_DATA_TOKEN"))
+    }
+
+    @Test func autonomousCallerPinsReviewedCodeAndNamesSecrets() throws {
+        let revision = String(repeating: "a", count: 40)
+        let workflow = try AutonomousSetup.callerWorkflow(reviewedRevision: revision)
+        #expect(workflow.contains("agent.yml@\(revision)"))
+        #expect(workflow.contains("maipag_revision: \(revision)"))
+        #expect(!workflow.contains("secrets: inherit"))
+        for name in ["MAIPAG_APP_ID", "MAIPAG_APP_PRIVATE_KEY", "OPENROUTER_API_KEY", "MAIPAG_MCP_SECRETS"] {
+            #expect(workflow.contains("\(name): ${{ secrets.\(name) }}"))
+        }
+        #expect(throws: GitHubSecretError.self) {
+            _ = try AutonomousSetup.callerWorkflow(reviewedRevision: "main")
+        }
     }
 
     @Test func buildInspectionDoesNotDispatch() async throws {

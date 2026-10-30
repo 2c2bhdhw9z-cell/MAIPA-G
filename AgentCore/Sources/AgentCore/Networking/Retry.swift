@@ -53,7 +53,7 @@ public func defaultRetryDelay(_ error: Error) -> TimeInterval? {
         case .transport(_, let isOffline):
             return isOffline ? nil : 0
         case .status(let code, _, let headers):
-            if code == 502 || code == 503 || code == 504 {
+            if code == 429 || (500...504).contains(code) {
                 return headers["retry-after"].flatMap(TimeInterval.init) ?? 0
             }
             return nil

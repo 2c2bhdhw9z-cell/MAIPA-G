@@ -62,8 +62,9 @@ final class MemoryLibrary {
     }
 
     func delete(_ id: UUID) async {
+        guard let record = memories.first(where: { $0.id == id }) else { return }
         do {
-            try await store.delete(id)
+            try await app?.trash.move(id: id, kind: .memory, title: String(record.text.prefix(80)), originalPath: await store.relativePath(for: id))
             await load()
             app?.sync.request()
         } catch { lastError = String(describing: error) }

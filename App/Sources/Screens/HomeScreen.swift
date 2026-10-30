@@ -135,6 +135,7 @@ struct SetupCards: View {
 /// The side-menu button at the top left.
 struct MenuButton: View {
     @Environment(AppModel.self) private var app
+    @AccessibilityFocusState(for: .voiceOver) private var menuButtonFocused: Bool
 
     var body: some View {
         Button {
@@ -149,5 +150,13 @@ struct MenuButton: View {
                 }
         }
         .accessibilityLabel("Menu")
+        .accessibilityFocused($menuButtonFocused)
+        .onChange(of: app.isMenuOpen) { _, isOpen in
+            guard !isOpen, app.sheet == nil else { return }
+            Task { @MainActor in
+                await Task.yield()
+                menuButtonFocused = true
+            }
+        }
     }
 }

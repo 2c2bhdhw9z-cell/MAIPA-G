@@ -23,6 +23,10 @@ on:
         description: Private data repository branch
         required: true
         type: string
+      maipag_revision:
+        description: Exact reviewed MAIPA-G commit used by this caller
+        required: true
+        type: string
     secrets:
       MAIPAG_APP_ID:
         required: true
@@ -47,7 +51,7 @@ jobs:
     steps:
       - name: Make a target-repo bot token
         id: target-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
           app-id: ${{ secrets.MAIPAG_APP_ID }}
           private-key: ${{ secrets.MAIPAG_APP_PRIVATE_KEY }}
@@ -56,7 +60,7 @@ jobs:
 
       - name: Make a private-data bot token
         id: data-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
           app-id: ${{ secrets.MAIPAG_APP_ID }}
           private-key: ${{ secrets.MAIPAG_APP_PRIVATE_KEY }}
@@ -64,16 +68,25 @@ jobs:
           repositories: ${{ inputs.data_repo }}
 
       - name: Check out the target repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           token: ${{ steps.target-token.outputs.token }}
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Check out the shared runner outside the target repo
+      - name: Check out the exact reviewed shared runner outside the target repo
         shell: bash
-        run: git clone --depth 1 --branch main https://github.com/2c2bhdhw9z-cell/MAIPA-G.git "$RUNNER_TEMP/maipag-runner"
+        env:
+          MAIPAG_REVISION: ${{ inputs.maipag_revision }}
+        run: |
+          set -euo pipefail
+          [[ "$MAIPAG_REVISION" =~ ^[0-9a-f]{40}$ ]] || { echo "error: invalid MAIPA-G revision" >&2; exit 2; }
+          git init "$RUNNER_TEMP/maipag-runner"
+          git -C "$RUNNER_TEMP/maipag-runner" remote add origin https://github.com/2c2bhdhw9z-cell/MAIPA-G.git
+          git -C "$RUNNER_TEMP/maipag-runner" fetch --depth 1 origin "$MAIPAG_REVISION"
+          git -C "$RUNNER_TEMP/maipag-runner" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/maipag-runner" rev-parse HEAD)" = "$MAIPAG_REVISION"
 
       - name: Run the private job
         shell: bash
@@ -116,7 +129,7 @@ jobs:
 
       - name: Upload the commit-matched preview artifact
         if: always() && steps.preview.outputs.ready == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: preview-site-${{ inputs.job_id }}
           path: .maipag-preview-artifact

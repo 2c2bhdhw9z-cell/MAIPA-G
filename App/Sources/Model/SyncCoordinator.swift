@@ -18,6 +18,12 @@ final class SyncCoordinator {
     private(set) var status: Status = .off
     private(set) var lastSaved: Date?
     private(set) var repo: RepoRef?
+    private(set) var pendingPaths: [String] = []
+    private(set) var fileProblems: [DataRepoSync.FileProblem] = []
+
+    var isEverythingBackedUp: Bool {
+        status == .idle && pendingPaths.isEmpty && fileProblems.isEmpty && lastSaved != nil
+    }
 
     @ObservationIgnored weak var app: AppModel?
     @ObservationIgnored private var engine: DataRepoSync?
@@ -44,12 +50,21 @@ final class SyncCoordinator {
     /// Saves in a few seconds; more changes in the meantime wait for the same save.
     func request(after seconds: Double = 4) {
         guard engine != nil else { return }
+        if pendingPaths.isEmpty { pendingPaths = ["Changes on this phone"] }
         scheduled?.cancel()
         scheduled = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            do { try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) }
+            catch { return }
             guard !Task.isCancelled else { return }
-            await self?.syncNow()
+            await self?.runScheduledSync()
         }
+    }
+
+    private func runScheduledSync() async {
+        // Clear the cancellable delay handle before syncing. Later edits may schedule another
+        // save, but can no longer cancel a sync that is already uploading files.
+        scheduled = nil
+        await syncNow()
     }
 
     func syncNow() async {
@@ -73,12 +88,24 @@ final class SyncCoordinator {
                     }
                 }
                 let report = try await engine.sync()
+                for problem in report.problems {
+                    await app?.diagnostics.record(
+                        error: ToolInputError(problem.message),
+                        area: "saving",
+                        operation: problem.stage.rawValue,
+                        path: problem.path
+                    )
+                }
+                fileProblems = report.problems
+                pendingPaths = await engine.pendingPaths()
                 lastSaved = Date()
                 status = .idle
                 if !report.downloaded.isEmpty || !report.deletedHere.isEmpty {
                     await app?.dataChangedFromGitHub(report)
                 }
             } catch {
+                pendingPaths = await engine.pendingPaths()
+                await app?.diagnostics.record(error: error, area: "saving", operation: "sync")
                 status = .failed(Self.describe(error))
                 return
             }
@@ -98,6 +125,8 @@ final class SyncCoordinator {
         engine = nil
         setup = nil
         repo = nil
+        pendingPaths = []
+        fileProblems = []
         status = .off
     }
 
@@ -115,6 +144,6 @@ final class SyncCoordinator {
         if let error = error as? HTTPError, error.isOffline { return "Offline. Your chats are safe on the phone and will be saved when you're back online." }
         if case GitHubAppSession.Failure.userSignInExpired = error { return "Your GitHub sign-in ran out. Sign in again in Settings." }
         if case GitHubAppSession.Failure.noUserToken = error { return "MAIPA-G needs you to sign in to GitHub once more to make your MAIPA-G-data repo. Tap Sign in to GitHub again in Settings." }
-        return "Couldn't save to GitHub just now. It'll try again."
+        return ErrorExplainer.explain(error).message
     }
 }

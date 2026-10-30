@@ -21,20 +21,24 @@ public actor ChangeWorkspace {
 
     public func read(_ rawPath: String) async throws -> FileRead {
         let path = try Self.safe(rawPath)
-        if let change = changes[path] {
-            switch change {
-            case .write(_, let data, _): return .text(String(decoding: data, as: UTF8.self), bytes: data.count)
-            case .delete: return .missing(suggestions: [])
-            }
+        switch try await readDecoded(path) {
+        case .text(let document, let bytes): return .text(document.text, bytes: bytes)
+        case .binary(let bytes): return .binary(bytes: bytes)
+        case .tooLarge(let bytes): return .tooLarge(bytes: bytes)
+        case .folder: return .folder
+        case .symlink(let target): return .symlink(target: target)
+        case .missing(let suggestions): return .missing(suggestions: suggestions)
         }
-        return try await base.readFile(path)
     }
 
     public func create(path rawPath: String, text: String, buildSetupApproved: Bool = false) async throws {
         let path = try Self.safe(rawPath)
         if Self.isBuildSetup(path), !buildSetupApproved { throw ChangeWorkspaceError.buildSetupApprovalRequired(path) }
         switch try await readBase(path) {
-        case .missing: changes[path] = .write(path: path, data: Data(text.utf8), existed: false)
+        case .missing:
+            let data = Data(text.utf8)
+            guard TextFileCodec.decode(data) != nil else { throw ChangeWorkspaceError.notText(path) }
+            changes[path] = .write(path: path, data: data, existed: false)
         default: throw ChangeWorkspaceError.alreadyExists(path)
         }
     }
@@ -42,14 +46,16 @@ public actor ChangeWorkspace {
     public func edit(path rawPath: String, text: String, buildSetupApproved: Bool = false) async throws {
         let path = try Self.safe(rawPath)
         if Self.isBuildSetup(path), !buildSetupApproved { throw ChangeWorkspaceError.buildSetupApprovalRequired(path) }
-        let existed: Bool
+        let document: TextFileCodec.Document
         switch try await readBase(path) {
-        case .text: existed = true
+        case .text(let decoded, _): document = decoded
         case .missing: throw ChangeWorkspaceError.missing(path)
         case .folder: throw ChangeWorkspaceError.notText(path)
         case .binary, .tooLarge, .symlink: throw ChangeWorkspaceError.notText(path)
         }
-        changes[path] = .write(path: path, data: Data(text.utf8), existed: existed)
+        let data = TextFileCodec.encode(text, preserving: document)
+        guard TextFileCodec.decode(data) != nil else { throw ChangeWorkspaceError.notText(path) }
+        changes[path] = .write(path: path, data: data, existed: true)
     }
 
     public func delete(path rawPath: String, approved: Bool = false) async throws {
@@ -57,8 +63,8 @@ public actor ChangeWorkspace {
         guard approved else { throw ChangeWorkspaceError.deletionApprovalRequired(path) }
         if Self.isBuildSetup(path), !approved { throw ChangeWorkspaceError.buildSetupApprovalRequired(path) }
         let previous: Data
-        switch try await read(path) {
-        case .text(let text, _): previous = Data(text.utf8)
+        switch try await readDecoded(path) {
+        case .text(let document, _): previous = document.data
         case .missing: throw ChangeWorkspaceError.missing(path)
         default: throw ChangeWorkspaceError.notText(path)
         }
@@ -69,7 +75,22 @@ public actor ChangeWorkspace {
         try await base.tree().entries.first { $0.path == path && $0.isFile }?.sha
     }
 
-    private func readBase(_ path: String) async throws -> FileRead { try await base.readFile(path) }
+    private func readDecoded(_ path: String) async throws -> DecodedFileRead {
+        if let change = changes[path] {
+            switch change {
+            case .write(_, let data, _):
+                guard let document = TextFileCodec.decode(data) else { return .binary(bytes: data.count) }
+                return .text(document, bytes: data.count)
+            case .delete:
+                return .missing(suggestions: [])
+            }
+        }
+        return try await readBase(path)
+    }
+
+    private func readBase(_ path: String) async throws -> DecodedFileRead {
+        try await base.readDecodedFile(path)
+    }
 
     public static func safe(_ rawPath: String) throws -> String {
         let path = RepoWorkspace.normalize(rawPath)

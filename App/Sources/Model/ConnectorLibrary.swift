@@ -202,6 +202,9 @@ final class ConnectorLibrary {
             }
             let request = try await oauth.authorizationRequest(endpoint: endpoint, requestedScopes: scopes, registeredClient: registered)
             let callback = try await WebSignIn.shared.open(request.url)
+            guard OAuthURLPolicy.isExpectedCallback(callback, expected: MCPOAuthClient.appCallbackURL) else {
+                throw MCPAuthorizationError.rejected("The connector returned to an unexpected app address.")
+            }
             let values = WebSignIn.values(in: callback)
             guard let code = values["code"] else { throw MCPAuthorizationError.rejected(values["error_description"] ?? "The connector did not return a sign-in code.") }
             let credential = try await oauth.exchange(code: code, callbackState: values["state"], request: request)

@@ -194,15 +194,63 @@ struct GeneratedImageCard: View {
     @Environment(AppModel.self) private var app
     let result: GeneratedImageResult
     @State private var image: UIImage?
+    @State private var failed = false
+
     var body: some View {
-        Button { app.sheet = .picture(result.id) } label: {
-            VStack(alignment: .leading, spacing: 6) {
-                if let image { Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 320).clipShape(RoundedRectangle(cornerRadius: 16)) }
-                else { ProgressView().frame(maxWidth: .infinity).frame(height: 160) }
-                HStack { Label("Generated picture", systemImage: "photo"); Spacer(); if let cost = result.cost { Text(cost.dollars) } }
-                    .font(.caption).foregroundStyle(Theme.secondaryText)
+        Group {
+            if let image {
+                Button { app.sheet = .picture(result.id) } label: {
+                    card(image: image)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Open generated picture")
+            } else if failed {
+                HStack(spacing: 8) {
+                    Image(systemName: "photo.badge.exclamationmark")
+                    Text("Picture unavailable")
+                }
+                .font(.subheadline)
+                .foregroundStyle(Theme.secondaryText)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+                .card()
+                .accessibilityElement(children: .combine)
+            } else {
+                ProgressView("Opening picture…")
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 160)
+                    .card()
             }
-        }.buttonStyle(.plain).task { if let data = try? await app.attachmentStore.data(for: result.attachment) { image = UIImage(data: data) } }
+        }
+        .task {
+            do {
+                let data = try await app.attachmentStore.data(for: result.attachment)
+                guard let decoded = UIImage(data: data) else {
+                    failed = true
+                    return
+                }
+                image = decoded
+            } catch {
+                failed = true
+            }
+        }
+    }
+
+    private func card(image: UIImage) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(maxHeight: 320)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+            HStack {
+                Label("Generated picture", systemImage: "photo")
+                Spacer()
+                if let cost = result.cost { Text(cost.dollars) }
+            }
+            .font(.caption)
+            .foregroundStyle(Theme.secondaryText)
+        }
     }
 }
 
@@ -286,7 +334,8 @@ struct ToolCallsFold: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("\(title), \(open ? "collapse" : "expand")")
+            .accessibilityLabel(title)
+            .accessibilityValue(open ? "Expanded" : "Collapsed")
             // The bar ends after its chevron; the free space stays outside it, so taps there do nothing.
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -321,38 +370,23 @@ struct ToolLine: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Button {
-                guard hasDetail else { return }
-                withAnimation(.snappy) { open.toggle() }
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: icon)
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(call.status == .failed ? Theme.danger : theme.accent)
-                        .frame(width: 18)
-                    Text(call.summary)
-                        .font(.subheadline)
-                        .foregroundStyle(call.status == .running ? .primary : Theme.secondaryText)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .shimmer(call.status == .running && theme.thinkingShimmer)
-                    if hasDetail {
-                        Image(systemName: "chevron.right")
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(Theme.secondaryText)
-                            .rotationEffect(.degrees(open ? 90 : 0))
-                    }
-                    if call.status == .running {
-                        ProgressView().controlSize(.mini)
-                    }
+            if hasDetail {
+                Button {
+                    withAnimation(.snappy) { open.toggle() }
+                } label: {
+                    rowLabel(showChevron: true)
                 }
-                .padding(.vertical, 6)
-                .padding(.horizontal, 10)
-                .background(Theme.surface.opacity(0.6), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .accessibilityLabel(call.summary)
+                .accessibilityValue(open ? "Expanded" : "Collapsed")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                rowLabel(showChevron: false)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(call.summary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .buttonStyle(.plain)
-            .frame(maxWidth: .infinity, alignment: .leading)
+
             if open, let detail = call.detail ?? call.result {
                 ScrollView([.horizontal, .vertical]) {
                     Text(detail)
@@ -367,6 +401,34 @@ struct ToolLine: View {
                 .background(Theme.codeBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
         }
+    }
+
+    private func rowLabel(showChevron: Bool) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(call.status == .failed ? Theme.danger : theme.accent)
+                .frame(width: 18)
+            Text(call.summary)
+                .font(.subheadline)
+                .foregroundStyle(call.status == .running ? .primary : Theme.secondaryText)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .shimmer(call.status == .running && theme.thinkingShimmer)
+            if showChevron {
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(Theme.secondaryText)
+                    .rotationEffect(.degrees(open ? 90 : 0))
+            }
+            if call.status == .running {
+                ProgressView().controlSize(.mini)
+            }
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .background(Theme.surface.opacity(0.6), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .contentShape(Rectangle())
     }
 
     private var hasDetail: Bool {

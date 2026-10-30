@@ -11,6 +11,11 @@ struct SettingsScreen: View {
     /// The controls edit this copy; every change is saved straight away.
     @State private var draft = AppSettings()
     @State private var loaded = false
+    @State private var exportURL: URL?
+    @State private var movingExport = false
+    @State private var exporting = false
+    @State private var exportMessage: String?
+    @State private var confirmUnsafeUpdate = false
 
     var body: some View {
         NavigationStack {
@@ -18,15 +23,18 @@ struct SettingsScreen: View {
                 if let newer = app.updates.newerBuildNumber {
                     Section {
                         Button {
-                            openURL(app.updates.downloadURL)
+                            if app.sync.isEverythingBackedUp { openURL(app.updates.downloadURL) }
+                            else { confirmUnsafeUpdate = true }
                         } label: {
                             HStack(spacing: 12) {
                                 Spark(size: 36)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Build \(newer) is out").font(.body.weight(.semibold))
-                                    Text("Tap to download it, then sign it with your sideloading app.")
+                                    Text(app.sync.isEverythingBackedUp
+                                         ? "Everything is backed up. Install it over the top."
+                                         : "Don’t delete MAIPA-G yet. Some data is not backed up.")
                                         .font(.footnote)
-                                        .foregroundStyle(Theme.secondaryText)
+                                        .foregroundStyle(app.sync.isEverythingBackedUp ? Theme.secondaryText : .orange)
                                 }
                             }
                         }
@@ -35,6 +43,11 @@ struct SettingsScreen: View {
                 }
 
                 accounts
+                Section {
+                    Button { app.sheet = .healthCheck } label: {
+                        Label("Check everything", systemImage: "checkmark.shield")
+                    }
+                }
                 look
                 workflowPolicy
                 chatComputer
@@ -85,6 +98,20 @@ struct SettingsScreen: View {
             } message: {
                 Text("MAIPA-G stops using your repos and stops saving chats to GitHub. Your chats stay on this phone, and the ones already saved stay in MAIPA-G-data.")
             }
+            .confirmationDialog("Some data is not backed up", isPresented: $confirmUnsafeUpdate, titleVisibility: .visible) {
+                Button("Save now first") { Task { await app.sync.syncNow() } }
+                Button("Download anyway", role: .destructive) { openURL(app.updates.downloadURL) }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Install the new build over this one. Deleting the app first can lose the files that are still only on this phone.")
+            }
+        }
+        .fileMover(isPresented: $movingExport, file: exportURL) { result in
+            switch result {
+            case .success: exportMessage = "Exported."
+            case .failure(let error): exportMessage = "Export failed: \(error.localizedDescription)"
+            }
+            exportURL = nil
         }
     }
 
@@ -347,6 +374,14 @@ struct SettingsScreen: View {
             if case .failed(let message) = app.sync.status {
                 Text(message).font(.footnote).foregroundStyle(Theme.danger)
             }
+            ForEach(app.sync.fileProblems, id: \.self) { problem in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(problem.path).font(.footnote.monospaced())
+                    Text("\(problem.stage.rawValue.capitalized): \(problem.message)")
+                        .font(.caption)
+                        .foregroundStyle(Theme.danger)
+                }
+            }
             if app.github.isConnected {
                 Button("Save now") { Task { await app.sync.syncNow() } }
                     .disabled(app.sync.status == .saving)
@@ -354,11 +389,37 @@ struct SettingsScreen: View {
             if let url = app.sync.repoURL {
                 Button("Open MAIPA-G-data on GitHub") { openURL(url) }
             }
+            Button("Recently Deleted") { app.sheet = .recentlyDeleted }
+            Button(exporting ? "Preparing export…" : "Export everything to Files") {
+                Task { await exportEverything() }
+            }
+            .disabled(exporting)
+            if let exportMessage { Text(exportMessage).font(.footnote).foregroundStyle(Theme.secondaryText) }
         } header: {
             Text("Saving")
         } footer: {
-            Text("Everything is kept in your private MAIPA-G-data repo, so deleting the app loses nothing.")
+            Text(app.sync.isEverythingBackedUp
+                 ? "Everything is in your private MAIPA-G-data repo. Install updates over this app."
+                 : "Some data is still only on this phone. Don’t delete the app; tap Save now and install updates over it.")
         }
+    }
+
+    private func exportEverything() async {
+        guard !exporting else { return }
+        exporting = true
+        exportMessage = nil
+        let source = app.paths.data
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("MAIPA-G-export-\(UUID().uuidString).zip")
+        do {
+            try await Task.detached {
+                try DataExport.makeArchive(dataDirectory: source, destination: destination)
+            }.value
+            exportURL = destination
+            movingExport = true
+        } catch {
+            exportMessage = "Export failed: \(error.localizedDescription)"
+        }
+        exporting = false
     }
 
     private var saveStatus: String {

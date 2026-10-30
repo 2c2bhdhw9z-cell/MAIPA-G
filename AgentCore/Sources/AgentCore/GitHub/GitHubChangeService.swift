@@ -42,13 +42,20 @@ public struct RepoWriteRules: Sendable, Hashable {
         var result = RepoWriteRules(directSave: directSaveSetting, reason: directSaveSetting ? "Direct save is on for this repo." : nil, documents: documents)
         for document in documents {
             let lines = document.text.lowercased().components(separatedBy: .newlines)
-            let direct = lines.contains { line in
-                ["no branches", "do not create branches", "never create a branch", "without a branch", "commit directly", "push directly", "save directly", "straight to main", "straight to master"].contains(where: line.contains)
+            let statements = lines.flatMap { line in
+                line.components(separatedBy: CharacterSet(charactersIn: ".;"))
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "-*`"))) }
             }
-            let noPR = lines.contains { line in
-                ["no pull requests", "no pull request", "do not open a pull request", "never open a pull request", "do not create a pr", "never create a pr"].contains(where: line.contains)
-            }
-            if direct || noPR {
+            // Only an unconditional, repository-wide statement selects direct mode. A sentence
+            // such as "notes files can go straight to main" is scoped to those files and must not
+            // silently send an unrelated README change to the default branch.
+            let directStatements: Set<String> = [
+                "no branches", "do not create branches", "never create branches", "never create a branch",
+                "commit directly to main", "commit directly to master", "push directly to main", "push directly to master",
+                "save directly to main", "save directly to master", "do not open pull requests", "never open pull requests",
+                "no pull requests", "no pull request",
+            ]
+            if document.scope.isEmpty, statements.contains(where: directStatements.contains) {
                 result.directSave = true
                 result.reason = "\(document.path) requires direct saves."
             }

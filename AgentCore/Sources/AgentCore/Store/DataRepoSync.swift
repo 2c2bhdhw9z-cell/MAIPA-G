@@ -10,7 +10,7 @@ import Foundation
 /// else moved the branch first; if someone did, the sync starts over with their changes included.
 public actor DataRepoSync {
     public static let repoName = "MAIPA-G-data"
-    static let managedJSONPrefixes = ["chats/", "memories/", "agents/", "workflows/", "groups/", "jobs/", "connectors/", "specs/", "receipts/"]
+    static let managedJSONPrefixes = ["chats/", "memories/", "agents/", "workflows/", "groups/", "jobs/", "connectors/", "specs/", "receipts/", "drafts/", "trash/", "diagnostics/"]
     static let managedBlobPrefixes = ["attachments/", "media/"]
     static let managedFiles: Set<String> = ["settings.json"]
 
@@ -27,11 +27,25 @@ public actor DataRepoSync {
         }
     }
 
+    public struct FileProblem: Sendable, Hashable {
+        public enum Stage: String, Sendable, Hashable { case read, download, write, upload }
+        public var path: String
+        public var stage: Stage
+        public var message: String
+
+        public init(path: String, stage: Stage, message: String) {
+            self.path = path
+            self.stage = stage
+            self.message = message
+        }
+    }
+
     public struct Report: Sendable, Hashable {
         public var downloaded: [String] = []
         public var uploaded: [String] = []
         public var deletedHere: [String] = []
         public var deletedThere: [String] = []
+        public var problems: [FileProblem] = []
         public var commit: String?
 
         public var changedAnything: Bool { !(downloaded.isEmpty && uploaded.isEmpty && deletedHere.isEmpty && deletedThere.isEmpty) }
@@ -148,8 +162,10 @@ public actor DataRepoSync {
         } else {
             remote = [:]
         }
-        let local = try localFiles()
+        let scan = localFiles()
+        let local = scan.files
         let base = state.files
+        report.problems.append(contentsOf: scan.problems)
 
         var downloads: [String] = []
         var uploads: [String] = []
@@ -158,6 +174,9 @@ public actor DataRepoSync {
         var conflicts: [String] = []
 
         for path in Set(local.keys).union(remote.keys).union(base.keys).sorted() {
+            // An unreadable local file is never interpreted as a deletion. Keep the last agreed
+            // blob on GitHub and retry the local read on the next sync.
+            if scan.unreadablePaths.contains(path) { continue }
             let l = local[path], r = remote[path], b = base[path]
             if l == r { continue }
             let localChanged = l != b
@@ -176,72 +195,113 @@ public actor DataRepoSync {
             }
         }
 
-        // Both sides edited: the newer version wins.
+        // Both sides edited: the newer version wins. A failure for one path is recorded and
+        // leaves that path at its previous agreed blob; it cannot abort unrelated files.
         var conflictContents: [String: Data] = [:]
+        var skipped = scan.unreadablePaths
         for path in conflicts {
             guard let sha = remote[path] else { continue }
-            let theirs = try await github.blob(repo, sha: sha)
-            let mine = (try? Data(contentsOf: dataDirectory.appendingPathComponent(path))) ?? Data()
-            if Self.updatedAt(theirs) ?? .distantPast > Self.updatedAt(mine) ?? .distantPast {
-                conflictContents[path] = theirs
-                downloads.append(path)
-            } else {
-                uploads.append(path)
+            do {
+                let theirs = try await github.blob(repo, sha: sha)
+                let mine = try Data(contentsOf: dataDirectory.appendingPathComponent(path))
+                if Self.updatedAt(theirs) ?? .distantPast > Self.updatedAt(mine) ?? .distantPast {
+                    conflictContents[path] = theirs
+                    downloads.append(path)
+                } else {
+                    uploads.append(path)
+                }
+            } catch {
+                skipped.insert(path)
+                report.problems.append(FileProblem(path: path, stage: .download, message: error.localizedDescription))
             }
         }
 
-        // GitHub to phone. A file the phone changed while this sync was running (a reply still
-        // coming in, say) is left alone: the next sync sees both versions and keeps the newer.
-        let fetched = try await fetchBlobs(repo, paths: downloads.filter { conflictContents[$0] == nil }, ids: remote)
-        var skipped = Set<String>()
-        for (path, data) in fetched.merging(conflictContents, uniquingKeysWith: { _, conflict in conflict }) {
+        // GitHub to phone. Each fetch and write is isolated. A file the phone changed while this
+        // sync was running is left alone so the next sync can reconcile it.
+        var fetched = conflictContents
+        for path in downloads where conflictContents[path] == nil && !skipped.contains(path) {
+            guard let sha = remote[path] else { continue }
+            do {
+                fetched[path] = try await github.blob(repo, sha: sha)
+            } catch {
+                skipped.insert(path)
+                report.problems.append(FileProblem(path: path, stage: .download, message: error.localizedDescription))
+            }
+        }
+        var downloadedSuccessfully: [String] = []
+        for (path, data) in fetched where !skipped.contains(path) {
             let url = dataDirectory.appendingPathComponent(path)
             guard currentBlobID(at: url) == local[path] else {
                 skipped.insert(path)
                 continue
             }
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try data.write(to: url, options: .atomic)
+            let safeData: Data
+            if path.hasPrefix("chats/") {
+                safeData = (try? SensitiveDataRedactor().redactJSON(data)) ?? data
+            } else {
+                safeData = data
+            }
+            do {
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try safeData.write(to: url, options: .atomic)
+                downloadedSuccessfully.append(path)
+            } catch {
+                skipped.insert(path)
+                report.problems.append(FileProblem(path: path, stage: .write, message: error.localizedDescription))
+            }
         }
+        var deletedHereSuccessfully: [String] = []
         for path in deleteHere {
             let url = dataDirectory.appendingPathComponent(path)
             guard currentBlobID(at: url) == local[path] else {
                 skipped.insert(path)
                 continue
             }
-            try? FileManager.default.removeItem(at: url)
+            do {
+                if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+                deletedHereSuccessfully.append(path)
+            } catch {
+                skipped.insert(path)
+                report.problems.append(FileProblem(path: path, stage: .write, message: error.localizedDescription))
+            }
         }
-        report.downloaded = downloads.filter { !skipped.contains($0) }
-        report.deletedHere = deleteHere.filter { !skipped.contains($0) }
+        report.downloaded = downloadedSuccessfully.sorted()
+        report.deletedHere = deletedHereSuccessfully.sorted()
 
         // What both sides now agree on. Skipped paths keep their old agreed version, so the next
-        // sync still sees them as changed on both sides.
+        // sync still sees them as pending.
         var agreed = remote
         for path in skipped { agreed[path] = base[path] }
 
-        // Phone to GitHub, as one commit.
-        if uploads.isEmpty && deleteThere.isEmpty {
+        // Phone to GitHub. Read/blob failures are isolated; every successful file and deletion is
+        // still committed together, while failed paths remain pending for the next sync.
+        var changes: [GitHubClient.TreeChange] = []
+        var successfulUploads: [String] = []
+        for path in uploads {
+            let url = dataDirectory.appendingPathComponent(path)
+            do {
+                let data = try Data(contentsOf: url)
+                let blob = try await github.createBlob(repo, contents: data)
+                changes.append(GitHubClient.TreeChange(path: path, blobSHA: blob))
+                successfulUploads.append(path)
+            } catch {
+                agreed[path] = base[path]
+                report.problems.append(FileProblem(path: path, stage: .upload, message: error.localizedDescription))
+            }
+        }
+        let committedDeletes = deleteThere.filter { remote[$0] != nil }
+        for path in committedDeletes {
+            changes.append(GitHubClient.TreeChange(path: path, blobSHA: nil))
+        }
+
+        if changes.isEmpty {
             state.files = agreed
             state.lastCommit = head
         } else {
-            var changes: [GitHubClient.TreeChange] = []
-            try await withThrowingTaskGroup(of: GitHubClient.TreeChange.self) { group in
-                for path in uploads {
-                    let url = dataDirectory.appendingPathComponent(path)
-                    group.addTask { [github] in
-                        let data = try Data(contentsOf: url)
-                        return GitHubClient.TreeChange(path: path, blobSHA: try await github.createBlob(repo, contents: data))
-                    }
-                }
-                for try await change in group { changes.append(change) }
-            }
-            for path in deleteThere where remote[path] != nil {
-                changes.append(GitHubClient.TreeChange(path: path, blobSHA: nil))
-            }
             var baseTree: String?
             if let head { baseTree = try await github.commitTree(repo, commit: head) }
             let tree = try await github.createTree(repo, base: baseTree, changes: changes.sorted { $0.path < $1.path })
-            let commit = try await github.createCommit(repo, message: Self.commitMessage(uploads: uploads, deletes: deleteThere), tree: tree, parents: head.map { [$0] } ?? [])
+            let commit = try await github.createCommit(repo, message: Self.commitMessage(uploads: successfulUploads, deletes: committedDeletes), tree: tree, parents: head.map { [$0] } ?? [])
             if head == nil {
                 _ = try await github.send("POST", GitHubClient.path(repo, "/git/refs"), body: ["ref": .string("refs/heads/\(branch)"), "sha": .string(commit)])
             } else {
@@ -252,28 +312,48 @@ public actor DataRepoSync {
             state.lastCommit = commit
             report.commit = commit
         }
-        report.uploaded = uploads
-        report.deletedThere = deleteThere.filter { remote[$0] != nil }
+        report.uploaded = successfulUploads.sorted()
+        report.deletedThere = changes.isEmpty ? [] : committedDeletes.sorted()
         state.lastSyncAt = Date()
         saveState()
         return report
     }
 
-    private func localFiles() throws -> [String: String] {
-        var result: [String: String] = [:]
+    private struct LocalScan {
+        var files: [String: String] = [:]
+        var unreadablePaths: Set<String> = []
+        var problems: [FileProblem] = []
+    }
+
+    private func localFiles() -> LocalScan {
+        var scan = LocalScan()
         let manager = FileManager.default
-        guard let enumerator = manager.enumerator(at: dataDirectory, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else { return result }
+        guard let enumerator = manager.enumerator(
+            at: dataDirectory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return scan }
         let rootPath = dataDirectory.standardizedFileURL.path
         for case let url as URL in enumerator {
-            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
             var path = url.standardizedFileURL.path
             guard path.hasPrefix(rootPath) else { continue }
             path.removeFirst(rootPath.count)
             while path.hasPrefix("/") { path.removeFirst() }
-            guard Self.isManaged(path), let data = try? Data(contentsOf: url) else { continue }
-            result[path] = Hashing.gitBlobID(data)
+            guard Self.isManaged(path) else { continue }
+            do {
+                guard try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else { continue }
+                let data = try Data(contentsOf: url)
+                scan.files[path] = Hashing.gitBlobID(data)
+            } catch {
+                scan.unreadablePaths.insert(path)
+                scan.problems.append(FileProblem(path: path, stage: .read, message: error.localizedDescription))
+            }
         }
-        return result
+        for record in Quarantine.records(dataDirectory: dataDirectory) where scan.files[record.originalPath] == nil {
+            scan.unreadablePaths.insert(record.originalPath)
+            scan.problems.append(FileProblem(path: record.originalPath, stage: .read, message: "Stored file was quarantined: \(record.reason)"))
+        }
+        return scan
     }
 
     private func currentBlobID(at url: URL) -> String? {
@@ -295,6 +375,16 @@ public actor DataRepoSync {
             }
             return results
         }
+    }
+
+    /// Paths whose phone bytes do not match the last GitHub commit acknowledged by this device.
+    /// This is local-only, so the update warning can run even while offline.
+    public func pendingPaths() -> [String] {
+        let scan = localFiles()
+        let paths = Set(scan.files.keys).union(state.files.keys).union(scan.unreadablePaths)
+        return paths.filter { path in
+            scan.unreadablePaths.contains(path) || scan.files[path] != state.files[path]
+        }.sorted()
     }
 
     static func updatedAt(_ data: Data) -> Date? {

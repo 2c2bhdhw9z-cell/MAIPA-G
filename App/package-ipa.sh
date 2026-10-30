@@ -27,7 +27,10 @@ command -v xcodegen >/dev/null 2>&1 || { echo "error: xcodegen not found (brew i
 # keep the old one (Continuum learned this the hard way). CI passes its run number; a build by
 # hand uses the UTC time, which also only goes up.
 BUILD_NUMBER="${MAIPAG_BUILD_NUMBER:-$(date -u +%Y%m%d%H%M)}"
+REVIEWED_REVISION="${MAIPAG_REVIEWED_REVISION:-$(git -C "$ROOT" rev-parse HEAD)}"
+[[ "$REVIEWED_REVISION" =~ ^[0-9a-f]{40}$ ]] || { echo "error: MAIPAG_REVIEWED_REVISION must be a full commit SHA" >&2; exit 2; }
 echo "==> build number $BUILD_NUMBER"
+echo "==> reviewed revision $REVIEWED_REVISION"
 
 echo "==> xcodegen generate"
 (cd "$HERE" && xcodegen generate --spec project.yml --project .)
@@ -57,6 +60,7 @@ xcodebuild \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY="" \
   CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+  MAIPAG_REVIEWED_REVISION="$REVIEWED_REVISION" \
   build
 
 APP="$DERIVED/Build/Products/Release-iphoneos/$APP_NAME.app"
