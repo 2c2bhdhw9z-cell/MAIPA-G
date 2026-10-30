@@ -1,12 +1,19 @@
 # MAIPA-G plan
 
-**Status (30 October 2026): Build 29 (`build-29-3ee52f0`, 4.8 MB, PR #9) is the latest
-installable build. It passed 123 AgentCore tests on Linux and macOS, the complete 39-scene
-Dark/Light check, and independent IPA inspection: 0.1.0 (29), iPhone arm64. It contains a partial
-stability and safety tranche, but it does not constitute 29 fully completed backlog items. The
-previous status incorrectly counted partial implementations and already-present behavior as
-complete. The 58 active requirements still need a sentence-by-sentence completion audit before
-any completed total is stated.**
+**Status (30 October 2026, 3:00 PM ET): Build 53 (`build-53-e009f51`, 5.1 MB, PR #10) is the latest
+installable build: 0.1.0 (53), iPhone arm64, built from commit `3f07b9f`, checked by the AgentCore
+tests on Linux and macOS and an independent IPA inspection (which now also confirms the embedded
+commit). Its checksummed Autonomous runner is published as `runner-3f07b9f…`. Build 29 embedded
+GitHub's temporary pull-request commit, so its Autonomous callers pointed at a runner that never
+existed; Build 53 fixes that. The owner deleted the Dark/Light screenshot job at 2:40 PM ("Delete.
+The. Mother. Fucking. Screenshot job."), so necessary item 8 is cancelled like Stability 40 and
+builds no longer get a screen check. By Kiro's count, 54 of the 57 active requirements are done.
+Not done: Stability 11 (about 250 silent `try?` failures and the generic fallback error remain),
+necessary item 4 (no read-only folder grants, network allow-list or separate package install for
+downloaded connectors; their sandbox blocks all network, so npx/uvx connectors can't install), and
+necessary item 6's leak test (deleted on the owner's order at 2:31 PM). The 37 items finished before
+noon were spot-checked against the code, not re-audited sentence by sentence. Chat-computer, Git
+LFS and Actions-minutes features passed tests against stand-ins only, not the live services.**
 
 ## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
 He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,
@@ -121,7 +128,8 @@ list. These 13 requirements are additional to the tools, stability list and repo
    and verify every installer by signature or hash before running it. Lock GitHub Actions to exact
    reviewed versions too. The planned checked MAIPAGRunner covers only that runner; today the
    computer setup also downloads and runs moving "latest" installers, some with full control.
-8. **Never publish a build unless its complete screen check passed.** Publishing waits for the
+8. **(Cancelled by the owner, 30 October 2026, 2:40 PM: the screenshot job was deleted.)
+   Never publish a build unless its complete screen check passed.** Publishing waits for the
    exact build's Linux tests, iPhone build and complete Dark/Light screenshot job. Every expected
    job must exist and pass. Today a release can publish while the screen job failed, stopped or is
    still running.
