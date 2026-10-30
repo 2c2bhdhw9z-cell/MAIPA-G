@@ -9,6 +9,9 @@ struct WebPreviewScreen: View {
     let repo: ChatRepo
     @State private var browser: PreviewBrowserModel?
     @State private var showDetails = false
+    @State private var showHostEntry = false
+    @State private var hostEntry = ""
+    @State private var hostError: String?
 
     var body: some View {
         NavigationStack {
@@ -38,11 +41,30 @@ struct WebPreviewScreen: View {
                     Button { browser?.reload() } label: { Image(systemName: "arrow.clockwise") }
                     Button { Task { await app.previews.refresh(repo); browser?.reload() } } label: { Image(systemName: "externaldrive.badge.icloud") }
                     Spacer()
+                    Button { showHostEntry = true } label: { Image(systemName: "network") }
+                        .accessibilityLabel("Allow preview network host")
                     Button { showDetails = true } label: { Image(systemName: "terminal") }
                     if let url = browser?.currentURL { Link(destination: url) { Image(systemName: "safari") } }
                 }
             }
             .task { if app.previews.directory == nil, app.previews.error == nil, !PreviewScenes.isActive { await app.previews.refresh(repo) } }
+            .alert("Allow one HTTPS host", isPresented: $showHostEntry) {
+                TextField("api.example.com", text: $hostEntry)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button("Allow") {
+                    do {
+                        try app.allowPreviewHost(hostEntry, for: repo.ref)
+                        Task { await app.previews.refresh(repo); browser?.reload() }
+                    } catch { hostError = ErrorExplainer.explain(error).message }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Preview network access is blocked by default. This allows only the exact host you enter.")
+            }
+            .alert("Host not allowed", isPresented: Binding(get: { hostError != nil }, set: { if !$0 { hostError = nil } })) {
+                Button("OK") {}
+            } message: { Text(hostError ?? "") }
             .sheet(isPresented: $showDetails) {
                 NavigationStack {
                     List(app.previews.console, id: \.self) { Text($0).font(.system(.caption, design: .monospaced)) }
@@ -82,6 +104,20 @@ struct PreviewWebView: UIViewRepresentable {
         let script = "window._maipagConsole=[];['log','warn','error'].forEach(k=>{const o=console[k];console[k]=function(...a){window._maipagConsole.push(k+': '+a.join(' '));o.apply(console,a)}});"
         configuration.userContentController.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         let view = WKWebView(frame: .zero, configuration: configuration)
+        let trigger: [String: Any] = manifest.allowedHTTPSHosts.isEmpty
+            ? ["url-filter": "^(https?|wss?)://"]
+            : ["url-filter": "^(https?|wss?)://", "unless-domain": manifest.allowedHTTPSHosts.sorted()]
+        let rules: [[String: Any]] = [["trigger": trigger, "action": ["type": "block"]]]
+        if let data = try? JSONSerialization.data(withJSONObject: rules),
+           let source = String(data: data, encoding: .utf8) {
+            WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "maipag-preview-\(manifest.allowedHTTPSHosts.sorted().joined(separator: "-"))", encodedContentRuleList: source) { list, _ in
+                guard let list else { return }
+                Task { @MainActor in
+                    view.configuration.userContentController.add(list)
+                    view.reload()
+                }
+            }
+        }
         view.navigationDelegate = context.coordinator
         let model = PreviewBrowserModel(); model.webView = view
         DispatchQueue.main.async { browser = model; context.coordinator.browser = model }

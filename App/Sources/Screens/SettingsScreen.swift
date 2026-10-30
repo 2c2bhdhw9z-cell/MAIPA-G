@@ -88,6 +88,7 @@ struct SettingsScreen: View {
                     settings.chatComputerServer = edited.chatComputerServer
                     settings.chatComputerOff = edited.chatComputerOff
                     settings.chatComputerMachine = edited.chatComputerMachine
+                    settings.previewAllowedHosts = edited.previewAllowedHosts
                 }
                 if disabledAutonomous {
                     app.home.autonomous = false

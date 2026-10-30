@@ -517,6 +517,37 @@ final class JobCoordinator {
         }
     }
 
+    func updateAutonomousWorkflows() async {
+        guard let app, let github = app.github.client,
+              let credentials = app.github.credentials,
+              let openRouterKey = app.openRouter.apiKey,
+              let revision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String,
+              revision.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil
+        else { return }
+        var secrets = [
+            "MAIPAG_APP_ID": String(credentials.appID),
+            "MAIPAG_APP_PRIVATE_KEY": credentials.privateKeyPEM,
+            "OPENROUTER_API_KEY": openRouterKey,
+        ]
+        if let connectorSecrets = app.connectors.autonomousSecretsJSON() { secrets["MAIPAG_MCP_SECRETS"] = connectorSecrets }
+        var failures: [String] = []
+        for var record in await provisioningStore.loadAll() {
+            do {
+                guard let repository = try await github.repositoryIfExists(record.repo) else { continue }
+                let setup = AutonomousSetup(github: github)
+                if try await setup.isInstalled(in: record.repo, ref: repository.defaultBranch, reviewedRevision: revision) { continue }
+                _ = try await setup.install(in: record.repo, branch: repository.defaultBranch, secrets: secrets, reviewedRevision: revision)
+                record.reviewedRevision = revision
+                record.managedSecrets = Set(secrets.keys)
+                record.updatedAt = Date()
+                try await provisioningStore.save(record)
+            } catch {
+                failures.append("\(record.repo.fullName): \(ErrorExplainer.explain(error).message)")
+            }
+        }
+        if !failures.isEmpty { lastError = "Autonomous workflow update failed for " + failures.joined(separator: "; ") }
+    }
+
     func reconcileAutonomousConnectorSecrets() async {
         guard let app, let github = app.github.client else { return }
         let records = await provisioningStore.loadAll()

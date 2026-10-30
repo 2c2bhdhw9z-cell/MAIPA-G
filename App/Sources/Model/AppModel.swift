@@ -223,6 +223,7 @@ final class AppModel {
         async let key: Void = openRouter.refreshKeyInfo()
         await github.refresh()
         await startSaving()
+        await jobs.updateAutonomousWorkflows()
         await updates.check(using: github.publicClient)
         _ = await (models, key)
     }
@@ -461,6 +462,20 @@ final class AppModel {
         case .chat(let id):
             if let session = library.session(id), !session.draftAttachments.contains(where: { $0.id == attachment.id }) { session.draftAttachments.append(attachment) }
         }
+    }
+
+    func allowPreviewHost(_ host: String, for repo: RepoRef) throws {
+        let candidate = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let url = URL(string: "https://\(candidate)"),
+              let checked = try? OAuthURLPolicy.validate(url),
+              checked.host?.lowercased() == candidate,
+              checked.path.isEmpty || checked.path == "/"
+        else { throw ToolInputError("Enter one public host, such as api.example.com.") }
+        updateSettings { $0.previewAllowedHosts[repo.fullName, default: []].insert(candidate) }
+    }
+
+    func removePreviewHost(_ host: String, for repo: RepoRef) {
+        updateSettings { $0.previewAllowedHosts[repo.fullName]?.remove(host.lowercased()) }
     }
 
     // MARK: Screenshots
