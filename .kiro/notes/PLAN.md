@@ -1,27 +1,25 @@
 # MAIPA-G plan
 
-**Status (30 October 2026, 3:00 PM ET): Build 53 (`build-53-e009f51`, 5.1 MB, PR #10) is the latest
-installable build: 0.1.0 (53), iPhone arm64, built from commit `3f07b9f`, checked by the AgentCore
-tests on Linux and macOS and an independent IPA inspection (which now also confirms the embedded
-commit). Its checksummed Autonomous runner is published as `runner-3f07b9f…`. Build 29 embedded
-GitHub's temporary pull-request commit, so its Autonomous callers pointed at a runner that never
-existed; Build 53 fixes that. The owner deleted the Dark/Light screenshot job at 2:40 PM ("Delete.
-The. Mother. Fucking. Screenshot job."), so necessary item 8 is cancelled like Stability 40 and
-builds no longer get a screen check. Kiro counted 54 of the 57 active requirements as done, but
-the owner's phone (3:04 PM) and its synced diagnostics show that count was wrong: the chat
-computer's command call is wrong for the real Sprites service (it gets back `{"count":0,"sessions":[]}`),
-so Stability 10, 31, 33, 34 and 35 don't work there, and "Replace machine" deleted and recreated
-`mcp-maipa-g` without fixing it; saving never finishes (a large attached .ipa can't upload, files
-deleted since the last save count as failures, and 54 GitHub failures hide their reason), so
-Stability 3 isn't done; and the Actions-minutes 403 shows a generic message instead of the Plan
-permission steps, so Stability 14 isn't done. Errors still show iOS's "The operation couldn't be
-completed (… error 1)" placeholder instead of their real reason.
-Not done: Stability 11 (about 250 silent `try?` failures and the generic fallback error remain),
-necessary item 4 (no read-only folder grants, network allow-list or separate package install for
-downloaded connectors; their sandbox blocks all network, so npx/uvx connectors can't install), and
-necessary item 6's leak test (deleted on the owner's order at 2:31 PM). The 37 items finished before
-noon were spot-checked against the code, not re-audited sentence by sentence. Chat-computer, Git
-LFS and Actions-minutes features passed tests against stand-ins only, not the live services.**
+**Status (30 October 2026, 3:51 PM ET): Build 55 (`build-55-3ba91ae`, 5.2 MB, PR #11) is the latest
+installable build: 0.1.0 (55), iPhone arm64, built from commit `97cb058`, checked by the AgentCore
+tests on Linux and macOS and an independent IPA inspection. It fixes what failed on the owner's
+phone with build 53, but none of it is confirmed on the phone yet:
+- Saving: attachments and media of 20 MB or more are stored as assets of MAIPA-G-data's private
+  draft release "MAIPA-G files" (Git keeps a pointer), big uploads run in a background session,
+  blob saves retry, and files deleted mid-save no longer count as failures. Stability 3 counts as
+  done only once MAIPA-G-data shows the owner's large .ipa and all his chats saved.
+- Chat computer: commands now go to Sprites' `exec` (build 53 picked `exec_list`). Stability 10,
+  31, 33, 34 and 35 count as done only once Check everything passes on the phone. Build 53's
+  "Replace machine" deleted and recreated `mcp-maipa-g`.
+- Errors show their real reason instead of iOS's "operation couldn't be completed" placeholder,
+  and the Actions-minutes 403 shows the Plan-permission steps (the owner still has to add the
+  permission; Stability 14 counts once minutes show).
+
+Still not done: Stability 11 (about 250 silent `try?` failures remain), necessary item 4 (sandbox
+for downloaded connectors blocks all network, so npx/uvx connectors can't install), and necessary
+item 6's leak test (deleted on the owner's order). Cancelled by the owner: Stability 40 and
+necessary item 8 (the screenshot job was deleted at 2:40 PM). The 37 items finished before noon were
+spot-checked, not re-audited sentence by sentence.**
 
 ## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
 He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,
