@@ -46,7 +46,7 @@ permissions:
 
 jobs:
   autonomous:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 355
     steps:
       - name: Make a target-repo bot token
@@ -75,18 +75,21 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Check out the exact reviewed shared runner outside the target repo
+      - name: Download the exact reviewed Autonomous runner
         shell: bash
         env:
           MAIPAG_REVISION: ${{ inputs.maipag_revision }}
         run: |
           set -euo pipefail
           [[ "$MAIPAG_REVISION" =~ ^[0-9a-f]{40}$ ]] || { echo "error: invalid MAIPA-G revision" >&2; exit 2; }
-          git init "$RUNNER_TEMP/maipag-runner"
-          git -C "$RUNNER_TEMP/maipag-runner" remote add origin https://github.com/2c2bhdhw9z-cell/MAIPA-G.git
-          git -C "$RUNNER_TEMP/maipag-runner" fetch --depth 1 origin "$MAIPAG_REVISION"
-          git -C "$RUNNER_TEMP/maipag-runner" checkout --detach FETCH_HEAD
-          test "$(git -C "$RUNNER_TEMP/maipag-runner" rev-parse HEAD)" = "$MAIPAG_REVISION"
+          runner="$RUNNER_TEMP/maipag-runner"
+          mkdir -p "$runner"
+          base="https://github.com/2c2bhdhw9z-cell/MAIPA-G/releases/download/runner-$MAIPAG_REVISION"
+          curl --proto '=https' --tlsv1.2 -fL "$base/MAIPAGRunner-linux-x86_64.tar.gz" -o "$runner/MAIPAGRunner-linux-x86_64.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fL "$base/MAIPAGRunner-linux-x86_64.tar.gz.sha256" -o "$runner/MAIPAGRunner-linux-x86_64.tar.gz.sha256"
+          (cd "$runner" && sha256sum -c MAIPAGRunner-linux-x86_64.tar.gz.sha256)
+          tar -C "$runner" -xzf "$runner/MAIPAGRunner-linux-x86_64.tar.gz"
+          chmod 0555 "$runner/MAIPAGRunner"
 
       - name: Run the private job
         shell: bash
@@ -116,7 +119,7 @@ jobs:
           export OPENROUTER_API_KEY_FILE="$openrouter_file"
           export MAIPAG_MCP_SECRETS_FILE="$mcp_file"
           export MAIPAG_RUNNER_ROOT="$RUNNER_TEMP/maipag-runner"
-          exec swift run --package-path "$MAIPAG_RUNNER_ROOT/AgentCore" -c release MAIPAGRunner
+          exec "$MAIPAG_RUNNER_ROOT/MAIPAGRunner"
 
       - name: Check for a dedicated preview artifact
         id: preview

@@ -39,6 +39,22 @@ jobs:
           restore-keys: agentcore-linux-${{ hashFiles('AgentCore/Package.resolved') }}-
       - name: Build Autonomous runner
         run: swift build --package-path AgentCore -c release --product MAIPAGRunner
+      - name: Package checksummed Autonomous runner
+        run: |
+          set -euo pipefail
+          mkdir -p build/runner
+          cp AgentCore/.build/release/MAIPAGRunner build/runner/MAIPAGRunner
+          tar -C build/runner -czf build/MAIPAGRunner-linux-x86_64.tar.gz MAIPAGRunner
+          (cd build && sha256sum MAIPAGRunner-linux-x86_64.tar.gz > MAIPAGRunner-linux-x86_64.tar.gz.sha256)
+      - name: Upload checked Autonomous runner
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: MAIPAGRunner-linux-${{ github.run_number }}
+          path: |
+            build/MAIPAGRunner-linux-x86_64.tar.gz
+            build/MAIPAGRunner-linux-x86_64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
       - name: Tests
         run: swift test --package-path AgentCore
       - name: Public network checks

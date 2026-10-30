@@ -27,6 +27,13 @@ for expected in (
 ):
     if ios.count(expected) != 2:
         errors.append(f"ios.yml: both macOS jobs must use locked XcodeGen metadata: {expected}")
+agent = (ROOT / ".github/workflows/agent.yml").read_text()
+for forbidden in ("swift run --package-path", "git clone --depth 1 --branch main"):
+    if forbidden in agent:
+        errors.append(f"agent.yml: checked runner regressed to {forbidden}")
+for required in ("runner-$MAIPAG_REVISION", "sha256sum -c", "MAIPAGRunner-linux-x86_64.tar.gz"):
+    if required not in agent:
+        errors.append(f"agent.yml: missing checked prebuilt runner requirement {required}")
 release = (ROOT / "scripts/publish-verified-ipa.sh").read_text()
 for required in ("AgentCore tests (Linux)", "Complete Dark and Light screenshots", "iPhone release candidate"):
     if required not in release:
