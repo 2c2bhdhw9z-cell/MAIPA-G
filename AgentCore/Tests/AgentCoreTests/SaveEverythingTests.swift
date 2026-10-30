@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 @testable import AgentCore
 
@@ -142,6 +145,35 @@ struct SaveEverythingTests {
         // Actions minutes: GitHub's real 403 type gets the Plan permission steps.
         let minutes = GitHubActionsBilling.explain(GitHubAPIError(status: 403, message: "Resource not accessible by integration"))
         #expect(minutes.contains("Plan") && minutes.contains("Read-only"))
+    }
+
+    @Test func serverDropsDoNotClaimIPhoneIsOfflineAndLargeAttachmentsFit() async throws {
+        let dropped = try #require(URLSessionTransport.transportError(URLError(.cannotConnectToHost)) as? HTTPError)
+        let lost = try #require(URLSessionTransport.transportError(URLError(.networkConnectionLost)) as? HTTPError)
+        let genuinelyOffline = try #require(URLSessionTransport.transportError(URLError(.notConnectedToInternet)) as? HTTPError)
+        #expect(!dropped.isOffline && !lost.isOffline && genuinelyOffline.isOffline)
+        #expect(!ErrorExplainer.describe(dropped).cause.contains("This iPhone is offline"))
+        #expect(ErrorExplainer.describe(genuinelyOffline).cause.contains("This iPhone is offline"))
+
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-att-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = AttachmentStore(dataDirectory: folder)
+        let bigText = String(repeating: "a", count: 1_200_000) + "TAIL_MARKER"
+        let ref = try await store.importData(Data(bigText.utf8), name: "Pasted text.txt", mimeType: "text/plain", kind: .text)
+        let tool = ReadAttachmentTool(attachments: [ref], store: store)
+        let firstPage = try await tool.run(arguments: ["name": "Pasted text.txt", "limit": 100_000], progress: { _ in })
+        #expect(firstPage.forModel.contains("offset 100000"))
+        let tailPage = try await tool.run(arguments: ["name": "Pasted text.txt", "offset": 1_200_000, "limit": 50_000], progress: { _ in })
+        #expect(tailPage.forModel.contains("TAIL_MARKER"))
+
+        var chat = Chat()
+        chat.messages = [.user("Summarize this", attachments: [ref])]
+        let transcript = Transcript.messages(for: chat, systemPrompt: "s")
+        #expect(transcript[1].content?.contains("Pasted text.txt") == true)
+
+        let (fitted, trimmed) = Transcript.fit([.system("s"), .user(String(repeating: "z", count: 80_000))], budget: 4_000)
+        #expect(trimmed && Transcript.estimatedTokens(fitted) <= 4_000)
     }
 }
 

@@ -61,30 +61,145 @@ struct UserBubble: View {
     var message: UserMessage
     var onEdit: () -> Void
     @Environment(\.theme) private var theme
+    @State private var showingFullText = false
+
+    private static let previewCharacterLimit = 1_200
+    private static let previewLineLimit = 16
+
+    private var isLongText: Bool {
+        if message.text.count > Self.previewCharacterLimit { return true }
+        var lines = 1
+        for character in message.text where character == "\n" {
+            lines += 1
+            if lines > Self.previewLineLimit { return true }
+        }
+        return false
+    }
+
+    private var previewText: String {
+        guard isLongText else { return message.text }
+        let prefix = String(message.text.prefix(Self.previewCharacterLimit))
+        let lines = prefix.split(separator: "\n", omittingEmptySubsequences: false)
+        if lines.count > Self.previewLineLimit {
+            return lines.prefix(Self.previewLineLimit).joined(separator: "\n") + "…"
+        }
+        return prefix.count < message.text.count ? prefix + "…" : prefix
+    }
 
     var body: some View {
         HStack {
             Spacer(minLength: 48)
             VStack(alignment: .leading, spacing: 8) {
                 if !message.text.isEmpty {
-                    Text(message.text)
+                    Text(previewText)
                         .font(.body)
                         .textSelection(.enabled)
+                    if isLongText {
+                        Button { showingFullText = true } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "doc.text.magnifyingglass")
+                                Text("Show full message (\(message.text.count.formatted()) characters)")
+                                Image(systemName: "chevron.right")
+                                    .font(.caption2.weight(.bold))
+                            }
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(theme.accent)
+                            .padding(.top, 2)
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
                 ForEach(message.attachments) { attachment in
                     Label(attachment.name, systemImage: attachment.kind == .image ? "photo" : attachment.kind == .pdf ? "doc.richtext" : "paperclip")
                         .font(.caption.weight(.medium))
                 }
             }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(theme.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(theme.accent.opacity(0.25)))
-                .contextMenu {
-                    Button(action: onEdit) { Label("Edit and resend", systemImage: "pencil") }
-                    if !message.text.isEmpty { Button { UIPasteboard.general.string = message.text } label: { Label("Copy", systemImage: "doc.on.doc") } }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(theme.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(theme.accent.opacity(0.25)))
+            .contextMenu {
+                if isLongText {
+                    Button { showingFullText = true } label: { Label("Show full message", systemImage: "doc.text.magnifyingglass") }
                 }
+                if message.text.count <= 20_000 {
+                    Button(action: onEdit) { Label("Edit and resend", systemImage: "pencil") }
+                }
+                if !message.text.isEmpty {
+                    Button { UIPasteboard.general.string = message.text } label: { Label("Copy", systemImage: "doc.on.doc") }
+                }
+            }
         }
+        .sheet(isPresented: $showingFullText) {
+            FullUserMessageSheet(text: message.text)
+        }
+    }
+}
+
+private struct FullUserMessageSheet: View {
+    let text: String
+    @Environment(\.dismiss) private var dismiss
+    private let chunks: [String]
+
+    init(text: String) {
+        self.text = text
+        self.chunks = Self.splitIntoChunks(text, targetSize: 3_000)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(chunks.enumerated()), id: \.offset) { _, chunk in
+                        Text(chunk)
+                            .font(.body)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(16)
+            }
+            .background(Theme.background.ignoresSafeArea())
+            .navigationTitle("Full message")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        UIPasteboard.general.string = text
+                        Haptics.selection()
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                        .fontWeight(.semibold)
+                }
+            }
+        }
+    }
+
+    private static func splitIntoChunks(_ text: String, targetSize: Int) -> [String] {
+        guard text.count > targetSize else { return [text] }
+        var result: [String] = []
+        var start = text.startIndex
+        while start < text.endIndex {
+            let maxEnd = text.index(start, offsetBy: targetSize, limitedBy: text.endIndex) ?? text.endIndex
+            if maxEnd == text.endIndex {
+                result.append(String(text[start..<maxEnd]))
+                break
+            }
+            let searchFloor = text.index(start, offsetBy: targetSize / 2, limitedBy: maxEnd) ?? start
+            if let newline = text[searchFloor..<maxEnd].lastIndex(of: "\n") {
+                let splitAt = text.index(after: newline)
+                result.append(String(text[start..<splitAt]))
+                start = splitAt
+            } else {
+                result.append(String(text[start..<maxEnd]))
+                start = maxEnd
+            }
+        }
+        return result
     }
 }
 

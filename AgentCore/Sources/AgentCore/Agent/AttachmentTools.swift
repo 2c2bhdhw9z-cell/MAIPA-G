@@ -48,15 +48,46 @@ public struct ReadAttachmentTool: AgentTool {
     public let store: AttachmentStore
     public let name = "read_attachment"
     public init(attachments: [AttachmentReference], store: AttachmentStore) { self.attachments = attachments; self.store = store }
-    public var spec: ToolSpec { ToolSpec(name: name, description: "Read a text attachment sent in this chat.", parameters: ["type": "object", "properties": ["name": ["type": "string"]], "required": ["name"]]) }
+    public var spec: ToolSpec {
+        ToolSpec(
+            name: name,
+            description: "Read a text attachment sent in this chat. Pass offset and limit to read large files in sections.",
+            parameters: [
+                "type": "object",
+                "properties": [
+                    "name": ["type": "string", "description": "Attachment file name or ID."],
+                    "offset": ["type": "integer", "description": "0-based character offset to start reading from (default 0)."],
+                    "limit": ["type": "integer", "description": "Maximum characters to return (default 120000, max 200000)."],
+                ],
+                "required": ["name"],
+            ]
+        )
+    }
     public func runningSummary(for arguments: JSONValue) -> String { "Reading \(arguments.optionalString("name") ?? "attachment")…" }
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let requested = try arguments.requiredString("name")
         guard let attachment = attachments.last(where: { $0.name == requested || $0.id.uuidString == requested }) else { throw ToolInputError("There is no attachment named \(requested).") }
         guard attachment.kind == .text else { throw ToolInputError("\(attachment.name) is not a text attachment.") }
         let data = try await store.data(for: attachment)
-        guard data.count <= 1_000_000 else { throw ToolInputError("\(attachment.name) is too large to read as text.") }
-        let text = String(decoding: data, as: UTF8.self)
-        return ToolOutput(forModel: "\(attachment.name) (\(data.count) bytes)\n\(text)", summary: "Read attachment \(attachment.name)", detail: String(text.prefix(20_000)))
+        guard data.count <= 25 * 1024 * 1024 else { throw ToolInputError("\(attachment.name) is too large to read as text.") }
+        let fullText = String(decoding: data, as: UTF8.self)
+        let total = fullText.count
+        let startOffset = max(0, arguments.optionalInt("offset") ?? 0)
+        let maxChars = min(200_000, max(1, arguments.optionalInt("limit") ?? 120_000))
+        guard startOffset <= total else {
+            return ToolOutput(forModel: "\(attachment.name) (\(data.count) bytes, \(total) characters): offset \(startOffset) is at or past the end.", summary: "Read attachment \(attachment.name)", detail: "")
+        }
+        let startIndex = fullText.index(fullText.startIndex, offsetBy: startOffset)
+        let endOffset = min(total, startOffset + maxChars)
+        let endIndex = fullText.index(startIndex, offsetBy: endOffset - startOffset)
+        let slice = String(fullText[startIndex..<endIndex])
+        let moreNote = endOffset < total
+            ? "\n\n[Showing characters \(startOffset)..<\(endOffset) of \(total). Call read_attachment with name \"\(attachment.name)\" and offset \(endOffset) to read the next section.]"
+            : ""
+        return ToolOutput(
+            forModel: "\(attachment.name) (\(data.count) bytes, \(total) characters)\n\(slice)\(moreNote)",
+            summary: endOffset < total ? "Read \(attachment.name) (\(startOffset)–\(endOffset) of \(total) chars)" : "Read attachment \(attachment.name)",
+            detail: String(slice.prefix(20_000))
+        )
     }
 }

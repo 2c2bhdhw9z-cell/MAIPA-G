@@ -25,8 +25,26 @@ public enum Transcript {
         for (index, message) in chat.messages.enumerated() where index >= firstIncludedIndex {
             switch message.body {
             case .user(let user):
+                let fileNotes = user.attachments.compactMap { attachment -> String? in
+                    switch attachment.kind {
+                    case .text:
+                        return "[Attached text file: \"\(attachment.name)\" (\(attachment.bytes) bytes) — call read_attachment(name: \"\(attachment.name)\") to read it.]"
+                    case .file:
+                        return "[Attached file: \"\(attachment.name)\" (\(attachment.bytes) bytes, \(attachment.mimeType))]"
+                    case .image, .pdf:
+                        return nil
+                    }
+                }
+                let effectiveText: String
+                if fileNotes.isEmpty {
+                    effectiveText = user.text
+                } else if user.text.isEmpty {
+                    effectiveText = fileNotes.joined(separator: "\n")
+                } else {
+                    effectiveText = user.text + "\n\n" + fileNotes.joined(separator: "\n")
+                }
                 var parts: [JSONValue] = []
-                if !user.text.isEmpty { parts.append(["type": "text", "text": .string(user.text)]) }
+                if !effectiveText.isEmpty { parts.append(["type": "text", "text": .string(effectiveText)]) }
                 for attachment in user.attachments {
                     guard let data = attachmentData[attachment.id] else { continue }
                     let encoded = "data:\(attachment.mimeType);base64,\(data.base64EncodedString())"
@@ -39,10 +57,10 @@ public enum Transcript {
                         break
                     }
                 }
-                if parts.count > (user.text.isEmpty ? 0 : 1) {
+                if parts.count > (effectiveText.isEmpty ? 0 : 1) {
                     result.append(APIMessage(role: .user, content: nil, contentParts: parts))
                 } else {
-                    result.append(.user(user.text))
+                    result.append(.user(effectiveText))
                 }
             case .assistant(let turn):
                 let isCurrent = index == lastAssistantIndex && index == chat.messages.count - 1
@@ -130,6 +148,27 @@ public enum Transcript {
         }
         if dropped, let system = messages.first, system.role == .system {
             messages[0].content = (system.content ?? "") + "\n\nEarlier parts of this conversation were left out to save space."
+        }
+        // Final safety guard: if a single giant pasted message or tool output in the latest turn
+        // still exceeds the AI's context budget, cap oversized text so the request fits instead of
+        // failing with a 400 or dropped multi-megabyte upload.
+        if estimatedTokens(messages) > budget, budget > 500 {
+            for index in messages.indices.reversed() where messages[index].role == .tool || messages[index].role == .user {
+                guard estimatedTokens(messages) > budget else { break }
+                if let text = messages[index].content, text.count > 4_000 {
+                    let excessTokens = estimatedTokens(messages) - budget + 512
+                    let targetCount = max(2_000, text.count - Int(Double(excessTokens) * 3.6))
+                    if targetCount < text.count {
+                        let headCount = Int(Double(targetCount) * 0.7)
+                        let tailCount = max(0, targetCount - headCount - 160)
+                        let head = String(text.prefix(headCount))
+                        let tail = tailCount > 0 ? String(text.suffix(tailCount)) : ""
+                        let omitted = max(0, text.count - head.count - tail.count)
+                        messages[index].content = head + "\n\n[… \(omitted) characters omitted so this message fits the AI's context window …]\n\n" + tail
+                        changed = true
+                    }
+                }
+            }
         }
         return (messages, changed)
     }

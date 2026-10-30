@@ -250,14 +250,22 @@ struct SideMenu: View {
                     Image(systemName: "person.crop.circle.fill")
                         .font(.title2)
                         .foregroundStyle(theme.accent)
-                    VStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 1) {
                         Text(login).font(.subheadline.weight(.medium)).lineLimit(1)
                         Text(saveStatus).font(.caption).foregroundStyle(Theme.secondaryText).lineLimit(1)
+                        if let credit = openRouterStatus {
+                            Text(credit).font(.caption2.monospacedDigit()).foregroundStyle(Theme.secondaryText).lineLimit(1)
+                        }
                     }
                 } else {
-                    Text("Not connected to GitHub")
-                        .font(.subheadline)
-                        .foregroundStyle(Theme.secondaryText)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Not connected to GitHub")
+                            .font(.subheadline)
+                            .foregroundStyle(Theme.secondaryText)
+                        if let credit = openRouterStatus {
+                            Text(credit).font(.caption2.monospacedDigit()).foregroundStyle(Theme.secondaryText).lineLimit(1)
+                        }
+                    }
                 }
                 Spacer()
                 Button {
@@ -321,6 +329,14 @@ struct SideMenu: View {
         case .saving: return "Saving…"
         case .failed: return "Not saved to GitHub yet"
         }
+    }
+
+    private var openRouterStatus: String? {
+        guard app.openRouter.isSignedIn else { return nil }
+        var items: [String] = []
+        if let balance = app.openRouter.balance { items.append(balance.dollars) }
+        if let free = app.openRouter.freeRequestsLeft { items.append("\(free) free") }
+        return items.isEmpty ? nil : items.joined(separator: " · ")
     }
 
     // MARK: Grouping by day
