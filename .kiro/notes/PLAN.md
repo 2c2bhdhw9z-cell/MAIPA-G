@@ -1,7 +1,7 @@
 # MAIPA-G plan
 
-**Status (30 October 2026, 5:10 PM ET): Build 58 (`build-58-9dddcb4`, 5.2 MB, PR #14) is the latest
-installable build: 0.1.0 (58), iPhone arm64, built from commit `209b7ab`, checked by the AgentCore
+**Status (30 October 2026, 6:28 PM ET): Build 59 (`build-59-2c89052`, 5.0 MB, PR #15) is the latest
+installable build: 0.1.0 (59), iPhone arm64, built from commit `14944f5`, checked by the AgentCore
 tests on Linux and macOS and an independent IPA inspection.
 
 Confirmed on the owner's phone with build 55 (4:04 PM): saving works (Settings showed "Saved just
@@ -18,6 +18,12 @@ Built since then, none of it confirmed on the phone yet:
 - Build 58 (PR #14): chats work again. Since build 53 every chat sent OpenRouter four AIs (the
   chosen one plus three backups) and OpenRouter refused them all with a 400; the phone failed seven
   messages that way at 4:27-4:35 PM.
+- Build 59 (PR #15): upgraded chat and Autonomous system prompts; folded the Home shortcut strip
+  and the row under the message box into the `+` menu, fixed the crooked AI/Thinking button offset
+  and `Medium` wrapping, and moved OpenRouter balance to the side menu and context ring popover;
+  capped long user bubbles with a chunked `Full message` sheet, auto-converted 20,000+ character
+  pastes into text attachments with paginated `read_attachment` up to 25 MB, and stopped dropped
+  server connections from falsely claiming `This iPhone is offline`.
 
 Still not done: Stability 11 (about 250 silent `try?` failures remain), necessary item 4 (sandbox
 for downloaded connectors blocks all network, so npx/uvx connectors can't install), and necessary
