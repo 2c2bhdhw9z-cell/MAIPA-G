@@ -9,7 +9,8 @@
 # It installs only what is missing, so it is safe to run again, also after it stopped part way.
 # One tool failing doesn't stop the rest; failures are listed at the end. The screen gets one line
 # per step and a list of every tool with its version; the full output of each step goes to
-# ~/.maipa-g/setup.log. At the end it writes ~/.maipa-g/ready with the date.
+# ~/.maipa-g/setup.log. At the end it writes ~/.maipa-g/ready with the date and any failures.
+# On a Fly.io Sprite it keeps the machine awake until it ends (see hold_machine_awake).
 
 if [ -z "${BASH_VERSION:-}" ]; then
   echo "Please run this with bash." >&2
@@ -169,6 +170,50 @@ SWIFT_VERSION=6.4.2
 # npm checks each package against the registry's SHA-512 integrity for these exact versions;
 # --ignore-scripts keeps package install scripts from running.
 NPM_GLOBALS="pnpm@12.16.1 yarn@1.22.22 typescript@7.0.2"
+
+# ---- Staying awake on a Sprite ----------------------------------------------------------------
+# A Sprite pauses about 30 seconds after the last command or connection to it ends, and a paused
+# machine stops this script part way; MAIPA-G starts it in the background, so nothing else keeps
+# the machine busy. Sprites' Tasks API (docs.fly.io/sprites/keeping-sprites-running) holds it
+# awake: the task lasts 5 minutes and is renewed every minute while this script runs, and is
+# removed at the end. If this script is killed, the task runs out by itself within 5 minutes,
+# and the hold ends after 3 hours in any case, so a stuck step can't keep a machine billing.
+SPRITE_SOCKET=/.sprite/api.sock
+SPRITE_TASK=maipa-g-setup
+HOLD_EVERY=60
+HOLD_PID=""
+
+sprite_task() {
+  curl -fsS --max-time 15 --unix-socket "$SPRITE_SOCKET" -H 'Content-Type: application/json' "$@" >/dev/null 2>&1
+}
+
+renew_hold() { sprite_task -X PUT "http://sprite/v1/tasks/$SPRITE_TASK" -d '{ "expire": "5m" }'; }
+
+hold_machine_awake() {
+  [ -S "$SPRITE_SOCKET" ] || return 0
+  if ! have curl || ! renew_hold; then
+    echo off >"$STATE_DIR/awake"
+    say "==> This Sprite couldn't be kept awake, so setup only moves on while the Sprite is in use"
+    return 0
+  fi
+  echo on >"$STATE_DIR/awake"
+  say "==> Keeping this Sprite awake until setup ends"
+  local owner=$$ stop_at=$(($(date +%s) + 10800))
+  (
+    trap - EXIT
+    while sleep "$HOLD_EVERY" && kill -0 "$owner" 2>/dev/null && [ "$(date +%s)" -lt "$stop_at" ]; do
+      renew_hold || true
+    done
+  ) </dev/null >/dev/null 2>&1 &
+  HOLD_PID=$!
+}
+
+release_machine() {
+  if [ -n "$HOLD_PID" ]; then
+    kill "$HOLD_PID" 2>/dev/null || true
+    sprite_task -X DELETE "http://sprite/v1/tasks/$SPRITE_TASK" || true
+  fi
+}
 
 # The value for this machine's CPU: pick X86_64_VALUE ARM64_VALUE.
 pick() {
@@ -445,13 +490,17 @@ main() {
     echo "Couldn't make $STATE_DIR." >&2
     return 1
   fi
+  # MAIPA-G's health check reads this to tell that setup is still running.
+  printf '%s\n' "$$" >"$STATE_DIR/setup.pid"
+  rm -f "$STATE_DIR/awake"
   : >"$LOG"
   TMP_DIR=$(mktemp -d 2>/dev/null) || TMP_DIR="/tmp/maipa-g-setup.$$"
   mkdir -p "$TMP_DIR"
-  trap 'rm -rf "$TMP_DIR"' EXIT
+  trap 'release_machine; rm -rf "$TMP_DIR"' EXIT
   exec 3>&1
 
   say "Setting up this computer for MAIPA-G. Step details go to $LOG."
+  hold_machine_awake
 
   # PATH first, so even a run that stops part way leaves the tools it got usable.
   write_env_file || add_failure "$STATE_DIR/env.sh"

@@ -4,11 +4,13 @@ import SwiftUI
 struct MemoriesScreen: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
+    /// Pushed inside Settings: no stack of its own and no Done button (Back returns to Settings).
+    var embedded = false
     @State private var query = ""
     @State private var deleting: MemoryRecord?
 
     var body: some View {
-        NavigationStack {
+        OwnNavigationStack(embedded: embedded) {
             List {
                 Section {
                     Toggle("Use memories in new chats", isOn: Binding(
@@ -46,7 +48,9 @@ struct MemoriesScreen: View {
             .searchable(text: $query, prompt: "Search memories")
             .navigationTitle("Memories")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
+                if !embedded {
+                    ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
+                }
                 ToolbarItem(placement: .primaryAction) { NavigationLink { MemoryEditorScreen() } label: { Image(systemName: "plus") } }
             }
             .task { await app.memories.load() }

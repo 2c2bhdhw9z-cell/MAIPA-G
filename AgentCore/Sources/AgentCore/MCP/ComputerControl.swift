@@ -39,9 +39,13 @@ public struct ComputerControl: Sendable {
         tools.first { predicate(Self.words($0.originalName)) }
     }
 
-    /// Whether a connector with these tools can serve as a chat computer.
+    /// Whether a connector with these tools can serve as a chat computer: one tool runs a command
+    /// and takes that command as text or a list. Hugging Face's `hf_sandbox_exec` only takes the
+    /// fixed word "exec" there, and a Space's tool has no command at all, so neither counts.
     public static func hasCommandTool(_ tools: [ConnectorToolDefinition]) -> Bool {
-        ComputerControl(tools: tools, machine: "check") { _, _ in ("", false) }.commandTool != nil
+        guard let tool = ComputerControl(tools: tools, machine: "check", call: { _, _ in ("", false) }).commandTool,
+              let key = commandKey(tool.inputSchema), let property = properties(tool.inputSchema)[key] else { return false }
+        return property["enum"] == nil && property["const"] == nil
     }
 
     /// The tool that runs one command. Sprites names it `exec`, next to `exec_list` and
@@ -124,16 +128,50 @@ public struct ComputerControl: Sendable {
         return result.text
     }
 
+    /// A shell test that is true while MAIPA-G's tool setup runs on the machine. The process is
+    /// checked by its command line, as a restarted machine can give its old number to another.
+    static let setupRunning = #"{ p=$(cat "$HOME/.maipa-g/setup.pid" 2>/dev/null); [ -n "$p" ] && tr '\0' ' ' 2>/dev/null < "/proc/$p/cmdline" | grep -q 'setup\.sh'; }"#
+
     /// The health check's real command: it proves the machine starts and runs a shell, and says
-    /// whether MAIPA-G's verified tool setup has finished there.
-    public static let healthCommand = "echo maipa-g-health-ok && uname -sm && if [ -f \"$HOME/.maipa-g/ready\" ]; then echo maipa-g-tools-ready; elif [ -f \"$HOME/.maipa-g/setup.pid\" ] && kill -0 \"$(cat \"$HOME/.maipa-g/setup.pid\")\" 2>/dev/null; then echo maipa-g-tools-installing; else echo maipa-g-tools-missing; fi"
+    /// whether MAIPA-G's verified tool setup is running (and its current step), finished (and
+    /// which tools failed), or hasn't run.
+    public static let healthCommand = #"echo maipa-g-health-ok; uname -sm; d="$HOME/.maipa-g"; if "# + setupRunning + #"; then echo maipa-g-tools-installing; grep '^==> ' "$d/setup-run.log" 2>/dev/null | tail -n 1 | cut -c1-124 | sed 's/^==> /maipa-g-tools-step: /'; if grep -qx off "$d/awake" 2>/dev/null; then echo maipa-g-tools-sleeps; fi; elif [ -f "$d/ready" ]; then echo maipa-g-tools-ready; sed -n 's/^failed: /maipa-g-tools-failed: /p' "$d/ready" | cut -c1-300; else echo maipa-g-tools-missing; fi; true"#
 
     public enum ToolState: Equatable, Sendable { case ready, installing, missing }
 
     public static func toolState(_ output: String) -> ToolState {
-        if output.contains("maipa-g-tools-ready") { return .ready }
         if output.contains("maipa-g-tools-installing") { return .installing }
+        if output.contains("maipa-g-tools-ready") { return .ready }
         return .missing
+    }
+
+    /// The setup step running now, such as "Rust 1.99.1 (rustup 1.29.2)".
+    public static func setupStep(_ output: String) -> String? { note("maipa-g-tools-step", in: output) }
+
+    /// The tools the finished setup couldn't install, such as "Swift, .NET".
+    public static func failedTools(_ output: String) -> String? { note("maipa-g-tools-failed", in: output) }
+
+    /// The machine pauses when idle and couldn't be held awake, so setup only moves on while
+    /// the machine is in use.
+    public static func setupPausesWhenIdle(_ output: String) -> Bool { output.contains("maipa-g-tools-sleeps") }
+
+    static func note(_ marker: String, in output: String) -> String? {
+        for line in plainOutput(output).split(whereSeparator: \.isNewline) {
+            let text = line.trimmingCharacters(in: .whitespaces)
+            guard text.hasPrefix(marker + ": ") else { continue }
+            let value = text.dropFirst(marker.count + 2).trimmingCharacters(in: .whitespaces)
+            return value.isEmpty ? nil : value
+        }
+        return nil
+    }
+
+    /// The command's own output. A service may wrap it in JSON (`{"stdout": "..."}`).
+    static func plainOutput(_ output: String) -> String {
+        if let object = JSONValue.parse(Data(output.utf8))?.objectValue {
+            let parts = ["stdout", "output", "stderr"].compactMap { object[$0]?.stringValue }
+            if !parts.isEmpty { return parts.joined(separator: "\n") }
+        }
+        return output
     }
 
     /// Starts MAIPA-G's tool setup in the background: the script comes from the app's exact
@@ -146,7 +184,8 @@ public struct ComputerControl: Sendable {
         let script = """
         set -euo pipefail
         mkdir -p "$HOME/.maipa-g"
-        if [ -f "$HOME/.maipa-g/setup.pid" ] && kill -0 "$(cat "$HOME/.maipa-g/setup.pid")" 2>/dev/null; then echo maipa-g-setup-started; exit 0; fi
+        if \(Self.setupRunning); then echo maipa-g-setup-started; exit 0; fi
+        rm -f "$HOME/.maipa-g/setup.pid"
         curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$HOME/.maipa-g/setup.sh" '\(url)'
         echo '\(sha)  '"$HOME/.maipa-g/setup.sh" | sha256sum -c - >/dev/null
         # Let go of inherited descriptors so this command returns now, while setup keeps going.
@@ -158,7 +197,8 @@ public struct ComputerControl: Sendable {
         else
           nohup bash "$HOME/.maipa-g/setup.sh" > "$HOME/.maipa-g/setup-run.log" 2>&1 < /dev/null &
         fi
-        echo $! > "$HOME/.maipa-g/setup.pid"
+        # setup.sh writes its own number too; this covers the moment before it starts.
+        [ -s "$HOME/.maipa-g/setup.pid" ] || echo $! > "$HOME/.maipa-g/setup.pid"
         echo maipa-g-setup-started
         """
         let output = try await run(script)

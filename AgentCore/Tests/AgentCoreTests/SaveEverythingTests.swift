@@ -212,15 +212,37 @@ struct SpritesToolTests {
         #expect(OutsideContentBoundary.connectorApproval(Self.tools.first { $0.originalName == "exec_list" }!, arguments: [:]) == nil)
     }
 
-    // Hugging Face is a connector, not a computer; Sprites is both.
+    // Hugging Face is a connector, not a computer; Sprites is both. These are huggingface/
+    // hf-mcp-server's tools: its defaults, a Space tool, and the sandbox tools a person can turn
+    // on, whose `hf_sandbox_exec` takes only the fixed word "exec" as its command.
     @Test func onlyConnectorsThatRunCommandsAreComputers() {
-        let huggingFace = ["hf_whoami", "space_search", "model_search", "paper_search", "hub_repo_details", "hf_doc_search", "dynamic_space", "gr1_flux1_schnell_infer"].map {
-            ConnectorToolDefinition(serverID: "huggingface", serverName: "Hugging Face", originalName: $0)
+        func hf(_ name: String, _ properties: [String: JSONValue] = [:]) -> ConnectorToolDefinition {
+            ConnectorToolDefinition(serverID: "co.huggingface/hf-mcp-server", serverName: "Hugging Face", originalName: name, inputSchema: ["type": "object", "properties": .object(properties)])
         }
-        #expect(!ComputerControl.hasCommandTool(huggingFace))
+        let defaults = ["hub_repo_search", "create_repo", "hub_repo_details", "hf_fs", "hf_jobs", "dynamic_space", "gr1_flux1_schnell_infer"].map { hf($0) }
+        let sandbox = [
+            hf("hf_sandbox", ["cmd": ["type": "string", "enum": ["create", "list", "delete"]], "args": ["type": "array", "items": ["type": "string"]]]),
+            hf("hf_sandbox_exec", ["cmd": ["type": "string", "enum": ["exec"]], "args": ["type": "array", "items": ["type": "string"]]]),
+            hf("hf_sandbox_fs", ["cmd": ["type": "string", "enum": ["read", "write"]], "args": ["type": "array", "items": ["type": "string"]]]),
+        ]
+        #expect(!ComputerControl.hasCommandTool(defaults))
+        #expect(!ComputerControl.hasCommandTool(defaults + sandbox))
+        #expect(!ComputerControl.hasCommandTool([hf("gr2_someone_tool_run", ["prompt": ["type": "string"]])]))
         #expect(ComputerControl.hasCommandTool(Self.tools))
+        #expect(ComputerControl.hasCommandTool([hf("run_command", ["command": ["type": "string"]])]))
+
         #expect(ComputerControl.toolState("maipa-g-health-ok\nLinux\nmaipa-g-tools-ready") == .ready)
         #expect(ComputerControl.toolState("maipa-g-health-ok\nmaipa-g-tools-installing") == .installing)
         #expect(ComputerControl.toolState("maipa-g-health-ok\nmaipa-g-tools-missing") == .missing)
+        // What the health command prints while setup runs and after it ends, also when the
+        // service wraps the output in JSON.
+        let running = "maipa-g-health-ok\nLinux x86_64\nmaipa-g-tools-installing\nmaipa-g-tools-step: Rust 1.99.1 (rustup 1.29.2)\n"
+        #expect(ComputerControl.setupStep(running) == "Rust 1.99.1 (rustup 1.29.2)" && !ComputerControl.setupPausesWhenIdle(running))
+        #expect(ComputerControl.setupPausesWhenIdle(running + "maipa-g-tools-sleeps\n"))
+        let wrapped = #"{"exit_code":0,"stdout":"maipa-g-health-ok\nLinux x86_64\nmaipa-g-tools-ready\nmaipa-g-tools-failed: Swift, .NET\n"}"#
+        #expect(ComputerControl.toolState(wrapped) == .ready && ComputerControl.failedTools(wrapped) == "Swift, .NET")
+        #expect(ComputerControl.failedTools("maipa-g-health-ok\nmaipa-g-tools-ready\n") == nil)
+        // A rerun after a finished run reports that it is installing again.
+        #expect(ComputerControl.healthCommand.range(of: "maipa-g-tools-installing")!.lowerBound < ComputerControl.healthCommand.range(of: "maipa-g-tools-ready")!.lowerBound)
     }
 }
