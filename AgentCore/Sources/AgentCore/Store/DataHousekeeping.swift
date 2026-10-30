@@ -19,19 +19,66 @@ public actor DataHousekeeping {
         var report = DataHousekeepingReport()
         report.compactedJobs = (try? await JobStore(dataDirectory: dataDirectory).compactFinished(now: now)) ?? 0
         report.purgedTrashItems = (try? await TrashStore(dataDirectory: dataDirectory).purgeExpired(now: now)) ?? 0
-        report.removedOrphanBlobs = await removeOrphanBlobs(olderThan: now.addingTimeInterval(-7 * 24 * 60 * 60))
+        let referenced = await referencedBlobPaths()
+        report.removedOrphanBlobs = Self.removeOrphanBlobs(
+            in: dataDirectory,
+            referenced: referenced,
+            olderThan: now.addingTimeInterval(-7 * 24 * 60 * 60)
+        )
         return report
     }
 
-    private func removeOrphanBlobs(olderThan cutoff: Date) async -> Int {
-        let manager = FileManager.default
-        var referenced = await referencedBlobPaths()
-        var removed = 0
+    private func referencedBlobPaths() async -> Set<String> {
+        var paths = Set<String>()
+        func include(_ chat: Chat) {
+            for message in chat.messages {
+                if case .user(let user) = message.body { paths.formUnion(user.attachments.map(\.path)) }
+                if let turn = message.assistantTurn {
+                    paths.formUnion(turn.steps.flatMap { $0.generatedImages ?? [] }.map { $0.attachment.path })
+                }
+            }
+        }
 
-        // Generated metadata keeps its picture during the grace period. Once both are old and no
-        // chat/draft/trash entry refers to the picture, remove the metadata and let the blob fall
-        // through to the same orphan cleanup below.
+        let chats = await ChatStore(dataDirectory: dataDirectory).loadAll()
+        for chat in chats { include(chat) }
+        paths.formUnion(Self.draftAttachmentPaths(in: dataDirectory))
+
+        let trash = await TrashStore(dataDirectory: dataDirectory).list()
+        for entry in trash where entry.kind == .chat {
+            guard let data = try? JSONCoding.encoder().encode(entry.payload),
+                  let chat = try? JSONCoding.decoder().decode(Chat.self, from: data)
+            else { continue }
+            include(chat)
+        }
+        return paths
+    }
+
+    /// FileManager's directory enumerator is intentionally confined to synchronous helpers. This
+    /// keeps macOS/iOS Swift 6 from carrying a non-Sendable iterator across an actor suspension.
+    private nonisolated static func draftAttachmentPaths(in dataDirectory: URL) -> Set<String> {
+        var paths = Set<String>()
+        let drafts = dataDirectory.appendingPathComponent(ComposerDraft.folder, isDirectory: true)
+        if let files = FileManager.default.enumerator(at: drafts, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
+            for case let url as URL in files where url.pathExtension == "json" {
+                guard let data = try? Data(contentsOf: url),
+                      let draft = try? JSONCoding.decoder().decode(ComposerDraft.self, from: data)
+                else { continue }
+                paths.formUnion(draft.attachments.map(\.path))
+            }
+        }
+        return paths
+    }
+
+    private nonisolated static func removeOrphanBlobs(
+        in dataDirectory: URL,
+        referenced initialReferences: Set<String>,
+        olderThan cutoff: Date
+    ) -> Int {
+        let manager = FileManager.default
+        var referenced = initialReferences
+        var removed = 0
         let media = dataDirectory.appendingPathComponent("media", isDirectory: true)
+
         if let files = manager.enumerator(at: media, includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey], options: [.skipsHiddenFiles]) {
             for case let url as URL in files where url.pathExtension == "json" {
                 guard let data = try? Data(contentsOf: url),
@@ -58,8 +105,7 @@ public actor DataHousekeeping {
                       values.isRegularFile == true,
                       (values.contentModificationDate ?? .distantFuture) < cutoff
                 else { continue }
-                let relative = relativePath(url)
-                // Metadata is retained with its generated image. Other files need a live reference.
+                let relative = relativePath(url, dataDirectory: dataDirectory)
                 if url.pathExtension == "json" && folder == "media" { continue }
                 guard !referenced.contains(relative) else { continue }
                 if (try? manager.removeItem(at: url)) != nil { removed += 1 }
@@ -70,47 +116,13 @@ public actor DataHousekeeping {
         return removed
     }
 
-    private func referencedBlobPaths() async -> Set<String> {
-        var paths = Set<String>()
-        func include(_ chat: Chat) {
-            for message in chat.messages {
-                if case .user(let user) = message.body {
-                    paths.formUnion(user.attachments.map(\.path))
-                }
-                if let turn = message.assistantTurn {
-                    paths.formUnion(turn.steps.flatMap { $0.generatedImages ?? [] }.map { $0.attachment.path })
-                }
-            }
-        }
-
-        for chat in await ChatStore(dataDirectory: dataDirectory).loadAll() { include(chat) }
-
-        let drafts = dataDirectory.appendingPathComponent(ComposerDraft.folder, isDirectory: true)
-        if let files = FileManager.default.enumerator(at: drafts, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
-            for case let url as URL in files where url.pathExtension == "json" {
-                guard let data = try? Data(contentsOf: url),
-                      let draft = try? JSONCoding.decoder().decode(ComposerDraft.self, from: data)
-                else { continue }
-                paths.formUnion(draft.attachments.map(\.path))
-            }
-        }
-
-        for entry in await TrashStore(dataDirectory: dataDirectory).list() where entry.kind == .chat {
-            guard let data = try? JSONCoding.encoder().encode(entry.payload),
-                  let chat = try? JSONCoding.decoder().decode(Chat.self, from: data)
-            else { continue }
-            include(chat)
-        }
-        return paths
-    }
-
-    private func relativePath(_ url: URL) -> String {
+    private nonisolated static func relativePath(_ url: URL, dataDirectory: URL) -> String {
         let root = dataDirectory.standardizedFileURL.path + "/"
         let path = url.standardizedFileURL.path
         return path.hasPrefix(root) ? String(path.dropFirst(root.count)) : ""
     }
 
-    private func removeEmptyDirectories(in root: URL) {
+    private nonisolated static func removeEmptyDirectories(in root: URL) {
         let manager = FileManager.default
         guard let enumerator = manager.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return }
         let directories = enumerator.compactMap { $0 as? URL }.filter {
