@@ -308,8 +308,7 @@ public final class URLSessionTransport: HTTPTransport, @unchecked Sendable {
         if let urlError = error as? URLError {
             if urlError.code == .cancelled { return CancellationError() }
             let offline: Set<URLError.Code> = [
-                .notConnectedToInternet, .networkConnectionLost, .dataNotAllowed,
-                .internationalRoamingOff, .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed,
+                .notConnectedToInternet, .dataNotAllowed, .internationalRoamingOff,
             ]
             return HTTPError.transport(urlError.localizedDescription, isOffline: offline.contains(urlError.code))
         }
