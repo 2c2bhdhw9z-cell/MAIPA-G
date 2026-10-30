@@ -1,12 +1,9 @@
 # MAIPA-G plan
 
-**Status (29 October 2026, 1:40 PM Eastern): the whole plan is built and on main. Build 25
-(`build-25-480fa98`, 4.6 MB, PR #8) is the one to install. It fixes all four build 24 reports
-below: the companies' own full-colour logos on plain tiles, search that finds Hugging Face and
-well-known services, a real computer for every chat (Sprites through its connector, switchable in
-Settings, set up and used by the AI on its own), and tool-call bars that end at their arrows.
-Linux checks and the iPhone build passed; downloaded and checked: 0.1.0 (25), iPhone arm64, 19
-entries. Next: he tests build 25.**
+**Status (30 October 2026): Build 25 (`build-25-480fa98`, 4.6 MB, PR #8) is the one to
+install. It is built and checked: 0.1.0 (25), iPhone arm64, 19 entries. Reports 5-18, the missing
+tools, the stability list and the 13 newly found needs below are plan only and have not been built.
+Current Spec step: requirements; the owner has not approved the design or task list yet.**
 
 ## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
 He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,
@@ -86,6 +83,63 @@ Kiro can read errors itself).
 - Tests: 44 a regression test for every bug found on 29 October, run in CI.
 - From Kiro and Arena: 45 edit and resend an earlier message, retry any answer (rewind), and a
   Compact button; 46 hooks (actions on events, like running the tests after every save).
+
+## Necessary things that were missing from both the app and this plan (30 October 2026)
+The owner asked for everything MAIPA-G still needs that was not already planned. Kiro first read
+"even in the plans" backwards and repeated the existing plan; this is the corrected, code-checked
+list. These 13 requirements are additional to the tools, stability list and reports above.
+
+1. **Clean old Autonomous secrets out of other repos.** Remember which repos received MAIPA-G's
+   GitHub, OpenRouter and connector access. When an account or connector is removed or changed,
+   Autonomous is disabled, or MAIPA-G is disconnected, delete or replace the affected Actions
+   secrets in every repo. Say which cleanup failed and offer Retry. Today removing the last
+   connector leaves its old secret behind, and no delete-secret operation exists.
+2. **Lock each Autonomous workflow to a reviewed MAIPA-G version.** The small workflow in another
+   repo calls an exact checked commit, not moving `main`, and passes only the named MAIPA-G secrets
+   it needs, not every secret in that repo. The planned workflow updater advances that locked
+   version after review. Today it uses `agent.yml@main` with `secrets: inherit`.
+3. **Keep MAIPA-G's credentials away from Autonomous commands.** Model- or repo-chosen commands
+   cannot see credential files or their locations. Test the exact environment commands inherit.
+   Today the filter removes `OPENROUTER_API_KEY` but leaves `OPENROUTER_API_KEY_FILE`, so a command
+   can read the key file.
+4. **Put downloaded local connectors in a real sandbox.** Registry packages started through
+   `npx` or `uvx` run in OS/container isolation. They cannot read the private checkout, runner or
+   secrets unless the owner approves a narrow read-only folder. Limit writable folders, child
+   programs, resources and network access. Keep the before/after repo check as an extra safeguard.
+5. **Validate connector sign-in addresses before sending credentials.** Every discovered sign-in,
+   token and registration address, including its final redirect, must be safe HTTPS with no
+   embedded username/password or fragment and the expected relationship to the connector. Never
+   follow HTTPS back to HTTP. Test hostile sign-in metadata.
+6. **Keep private files out of website previews.** Give preview JavaScript only published website
+   files, never the whole project or repo. Block outside network access by default; the owner can
+   explicitly allow a host when a site needs it. Test that a preview cannot read a private repo
+   file or send it off the phone.
+7. **Lock and verify downloaded setup programs and build helpers.** Use reviewed exact versions
+   and verify every installer by signature or hash before running it. Lock GitHub Actions to exact
+   reviewed versions too. The planned checked MAIPAGRunner covers only that runner; today the
+   computer setup also downloads and runs moving "latest" installers, some with full control.
+8. **Never publish a build unless its complete screen check passed.** Publishing waits for the
+   exact build's Linux tests, iPhone build and complete Dark/Light screenshot job. Every expected
+   job must exist and pass. Today a release can publish while the screen job failed, stopped or is
+   still running.
+9. **Make saving a generated picture safe and visible.** Add the iPhone Photos permission text;
+   never force-open a missing picture; keep the screen open and show Saved or the real permission
+   or write error, with Open Settings when denied. Today Save can terminate the app or look like
+   it did nothing.
+10. **Handle an empty picture result without crashing.** Check that at least one readable picture
+    came back before opening it. If none did, stop loading, keep the prompt and settings, explain
+    the failure and offer Retry. Today the screen opens item zero without checking.
+11. **Make the side menu correct for VoiceOver.** VoiceOver is the iPhone feature that reads the
+    screen aloud. When the menu is closed it must not select invisible menu buttons; when open it
+    must not select the covered chat. Move reading focus into the menu and back to its button, and
+    let VoiceOver's two-finger Back gesture close it. Ordinary taps and swipes stay unchanged.
+12. **Do not announce dead tool rows as buttons.** A tool event with nothing to open is labelled
+    information, not a button. A row with details announces Expanded or Collapsed. Today every
+    tool row is called a button even when tapping it deliberately does nothing.
+13. **Separate Files loading, an empty repo and no search matches.** Show “Opening repo…” only
+    during the request, an empty-repo message after a successful empty result, and “No files
+    match” when search finds nothing, while preserving Retry for a failed request. Today an empty
+    repo spins forever and no search matches give a blank screen.
 
 ## Build 24 test reports (29 October 2026, all fixed in build 25)
 1. **10:04 AM: the connector logos aren't the real ones.** "CAN I PLEASE JUST HAVE THE NORMAL
