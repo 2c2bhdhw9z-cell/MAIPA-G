@@ -4,6 +4,8 @@ import SwiftUI
 struct HealthCheckScreen: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
+    /// Pushed inside Settings: no stack of its own and no Done button (Back returns to Settings).
+    var embedded = false
     @State private var items: [Item] = []
     @State private var running = false
     @State private var confirmReplace = false
@@ -20,7 +22,7 @@ struct HealthCheckScreen: View {
     }
 
     var body: some View {
-        NavigationStack {
+        OwnNavigationStack(embedded: embedded) {
             List {
                 if running {
                     HStack { ProgressView(); Text("Checking everything…") }
@@ -47,7 +49,11 @@ struct HealthCheckScreen: View {
             }
             .navigationTitle("Check everything")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .toolbar {
+                if !embedded {
+                    ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                }
+            }
             .task { await run() }
             .confirmationDialog("Replace the chat computer?", isPresented: $confirmReplace, titleVisibility: .visible) {
                 Button("Replace \(app.settings.chatComputerMachineName)", role: .destructive) {
@@ -136,10 +142,20 @@ struct HealthCheckScreen: View {
             do {
                 switch try await control.ensureMachine(allowCreate: true) {
                 case .healthy(let output):
-                    if output.contains("maipa-g-tools-missing") {
-                        items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) ran a command, but MAIPA-G's verified tool setup hasn't finished there.", nextStep: "Set up tools installs reviewed, checksum-verified versions in the background.", state: .warning, action: .setupTools))
-                    } else {
-                        items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) ran a command: \(Self.firstLine(output, skipping: "maipa-g-health-ok"))", state: .good))
+                    switch ComputerControl.toolState(output) {
+                    case .ready:
+                        items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) ran a command and its tools are installed.", state: .good))
+                    case .installing:
+                        items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) runs commands. Its tools are still installing in the background; that takes about 15 to 30 minutes.", state: .good))
+                    case .missing:
+                        // Nothing to tap: the checked tool setup starts by itself.
+                        let revision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
+                        do {
+                            _ = try await control.startVerifiedSetup(revision: revision)
+                            items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) runs commands. MAIPA-G started installing its tools there in the background; that takes about 15 to 30 minutes.", state: .good))
+                        } catch {
+                            items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) runs commands, but installing its tools didn't start: \(ErrorExplainer.explain(error).message)", nextStep: "Try again.", state: .warning, action: .setupTools))
+                        }
                     }
                 case .recreated(let output):
                     items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) was missing, so MAIPA-G created it again. It ran a command: \(Self.firstLine(output, skipping: "maipa-g-health-ok"))", state: .good))

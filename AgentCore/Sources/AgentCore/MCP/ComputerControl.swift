@@ -39,6 +39,11 @@ public struct ComputerControl: Sendable {
         tools.first { predicate(Self.words($0.originalName)) }
     }
 
+    /// Whether a connector with these tools can serve as a chat computer.
+    public static func hasCommandTool(_ tools: [ConnectorToolDefinition]) -> Bool {
+        ComputerControl(tools: tools, machine: "check") { _, _ in ("", false) }.commandTool != nil
+    }
+
     /// The tool that runs one command. Sprites names it `exec`, next to `exec_list` and
     /// `exec_kill`, which only list or stop sessions; picking one of those by mistake made every
     /// check fail with `{"count":0,"sessions":[]}`.
@@ -121,7 +126,15 @@ public struct ComputerControl: Sendable {
 
     /// The health check's real command: it proves the machine starts and runs a shell, and says
     /// whether MAIPA-G's verified tool setup has finished there.
-    public static let healthCommand = "echo maipa-g-health-ok && uname -sm && if [ -f \"$HOME/.maipa-g/ready\" ]; then echo maipa-g-tools-ready; else echo maipa-g-tools-missing; fi"
+    public static let healthCommand = "echo maipa-g-health-ok && uname -sm && if [ -f \"$HOME/.maipa-g/ready\" ]; then echo maipa-g-tools-ready; elif [ -f \"$HOME/.maipa-g/setup.pid\" ] && kill -0 \"$(cat \"$HOME/.maipa-g/setup.pid\")\" 2>/dev/null; then echo maipa-g-tools-installing; else echo maipa-g-tools-missing; fi"
+
+    public enum ToolState: Equatable, Sendable { case ready, installing, missing }
+
+    public static func toolState(_ output: String) -> ToolState {
+        if output.contains("maipa-g-tools-ready") { return .ready }
+        if output.contains("maipa-g-tools-installing") { return .installing }
+        return .missing
+    }
 
     /// Starts MAIPA-G's tool setup in the background: the script comes from the app's exact
     /// reviewed commit and runs only if its SHA-256 matches the copy compiled into the app.
@@ -133,14 +146,24 @@ public struct ComputerControl: Sendable {
         let script = """
         set -euo pipefail
         mkdir -p "$HOME/.maipa-g"
+        if [ -f "$HOME/.maipa-g/setup.pid" ] && kill -0 "$(cat "$HOME/.maipa-g/setup.pid")" 2>/dev/null; then echo maipa-g-setup-started; exit 0; fi
         curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$HOME/.maipa-g/setup.sh" '\(url)'
         echo '\(sha)  '"$HOME/.maipa-g/setup.sh" | sha256sum -c - >/dev/null
-        nohup bash "$HOME/.maipa-g/setup.sh" > "$HOME/.maipa-g/setup-run.log" 2>&1 < /dev/null &
+        # Let go of inherited descriptors so this command returns now, while setup keeps going.
+        if [ -d /proc/$$/fd ]; then
+          for fd in /proc/$$/fd/*; do fd=${fd##*/}; case "$fd" in 0|1|2) ;; *) eval "exec $fd>&-" 2>/dev/null || true ;; esac; done
+        fi
+        if command -v setsid >/dev/null 2>&1; then
+          setsid nohup bash "$HOME/.maipa-g/setup.sh" > "$HOME/.maipa-g/setup-run.log" 2>&1 < /dev/null &
+        else
+          nohup bash "$HOME/.maipa-g/setup.sh" > "$HOME/.maipa-g/setup-run.log" 2>&1 < /dev/null &
+        fi
+        echo $! > "$HOME/.maipa-g/setup.pid"
         echo maipa-g-setup-started
         """
         let output = try await run(script)
         guard output.contains("maipa-g-setup-started") else { throw Failure.commandFailed(output) }
-        return "MAIPA-G started its verified tool setup on \(machine). Progress is in ~/.maipa-g/setup-run.log; ~/.maipa-g/ready appears when it finishes."
+        return "MAIPA-G is installing its checked tool set on \(machine) in the background. It takes about 15 to 30 minutes; progress is in ~/.maipa-g/setup-run.log."
     }
 
     public func healthCheck() async throws -> String {

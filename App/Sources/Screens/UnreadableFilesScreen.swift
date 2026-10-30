@@ -4,12 +4,14 @@ import SwiftUI
 struct UnreadableFilesScreen: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
+    /// Pushed inside Settings: no stack of its own and no Done button (Back returns to Settings).
+    var embedded = false
     @State private var records: [QuarantineRecord] = []
     @State private var deleting: QuarantineRecord?
     @State private var message: String?
 
     var body: some View {
-        NavigationStack {
+        OwnNavigationStack(embedded: embedded) {
             Group {
                 if records.isEmpty {
                     ContentUnavailableView("No unreadable files", systemImage: "checkmark.circle")
@@ -36,7 +38,11 @@ struct UnreadableFilesScreen: View {
             }
             .navigationTitle("Unreadable Files")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .toolbar {
+                if !embedded {
+                    ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                }
+            }
             .task { reload() }
             .confirmationDialog("Delete this unreadable file?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
                 Button("Delete", role: .destructive) {

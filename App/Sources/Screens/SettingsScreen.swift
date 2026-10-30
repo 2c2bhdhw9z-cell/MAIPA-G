@@ -45,7 +45,7 @@ struct SettingsScreen: View {
 
                 accounts
                 Section {
-                    Button { app.sheet = .healthCheck } label: {
+                    NavigationLink { HealthCheckScreen(embedded: true) } label: {
                         Label("Check everything", systemImage: "checkmark.shield")
                     }
                 }
@@ -351,10 +351,11 @@ struct SettingsScreen: View {
         )
     }
 
-    /// Remote connectors, one per server, that can be picked as the computer.
+    /// Connectors that can actually run commands (Sprites and the like), one per server. A
+    /// connector such as Hugging Face only answers questions, so it isn't a computer.
     private var computerConnectors: [ConnectorConfiguration] {
         var seen = Set<String>()
-        return app.connectors.connected.filter { $0.kind == .remote && seen.insert($0.serverID).inserted }
+        return app.connectors.connected.filter { $0.kind == .remote && app.connectors.canRunCommands($0) && seen.insert($0.serverID).inserted }
     }
 
     /// The chosen connector's serverID when that connector has since been removed, so the picker
@@ -465,8 +466,8 @@ struct SettingsScreen: View {
             if let url = app.sync.repoURL {
                 Button("Open MAIPA-G-data on GitHub") { openURL(url) }
             }
-            Button("Recently Deleted") { app.sheet = .recentlyDeleted }
-            Button("Unreadable files") { app.sheet = .unreadableFiles }
+            NavigationLink("Recently Deleted") { RecentlyDeletedScreen(embedded: true) }
+            NavigationLink("Unreadable files") { UnreadableFilesScreen(embedded: true) }
             Button(exporting ? "Preparing export…" : "Export everything to Files") {
                 Task { await exportEverything() }
             }
