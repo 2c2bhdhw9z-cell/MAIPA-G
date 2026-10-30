@@ -238,7 +238,9 @@ private struct Runner {
             let (messages, trimmed) = Transcript.fit(Transcript.messages(for: chat, systemPrompt: systemPrompt, attachmentData: attachmentData), budget: route.contextBudget)
             let request = ChatCompletionRequest(
                 model: route.model,
-                models: fallbackModels.isEmpty ? nil : [route.model] + fallbackModels,
+                // OpenRouter refuses the whole request (400) when this list, the chosen AI
+                // included, has more than 3 entries.
+                models: fallbackModels.isEmpty ? nil : Array(([route.model] + fallbackModels).prefix(ChatCompletionRequest.maxModels)),
                 messages: messages,
                 tools: specs,
                 reasoningEffort: route.effort,

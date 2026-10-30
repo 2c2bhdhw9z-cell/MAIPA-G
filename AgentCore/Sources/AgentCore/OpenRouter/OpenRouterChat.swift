@@ -114,6 +114,8 @@ public struct ChatCompletionRequest: Encodable, Sendable {
     public var model: String
     /// Ordered fallbacks OpenRouter may use if the chosen provider fails or model disappears.
     public var models: [String]?
+    /// The most entries OpenRouter accepts in `models`, the chosen AI included.
+    public static let maxModels = 3
     public var messages: [APIMessage]
     public var tools: [ToolSpec]?
     public var reasoningEffort: ThinkingLevel?

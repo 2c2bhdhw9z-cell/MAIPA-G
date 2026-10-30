@@ -492,7 +492,7 @@ final class ChatSession: Identifiable {
                 && (!hasRepo || model.supportsTools)
                 && (!hasImageInput || model.acceptsImages)
                 && (!route.isFree || model.isFree)
-        }.prefix(3).map(\.id)
+        }.prefix(ChatCompletionRequest.maxModels - 1).map(\.id)
         let input = AgentTurnInput(
             chat: chat,
             route: route,
