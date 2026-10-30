@@ -146,6 +146,26 @@ struct AgentLoopTests {
         #expect(body["tools"]?.arrayValue?.count == 2) // read_file and ask_user
     }
 
+    // OpenRouter answered every chat on the owner's phone (builds 53 to 57) with "400: 'models'
+    // array must have 3 items or fewer", because the chosen AI went in front of three backups.
+    @Test func backupAIsStayWithinOpenRouterLimit() async throws {
+        let transport = ScriptedTransport([.events([Self.text("Hi."), Self.done])])
+        let environment = AgentEnvironment(
+            openRouter: OpenRouterClient(transport: transport, apiKey: "sk-test"),
+            freeRoute: { ModelRouter.route(choice: .free, difficulty: .normal, thinking: .medium, account: AccountState(), catalogue: [:]) },
+            onOutOfCredits: {}
+        )
+        let input = AgentTurnInput(chat: Self.newChat("Hi"), route: Self.route(), systemPrompt: "system", tools: [EchoTool()], fallbackModels: ["backup/one", "backup/two", "backup/three", "backup/four"])
+        var status: AssistantTurn.Status?
+        for await event in AgentLoop.run(input, environment: environment) {
+            if case .updated(let turn, _) = event { status = turn.status }
+        }
+        #expect(status == .done)
+        let models = try #require(transport.sentBodies.first?["models"]?.arrayValue).compactMap(\.stringValue)
+        #expect(models == ["test/model", "backup/one", "backup/two"])
+        #expect(models.count <= ChatCompletionRequest.maxModels)
+    }
+
     @Test func toolCallsRunAndResultsGoBack() async throws {
         let transport = ScriptedTransport([
             .events([Self.text("Let me look."), Self.toolCall(id: "c1", name: "read_file", arguments: #"{"path":"README.md"}"#), Self.toolCall(id: "c2", name: "read_file", arguments: #"{"path":"missing.txt"}"#, index: 1), Self.toolsDone]),
