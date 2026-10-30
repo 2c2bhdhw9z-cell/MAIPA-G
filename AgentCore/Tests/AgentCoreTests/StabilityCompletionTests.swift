@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 @testable import AgentCore
 
@@ -214,5 +217,77 @@ struct StabilityCompletionTests {
         await #expect(throws: ComputerControl.Failure.self) {
             _ = try await control.syncStagedChanges(homePath: "repos/me/app", cloneURL: nil, commit: nil, changes: [.write(path: "../outside", data: Data(), existed: false)])
         }
+    }
+
+    // Necessary 5: a connector's bearer token never follows a redirect to another origin or down
+    // to HTTP. Two real local servers: the first redirects, the second records what reached it.
+    @Test func N05_bearerTokenNeverFollowsCrossOriginRedirects() async throws {
+        #expect(CredentialRedirectPolicy.allows(from: URL(string: "https://mcp.example.com/mcp"), to: URL(string: "https://mcp.example.com/v2/mcp")))
+        #expect(CredentialRedirectPolicy.allows(from: URL(string: "http://mcp.example.com/mcp"), to: URL(string: "https://mcp.example.com/mcp")))
+        #expect(!CredentialRedirectPolicy.allows(from: URL(string: "https://mcp.example.com/mcp"), to: URL(string: "https://evil.example.net/mcp")))
+        #expect(!CredentialRedirectPolicy.allows(from: URL(string: "https://mcp.example.com/mcp"), to: URL(string: "http://mcp.example.com/mcp")))
+        #expect(!CredentialRedirectPolicy.allows(from: URL(string: "https://mcp.example.com/mcp"), to: URL(string: "https://mcp.example.com:8443/mcp")))
+        #expect(!CredentialRedirectPolicy.allows(from: URL(string: "https://mcp.example.com/mcp"), to: URL(string: "https://user:pw@mcp.example.com/mcp")))
+
+        #if !canImport(FoundationNetworking)
+        // The live check runs in the macOS test job; remote connector sessions only exist on the phone.
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let script = folder.appendingPathComponent("servers.py")
+        try Data(#"""
+        import http.server, socketserver, threading, sys, os, time
+        folder = sys.argv[1]
+        class Target(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                with open(os.path.join(folder, "target-hit"), "w") as f:
+                    f.write(self.headers.get("Authorization") or "none")
+                self.send_response(200); self.end_headers(); self.wfile.write(b"target")
+            def log_message(self, *a): pass
+        target = socketserver.TCPServer(("127.0.0.1", 0), Target)
+        class Origin(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/same":
+                    self.send_response(302); self.send_header("Location", "/final"); self.end_headers(); return
+                if self.path == "/final":
+                    self.send_response(200); self.end_headers(); self.wfile.write((self.headers.get("Authorization") or "none").encode()); return
+                self.send_response(302)
+                self.send_header("Location", "http://127.0.0.1:%d/steal" % target.server_address[1])
+                self.end_headers()
+            def log_message(self, *a): pass
+        origin = socketserver.TCPServer(("127.0.0.1", 0), Origin)
+        for server in (target, origin):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+        with open(os.path.join(folder, "port.tmp"), "w") as f: f.write(str(origin.server_address[1]))
+        os.rename(os.path.join(folder, "port.tmp"), os.path.join(folder, "port"))
+        time.sleep(30)
+        """#.utf8).write(to: script)
+        let server = Process()
+        server.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        server.arguments = ["python3", script.path, folder.path]
+        try server.run()
+        defer { server.terminate(); server.waitUntilExit() }
+        var port: String?
+        for _ in 0..<100 {
+            if let text = try? String(contentsOf: folder.appendingPathComponent("port"), encoding: .utf8) { port = text; break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let originPort = try #require(port)
+        let session = URLSession(configuration: OriginPinnedRedirectProtocol.configuration())
+        defer { session.invalidateAndCancel() }
+
+        var stolen = URLRequest(url: URL(string: "http://127.0.0.1:\(originPort)/mcp")!)
+        stolen.setValue("Bearer secret-token", forHTTPHeaderField: "Authorization")
+        await #expect(throws: URLError.self) { _ = try await session.data(for: stolen) }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(!FileManager.default.fileExists(atPath: folder.appendingPathComponent("target-hit").path))
+
+        var same = URLRequest(url: URL(string: "http://127.0.0.1:\(originPort)/same")!)
+        same.setValue("Bearer secret-token", forHTTPHeaderField: "Authorization")
+        let (body, sameResponse) = try await session.data(for: same)
+        #expect((sameResponse as? HTTPURLResponse)?.statusCode == 200)
+        // Same-origin redirects keep working (whether the system re-sends the header is its call).
+        #expect(["Bearer secret-token", "none"].contains(String(decoding: body, as: UTF8.self)))
+        #endif
     }
 }

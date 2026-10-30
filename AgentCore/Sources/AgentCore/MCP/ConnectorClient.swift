@@ -206,7 +206,8 @@ public actor MCPConnectorSession {
         try await refreshIfNeeded(force: false)
         guard let endpoint = configuration.endpoint, endpoint.scheme == "https" else { throw MCPAuthorizationError.insecureURL }
         let token = credential?.accessToken
-        let transport = HTTPClientTransport(endpoint: endpoint, configuration: .ephemeral, streaming: true) { request in
+        // The bearer token below must never follow a redirect to another host or down to HTTP.
+        let transport = HTTPClientTransport(endpoint: endpoint, configuration: OriginPinnedRedirectProtocol.configuration(), streaming: true) { request in
             var request = request
             if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
             return request
