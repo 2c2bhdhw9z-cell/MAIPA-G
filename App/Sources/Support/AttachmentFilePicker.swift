@@ -9,12 +9,12 @@ final class AttachmentFilePicker: NSObject, UIDocumentPickerDelegate, UIAdaptive
     @MainActor static let shared = AttachmentFilePicker()
 
     private var activePicker: UIDocumentPickerViewController?
-    private var onPick: ((Data, String) -> Void)?
+    private var onPick: (([(Data, String)]) -> Void)?
     private var onFailure: ((String) -> Void)?
     private var outcomeDelivered = false
 
     @MainActor
-    func present(onPick: @escaping (Data, String) -> Void, onFailure: @escaping (String) -> Void) {
+    func present(onPick: @escaping ([(Data, String)]) -> Void, onFailure: @escaping (String) -> Void) {
         guard activePicker == nil else { return }
         guard AppPresenter.topmostViewController() != nil else {
             onFailure("There is no screen to show the file picker on.")
@@ -26,7 +26,7 @@ final class AttachmentFilePicker: NSObject, UIDocumentPickerDelegate, UIAdaptive
 
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
         picker.delegate = self
-        picker.allowsMultipleSelection = false
+        picker.allowsMultipleSelection = true
         picker.shouldShowFileExtensions = true
         picker.presentationController?.delegate = self
         activePicker = picker
@@ -38,18 +38,28 @@ final class AttachmentFilePicker: NSObject, UIDocumentPickerDelegate, UIAdaptive
     }
 
     @objc func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        guard let url = urls.first else {
+        guard !urls.isEmpty else {
             settle { _, fail in fail?("No file was picked.") }
             return
         }
-        let name = url.lastPathComponent
-        do {
-            // `asCopy: true` gives this app a temporary copy. Read it before dismissing or hopping
-            // to another task because a File Provider may remove it immediately afterwards.
-            let data = try Data(contentsOf: url, options: .mappedIfSafe)
-            settle { pick, _ in pick?(data, name) }
-        } catch {
-            settle { _, fail in fail?("\(name) couldn't be read: \(error.localizedDescription)") }
+        var picked: [(Data, String)] = []
+        var failed: [String] = []
+        for url in urls {
+            let name = url.lastPathComponent
+            do {
+                // `asCopy: true` gives this app temporary copies. Read all of them before dismissing
+                // or hopping to another task because a File Provider may remove them right afterwards.
+                let data = try Data(contentsOf: url, options: .mappedIfSafe)
+                picked.append((data, name))
+            } catch {
+                failed.append("\(name) (\(error.localizedDescription))")
+            }
+        }
+        settle { pick, fail in
+            if !picked.isEmpty { pick?(picked) }
+            if !failed.isEmpty {
+                fail?("Couldn't read: \(failed.joined(separator: ", "))")
+            }
         }
     }
 
@@ -68,7 +78,7 @@ final class AttachmentFilePicker: NSObject, UIDocumentPickerDelegate, UIAdaptive
         settle { _, _ in }
     }
 
-    private func settle(_ deliver: @escaping (((Data, String) -> Void)?, ((String) -> Void)?) -> Void) {
+    private func settle(_ deliver: @escaping ((([(Data, String)]) -> Void)?, ((String) -> Void)?) -> Void) {
         guard !outcomeDelivered else { return }
         outcomeDelivered = true
         Task { @MainActor in

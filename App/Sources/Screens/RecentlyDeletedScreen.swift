@@ -42,7 +42,7 @@ struct RecentlyDeletedScreen: View {
                 }
             }
             .task { await reload() }
-            .confirmationDialog("Delete forever?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
+            .alert("Delete forever?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
                 Button("Delete forever", role: .destructive) {
                     guard let entry = deleting else { return }
                     deleting = nil

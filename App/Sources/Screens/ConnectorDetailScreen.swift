@@ -24,7 +24,12 @@ struct ConnectorDetailScreen: View {
             .navigationTitle(connector?.displayName ?? server?.displayName ?? "Connector")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
-            .confirmationDialog("Remove this connector?", isPresented: $showingDelete) { if let connector { Button("Remove", role: .destructive) { Task { await app.connectors.remove(connector); dismiss() } } } }
+            .alert("Remove this connector?", isPresented: $showingDelete) {
+                if let connector {
+                    Button("Remove", role: .destructive) { Task { await app.connectors.remove(connector); dismiss() } }
+                }
+                Button("Cancel", role: .cancel) {}
+            }
         }
     }
 

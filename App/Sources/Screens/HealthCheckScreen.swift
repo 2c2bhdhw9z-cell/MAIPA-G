@@ -9,6 +9,7 @@ struct HealthCheckScreen: View {
     @State private var items: [Item] = []
     @State private var running = false
     @State private var confirmReplace = false
+    @State private var toolsInstalling = false
 
     private struct Item: Identifiable {
         enum State { case good, warning, failed }
@@ -55,10 +56,19 @@ struct HealthCheckScreen: View {
                 }
             }
             .task { await run() }
-            .confirmationDialog("Replace the chat computer?", isPresented: $confirmReplace, titleVisibility: .visible) {
+            .task(id: toolsInstalling) {
+                guard toolsInstalling, !PreviewScenes.isActive else { return }
+                while !Task.isCancelled, toolsInstalling {
+                    try? await Task.sleep(nanoseconds: 15_000_000_000)
+                    guard !Task.isCancelled, toolsInstalling else { break }
+                    await refreshComputerItemOnly()
+                }
+            }
+            .alert("Replace the chat computer?", isPresented: $confirmReplace) {
                 Button("Replace \(app.settings.chatComputerMachineName)", role: .destructive) {
                     Task { await replaceComputer() }
                 }
+                Button("Cancel", role: .cancel) {}
             } message: {
                 Text("MAIPA-G deletes the machine that isn't answering and creates a new one with the same name. Files on it are lost; your repos on GitHub and the phone's staged changes are not.")
             }
@@ -70,9 +80,46 @@ struct HealthCheckScreen: View {
         let revision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
         do {
             let message = try await control.startVerifiedSetup(revision: revision)
+            toolsInstalling = true
+            app.connectors.keepComputerAwakeDuringSetup(resetReadyCache: true)
             items.append(Item(id: "computer-setup", title: "Tool setup", detail: message, state: .good))
         } catch {
             items.append(Item(id: "computer-setup", title: "Tool setup", detail: ErrorExplainer.explain(error).message, nextStep: "Check the computer service, then try Set up tools again.", state: .failed, action: .setupTools))
+        }
+    }
+
+    private func refreshComputerItemOnly() async {
+        guard !running, !app.settings.chatComputerOff, let control = app.connectors.computerControl() else {
+            toolsInstalling = false
+            return
+        }
+        guard let output = try? await control.healthCheck() else { return }
+        let updated = computerItem(for: control.machine, output: output)
+        if let index = items.firstIndex(where: { $0.id == "computer" }) {
+            items[index] = updated
+        }
+    }
+
+    private func computerItem(for machine: String, output: String) -> Item {
+        switch ComputerControl.toolState(output) {
+        case .ready:
+            toolsInstalling = false
+            if let failed = ComputerControl.failedTools(output) {
+                return Item(id: "computer", title: "Chat computer", detail: "\(machine) ran a command. Its tools are installed except these, which failed: \(failed).", nextStep: "Set up tools tries those again.", state: .warning, action: .setupTools)
+            }
+            UserDefaults.standard.set(true, forKey: ConnectorLibrary.toolsReadyDefaultsKey(machine))
+            return Item(id: "computer", title: "Chat computer", detail: "\(machine) ran a command and its tools are installed.", state: .good)
+        case .installing:
+            toolsInstalling = true
+            app.connectors.keepComputerAwakeDuringSetup()
+            let step = ComputerControl.setupStep(output).map { " Now: \($0)." } ?? ""
+            if ComputerControl.setupPausesWhenIdle(output) {
+                return Item(id: "computer", title: "Chat computer", detail: "\(machine) runs commands. Its developer tools are finishing their one-time background install — MAIPA-G is keeping this computer awake while the app is open so setup can finish.\(step)", state: .good)
+            }
+            return Item(id: "computer", title: "Chat computer", detail: "\(machine) runs commands. Its developer tools are installing in the background (about 15 to 30 minutes the first time).\(step)", state: .good)
+        case .missing:
+            toolsInstalling = false
+            return Item(id: "computer", title: "Chat computer", detail: "\(machine) runs commands, and its developer tools haven't been installed yet.", nextStep: "Tap Set up tools to start.", state: .warning, action: .setupTools)
         }
     }
 
@@ -143,30 +190,27 @@ struct HealthCheckScreen: View {
                 switch try await control.ensureMachine(allowCreate: true) {
                 case .healthy(let output):
                     switch ComputerControl.toolState(output) {
-                    case .ready:
-                        if let failed = ComputerControl.failedTools(output) {
-                            items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) ran a command. Its tools are installed except these, which failed: \(failed).", nextStep: "Set up tools tries those again.", state: .warning, action: .setupTools))
-                        } else {
-                            items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) ran a command and its tools are installed.", state: .good))
-                        }
-                    case .installing:
-                        let step = ComputerControl.setupStep(output).map { " Now: \($0)." } ?? ""
-                        if ComputerControl.setupPausesWhenIdle(output) {
-                            items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) runs commands. Its tools are still installing, but this computer couldn't be kept awake, so installing only moves on while it is in use.\(step)", state: .warning))
-                        } else {
-                            items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) runs commands. Its tools are still installing in the background; that takes about 15 to 30 minutes.\(step)", state: .good))
-                        }
+                    case .ready, .installing:
+                        items.append(computerItem(for: control.machine, output: output))
                     case .missing:
                         // Nothing to tap: the checked tool setup starts by itself.
                         let revision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
                         do {
                             _ = try await control.startVerifiedSetup(revision: revision)
-                            items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) runs commands. MAIPA-G started installing its tools there in the background; that takes about 15 to 30 minutes.", state: .good))
+                            toolsInstalling = true
+                            app.connectors.keepComputerAwakeDuringSetup(resetReadyCache: true)
+                            items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) runs commands. MAIPA-G started installing its developer tools in the background (about 15 to 30 minutes the first time).", state: .good))
                         } catch {
+                            toolsInstalling = false
                             items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) runs commands, but installing its tools didn't start: \(ErrorExplainer.explain(error).message)", nextStep: "Try again.", state: .warning, action: .setupTools))
                         }
                     }
                 case .recreated(let output):
+                    let revision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
+                    if let _ = try? await control.startVerifiedSetup(revision: revision) {
+                        toolsInstalling = true
+                        app.connectors.keepComputerAwakeDuringSetup(resetReadyCache: true)
+                    }
                     items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) was missing, so MAIPA-G created it again. It ran a command: \(Self.firstLine(output, skipping: "maipa-g-health-ok"))", state: .good))
                 }
             } catch {

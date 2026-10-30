@@ -156,7 +156,7 @@ public enum SystemPrompt {
     /// reviewed commit, after checking `computerSetupSHA256`; the AI is never told to run it.
     public static let computerSetupURL = "https://raw.githubusercontent.com/2c2bhdhw9z-cell/MAIPA-G/main/docs/computer/setup.sh"
     /// SHA-256 of docs/computer/setup.sh in this build. CI fails when the file and this differ.
-    public static let computerSetupSHA256 = "ded3b6bd00e6f333a81dbe27aec17f901f306003be814ac9014d41e8403742f7"
+    public static let computerSetupSHA256 = "e3f2eb89d310046376a6cfa7ca3326581e9011b18867e9fdd1dfe43b1392a565"
 
     public static func computerSetupURL(revision: String) -> String? {
         guard revision.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil else { return nil }

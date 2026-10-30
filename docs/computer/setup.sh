@@ -184,16 +184,32 @@ HOLD_EVERY=60
 HOLD_PID=""
 
 sprite_task() {
-  curl -fsS --max-time 15 --unix-socket "$SPRITE_SOCKET" -H 'Content-Type: application/json' "$@" >/dev/null 2>&1
+  curl -fsS --max-time 15 --unix-socket "$SPRITE_SOCKET" -H 'Content-Type: application/json' "$@" >/dev/null 2>&1 && return 0
+  as_root curl -fsS --max-time 15 --unix-socket "$SPRITE_SOCKET" -H 'Content-Type: application/json' "$@" >/dev/null 2>&1
 }
 
-renew_hold() { sprite_task -X PUT "http://sprite/v1/tasks/$SPRITE_TASK" -d '{ "expire": "5m" }'; }
+sprite_env_curl() {
+  if [ -x /.sprite/bin/sprite-env ]; then
+    /.sprite/bin/sprite-env curl -fsS -H 'Content-Type: application/json' "$@" >/dev/null 2>&1 && return 0
+  fi
+  if have sprite-env; then
+    sprite-env curl -fsS -H 'Content-Type: application/json' "$@" >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+renew_hold() {
+  sprite_task -X PUT "http://sprite/v1/tasks/$SPRITE_TASK" -d '{ "expire": "5m" }' && return 0
+  sprite_task -X POST "http://sprite/v1/tasks" -d "{ \"name\": \"$SPRITE_TASK\", \"expire\": \"5m\" }" && return 0
+  sprite_env_curl -X PUT "/v1/tasks/$SPRITE_TASK" -d '{ "expire": "5m" }' && return 0
+  sprite_env_curl -X POST "/v1/tasks" -d "{ \"name\": \"$SPRITE_TASK\", \"expire\": \"5m\" }"
+}
 
 hold_machine_awake() {
   [ -S "$SPRITE_SOCKET" ] || return 0
   if ! have curl || ! renew_hold; then
     echo off >"$STATE_DIR/awake"
-    say "==> This Sprite couldn't be kept awake, so setup only moves on while the Sprite is in use"
+    say "==> This Sprite couldn't hold itself awake locally; MAIPA-G keeps it awake while the app is open"
     return 0
   fi
   echo on >"$STATE_DIR/awake"
@@ -212,6 +228,7 @@ release_machine() {
   if [ -n "$HOLD_PID" ]; then
     kill "$HOLD_PID" 2>/dev/null || true
     sprite_task -X DELETE "http://sprite/v1/tasks/$SPRITE_TASK" || true
+    sprite_env_curl -X DELETE "/v1/tasks/$SPRITE_TASK" || true
   fi
 }
 
@@ -363,7 +380,7 @@ write_env_file() {
   cat >"$STATE_DIR/env.sh" <<'EOF'
 # Written by MAIPA-G's computer setup (docs/computer/setup.sh): puts the tools it installs on PATH.
 for maipa_g_dir in "$HOME/.local/bin" "$HOME/.cargo/bin" "$HOME/.dotnet" "$HOME/.dotnet/tools" "$HOME/.bun/bin" \
-  "$HOME/.deno/bin" "$HOME/go/bin" "/usr/local/go/bin" "${SWIFTLY_BIN_DIR:-$HOME/.local/share/swiftly/bin}"; do
+  "$HOME/.deno/bin" "$HOME/go/bin" "/usr/local/go/bin" "${SWIFTLY_BIN_DIR:-$HOME/.local/share/swiftly/bin}" "/.sprite/bin"; do
   case ":$PATH:" in
     *":$maipa_g_dir:"*) ;;
     *) if [ -d "$maipa_g_dir" ]; then PATH="$maipa_g_dir:$PATH"; fi ;;
@@ -480,7 +497,7 @@ main() {
   export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 COMPOSER_ALLOW_SUPERUSER=1 COREPACK_ENABLE_DOWNLOAD_PROMPT=0
   # The folders this script installs into come first; the usual system folders are added at the
   # end in case this shell's PATH is bare.
-  PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.dotnet:$HOME/.dotnet/tools:$HOME/.bun/bin:$HOME/.deno/bin:$HOME/go/bin:/usr/local/go/bin:${SWIFTLY_BIN_DIR:-$HOME/.local/share/swiftly/bin}:${PATH:-}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.dotnet:$HOME/.dotnet/tools:$HOME/.bun/bin:$HOME/.deno/bin:$HOME/go/bin:/usr/local/go/bin:${SWIFTLY_BIN_DIR:-$HOME/.local/share/swiftly/bin}:${PATH:-}:/.sprite/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
   export PATH
 
   STATE_DIR="$HOME/.maipa-g"

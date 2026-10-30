@@ -165,13 +165,36 @@ public struct ComputerControl: Sendable {
         return nil
     }
 
-    /// The command's own output. A service may wrap it in JSON (`{"stdout": "..."}`).
+    /// The command's own output. A service may wrap it in JSON (`{"stdout": "..."}` or nested
+    /// `{"result": {"stdout": "..."}}`).
     static func plainOutput(_ output: String) -> String {
-        if let object = JSONValue.parse(Data(output.utf8))?.objectValue {
-            let parts = ["stdout", "output", "stderr"].compactMap { object[$0]?.stringValue }
+        if let parsed = JSONValue.parse(Data(output.utf8)) {
+            let parts = extractedStrings(from: parsed)
             if !parts.isEmpty { return parts.joined(separator: "\n") }
         }
-        return output
+        return output.replacingOccurrences(of: "\\n", with: "\n")
+    }
+
+    private static func extractedStrings(from value: JSONValue) -> [String] {
+        switch value {
+        case .string(let text):
+            return text.isEmpty ? [] : [text]
+        case .array(let items):
+            return items.flatMap(extractedStrings)
+        case .object(let object):
+            let preferred = ["stdout", "output", "stderr", "text", "result", "data", "content"]
+            var parts: [String] = []
+            for key in preferred {
+                if let child = object[key] { parts.append(contentsOf: extractedStrings(from: child)) }
+            }
+            if !parts.isEmpty { return parts }
+            for key in object.keys.sorted() where !preferred.contains(key) {
+                if let child = object[key] { parts.append(contentsOf: extractedStrings(from: child)) }
+            }
+            return parts
+        default:
+            return []
+        }
     }
 
     /// Starts MAIPA-G's tool setup in the background: the script comes from the app's exact

@@ -634,16 +634,23 @@ final class ChatSession: Identifiable {
                             notes.append("MAIPA-G's tool setup finished on this machine, but these didn't install: \(failed). If a task needs one of them, say it is missing.")
                         }
                     case .installing:
+                        app.connectors.keepComputerAwakeDuringSetup()
                         notes.append("MAIPA-G's checked tool set is still installing on this machine in the background. Use the tools that are there; if one is missing, say which and that it is still installing.")
                     case .missing:
                         let revision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
-                        do { notes.append(try await control.startVerifiedSetup(revision: revision)) }
+                        do {
+                            notes.append(try await control.startVerifiedSetup(revision: revision))
+                            app.connectors.keepComputerAwakeDuringSetup(resetReadyCache: true)
+                        }
                         catch { notes.append("MAIPA-G couldn't start installing its tools: \(ErrorExplainer.explain(error).message)") }
                     }
                 case .recreated:
                     notes.append("`\(control.machine)` was missing, so MAIPA-G's own code created it again with that exact name and checked it with a real command.")
                     let revision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
-                    do { notes.append(try await control.startVerifiedSetup(revision: revision)) }
+                    do {
+                        notes.append(try await control.startVerifiedSetup(revision: revision))
+                        app.connectors.keepComputerAwakeDuringSetup(resetReadyCache: true)
+                    }
                     catch { notes.append("MAIPA-G couldn't start its verified tool setup: \(ErrorExplainer.explain(error).message)") }
                 }
                 lastComputerCheck = Date()

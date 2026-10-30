@@ -88,9 +88,11 @@ struct PictureViewer: View {
                     await loadImage()
                 }
             }
-            .confirmationDialog(spendMessage, isPresented: $confirmSpend) {
+            .alert("Approve spending?", isPresented: $confirmSpend) {
                 Button("Generate") { spendApproved = true; generate() }
                 Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(spendMessage)
             }
         }
     }

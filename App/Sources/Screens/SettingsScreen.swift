@@ -107,14 +107,15 @@ struct SettingsScreen: View {
                 copiesSize = await app.snapshots.diskUsage()
                 freeSpace = try? app.paths.support.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage
             }
-            .confirmationDialog("Disconnect GitHub?", isPresented: $confirmDisconnect, titleVisibility: .visible) {
+            .alert("Disconnect GitHub?", isPresented: $confirmDisconnect) {
                 Button("Disconnect", role: .destructive) {
                     Task { await app.disconnectGitHub() }
                 }
+                Button("Cancel", role: .cancel) {}
             } message: {
                 Text("MAIPA-G stops using your repos and stops saving chats to GitHub. Your chats stay on this phone, and the ones already saved stay in MAIPA-G-data.")
             }
-            .confirmationDialog("Some data is not backed up", isPresented: $confirmUnsafeUpdate, titleVisibility: .visible) {
+            .alert("Some data is not backed up", isPresented: $confirmUnsafeUpdate) {
                 Button("Save now first") { Task { await app.sync.syncNow() } }
                 Button("Download anyway", role: .destructive) { openURL(app.updates.downloadURL) }
                 Button("Cancel", role: .cancel) {}
@@ -272,8 +273,9 @@ struct SettingsScreen: View {
                         Text(host).font(.body.monospaced())
                         Text(repo).font(.caption).foregroundStyle(Theme.secondaryText)
                     }
-                    .swipeActions {
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button("Remove", role: .destructive) { removePreviewHost(host, from: repo) }
+                            .tint(Theme.danger)
                     }
                     .contextMenu {
                         Button("Remove", role: .destructive) { removePreviewHost(host, from: repo) }

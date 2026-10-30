@@ -147,11 +147,23 @@ final class AutomationLibrary {
         }
     }
 
-    func run(_ workflow: WorkflowDefinition, request: String) async {
+    func clearError() {
+        lastError = nil
+    }
+
+    @discardableResult
+    func run(_ workflow: WorkflowDefinition, request: String, repo: ChatRepo?) async -> Bool {
+        lastError = nil
         guard workflow.isApproved else {
             lastError = "Approve this workflow before its first run."
-            return
+            return false
         }
-        await app?.jobs.start(workflow: workflow, request: request, repo: app?.home.repo)
+        guard let app else { return false }
+        let job = await app.jobs.start(workflow: workflow, request: request, repo: repo)
+        if job == nil {
+            lastError = app.jobs.lastError ?? "Couldn't start this run."
+            return false
+        }
+        return true
     }
 }

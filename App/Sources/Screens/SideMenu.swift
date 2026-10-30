@@ -17,6 +17,8 @@ struct SideMenu: View {
     @State private var selected: ChatSummary?
     @State private var showRename = false
     @State private var showDelete = false
+    @State private var deletingAgent: CustomAgentRecord?
+    @State private var deletingWorkflow: WorkflowRecord?
     @State private var newTitle = ""
     @AccessibilityFocusState(for: .voiceOver) private var newChatFocused: Bool
 
@@ -43,10 +45,33 @@ struct SideMenu: View {
             }
             Button("Cancel", role: .cancel) {}
         }
-        .confirmationDialog("Delete this chat?", isPresented: $showDelete, titleVisibility: .visible) {
+        .alert("Delete this chat?", isPresented: $showDelete) {
             Button("Delete", role: .destructive) {
                 if let chat = selected { Task { await app.library.delete(chat.id) } }
             }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("It stays in Recently Deleted for 30 days.")
+        }
+        .alert("Delete this agent?", isPresented: Binding(get: { deletingAgent != nil }, set: { if !$0 { deletingAgent = nil } })) {
+            Button("Delete", role: .destructive) {
+                if let record = deletingAgent {
+                    deletingAgent = nil
+                    Task { await app.automations.deleteAgent(record.id) }
+                }
+            }
+            Button("Cancel", role: .cancel) { deletingAgent = nil }
+        } message: {
+            Text("It stays in Recently Deleted for 30 days.")
+        }
+        .alert("Delete this workflow?", isPresented: Binding(get: { deletingWorkflow != nil }, set: { if !$0 { deletingWorkflow = nil } })) {
+            Button("Delete", role: .destructive) {
+                if let record = deletingWorkflow {
+                    deletingWorkflow = nil
+                    Task { await app.automations.deleteWorkflow(record.id) }
+                }
+            }
+            Button("Cancel", role: .cancel) { deletingWorkflow = nil }
         } message: {
             Text("It stays in Recently Deleted for 30 days.")
         }
@@ -144,15 +169,123 @@ struct SideMenu: View {
             }
             .listStyle(.plain).scrollContentBackground(.hidden).environment(\.defaultMinListRowHeight, 44)
         case .agents:
-            automationList(
-                app.automations.agents.filter { query.isEmpty || ($0.name + " " + $0.summary).localizedCaseInsensitiveContains(query) },
-                empty: "No agents match."
-            ) { agent in app.sheet = .agentEditor(agent.id) }
+            let filteredAgents = app.automations.agents.filter { query.isEmpty || ($0.name + " " + $0.summary).localizedCaseInsensitiveContains(query) }
+            List {
+                Section {
+                    if filteredAgents.isEmpty {
+                        Text("No agents match.")
+                            .font(.subheadline).foregroundStyle(Theme.secondaryText).listRowBackground(Color.clear)
+                    }
+                    ForEach(filteredAgents) { agent in
+                        Button {
+                            app.sheet = .agentDetail(agent.id)
+                            app.isMenuOpen = false
+                        } label: {
+                            HStack(spacing: 8) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack(spacing: 6) {
+                                        Text(agent.name).font(.subheadline.weight(.medium))
+                                        if !agent.isBuiltIn {
+                                            Text("Custom").font(.caption2).foregroundStyle(Theme.secondaryText)
+                                        }
+                                    }
+                                    Text(agent.summary).font(.caption).foregroundStyle(Theme.secondaryText).lineLimit(2)
+                                }
+                                Spacer(minLength: 4)
+                                Image(systemName: "chevron.right")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(Theme.secondaryText)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            if let record = app.automations.agentRecord(for: agent) {
+                                Button(role: .destructive) { deletingAgent = record } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                                .tint(Theme.danger)
+                            }
+                        }
+                    }
+                    Button {
+                        app.sheet = .agents
+                        app.isMenuOpen = false
+                    } label: {
+                        Label("Manage or create agents", systemImage: "slider.horizontal.3")
+                    }
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                } header: {
+                    Text("Specialists for one job — tap one to run it.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.secondaryText)
+                        .textCase(nil)
+                }
+            }
+            .listStyle(.plain).scrollContentBackground(.hidden)
         case .workflows:
-            automationList(
-                app.automations.workflows.filter { query.isEmpty || ($0.name + " " + $0.summary).localizedCaseInsensitiveContains(query) },
-                empty: "No workflows match."
-            ) { workflow in app.sheet = .workflowEditor(workflow.id) }
+            let filteredWorkflows = app.automations.workflows.filter { query.isEmpty || ($0.name + " " + $0.summary).localizedCaseInsensitiveContains(query) }
+            List {
+                Section {
+                    if filteredWorkflows.isEmpty {
+                        Text("No workflows match.")
+                            .font(.subheadline).foregroundStyle(Theme.secondaryText).listRowBackground(Color.clear)
+                    }
+                    ForEach(filteredWorkflows) { workflow in
+                        Button {
+                            app.sheet = .workflowDetail(workflow.id)
+                            app.isMenuOpen = false
+                        } label: {
+                            HStack(spacing: 8) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack(spacing: 6) {
+                                        Text(workflow.name).font(.subheadline.weight(.medium))
+                                        if !workflow.isBuiltIn {
+                                            Text(workflow.isApproved ? "Custom" : "Draft")
+                                                .font(.caption2)
+                                                .foregroundStyle(Theme.secondaryText)
+                                        }
+                                    }
+                                    Text(workflow.summary).font(.caption).foregroundStyle(Theme.secondaryText).lineLimit(2)
+                                }
+                                Spacer(minLength: 4)
+                                Image(systemName: "chevron.right")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(Theme.secondaryText)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            if let record = app.automations.workflowRecord(for: workflow) {
+                                Button(role: .destructive) { deletingWorkflow = record } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                                .tint(Theme.danger)
+                            }
+                        }
+                    }
+                    Button {
+                        app.sheet = .workflows
+                        app.isMenuOpen = false
+                    } label: {
+                        Label("Manage or build workflows", systemImage: "slider.horizontal.3")
+                    }
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                } header: {
+                    Text("Step-by-step plans that chain agents — tap one to run it.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.secondaryText)
+                        .textCase(nil)
+                }
+            }
+            .listStyle(.plain).scrollContentBackground(.hidden)
         case .memories:
             let filteredMemories = app.memories.memories.filter { query.isEmpty || $0.text.localizedCaseInsensitiveContains(query) }
             List {
@@ -177,22 +310,6 @@ struct SideMenu: View {
             }
             .listStyle(.plain).scrollContentBackground(.hidden)
         }
-    }
-
-    private func automationList<Item: Identifiable>(_ items: [Item], empty: String, action: @escaping (Item) -> Void) -> some View where Item.ID == String {
-        List {
-            if items.isEmpty { Text(empty).font(.subheadline).foregroundStyle(Theme.secondaryText).listRowBackground(Color.clear) }
-            ForEach(items) { item in
-                Button { action(item); app.isMenuOpen = false } label: {
-                    if let agent = item as? AgentDefinition {
-                        VStack(alignment: .leading, spacing: 2) { Text(agent.name); Text(agent.summary).font(.caption).foregroundStyle(Theme.secondaryText).lineLimit(2) }
-                    } else if let workflow = item as? WorkflowDefinition {
-                        VStack(alignment: .leading, spacing: 2) { Text(workflow.name); Text(workflow.summary).font(.caption).foregroundStyle(Theme.secondaryText).lineLimit(2) }
-                    }
-                }.buttonStyle(.plain)
-                .listRowBackground(Color.clear)
-            }
-        }.listStyle(.plain).scrollContentBackground(.hidden)
     }
 
     private func row(_ chat: ChatSummary) -> some View {
@@ -231,8 +348,9 @@ struct SideMenu: View {
         .buttonStyle(.plain)
         .listRowBackground(isOpen ? theme.accent.opacity(0.12) : Color.clear)
         .listRowSeparator(.hidden)
-        .swipeActions(edge: .trailing) {
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button(role: .destructive) { delete(chat) } label: { Label("Delete", systemImage: "trash") }
+                .tint(Theme.danger)
             Button { rename(chat) } label: { Label("Rename", systemImage: "pencil") }
                 .tint(.gray)
         }
