@@ -239,3 +239,28 @@ public struct GitHubBuildInspector: Sendable {
         try await github.dispatchWorkflow(repo, workflow: workflow, ref: ref)
     }
 }
+
+
+public struct GitHubActionsBilling: Codable, Sendable, Hashable {
+    public var totalMinutesUsed: Double
+    public var totalPaidMinutesUsed: Double
+    public var includedMinutes: Double
+    public var minutesUsedBreakdown: [String: Double]
+
+    enum CodingKeys: String, CodingKey {
+        case totalMinutesUsed = "total_minutes_used"
+        case totalPaidMinutesUsed = "total_paid_minutes_used"
+        case includedMinutes = "included_minutes"
+        case minutesUsedBreakdown = "minutes_used_breakdown"
+    }
+
+    public var includedMinutesRemaining: Int {
+        max(0, Int((includedMinutes - totalMinutesUsed).rounded(.down)))
+    }
+}
+
+public extension GitHubClient {
+    func actionsBilling(for user: String) async throws -> GitHubActionsBilling {
+        try await get(GitHubActionsBilling.self, "/users/\(Self.escape(user))/settings/billing/actions", auth: .user)
+    }
+}

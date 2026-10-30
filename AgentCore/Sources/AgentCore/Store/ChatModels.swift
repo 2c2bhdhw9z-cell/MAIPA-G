@@ -80,6 +80,10 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
     public var specID: UUID?
     /// Enabled memories captured when this chat began. Existing chats do not change underneath the user.
     public var memoryContext: [String]
+    /// Optional Kiro-style compact summary; older messages remain visible but are replaced by this
+    /// summary in later model requests.
+    public var compactedSummary: String?
+    public var compactedThroughMessageID: UUID?
 
     public init(
         id: UUID = UUID(),
@@ -108,11 +112,14 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         self.workflowID = nil
         self.specID = nil
         self.memoryContext = memoryContext
+        self.compactedSummary = nil
+        self.compactedThroughMessageID = nil
     }
 
     enum CodingKeys: String, CodingKey {
         case format, id, title, titleIsCustom, createdAt, updatedAt, repo, model, thinking, messages
         case groupID, saveReceipts, activeJobID, workflowID, specID, memoryContext
+        case compactedSummary, compactedThroughMessageID
     }
 
     public init(from decoder: Decoder) throws {
@@ -133,6 +140,8 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         workflowID = try c.decodeIfPresent(UUID.self, forKey: .workflowID)
         specID = try c.decodeIfPresent(UUID.self, forKey: .specID)
         memoryContext = try c.decodeIfPresent([String].self, forKey: .memoryContext) ?? []
+        compactedSummary = try c.decodeIfPresent(String.self, forKey: .compactedSummary)
+        compactedThroughMessageID = try c.decodeIfPresent(UUID.self, forKey: .compactedThroughMessageID)
     }
 
     /// Everything the chat has cost so far, in dollars, as OpenRouter reported it.

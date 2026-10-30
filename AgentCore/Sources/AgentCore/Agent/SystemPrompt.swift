@@ -104,7 +104,7 @@ public enum SystemPrompt {
             each other. Never claim a change was saved until save_changes succeeds. Deleting a file and changing \
             build setup require the person's explicit approval; the app enforces that pause. Repo rules override \
             the normal side-branch and pull-request behavior.
-            \(repo.ruleDocuments.isEmpty ? "" : "\nApplicable repository instructions, scoped by their locations:\n" + repo.ruleDocuments.prefix(20).map { "--- \($0.path) (\($0.scope.isEmpty ? "whole repository" : $0.scope)) ---\n" + String($0.text.prefix(20_000)) }.joined(separator: "\n"))
+            \(repo.ruleDocuments.isEmpty ? "" : "\nRepository rule documents are available on demand through load_repo_rules:\n" + repo.ruleDocuments.prefix(100).map { "- \($0.path) (\($0.scope.isEmpty ? "whole repository" : $0.scope))" }.joined(separator: "\n"))
             """)
         }
 

@@ -112,6 +112,8 @@ public struct ToolSpec: Encodable, Sendable, Hashable {
 /// POST /api/v1/chat/completions, always streamed.
 public struct ChatCompletionRequest: Encodable, Sendable {
     public var model: String
+    /// Ordered fallbacks OpenRouter may use if the chosen provider fails or model disappears.
+    public var models: [String]?
     public var messages: [APIMessage]
     public var tools: [ToolSpec]?
     public var reasoningEffort: ThinkingLevel?
@@ -125,6 +127,7 @@ public struct ChatCompletionRequest: Encodable, Sendable {
 
     public init(
         model: String,
+        models: [String]? = nil,
         messages: [APIMessage],
         tools: [ToolSpec]? = nil,
         reasoningEffort: ThinkingLevel? = nil,
@@ -134,6 +137,7 @@ public struct ChatCompletionRequest: Encodable, Sendable {
         maxTokens: Int? = nil
     ) {
         self.model = model
+        self.models = models
         self.messages = messages
         self.tools = tools
         self.reasoningEffort = reasoningEffort
@@ -144,7 +148,7 @@ public struct ChatCompletionRequest: Encodable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case model, messages, tools, stream, reasoning, plugins
+        case model, models, messages, tools, stream, reasoning, plugins
         case toolChoice = "tool_choice"
         case sessionID = "session_id"
         case cacheControl = "cache_control"
@@ -154,6 +158,7 @@ public struct ChatCompletionRequest: Encodable, Sendable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(model, forKey: .model)
+        try container.encodeIfPresent(models?.isEmpty == false ? models : nil, forKey: .models)
         try container.encode(messages, forKey: .messages)
         try container.encode(true, forKey: .stream)
         if let tools, !tools.isEmpty {

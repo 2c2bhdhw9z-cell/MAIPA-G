@@ -14,6 +14,8 @@ final class ChatSession: Identifiable {
     var webEnabled = true
     var autonomous = false
     private(set) var isRunning = false
+    private(set) var mergeCheckStatus: String?
+    private(set) var mergeWarning: String?
 
     @ObservationIgnored weak var app: AppModel?
     @ObservationIgnored private var run: AgentRun?
@@ -100,6 +102,29 @@ final class ChatSession: Identifiable {
         start()
     }
 
+    func resumeInterruptedTurn() {
+        guard !isRunning, lastTurn?.status == .running else { return }
+        start()
+    }
+
+    func stagedDiff() async -> String {
+        await changeWorkspace?.stagedDiff() ?? "No staged changes in this turn."
+    }
+
+    func branchDiff() async -> String {
+        guard let app, let github = app.github.client, let repo = chat.repo else { return "Connect GitHub to load the branch diff." }
+        let branch = (chat.saveReceipts ?? []).last { $0.pullRequest != nil && $0.resolution == nil }?.branch ?? repo.branch
+        do {
+            let comparison = try await github.compare(repo.ref, base: repo.defaultBranch, head: branch)
+            if comparison.files.isEmpty { return "No branch changes." }
+            return String(comparison.files.map { file in
+                "--- \(file.status): \(file.path)\n" + (file.patch ?? "GitHub did not provide a text patch for this file.")
+            }.joined(separator: "\n\n").prefix(200_000))
+        } catch {
+            return ErrorExplainer.explain(error).message
+        }
+    }
+
     /// Answers the AI's numbered questions and lets it carry on.
     func answer(_ answers: [String]) {
         guard !isRunning, var turn = lastTurn, let pending = turn.pendingQuestions else { return }
@@ -125,6 +150,55 @@ final class ChatSession: Identifiable {
             return
         }
         run?.cancel()
+    }
+
+    /// Runs any saved answer again, rewinding messages after it but preserving the preceding user
+    /// message and all tool results that belong to earlier turns.
+    func retryAnswer(_ messageID: UUID) {
+        guard !isRunning, let index = chat.messages.firstIndex(where: { $0.id == messageID }),
+              chat.messages[index].assistantTurn != nil else { return }
+        chat.messages.removeSubrange(index...)
+        chat.messages.append(ChatMessage(body: .assistant(AssistantTurn())))
+        chat.compactedSummary = nil
+        chat.compactedThroughMessageID = nil
+        touch()
+        start()
+    }
+
+    func editAndResend(_ messageID: UUID, text: String) {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isRunning, !clean.isEmpty,
+              let index = chat.messages.firstIndex(where: { $0.id == messageID }),
+              case .user(let original) = chat.messages[index].body else { return }
+        chat.messages.removeSubrange(index...)
+        chat.messages.append(ChatMessage(body: .user(UserMessage(text: clean, attachments: original.attachments))))
+        chat.messages.append(ChatMessage(body: .assistant(AssistantTurn())))
+        chat.compactedSummary = nil
+        chat.compactedThroughMessageID = nil
+        touch()
+        start()
+    }
+
+    func compact() {
+        guard !isRunning, chat.messages.count > 4 else { return }
+        let throughIndex = chat.messages.count - 3
+        let older = chat.messages[...throughIndex]
+        var lines: [String] = []
+        for message in older {
+            switch message.body {
+            case .user(let user):
+                if !user.text.isEmpty { lines.append("Person: " + String(user.text.prefix(1_500))) }
+            case .assistant(let turn):
+                let text = turn.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n")
+                if !text.isEmpty { lines.append("MAIPA-G: " + String(text.prefix(2_500))) }
+            }
+            if lines.joined(separator: "\n").count >= 18_000 { break }
+        }
+        guard !lines.isEmpty else { return }
+        chat.compactedSummary = String(lines.joined(separator: "\n\n").prefix(20_000))
+        chat.compactedThroughMessageID = chat.messages[throughIndex].id
+        appendNotice("Compacted older messages for future AI requests. The full chat remains visible.")
+        touch()
     }
 
     /// Runs the last message again, after a failure.
@@ -190,16 +264,44 @@ final class ChatSession: Identifiable {
         touch()
     }
 
-    func addLastSave() async {
+    func addLastSave(force: Bool = false) async {
         guard let app, let github = app.github.client, var receipts = chat.saveReceipts,
-              let index = receipts.indices.last, receipts[index].pullRequest != nil, receipts[index].resolution == nil else { return }
+              let index = receipts.indices.last, let pull = receipts[index].pullRequest, receipts[index].resolution == nil else { return }
         do {
+            let result = try await GitHubRunWatcher(github: github, maximumPolls: 1, discoveryPolls: 1, sleeper: {}).wait(
+                repo: receipts[index].repo,
+                commit: receipts[index].savedCommit,
+                branch: receipts[index].branch,
+                redacting: RedactingLogger()
+            )
+            if result.succeeded {
+                mergeCheckStatus = result.discovery == .confirmedNoChecks ? "No automatic checks" : "Checks passed"
+            } else {
+                let failed = result.runs.filter { $0.conclusion != nil && !["success", "neutral", "skipped"].contains($0.conclusion!) }.map(\.name)
+                    + result.checks.filter { $0.conclusion != nil && !["success", "neutral", "skipped"].contains($0.conclusion!) }.map(\.name)
+                    + result.statuses.filter { $0.state != "success" }.map(\.context)
+                mergeCheckStatus = failed.isEmpty ? "Checks are pending or did not start" : "Failing: " + failed.joined(separator: ", ")
+                if !force {
+                    mergeWarning = "\(mergeCheckStatus ?? "Checks did not pass"). Add pull request #\(pull.number) anyway?"
+                    return
+                }
+            }
             try await GitHubChangeService(github: github).addIt(receipts[index])
             receipts[index].resolution = "added"
             chat.saveReceipts = receipts
+            mergeWarning = nil
             appendNotice("Added the pull request and removed its side branch.")
-        } catch { appendNotice("Couldn't add it: \(error)") }
+        } catch {
+            let explanation = ErrorExplainer.explain(error)
+            if let api = error as? GitHubAPIError, api.status == 409 || api.status == 422 {
+                appendNotice("GitHub could not merge pull request #\(pull.number): \(explanation.cause) Open the pull request, resolve the named conflicting files, then tap Add it again. \(pull.htmlURL)")
+            } else {
+                appendNotice("Couldn’t add pull request #\(pull.number): \(explanation.message)")
+            }
+        }
     }
+
+    func cancelMergeWarning() { mergeWarning = nil }
 
     func throwAwayLastSave() async {
         guard let app, let github = app.github.client, var receipts = chat.saveReceipts,
@@ -297,7 +399,7 @@ final class ChatSession: Identifiable {
                 let saves = changeSession ?? ChangeSession(receipts: chat.saveReceipts ?? [])
                 changeSession = saves
                 let repoTools: [any AgentTool] = [
-                    ListFilesTool(workspace: workspace), SearchCodeTool(workspace: workspace), ReadFileTool(workspace: workspace), ReadRepoFileTool(github: github),
+                    ListFilesTool(workspace: workspace), SearchCodeTool(workspace: workspace), ReadFileTool(workspace: workspace), ReadRepoFileTool(github: github), LoadRepoRulesTool(documents: rules.documents),
                     CreateFileTool(workspace: changes, authorization: changeAuthorization, rules: rules), EditFileTool(workspace: changes, authorization: changeAuthorization, rules: rules), DeleteFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
                     SaveChangesTool(workspace: changes, service: service, session: saves, selectedBranch: workingBranch, defaultBranch: repo.defaultBranch, rules: rules),
                 ]
@@ -338,6 +440,12 @@ final class ChatSession: Identifiable {
         if let imageModel = app.openRouter.models.first(where: \.generatesImages) {
             tools.append(GenerateImageTool(client: app.openRouter.client, store: app.attachmentStore, model: imageModel.id, maySpend: !imageModel.isFree))
         }
+        let fallbackModels = app.openRouter.models.filter { model in
+            model.id != route.model && model.isChatModel
+                && (!hasRepo || model.supportsTools)
+                && (!hasImageInput || model.acceptsImages)
+                && (!route.isFree || model.isFree)
+        }.prefix(3).map(\.id)
         let input = AgentTurnInput(
             chat: chat,
             route: route,
@@ -346,7 +454,9 @@ final class ChatSession: Identifiable {
             allowTools: app.openRouter.supportsTools(chat.model),
             spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil,
             attachmentData: attachmentData,
-            serverTools: webEnabled && app.openRouter.accountState.paidAllowed() ? OpenRouterWebTools.paid : []
+            serverTools: webEnabled && app.openRouter.accountState.paidAllowed() ? OpenRouterWebTools.paid : [],
+            fallbackModels: fallbackModels,
+            requiresInitialSpendApproval: !route.isFree
         )
         let account = app.openRouter
         let environment = AgentEnvironment(

@@ -80,7 +80,8 @@ public actor RemoteJobStore {
 
     public func save(_ job: JobRecord) async throws {
         let path = "jobs/\(job.id.uuidString.lowercased()).json"
-        let data = try JSONCoding.encoder(pretty: true).encode(job)
+        let safeJob = try SensitiveDataRedactor().redactCodable(job)
+        let data = try JSONCoding.encoder(pretty: true).encode(safeJob)
         for attempt in 1...4 {
             guard let head = try await github.branchHead(repo, branch: branch) else { throw CloudRunnerError.jobNotFound }
             do {
@@ -244,7 +245,8 @@ public struct CloudRunner: Sendable {
                 route: route,
                 systemPrompt: cloudPrompt(repo: configuration.targetRepository, branch: workBranch, rules: writeRules),
                 tools: tools,
-                spendLimit: job.state["spendLimit"]?.doubleValue
+                spendLimit: job.state["spendLimit"]?.doubleValue,
+                requiresInitialSpendApproval: !route.isFree
             )
             let environment = AgentEnvironment(
                 openRouter: OpenRouterClient(transport: transport, apiKey: configuration.openRouterKey),
@@ -393,7 +395,8 @@ public struct CloudRunner: Sendable {
             let input = AgentTurnInput(
                 chat: chat, route: route,
                 systemPrompt: SystemPrompt.make(userLogin: nil, repo: repoContext, agent: invocation.definition, workflowContext: invocation.context),
-                tools: workflowTools + invocation.tools, spendLimit: invocation.spendLimit, agent: invocation.definition
+                tools: workflowTools + invocation.tools, spendLimit: invocation.spendLimit,
+                requiresInitialSpendApproval: !route.isFree, agent: invocation.definition
             )
             var final: AssistantTurn?
             let agentRun = AgentLoop.start(input, environment: environment)
@@ -709,7 +712,7 @@ public struct CloudRunner: Sendable {
         var chat = Chat(title: definition.name)
         chat.messages = [.user([definition.prompt(task: task), context].filter { !$0.isEmpty }.joined(separator: "\n\nContext:\n")), ChatMessage(body: .assistant(AssistantTurn()))]
         let repo = SystemPrompt.RepoContext(ref: configuration.targetRepository, branch: "checked workspace", commit: try await git(["rev-parse", "HEAD"]).stdout.trimmingCharacters(in: .whitespacesAndNewlines), isPrivate: true, summary: nil, ruleDocuments: rules.documents)
-        let input = AgentTurnInput(chat: chat, route: route, systemPrompt: SystemPrompt.make(userLogin: nil, repo: repo, agent: definition, workflowContext: context), tools: tools, spendLimit: spendLimit, agent: definition)
+        let input = AgentTurnInput(chat: chat, route: route, systemPrompt: SystemPrompt.make(userLogin: nil, repo: repo, agent: definition, workflowContext: context), tools: tools, spendLimit: spendLimit, requiresInitialSpendApproval: !route.isFree, agent: definition)
         let environment = AgentEnvironment(openRouter: openRouter, freeRoute: { ModelRouter.route(choice: .free, difficulty: definition.difficulty, thinking: .medium, account: AccountState(), catalogue: catalogue) }, onOutOfCredits: {})
         var final: AssistantTurn?
         for await event in AgentLoop.run(input, environment: environment) { if case .updated(let turn, _) = event { final = turn } }
@@ -791,7 +794,9 @@ public struct CloudRunner: Sendable {
                 if item.key.hasPrefix(prefix) { values[String(item.key.dropFirst(prefix.count))] = item.value }
             }
             let definitions = try await connector.connect(environment: secrets)
-            tools.append(contentsOf: definitions.map { AutonomousMCPTool(definition: $0, connector: connector) })
+            tools.append(contentsOf: definitions
+                .filter { !configuration.disabledTools.contains($0.originalName) }
+                .map { AutonomousMCPTool(definition: $0, connector: connector) })
         }
         return tools
         #else

@@ -238,7 +238,7 @@ public struct GitHubClient: Sendable {
         guard let json = JSONValue.parse(response.body) else { throw GitHubAPIError(status: response.status, message: "Unreadable comparison") }
         let files = (json["files"]?.arrayValue ?? []).compactMap { file -> GitCompare.File? in
             guard let path = file["filename"]?.stringValue, let status = file["status"]?.stringValue else { return nil }
-            return GitCompare.File(path: path, status: status, sha: file["sha"]?.stringValue, previousPath: file["previous_filename"]?.stringValue)
+            return GitCompare.File(path: path, status: status, sha: file["sha"]?.stringValue, previousPath: file["previous_filename"]?.stringValue, patch: file["patch"]?.stringValue)
         }
         let changedFiles = json["files"]?.arrayValue?.count ?? 0
         return GitCompare(

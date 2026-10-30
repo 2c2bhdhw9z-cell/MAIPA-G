@@ -36,6 +36,12 @@ public struct SensitiveDataRedactor: Sendable {
         }
     }
 
+    public func redactCodable<T: Codable>(_ value: T) throws -> T {
+        let encoded = try JSONCoding.encoder().encode(value)
+        let redacted = try redactJSON(encoded, pretty: false)
+        return try JSONCoding.decoder().decode(T.self, from: redacted)
+    }
+
     public func redactJSON(_ data: Data, pretty: Bool = true) throws -> Data {
         let value = try JSONCoding.decoder().decode(JSONValue.self, from: data)
         return try JSONCoding.encoder(pretty: pretty).encode(redact(value))

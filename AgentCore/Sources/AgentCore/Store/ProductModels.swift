@@ -438,3 +438,24 @@ public struct SaveReceipt: Codable, Sendable, Hashable, Identifiable {
         self.files = files; self.pullRequest = pullRequest; self.createdAt = createdAt; self.resolution = nil
     }
 }
+
+
+public struct AutonomousInstallationRecord: ProductRecord, Hashable {
+    public static let currentFormat = 1
+    public var format = currentFormat
+    public var id: UUID
+    public var repo: RepoRef
+    public var managedSecrets: Set<String>
+    public var reviewedRevision: String
+    public var createdAt: Date
+    public var updatedAt: Date
+
+    public init(id: UUID = UUID(), repo: RepoRef, managedSecrets: Set<String>, reviewedRevision: String, createdAt: Date = Date()) {
+        self.id = id
+        self.repo = repo
+        self.managedSecrets = managedSecrets
+        self.reviewedRevision = reviewedRevision
+        self.createdAt = createdAt
+        self.updatedAt = createdAt
+    }
+}

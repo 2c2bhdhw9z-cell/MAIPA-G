@@ -12,11 +12,13 @@ final class JobCoordinator {
 
     @ObservationIgnored weak var app: AppModel?
     @ObservationIgnored private let store: JobStore
+    @ObservationIgnored private let provisioningStore: ProductStore<AutonomousInstallationRecord>
     @ObservationIgnored private var watcher: Task<Void, Never>?
     @ObservationIgnored private var localRuns: [UUID: Task<Void, Never>] = [:]
 
     init(dataDirectory: URL) {
         store = JobStore(dataDirectory: dataDirectory)
+        provisioningStore = ProductStore(dataDirectory: dataDirectory, folder: "autonomous-installations")
     }
 
     deinit {
@@ -62,7 +64,7 @@ final class JobCoordinator {
 
     @discardableResult
     func start(request: String, repo: ChatRepo, workflow: WorkflowDefinition? = nil, additionalState: [String: JSONValue] = [:]) async -> JobRecord? {
-        guard let app, let github = app.github.client else { return nil }
+        guard let app, app.settings.autonomousEnabled, let github = app.github.client else { return nil }
         await app.sync.syncNow()
         guard let dataRepo = app.sync.repo else {
             lastError = "MAIPA-G needs its private data repo before Autonomous can start."
@@ -218,6 +220,7 @@ final class JobCoordinator {
                 systemPrompt: SystemPrompt.make(userLogin: login, repo: nil, agent: invocation.definition, workflowContext: invocation.context),
                 tools: [WebSearchTool(transport: transport), ReadWebPageTool(transport: transport)] + invocation.tools,
                 spendLimit: invocation.spendLimit,
+                requiresInitialSpendApproval: !route.isFree,
                 agent: invocation.definition
             )
             let environment = AgentEnvironment(
@@ -339,6 +342,19 @@ final class JobCoordinator {
                 secrets: setupSecrets,
                 reviewedRevision: Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
             )
+            let existingInstallations = await provisioningStore.loadAll()
+            let record = existingInstallations.first(where: { $0.repo == repo }).map { existing -> AutonomousInstallationRecord in
+                var copy = existing
+                copy.managedSecrets = Set(setupSecrets.keys)
+                copy.reviewedRevision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
+                copy.updatedAt = Date()
+                return copy
+            } ?? AutonomousInstallationRecord(
+                repo: repo,
+                managedSecrets: Set(setupSecrets.keys),
+                reviewedRevision: Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
+            )
+            try await provisioningStore.save(record)
             job.recordAutonomousSetupCommit(setupCommit)
             job.status = .queued
             job.steps = [JobStepRecord(title: "Waiting for GitHub", status: .pending)]
@@ -503,17 +519,21 @@ final class JobCoordinator {
 
     func reconcileAutonomousConnectorSecrets() async {
         guard let app, let github = app.github.client else { return }
-        let repos = Set(jobs.compactMap(\.targetRepo))
+        let records = await provisioningStore.loadAll()
         var failures: [String] = []
-        for repo in repos {
+        for var record in records {
             do {
                 if let value = app.connectors.autonomousSecretsJSON() {
-                    try await github.putActionsSecret(repo, name: "MAIPAG_MCP_SECRETS", value: value)
+                    try await github.putActionsSecret(record.repo, name: "MAIPAG_MCP_SECRETS", value: value)
+                    record.managedSecrets.insert("MAIPAG_MCP_SECRETS")
                 } else {
-                    try await github.deleteActionsSecret(repo, name: "MAIPAG_MCP_SECRETS")
+                    try await github.deleteActionsSecret(record.repo, name: "MAIPAG_MCP_SECRETS")
+                    record.managedSecrets.remove("MAIPAG_MCP_SECRETS")
                 }
+                record.updatedAt = Date()
+                try await provisioningStore.save(record)
             } catch {
-                failures.append("\(repo.fullName): \(error.localizedDescription)")
+                failures.append("\(record.repo.fullName): \(ErrorExplainer.explain(error).message)")
             }
         }
         lastError = failures.isEmpty ? nil : "Autonomous secret cleanup failed for " + failures.joined(separator: "; ")
@@ -521,15 +541,26 @@ final class JobCoordinator {
 
     func cleanupAllAutonomousSecrets() async {
         guard let app, let github = app.github.client else { return }
-        let names = ["MAIPAG_APP_ID", "MAIPAG_APP_PRIVATE_KEY", "OPENROUTER_API_KEY", "MAIPAG_MCP_SECRETS"]
+        let known = Set(["MAIPAG_APP_ID", "MAIPAG_APP_PRIVATE_KEY", "OPENROUTER_API_KEY", "MAIPAG_MCP_SECRETS"])
+        let records = await provisioningStore.loadAll()
         var failures: [String] = []
-        for repo in Set(jobs.compactMap(\.targetRepo)) {
-            for name in names {
-                do { try await github.deleteActionsSecret(repo, name: name) }
-                catch { failures.append("\(repo.fullName) / \(name): \(error.localizedDescription)") }
+        for record in records {
+            var failed = false
+            for name in record.managedSecrets.union(known) {
+                do { try await github.deleteActionsSecret(record.repo, name: name) }
+                catch {
+                    failed = true
+                    failures.append("\(record.repo.fullName) / \(name): \(ErrorExplainer.explain(error).message)")
+                }
             }
+            if !failed { try? await provisioningStore.delete(record.id) }
         }
         lastError = failures.isEmpty ? nil : "Autonomous secret cleanup failed for " + failures.joined(separator: "; ")
+    }
+
+    func retryPendingSecretCleanup() async {
+        if app?.openRouter.isSignedIn == true { await reconcileAutonomousConnectorSecrets() }
+        else { await cleanupAllAutonomousSecrets() }
     }
 
     private func dispatch(_ job: JobRecord) async throws {

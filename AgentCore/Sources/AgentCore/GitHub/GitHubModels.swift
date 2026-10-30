@@ -195,6 +195,7 @@ public struct GitCompare: Sendable, Hashable {
         public var status: String
         public var sha: String?
         public var previousPath: String?
+        public var patch: String?
     }
 
     public var status: String

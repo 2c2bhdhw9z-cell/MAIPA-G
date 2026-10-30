@@ -18,10 +18,13 @@ public struct AgentTurnInput: Sendable {
     public var attachmentData: [UUID: Data]
     /// OpenRouter-run paid tools, offered alongside local tools.
     public var serverTools: [ToolSpec]
+    public var fallbackModels: [String]
+    /// Paid model requests cannot begin until the person taps the app's spend approval.
+    public var requiresInitialSpendApproval: Bool
     /// Fixed role and tool policy when this turn belongs to a named agent.
     public var agent: AgentDefinition?
 
-    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 40, spendLimit: Double? = nil, attachmentData: [UUID: Data] = [:], serverTools: [ToolSpec] = [], agent: AgentDefinition? = nil) {
+    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 40, spendLimit: Double? = nil, attachmentData: [UUID: Data] = [:], serverTools: [ToolSpec] = [], fallbackModels: [String] = [], requiresInitialSpendApproval: Bool = false, agent: AgentDefinition? = nil) {
         self.chat = chat
         self.route = route
         self.systemPrompt = systemPrompt
@@ -31,6 +34,8 @@ public struct AgentTurnInput: Sendable {
         self.spendLimit = spendLimit
         self.attachmentData = attachmentData
         self.serverTools = serverTools
+        self.fallbackModels = fallbackModels
+        self.requiresInitialSpendApproval = requiresInitialSpendApproval
         self.agent = agent
     }
 }
@@ -105,6 +110,8 @@ private struct Runner {
     let maxSteps: Int
     let spendLimit: Double?
     let attachmentData: [UUID: Data]
+    let fallbackModels: [String]
+    let requiresInitialSpendApproval: Bool
     let environment: AgentEnvironment
     let continuation: AsyncStream<AgentEvent>.Continuation
     var switchedToFree = false
@@ -133,6 +140,8 @@ private struct Runner {
         maxSteps = input.maxSteps
         spendLimit = input.spendLimit.flatMap { $0 > 0 ? $0 : nil }
         attachmentData = input.attachmentData
+        fallbackModels = input.fallbackModels.filter { $0 != input.route.model }
+        requiresInitialSpendApproval = input.requiresInitialSpendApproval
         self.environment = environment
         self.continuation = continuation
     }
@@ -167,6 +176,12 @@ private struct Runner {
                 guard newSteps < maxSteps else {
                     turn.status = .stopped
                     turn.failure = TurnFailure(kind: .stepLimit, message: "I stopped after \(maxSteps) steps so this doesn't run up a bill. Tap Keep going if you want more.")
+                    break
+                }
+                // Every paid run needs an explicit, typed approval before its first network call.
+                if requiresInitialSpendApproval, turn.approvedSpendUpTo == nil, (turn.usage.cost ?? 0) == 0 {
+                    turn.status = .waitingForUser
+                    turn.spendCheck = 0
                     break
                 }
                 // "Stop and ask when a job has cost $__": checked before every request to the AI,
@@ -215,6 +230,7 @@ private struct Runner {
             let (messages, trimmed) = Transcript.fit(Transcript.messages(for: chat, systemPrompt: systemPrompt, attachmentData: attachmentData), budget: route.contextBudget)
             let request = ChatCompletionRequest(
                 model: route.model,
+                models: fallbackModels.isEmpty ? nil : [route.model] + fallbackModels,
                 messages: messages,
                 tools: specs,
                 reasoningEffort: route.effort,
@@ -292,6 +308,10 @@ private struct Runner {
         step.reasoning = accumulator.reasoning
         step.reasoningDetails = accumulator.reasoningDetails
         step.model = accumulator.model ?? step.model
+        if let actual = accumulator.model, actual != route.model,
+           !turn.notices.contains(where: { $0.contains("switched to fallback AI") }) {
+            turn.notices.append("OpenRouter switched to fallback AI \(actual) because the first AI was unavailable.")
+        }
         step.usage = accumulator.usage
         step.finishReason = accumulator.finishReason
         step.citations = accumulator.citations.isEmpty ? nil : accumulator.citations

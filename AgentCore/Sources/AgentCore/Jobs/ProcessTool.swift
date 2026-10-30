@@ -1,4 +1,7 @@
 import Foundation
+#if os(Linux)
+import Glibc
+#endif
 
 public struct ProcessResult: Sendable, Hashable {
     public var exitCode: Int32
@@ -38,8 +41,19 @@ public enum BoundedProcess {
         defer { try? output.close(); try? errors.close() }
 
         let process = Process()
+        #if os(Linux)
+        let setsid = "/usr/bin/setsid"
+        if manager.isExecutableFile(atPath: setsid) {
+            process.executableURL = URL(fileURLWithPath: setsid)
+            process.arguments = [executable] + arguments
+        } else {
+            process.executableURL = URL(fileURLWithPath: executable)
+            process.arguments = arguments
+        }
+        #else
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        #endif
         process.currentDirectoryURL = directory
         if replacingEnvironment {
             process.environment = environment
@@ -73,9 +87,24 @@ public enum BoundedProcess {
         let wasCancelled = Task.isCancelled
         let timedOut = process.isRunning && !wasCancelled
         if process.isRunning {
+            #if os(Linux)
+            if manager.isExecutableFile(atPath: "/usr/bin/setsid") {
+                _ = Glibc.kill(-process.processIdentifier, SIGTERM)
+            } else {
+                process.terminate()
+            }
+            #else
             process.terminate()
+            #endif
             for _ in 0..<20 where process.isRunning { try? await Task.sleep(nanoseconds: 50_000_000) }
-            if process.isRunning { process.interrupt() }
+            if process.isRunning {
+                #if os(Linux)
+                if manager.isExecutableFile(atPath: "/usr/bin/setsid") { _ = Glibc.kill(-process.processIdentifier, SIGKILL) }
+                else { process.interrupt() }
+                #else
+                process.interrupt()
+                #endif
+            }
         }
         process.waitUntilExit()
         if wasCancelled { throw CancellationError() }
@@ -453,11 +482,16 @@ public struct StdioMCPTool: AgentTool {
             let before = try await broker.snapshot()
             let result: ProcessResult
             do {
+                #if os(Linux)
+                let sandbox = try ConnectorSandbox.invocation(command: [server.executable] + server.arguments, directory: isolation)
                 result = try await BoundedProcess.run(
-                    executable: server.executable, arguments: server.arguments, directory: isolation,
+                    executable: sandbox.executable, arguments: sandbox.arguments, directory: isolation,
                     environment: BoundedProcess.minimalChildEnvironment(home: isolation, additions: server.environment),
                     replacingEnvironment: true, stdin: input, timeout: 120, outputLimit: 80_000
                 )
+                #else
+                throw ProcessFailure.unavailable
+                #endif
             } catch {
                 try? await broker.finish(before)
                 throw error

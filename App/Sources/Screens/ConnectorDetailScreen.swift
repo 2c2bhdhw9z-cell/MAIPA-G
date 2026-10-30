@@ -50,7 +50,7 @@ struct ConnectorDetailScreen: View {
         }
         if let tools = app.connectors.toolDefinitions[connector.id], !tools.isEmpty {
             Section("Tools") {
-                ForEach(tools) { tool in ConnectorToolRow(tool: tool) }
+                ForEach(tools) { tool in ConnectorToolRow(tool: tool, connector: connector) }
             }
         }
         Section {
@@ -164,14 +164,22 @@ struct ConnectorDetailScreen: View {
 
 /// One tool a connected connector offers: its name and what it does.
 private struct ConnectorToolRow: View {
+    @Environment(AppModel.self) private var app
     let tool: ConnectorToolDefinition
+    let connector: ConnectorConfiguration
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(tool.title)
-            Text(tool.description)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        Toggle(isOn: Binding(
+            get: { !connector.disabledTools.contains(tool.originalName) },
+            set: { enabled in Task { await app.connectors.setTool(tool.originalName, enabled: enabled, for: connector) } }
+        )) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(tool.title)
+                Text(tool.description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
+        .accessibilityHint("Controls whether this tool is sent to the AI")
     }
 }

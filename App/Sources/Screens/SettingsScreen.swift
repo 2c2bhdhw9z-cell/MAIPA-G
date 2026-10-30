@@ -72,6 +72,7 @@ struct SettingsScreen: View {
             }
             .onChange(of: draft) { _, edited in
                 guard loaded else { return }
+                let disabledAutonomous = app.settings.autonomousEnabled && !edited.autonomousEnabled
                 app.updateSettings { settings in
                     settings.appearance = edited.appearance
                     settings.accent = edited.accent
@@ -81,14 +82,20 @@ struct SettingsScreen: View {
                     settings.notificationsOn = edited.notificationsOn
                     settings.directSaveRepos = edited.directSaveRepos
                     settings.workflowPolicy = edited.workflowPolicy
+                    settings.autonomousEnabled = edited.autonomousEnabled
                     settings.memoriesOn = edited.memoriesOn
                     settings.chatComputerServer = edited.chatComputerServer
                     settings.chatComputerOff = edited.chatComputerOff
                     settings.chatComputerMachine = edited.chatComputerMachine
                 }
+                if disabledAutonomous {
+                    app.home.autonomous = false
+                    Task { await app.jobs.cleanupAllAutonomousSecrets() }
+                }
             }
             .task {
                 await app.openRouter.refreshKeyInfo()
+                await app.github.refreshActionsBilling()
                 copiesSize = await app.snapshots.diskUsage()
             }
             .confirmationDialog("Disconnect GitHub?", isPresented: $confirmDisconnect, titleVisibility: .visible) {
@@ -222,6 +229,7 @@ struct SettingsScreen: View {
 
     private var workflowPolicy: some View {
         Section {
+            Toggle("Autonomous enabled", isOn: $draft.autonomousEnabled)
             Picker("Use Autonomous", selection: $draft.workflowPolicy) {
                 ForEach(WorkflowPolicy.allCases) { policy in Text(policy.label).tag(policy) }
             }
@@ -371,6 +379,19 @@ struct SettingsScreen: View {
                 Spacer()
                 Text(saveStatus).foregroundStyle(Theme.secondaryText)
             }
+            if let billing = app.github.actionsBilling {
+                HStack {
+                    Text("Private Actions minutes")
+                    Spacer()
+                    Text("\(billing.includedMinutesRemaining) left")
+                        .foregroundStyle(billing.includedMinutesRemaining < 200 ? .orange : Theme.secondaryText)
+                }
+                if billing.includedMinutesRemaining < 200 {
+                    Text("GitHub’s included private-repo minutes are running low.").font(.footnote).foregroundStyle(.orange)
+                }
+            } else if let error = app.github.actionsBillingError {
+                Text("Actions minutes: \(error)").font(.footnote).foregroundStyle(Theme.secondaryText)
+            }
             if case .failed(let message) = app.sync.status {
                 Text(message).font(.footnote).foregroundStyle(Theme.danger)
             }
@@ -381,6 +402,10 @@ struct SettingsScreen: View {
                         .font(.caption)
                         .foregroundStyle(Theme.danger)
                 }
+            }
+            if let error = app.jobs.lastError, error.contains("secret cleanup") {
+                Text(error).font(.footnote).foregroundStyle(Theme.danger)
+                Button("Retry Autonomous cleanup") { Task { await app.jobs.retryPendingSecretCleanup() } }
             }
             if app.github.isConnected {
                 Button("Save now") { Task { await app.sync.syncNow() } }
@@ -457,6 +482,12 @@ struct SettingsScreen: View {
                 detail("OpenRouter key", app.openRouter.keyInfo?.label ?? (app.openRouter.isSignedIn ? "signed in" : "none"))
                 detail("iPhone's own AI", OnDeviceAI.status)
                 detail("Repo copies", copiesSize.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "…")
+                if let failure = app.backgroundJobs.lastFailure {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Background task")
+                        Text(failure).font(.caption).foregroundStyle(Theme.danger)
+                    }
+                }
                 Button("Clear repo copies") {
                     Task {
                         await app.snapshots.removeAll()

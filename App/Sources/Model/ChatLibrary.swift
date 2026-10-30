@@ -62,26 +62,13 @@ final class ChatLibrary {
 
     func load() async {
         let chats = await store.loadAll()
-        var fixed: [Chat] = []
-        for var chat in chats {
-            // A reply that was mid-way when the app last closed can't carry on by itself.
-            if var turn = chat.lastAssistantTurn, turn.status == .running {
-                turn.status = .stopped
-                turn.notices.append("The app closed before this reply finished.")
-                for stepIndex in turn.steps.indices {
-                    for callIndex in turn.steps[stepIndex].toolCalls.indices where turn.steps[stepIndex].toolCalls[callIndex].status == .running {
-                        turn.steps[stepIndex].toolCalls[callIndex].status = .failed
-                    }
-                    if turn.steps[stepIndex].finishedAt == nil { turn.steps[stepIndex].finishedAt = Date() }
-                }
-                chat.messages[chat.messages.count - 1].assistantTurn = turn
-                fixed.append(chat)
-            }
-        }
-        for chat in fixed { try? await store.save(chat) }
-        let fixedIDs = Dictionary(fixed.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        summaries = chats.map { ChatSummary(fixedIDs[$0.id] ?? $0) }.sorted { $0.updatedAt > $1.updatedAt }
+        summaries = chats.map(ChatSummary.init).sorted { $0.updatedAt > $1.updatedAt }
         isLoaded = true
+        for chat in chats where chat.lastAssistantTurn?.status == .running {
+            let session = ChatSession(chat: chat, app: app, draft: await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: chat.id.uuidString.lowercased())))
+            sessions[chat.id] = session
+            session.resumeInterruptedTurn()
+        }
     }
 
     /// After a save brought chats from GitHub: refreshes the list, and any open chat that isn't busy.

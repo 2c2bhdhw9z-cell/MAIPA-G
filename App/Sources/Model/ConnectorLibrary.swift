@@ -257,10 +257,19 @@ final class ConnectorLibrary {
         return String(decoding: data, as: UTF8.self)
     }
 
+    func setTool(_ name: String, enabled: Bool, for configuration: ConnectorConfiguration) async {
+        var copy = configuration
+        if enabled { copy.disabledTools.remove(name) }
+        else { copy.disabledTools.insert(name) }
+        await save(copy)
+    }
+
     func agentTools() -> [any AgentTool] {
         connected.flatMap { configuration -> [any AgentTool] in
             guard states[configuration.id] == .connected, let session = sessions[configuration.id] else { return [] }
-            return (toolDefinitions[configuration.id] ?? []).map { MCPTool(definition: $0, session: session) }
+            return (toolDefinitions[configuration.id] ?? [])
+                .filter { !configuration.disabledTools.contains($0.originalName) }
+                .map { MCPTool(definition: $0, session: session) }
         }
     }
 

@@ -77,6 +77,8 @@ struct AppSettings: Codable, Equatable, Sendable {
     var directSaveRepos: [String: Bool] = [:]
     /// When work moves to an Autonomous GitHub runner. Big jobs too is the factory default.
     var workflowPolicy: WorkflowPolicy = .bigJobs
+    /// Global Autonomous switch. Turning it off removes MAIPA-G-managed Actions secrets.
+    var autonomousEnabled = true
     /// Master switch for adding enabled memories to newly started chats.
     var memoriesOn = true
     /// The connector (its serverID) that gives chats a Linux computer to run commands on. Nil is
@@ -102,6 +104,7 @@ struct AppSettings: Codable, Equatable, Sendable {
         notificationsOn = try c.decodeIfPresent(Bool.self, forKey: .notificationsOn) ?? true
         directSaveRepos = try c.decodeIfPresent([String: Bool].self, forKey: .directSaveRepos) ?? [:]
         workflowPolicy = (try? c.decodeIfPresent(WorkflowPolicy.self, forKey: .workflowPolicy)) ?? .bigJobs
+        autonomousEnabled = try c.decodeIfPresent(Bool.self, forKey: .autonomousEnabled) ?? true
         memoriesOn = try c.decodeIfPresent(Bool.self, forKey: .memoriesOn) ?? true
         chatComputerServer = try? c.decodeIfPresent(String.self, forKey: .chatComputerServer)
         chatComputerOff = (try? c.decodeIfPresent(Bool.self, forKey: .chatComputerOff)) ?? false

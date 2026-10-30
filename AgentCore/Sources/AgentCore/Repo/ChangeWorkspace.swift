@@ -16,6 +16,32 @@ public actor ChangeWorkspace {
 
     public init(base: RepoWorkspace) { self.base = base }
 
+    public func stagedDiff() async -> String {
+        guard !changes.isEmpty else { return "No staged changes." }
+        var sections: [String] = []
+        for change in changes.values.sorted(by: { $0.path < $1.path }) {
+            switch change {
+            case .delete(let path, let previous):
+                let old = TextFileCodec.decode(previous)?.text ?? "[binary content]"
+                sections.append("--- a/\(path)\n+++ /dev/null\n" + old.split(separator: "\n", omittingEmptySubsequences: false).map { "-" + $0 }.joined(separator: "\n"))
+            case .write(let path, let data, let existed):
+                let new = TextFileCodec.decode(data)?.text ?? "[binary content]"
+                let old: String
+                if existed {
+                    let read = try? await base.readDecodedFile(path)
+                    if case .text(let document, _)? = read { old = document.text }
+                    else { old = "" }
+                } else {
+                    old = ""
+                }
+                let removed = old.split(separator: "\n", omittingEmptySubsequences: false).map { "-" + $0 }
+                let added = new.split(separator: "\n", omittingEmptySubsequences: false).map { "+" + $0 }
+                sections.append("--- \(existed ? "a/\(path)" : "/dev/null")\n+++ b/\(path)\n" + (removed + added).joined(separator: "\n"))
+            }
+        }
+        return String(sections.joined(separator: "\n\n").prefix(200_000))
+    }
+
     public func stagedChanges() -> [StagedChange] { changes.values.sorted { $0.path < $1.path } }
     public func discardAll() { changes.removeAll() }
 
