@@ -231,6 +231,9 @@ public struct ProcessTool: AgentTool {
             "properties": [
                 "command": ["type": "string"],
                 "timeout_seconds": ["type": "integer", "minimum": 1, "maximum": 900],
+                "background": ["type": "boolean", "description": "Keep a long command running and return a task id."],
+                "operation": ["type": "string", "enum": ["run", "status", "stop"]],
+                "task_id": ["type": "string"],
             ],
             "required": ["command"],
             "additionalProperties": false,
@@ -249,20 +252,42 @@ public struct ProcessTool: AgentTool {
     public func runningSummary(for arguments: JSONValue) -> String { "Running a command…" }
 
     public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
+        if let operation = arguments.optionalString("operation"), operation != "run" { return nil }
         guard let command = arguments.optionalString("command"), Self.needsApproval(command) else { return nil }
         return ToolApprovalRequest(question: "Allow MAIPA-G to run this command? It may execute code or change files.\n\(String(command.prefix(500)))")
     }
 
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        if let control = try await control(arguments) { return control }
         let command = try arguments.requiredString("command")
         if Self.needsApproval(command) {
             throw ToolApprovalRequired(ToolApprovalRequest(question: "Allow MAIPA-G to run this command? It may execute code or change files.\n\(String(command.prefix(500)))"))
         }
-        return try await execute(arguments: arguments, approved: false, progress: progress)
+        return try await runOrBackground(arguments: arguments, approved: false, progress: progress)
     }
 
     public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
-        try await execute(arguments: arguments, approved: true, progress: progress)
+        if let control = try await control(arguments) { return control }
+        return try await runOrBackground(arguments: arguments, approved: true, progress: progress)
+    }
+
+    private func control(_ arguments: JSONValue) async throws -> ToolOutput? {
+        switch arguments.optionalString("operation") ?? "run" {
+        case "run": return nil
+        case "status": return await BackgroundCommandRegistry.shared.status(try arguments.requiredString("task_id"))
+        case "stop": return await BackgroundCommandRegistry.shared.stop(try arguments.requiredString("task_id"))
+        default: throw ToolInputError("Unknown command operation.")
+        }
+    }
+
+    private func runOrBackground(arguments: JSONValue, approved: Bool, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        if arguments["background"]?.boolValue == true {
+            let id = await BackgroundCommandRegistry.shared.start {
+                try await execute(arguments: arguments, approved: approved, progress: { _ in })
+            }
+            return ToolOutput(forModel: "Background command started with task id \(id). Use run_shell operation status or stop with this task_id.", summary: "Started background command")
+        }
+        return try await execute(arguments: arguments, approved: approved, progress: progress)
     }
 
     static func needsApproval(_ command: String) -> Bool {
