@@ -214,6 +214,37 @@ public struct GitHubClient: Sendable {
         try await send("GET", Self.path(repo, "/git/blobs/\(sha)"), accept: "application/vnd.github.raw+json").body
     }
 
+    /// The real content behind a Git LFS pointer, through GitHub's LFS batch API. The app's
+    /// token goes only to github.com; the storage address gets only the headers GitHub returns.
+    /// The bytes must match the pointer's SHA-256 and size exactly.
+    public func lfsObject(_ repo: RepoRef, pointer: GitLFSPointer) async throws -> Data {
+        guard let tokens else { throw GitLFSError.notSignedIn }
+        let token = try await tokens.installationToken()
+        let credential = Data("x-access-token:\(token)".utf8).base64EncodedString()
+        guard let batchURL = URL(string: "https://github.com/\(Self.escape(repo.owner))/\(Self.escape(repo.name)).git/info/lfs/objects/batch") else { throw GitLFSError.badResponse }
+        let body: JSONValue = ["operation": "download", "transfers": ["basic"], "objects": [["oid": .string(pointer.oid), "size": .number(Double(pointer.size))]]]
+        let batch = try await transport.send(HTTPRequest(
+            method: "POST", url: batchURL,
+            headers: ["Accept": "application/vnd.git-lfs+json", "Content-Type": "application/vnd.git-lfs+json", "Authorization": "Basic \(credential)"],
+            body: try JSONCoding.encoder().encode(body), idleTimeout: 60, followsRedirects: false
+        ))
+        guard batch.isSuccess, let answer = JSONValue.parse(batch.body), let object = answer["objects"]?.arrayValue?.first else {
+            throw GitLFSError.unavailable(batch.status)
+        }
+        if let message = object["error"]?["message"]?.stringValue { throw GitLFSError.refused(message) }
+        guard let href = object["actions"]?["download"]?["href"]?.stringValue, let url = URL(string: href), url.scheme == "https" else {
+            throw GitLFSError.badResponse
+        }
+        var headers: [String: String] = [:]
+        for (key, value) in object["actions"]?["download"]?["header"]?.objectValue ?? [:] {
+            if let text = value.stringValue { headers[key] = text }
+        }
+        let download = try await transport.send(HTTPRequest(method: "GET", url: url, headers: headers, body: nil, idleTimeout: 120))
+        guard download.isSuccess else { throw GitLFSError.unavailable(download.status) }
+        guard download.body.count == pointer.size, Hashing.sha256Hex(download.body) == pointer.oid else { throw GitLFSError.checksumMismatch }
+        return download.body
+    }
+
     /// A file's bytes at a commit or branch.
     public func fileContents(_ repo: RepoRef, path: String, ref: String) async throws -> Data {
         try await send("GET", Self.path(repo, "/contents/\(Self.escapePath(path))"), query: ["ref": ref], accept: "application/vnd.github.raw+json").body
@@ -416,4 +447,76 @@ struct AnyKey: CodingKey {
 
 extension CodingUserInfoKey {
     static let paginationKey = CodingUserInfoKey(rawValue: "maipag.paginationKey")!
+}
+
+/// A Git LFS pointer file: the repo stores this small text instead of the real big file.
+public struct GitLFSPointer: Sendable, Hashable {
+    public var oid: String
+    public var size: Int
+
+    public static func parse(_ data: Data) -> GitLFSPointer? {
+        guard data.count < 1_024, let text = String(data: data, encoding: .utf8), text.hasPrefix("version https://git-lfs.github.com/spec/v1") else { return nil }
+        var oid: String?
+        var size: Int?
+        for line in text.split(separator: "\n") {
+            if line.hasPrefix("oid sha256:") { oid = String(line.dropFirst("oid sha256:".count)).trimmingCharacters(in: .whitespaces) }
+            if line.hasPrefix("size ") { size = Int(line.dropFirst(5).trimmingCharacters(in: .whitespaces)) }
+        }
+        guard let oid, oid.count == 64, oid.allSatisfy(\.isHexDigit), let size, size >= 0 else { return nil }
+        return GitLFSPointer(oid: oid.lowercased(), size: size)
+    }
+}
+
+public enum GitLFSError: Error, Sendable, CustomStringConvertible, Equatable {
+    case notSignedIn, unavailable(Int), refused(String), badResponse, checksumMismatch, tooLarge(Int)
+
+    public var description: String {
+        switch self {
+        case .notSignedIn: "Connect GitHub to download Git LFS files."
+        case .unavailable(let status): "GitHub's Git LFS storage answered HTTP \(status)."
+        case .refused(let message): "GitHub's Git LFS storage refused the file: \(message)"
+        case .badResponse: "GitHub's Git LFS answer couldn't be read."
+        case .checksumMismatch: "The Git LFS download didn't match the file's recorded checksum, so it wasn't used."
+        case .tooLarge(let bytes): "This Git LFS file is \(bytes / 1_048_576) MB, more than MAIPA-G reads at once."
+        }
+    }
+}
+
+/// Where a submodule's files come from, from the repo's .gitmodules.
+public enum GitSubmodules {
+    public struct Module: Sendable, Hashable { public var path: String; public var repo: RepoRef }
+
+    public static func parse(_ text: String, parent: RepoRef) -> [Module] {
+        var modules: [Module] = []
+        var path: String?
+        var url: String?
+        func flush() {
+            if let path, let url, let repo = githubRepo(from: url, parent: parent) { modules.append(Module(path: path, repo: repo)) }
+            path = nil; url = nil
+        }
+        for raw in text.split(whereSeparator: \.isNewline) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[submodule") { flush(); continue }
+            let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            guard parts.count == 2 else { continue }
+            if parts[0] == "path" { path = parts[1] }
+            if parts[0] == "url" { url = parts[1] }
+        }
+        flush()
+        return modules
+    }
+
+    static func githubRepo(from url: String, parent: RepoRef) -> RepoRef? {
+        var rest: Substring
+        if url.hasPrefix("https://github.com/") { rest = url.dropFirst("https://github.com/".count) }
+        else if url.hasPrefix("git@github.com:") { rest = url.dropFirst("git@github.com:".count) }
+        else if url.hasPrefix("../") {
+            let name = url.dropFirst(3)
+            rest = Substring("\(parent.owner)/\(name)")
+        } else { return nil }
+        if rest.hasSuffix(".git") { rest = rest.dropLast(4) }
+        let pieces = rest.split(separator: "/").map(String.init)
+        guard pieces.count == 2, pieces.allSatisfy({ !$0.isEmpty && $0 != ".." }) else { return nil }
+        return RepoRef(owner: pieces[0], name: pieces[1])
+    }
 }

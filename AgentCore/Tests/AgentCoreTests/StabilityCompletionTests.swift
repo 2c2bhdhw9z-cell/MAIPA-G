@@ -538,4 +538,71 @@ struct StabilityCompletionTests {
         await #expect(throws: ToolApprovalRequired.self) { _ = try await tool.run(arguments: ["operation": "start", "command": "rm -rf build"]) { _ in } }
         await #expect(throws: ComputerControl.Failure.self) { _ = try await control.backgroundStatus("../../etc") }
     }
+
+    struct FixedTokens: GitHubTokenProvider {
+        func installationToken() async throws -> String { "ghs_installation_secret" }
+        func userToken() async throws -> String { "ghu_user_secret" }
+    }
+
+    final class LFSServer: HTTPTransport, @unchecked Sendable {
+        let lock = NSLock()
+        var requests: [HTTPRequest] = []
+        let content: Data
+        init(content: Data) { self.content = content }
+        func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+            lock.withLock { requests.append(request) }
+            if request.url.host == "github.com", request.url.path == "/me/game.git/info/lfs/objects/batch" {
+                let body = #"{"objects":[{"oid":"x","size":1,"actions":{"download":{"href":"https://lfs-storage.example/obj","header":{"Authorization":"RemoteAuth storage-only"}}}}]}"#
+                return HTTPResponse(status: 200, headers: [:], body: Data(body.utf8))
+            }
+            if request.url.host == "lfs-storage.example" { return HTTPResponse(status: 200, headers: [:], body: content) }
+            return HTTPResponse(status: 404)
+        }
+        func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse { throw HTTPError.transport("no streams", isOffline: false) }
+    }
+
+    // Stability 29: big repos: Git LFS pointers become the real file (checked against its
+    // SHA-256 and size, token kept to github.com), and submodule sources are found on GitHub.
+    @Test func S29_gitLFSFilesAndSubmodulesAreReadFromTheirRealSource() async throws {
+        let real = Data("sprite sheet bytes \u{1F47E}".utf8)
+        let oid = Hashing.sha256Hex(real)
+        let pointerText = "version https://git-lfs.github.com/spec/v1\noid sha256:\(oid)\nsize \(real.count)\n"
+        let pointer = try #require(GitLFSPointer.parse(Data(pointerText.utf8)))
+        #expect(pointer.oid == oid && pointer.size == real.count)
+        #expect(GitLFSPointer.parse(Data("hello".utf8)) == nil)
+        #expect(GitLFSPointer.parse(Data("version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 3\n".utf8)) == nil)
+
+        let server = LFSServer(content: real)
+        let github = GitHubClient(transport: server, tokens: FixedTokens())
+        let repo = RepoRef(owner: "me", name: "game")
+        #expect(try await github.lfsObject(repo, pointer: pointer) == real)
+        let batch = try #require(server.requests.first { $0.url.host == "github.com" })
+        #expect(batch.headers["Authorization"] == "Basic " + Data("x-access-token:ghs_installation_secret".utf8).base64EncodedString())
+        let download = try #require(server.requests.first { $0.url.host == "lfs-storage.example" })
+        #expect(download.headers["Authorization"] == "RemoteAuth storage-only")
+        #expect(!download.headers.values.contains { $0.contains("ghs_installation_secret") })
+
+        let tampered = GitHubClient(transport: LFSServer(content: Data("something else".utf8)), tokens: FixedTokens())
+        await #expect(throws: GitLFSError.checksumMismatch) { _ = try await tampered.lfsObject(repo, pointer: pointer) }
+
+        let modules = GitSubmodules.parse("""
+        [submodule "engine"]
+        \tpath = vendor/engine
+        \turl = https://github.com/someone/engine.git
+        [submodule "art"]
+        \tpath = art
+        \turl = ../game-art.git
+        [submodule "ssh"]
+        \tpath = tools
+        \turl = git@github.com:someone/tools.git
+        [submodule "elsewhere"]
+        \tpath = lib
+        \turl = https://gitlab.com/x/lib.git
+        """, parent: repo)
+        #expect(modules == [
+            .init(path: "vendor/engine", repo: RepoRef(owner: "someone", name: "engine")),
+            .init(path: "art", repo: RepoRef(owner: "me", name: "game-art")),
+            .init(path: "tools", repo: RepoRef(owner: "someone", name: "tools")),
+        ])
+    }
 }
