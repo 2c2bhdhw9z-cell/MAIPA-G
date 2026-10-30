@@ -41,10 +41,11 @@ struct MemoryEditorScreen: View {
             enabled = record?.isEnabled ?? true
             loaded = true
         }
-        .confirmationDialog("Delete this memory?", isPresented: $confirmDelete, titleVisibility: .visible) {
+        .alert("Delete this memory?", isPresented: $confirmDelete) {
             Button("Delete", role: .destructive) {
                 if let record { Task { await app.memories.delete(record.id); dismiss() } }
             }
+            Button("Cancel", role: .cancel) {}
         }
     }
 

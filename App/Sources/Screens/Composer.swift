@@ -54,7 +54,7 @@ struct Composer: View {
     @FocusState private var focused: Bool
     @Environment(AppModel.self) private var app
     @Environment(\.theme) private var theme
-    @State private var photoItem: PhotosPickerItem?
+    @State private var photoItems: [PhotosPickerItem] = []
     @State private var choosingPhoto = false
     @State private var takingPhoto = false
     @State private var importError: String?
@@ -166,7 +166,13 @@ struct Composer: View {
                 }
             }
         }
-        .photosPicker(isPresented: $choosingPhoto, selection: $photoItem, matching: .images)
+        .photosPicker(
+            isPresented: $choosingPhoto,
+            selection: $photoItems,
+            maxSelectionCount: 20,
+            selectionBehavior: .ordered,
+            matching: .images
+        )
         .fullScreenCover(isPresented: $takingPhoto) {
             CameraPicker(isPresented: $takingPhoto) { data in
                 Task {
@@ -176,12 +182,26 @@ struct Composer: View {
             }
             .ignoresSafeArea()
         }
-        .onChange(of: photoItem) { _, item in
-            guard let item else { return }
+        .onChange(of: photoItems) { _, items in
+            guard !items.isEmpty else { return }
+            photoItems = []
             Task {
-                do { attachments.append(try await AttachmentImporter.importPhoto(item, store: app.attachmentStore)) }
-                catch { importError = "Couldn't add that photo." }
-                photoItem = nil
+                let existingPhotos = attachments.filter { $0.kind == .image }.count
+                let shouldNumber = items.count > 1 || existingPhotos > 0
+                var failed = 0
+                var nextNumber = existingPhotos + 1
+                for item in items {
+                    let baseName = shouldNumber ? "Photo \(nextNumber)" : nil
+                    do {
+                        attachments.append(try await AttachmentImporter.importPhoto(item, baseName: baseName, store: app.attachmentStore))
+                        nextNumber += 1
+                    } catch {
+                        failed += 1
+                    }
+                }
+                if failed > 0 {
+                    importError = failed == 1 ? "Couldn't add 1 photo." : "Couldn't add \(failed) photos."
+                }
             }
         }
         .alert("Attachment", isPresented: Binding(get: { importError != nil }, set: { if !$0 { importError = nil } })) {
@@ -346,10 +366,21 @@ struct Composer: View {
     private func pickFile() {
         focused = false
         AttachmentFilePicker.shared.present(
-            onPick: { data, name in
+            onPick: { files in
                 Task {
-                    do { attachments.append(try await AttachmentImporter.importFile(data, name: name, store: app.attachmentStore)) }
-                    catch { importError = "Couldn't add that file." }
+                    var failures: [String] = []
+                    for (data, name) in files {
+                        do {
+                            attachments.append(try await AttachmentImporter.importFile(data, name: name, store: app.attachmentStore))
+                        } catch let error as AttachmentImporter.Failure {
+                            failures.append("\(name): \(error.localizedDescription)")
+                        } catch {
+                            failures.append("Couldn't add \(name).")
+                        }
+                    }
+                    if !failures.isEmpty {
+                        importError = failures.joined(separator: "\n")
+                    }
                 }
             },
             onFailure: { importError = $0 }

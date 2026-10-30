@@ -44,7 +44,7 @@ struct UnreadableFilesScreen: View {
                 }
             }
             .task { reload() }
-            .confirmationDialog("Delete this unreadable file?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
+            .alert("Delete this unreadable file?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
                 Button("Delete", role: .destructive) {
                     guard let record = deleting else { return }
                     deleting = nil

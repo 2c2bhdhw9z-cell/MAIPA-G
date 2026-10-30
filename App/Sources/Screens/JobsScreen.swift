@@ -17,6 +17,7 @@ struct JobsScreen: View {
                         NavigationLink(value: job.id) { JobRow(job: job) }
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                 Button(role: .destructive) { askToDelete(job) } label: { Label("Delete", systemImage: "trash") }
+                                    .tint(Theme.danger)
                             }
                             .contextMenu {
                                 Button(role: .destructive) { askToDelete(job) } label: { Label("Delete job", systemImage: "trash") }
@@ -35,7 +36,7 @@ struct JobsScreen: View {
             }
             .refreshable { await app.jobs.refresh() }
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-            .confirmationDialog("Delete this job?", isPresented: $showsDelete, titleVisibility: .visible) {
+            .alert("Delete this job?", isPresented: $showsDelete) {
                 Button("Delete job", role: .destructive) {
                     if let id = deletingJob?.id { Task { await app.jobs.delete(id) } }
                 }
@@ -204,7 +205,7 @@ struct JobDetailScreen: View {
         .navigationTitle(current.title)
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await app.jobs.refresh() }
-        .confirmationDialog("Delete this job?", isPresented: $showsDelete, titleVisibility: .visible) {
+        .alert("Delete this job?", isPresented: $showsDelete) {
             Button("Delete job", role: .destructive) {
                 Task {
                     await app.jobs.delete(current.id)

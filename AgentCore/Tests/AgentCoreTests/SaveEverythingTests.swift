@@ -273,6 +273,10 @@ struct SpritesToolTests {
         #expect(ComputerControl.setupPausesWhenIdle(running + "maipa-g-tools-sleeps\n"))
         let wrapped = #"{"exit_code":0,"stdout":"maipa-g-health-ok\nLinux x86_64\nmaipa-g-tools-ready\nmaipa-g-tools-failed: Swift, .NET\n"}"#
         #expect(ComputerControl.toolState(wrapped) == .ready && ComputerControl.failedTools(wrapped) == "Swift, .NET")
+        let nestedWrapped = #"{"result":{"exitCode":0,"stdout":"maipa-g-health-ok\nLinux x86_64\nmaipa-g-tools-installing\nmaipa-g-tools-step: Node.js v26.13.0\nmaipa-g-tools-sleeps\n"}}"#
+        #expect(ComputerControl.toolState(nestedWrapped) == .installing)
+        #expect(ComputerControl.setupStep(nestedWrapped) == "Node.js v26.13.0")
+        #expect(ComputerControl.setupPausesWhenIdle(nestedWrapped))
         #expect(ComputerControl.failedTools("maipa-g-health-ok\nmaipa-g-tools-ready\n") == nil)
         // A rerun after a finished run reports that it is installing again.
         #expect(ComputerControl.healthCommand.range(of: "maipa-g-tools-installing")!.lowerBound < ComputerControl.healthCommand.range(of: "maipa-g-tools-ready")!.lowerBound)

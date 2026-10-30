@@ -26,8 +26,9 @@ struct GroupPicker: View {
                                 if current == group.id { Image(systemName: "checkmark") }
                             }
                         }
-                        .swipeActions {
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                             Button(role: .destructive) { deleting = group } label: { Label("Delete", systemImage: "trash") }
+                                .tint(Theme.danger)
                             Button { editing = group; name = group.name } label: { Label("Rename", systemImage: "pencil") }.tint(.gray)
                         }
                     }
@@ -59,11 +60,12 @@ struct GroupPicker: View {
                 }
                 Button("Cancel", role: .cancel) { editing = nil; name = "" }
             }
-            .confirmationDialog("Delete this group?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
+            .alert("Delete this group?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
                 Button("Delete group", role: .destructive) {
                     if let deleting { Task { await app.groups.delete(deleting.id) } }
                     deleting = nil
                 }
+                Button("Cancel", role: .cancel) { deleting = nil }
             } message: { Text("The chats stay in Chats. Only the group is removed.") }
         }
     }

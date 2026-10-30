@@ -36,8 +36,9 @@ struct MemoriesScreen: View {
                             .foregroundStyle(Theme.secondaryText)
                         }
                     }
-                    .swipeActions {
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button(role: .destructive) { deleting = memory } label: { Label("Delete", systemImage: "trash") }
+                            .tint(Theme.danger)
                         Button { Task { await app.memories.setEnabled(memory.id, !memory.isEnabled) } } label: {
                             Label(memory.isEnabled ? "Turn off" : "Turn on", systemImage: memory.isEnabled ? "pause" : "play")
                         }
@@ -54,7 +55,7 @@ struct MemoriesScreen: View {
                 ToolbarItem(placement: .primaryAction) { NavigationLink { MemoryEditorScreen() } label: { Image(systemName: "plus") } }
             }
             .task { await app.memories.load() }
-            .confirmationDialog("Delete this memory?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
+            .alert("Delete this memory?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
                 Button("Delete", role: .destructive) {
                     if let deleting { Task { await app.memories.delete(deleting.id) } }
                     deleting = nil

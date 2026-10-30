@@ -25,10 +25,11 @@ enum AttachmentImporter {
         }
     }
 
-    static func importPhoto(_ item: PhotosPickerItem, store: AttachmentStore) async throws -> AttachmentReference {
+    static func importPhoto(_ item: PhotosPickerItem, baseName: String? = nil, store: AttachmentStore) async throws -> AttachmentReference {
         guard let data = try await item.loadTransferable(type: Data.self) else { throw CocoaError(.fileReadUnknown) }
         let shrunk = try shrinkImage(data)
-        return try await store.importData(shrunk.data, name: "Photo.\(shrunk.extension)", mimeType: shrunk.mimeType, kind: .image)
+        let prefix = baseName ?? "Photo"
+        return try await store.importData(shrunk.data, name: "\(prefix).\(shrunk.extension)", mimeType: shrunk.mimeType, kind: .image)
     }
 
     static func importCameraPhoto(_ data: Data, store: AttachmentStore) async throws -> AttachmentReference {

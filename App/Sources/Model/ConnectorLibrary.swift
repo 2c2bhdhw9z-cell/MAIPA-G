@@ -19,6 +19,7 @@ final class ConnectorLibrary {
     @ObservationIgnored private let cacheURL: URL
     @ObservationIgnored private let store: ProductStore<ConnectorRecord>
     @ObservationIgnored private var sessions: [UUID: MCPConnectorSession] = [:]
+    @ObservationIgnored private var setupKeepAwakeTask: Task<Void, Never>?
 
     init(transport: any HTTPTransport, paths: AppPaths) {
         self.transport = transport; cacheURL = paths.connectorCatalogue
@@ -30,6 +31,11 @@ final class ConnectorLibrary {
         connected = await store.loadAll().compactMap(Self.configuration).sorted { $0.displayName < $1.displayName }
         for configuration in connected where configuration.kind == .remote { await restore(configuration) }
         if catalog.isEmpty { await search() }
+        if !PreviewScenes.isActive, app?.settings.chatComputerOff == false,
+           let control = computerControl(),
+           !UserDefaults.standard.bool(forKey: Self.toolsReadyDefaultsKey(control.machine)) {
+            keepComputerAwakeDuringSetup()
+        }
     }
 
     func search(reset: Bool = true) async {
@@ -309,6 +315,38 @@ final class ConnectorLibrary {
         guard let configuration = computerConnector(), let session = sessions[configuration.id], let machine = app?.settings.chatComputerMachineName else { return nil }
         return ComputerControl(tools: toolDefinitions[configuration.id] ?? [], machine: machine) { name, arguments in
             try await session.call(tool: name, arguments: arguments)
+        }
+    }
+
+    static func toolsReadyDefaultsKey(_ machine: String) -> String { "computerToolsReady.\(machine)" }
+
+    /// Sprites pause about 30 seconds after the last request from outside unless held awake. When
+    /// the machine's own local keep-awake hold isn't supported yet, MAIPA-G pings its health check
+    /// every 20 seconds while setup is running (capped at 45 minutes) so installation finishes
+    /// cleanly and stops pinging the moment `~/.maipa-g/ready` appears.
+    func keepComputerAwakeDuringSetup(resetReadyCache: Bool = false) {
+        if resetReadyCache, let machine = app?.settings.chatComputerMachineName {
+            UserDefaults.standard.removeObject(forKey: Self.toolsReadyDefaultsKey(machine))
+        }
+        guard setupKeepAwakeTask == nil, !PreviewScenes.isActive else { return }
+        setupKeepAwakeTask = Task { @MainActor [weak self] in
+            defer { self?.setupKeepAwakeTask = nil }
+            let deadline = Date().addingTimeInterval(45 * 60)
+            while !Task.isCancelled, Date() < deadline {
+                guard let self, self.app?.settings.chatComputerOff == false,
+                      let control = self.computerControl(), control.commandTool != nil else { return }
+                do {
+                    let output = try await control.healthCheck()
+                    let state = ComputerControl.toolState(output)
+                    if state == .ready, ComputerControl.failedTools(output) == nil {
+                        UserDefaults.standard.set(true, forKey: Self.toolsReadyDefaultsKey(control.machine))
+                    }
+                    guard state == .installing else { return }
+                } catch {
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+            }
         }
     }
 

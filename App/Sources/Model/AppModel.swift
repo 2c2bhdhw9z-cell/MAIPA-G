@@ -20,8 +20,10 @@ enum AppSheet: Identifiable, Hashable {
     case files(ChatRepo, ComposerTarget)
     case jobs
     case agents
+    case agentDetail(String)
     case agentEditor(String?)
     case workflows
+    case workflowDetail(String)
     case workflowEditor(String?)
     case workflowMaker
     case memories
@@ -50,8 +52,10 @@ enum AppSheet: Identifiable, Hashable {
         case .files(let repo, let target): return "files-\(repo.ref.fullName)-\(repo.branch)-\(target)"
         case .jobs: return "jobs"
         case .agents: return "agents"
+        case .agentDetail(let id): return "agent-detail-\(id)"
         case .agentEditor(let id): return "agent-editor-\(id ?? "new")"
         case .workflows: return "workflows"
+        case .workflowDetail(let id): return "workflow-detail-\(id)"
         case .workflowEditor(let id): return "workflow-editor-\(id ?? "new")"
         case .workflowMaker: return "workflow-maker"
         case .memories: return "memories"

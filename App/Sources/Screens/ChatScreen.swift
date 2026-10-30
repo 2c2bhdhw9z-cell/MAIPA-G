@@ -171,7 +171,7 @@ struct ChatScreen: View {
                 }
             }
         }
-        .confirmationDialog("Checks did not pass", isPresented: Binding(get: { session.mergeWarning != nil }, set: { if !$0 { session.cancelMergeWarning() } }), titleVisibility: .visible) {
+        .alert("Checks did not pass", isPresented: Binding(get: { session.mergeWarning != nil }, set: { if !$0 { session.cancelMergeWarning() } })) {
             Button("Add it anyway", role: .destructive) { Task { await session.addLastSave(force: true) } }
             Button("Cancel", role: .cancel) { session.cancelMergeWarning() }
         } message: { Text(session.mergeWarning ?? "") }

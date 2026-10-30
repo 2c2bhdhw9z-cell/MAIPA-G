@@ -22,8 +22,9 @@ struct SpecReviewScreen: View {
                             } label: { Image(systemName: "ellipsis.circle") }
                         }
                     }
-                    .confirmationDialog("Delete this spec record?", isPresented: $confirmDelete, titleVisibility: .visible) {
+                    .alert("Delete this spec record?", isPresented: $confirmDelete) {
                         Button("Delete", role: .destructive) { Task { await app.specs.delete(spec.id) } }
+                        Button("Cancel", role: .cancel) {}
                     } message: { Text("Files already saved in the project repo are left alone.") }
             } else {
                 ProgressView().task { await app.specs.load() }

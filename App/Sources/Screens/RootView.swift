@@ -123,6 +123,14 @@ struct SheetContent: View {
         case .files(let repo, let target): FilesScreen(repo: repo, target: target)
         case .jobs: JobsScreen()
         case .agents: AgentsScreen()
+        case .agentDetail(let id):
+            NavigationStack {
+                if let agent = app.automations.agents.first(where: { $0.id == id }) {
+                    AgentDetailScreen(agent: agent, standalone: true)
+                } else {
+                    ContentUnavailableView("Agent not found", systemImage: "person.crop.circle.badge.exclamationmark")
+                }
+            }
         case .agentEditor(let id):
             NavigationStack {
                 AgentEditorScreen(
@@ -131,6 +139,14 @@ struct SheetContent: View {
                 )
             }
         case .workflows: WorkflowsScreen()
+        case .workflowDetail(let id):
+            NavigationStack {
+                if let workflow = app.automations.workflows.first(where: { $0.id == id }) {
+                    WorkflowDetailScreen(workflow: workflow, standalone: true)
+                } else {
+                    ContentUnavailableView("Workflow not found", systemImage: "list.number")
+                }
+            }
         case .workflowEditor(let id):
             NavigationStack {
                 WorkflowEditorScreen(

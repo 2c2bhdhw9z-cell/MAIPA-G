@@ -64,7 +64,15 @@ final class JobCoordinator {
 
     @discardableResult
     func start(request: String, repo: ChatRepo, workflow: WorkflowDefinition? = nil, additionalState: [String: JSONValue] = [:]) async -> JobRecord? {
-        guard let app, app.settings.autonomousEnabled, let github = app.github.client else { return nil }
+        guard let app else { return nil }
+        guard app.settings.autonomousEnabled else {
+            lastError = "Autonomous is turned off in Settings. Turn it on to run repo jobs on GitHub, or switch 'Where it runs' to 'On this phone'."
+            return nil
+        }
+        guard let github = app.github.client else {
+            lastError = "Connect GitHub in Settings before running a job on a repository."
+            return nil
+        }
         await app.sync.syncNow()
         guard let dataRepo = app.sync.repo else {
             lastError = "MAIPA-G needs its private data repo before Autonomous can start."
@@ -155,7 +163,11 @@ final class JobCoordinator {
     @discardableResult
     func start(workflow: WorkflowDefinition, request: String, repo: ChatRepo?) async -> JobRecord? {
         if let repo { return await start(request: request, repo: repo, workflow: workflow) }
-        guard let app, app.openRouter.apiKey != nil else { return nil }
+        guard let app else { return nil }
+        guard app.openRouter.apiKey != nil else {
+            lastError = "Sign in to OpenRouter in Settings before running an agent or workflow."
+            return nil
+        }
         let job = JobRecord(
             status: .running,
             title: workflow.name,
