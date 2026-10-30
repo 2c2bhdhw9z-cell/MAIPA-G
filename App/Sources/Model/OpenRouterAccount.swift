@@ -196,6 +196,6 @@ final class OpenRouterAccount {
             }
         }
         if let error = error as? HTTPError, error.isOffline { return "You're offline." }
-        return "Something went wrong signing in to OpenRouter."
+        return ErrorExplainer.explain(error).message
     }
 }

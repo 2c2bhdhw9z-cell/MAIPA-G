@@ -336,6 +336,6 @@ final class GitHubAccount {
             }
         }
         if case GitHubAppSession.Failure.userSignInExpired = error { return "Your GitHub sign-in ran out. Sign in again in Settings." }
-        return "Something went wrong talking to GitHub."
+        return ErrorExplainer.explain(error).message
     }
 }

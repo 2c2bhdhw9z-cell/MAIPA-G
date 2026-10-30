@@ -46,7 +46,7 @@ public struct OpenRouterAPIError: Error, Sendable, Hashable, CustomStringConvert
         self.init(
             httpStatus: httpStatus,
             code: code,
-            message: errorObject["message"]?.stringValue ?? "Something went wrong at OpenRouter.",
+            message: errorObject["message"]?.stringValue ?? "OpenRouter returned HTTP \(httpStatus) without an error message.",
             metadata: errorObject["metadata"],
             retryAfter: retryAfter
         )

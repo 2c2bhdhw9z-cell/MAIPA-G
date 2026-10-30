@@ -531,7 +531,7 @@ private struct Runner {
             } else if let github = error as? GitHubAPIError {
                 message = github.isRateLimited ? "GitHub's hourly request limit was reached. Try again later." : github.description
             } else {
-                message = String(describing: error)
+                message = ErrorExplainer.explain(error).message
             }
             fail(stepIndex, callIndex, message: "Error: \(message)", summary: "\(base) · didn't work", detail: message)
         }
@@ -574,13 +574,16 @@ private struct Runner {
             case .moderated:
                 return TurnFailure(kind: .other, message: "The AI's provider refused this request.", detail: api.description)
             case .badRequest, .other:
-                return TurnFailure(kind: .other, message: "Something went wrong talking to OpenRouter.", detail: api.description)
+                let explanation = ErrorExplainer.explain(api)
+                return TurnFailure(kind: .other, message: explanation.message, detail: api.description)
             }
         }
         if let http = error as? HTTPError {
-            if http.isOffline { return TurnFailure(kind: .offline, message: "You're offline. Check your connection and try again.", detail: http.description) }
-            return TurnFailure(kind: .providerFailed, message: "The connection dropped. Try again.", detail: http.description)
+            let explanation = ErrorExplainer.explain(http)
+            if http.isOffline { return TurnFailure(kind: .offline, message: explanation.message, detail: http.description) }
+            return TurnFailure(kind: .providerFailed, message: explanation.message, detail: http.description)
         }
-        return TurnFailure(kind: .other, message: "Something went wrong.", detail: String(describing: error))
+        let explanation = ErrorExplainer.explain(error)
+        return TurnFailure(kind: .other, message: explanation.message, detail: explanation.technical)
     }
 }
