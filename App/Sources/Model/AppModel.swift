@@ -110,7 +110,7 @@ final class HomeDraft {
                 if value.isEmpty { try await store.deleteItem(at: ComposerDraft.path(for: "home")) }
                 else { try await store.saveDocument(value, at: ComposerDraft.path(for: "home")) }
             } catch {
-                // A later edit or background save retries without discarding the in-memory draft.
+                _ = app?.report(error, area: "draft", operation: "save home draft", path: ComposerDraft.path(for: "home"))
             }
         }
     }
@@ -186,6 +186,13 @@ final class AppModel {
         backgroundJobs.app = self
         backgroundJobs.register()
         home.repo = settings.lastRepo
+    }
+
+    @discardableResult
+    func report(_ error: Error, area: String, operation: String, path: String? = nil) -> ErrorExplanation {
+        let explanation = ErrorExplainer.explain(error)
+        Task { await diagnostics.record(error: error, area: area, operation: operation, path: path) }
+        return explanation
     }
 
     // MARK: Starting up

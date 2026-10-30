@@ -47,7 +47,7 @@ final class ChatSession: Identifiable {
                 if value.isEmpty { try await store.deleteItem(at: path) }
                 else { try await store.saveDocument(value, at: path) }
             } catch {
-                // The chat itself still remains on the phone; the next edit retries this draft.
+                _ = app?.report(error, area: "draft", operation: "save chat draft", path: path)
             }
         }
     }

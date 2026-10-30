@@ -231,6 +231,11 @@ final class ConnectorLibrary {
         await authorize(configuration, scopes: configuration.scopes.union(scopes).union(available))
     }
 
+    func recheck(_ configuration: ConnectorConfiguration) async {
+        if configuration.kind == .remote { await restore(configuration) }
+        else { states[configuration.id] = .disconnected }
+    }
+
     func disconnect(_ configuration: ConnectorConfiguration) async {
         await sessions[configuration.id]?.disconnect(); sessions[configuration.id] = nil
         Keychain.remove(account: credentialKey(configuration.id)); toolDefinitions[configuration.id] = nil

@@ -9,11 +9,13 @@ struct HealthCheckScreen: View {
 
     private struct Item: Identifiable {
         enum State { case good, warning, failed }
+        enum Action { case github, openRouter, save, connector(UUID), computer, jobs }
         let id: String
         var title: String
         var detail: String
         var nextStep: String?
         var state: State
+        var action: Action? = nil
     }
 
     var body: some View {
@@ -31,6 +33,9 @@ struct HealthCheckScreen: View {
                             Text(item.detail).font(.footnote).foregroundStyle(Theme.secondaryText)
                             if let next = item.nextStep {
                                 Text(next).font(.footnote).foregroundStyle(item.state == .failed ? Theme.danger : .orange)
+                            }
+                            if let action = item.action {
+                                Button("Fix") { fix(action) }.font(.footnote.weight(.semibold))
                             }
                         }
                     }
@@ -55,7 +60,7 @@ struct HealthCheckScreen: View {
         if app.github.isConnected, app.github.reposError == nil {
             items.append(Item(id: "github", title: "GitHub", detail: "Connected as \(app.github.login ?? "your account").", state: .good))
         } else {
-            items.append(Item(id: "github", title: "GitHub", detail: app.github.reposError ?? "Not connected.", nextStep: "Connect or sign in again in Settings.", state: .failed))
+            items.append(Item(id: "github", title: "GitHub", detail: app.github.reposError ?? "Not connected.", nextStep: "Connect or sign in again in Settings.", state: .failed, action: .github))
         }
 
         await app.openRouter.refreshKeyInfo()
@@ -63,7 +68,7 @@ struct HealthCheckScreen: View {
             let balance = app.openRouter.balance.map { " Balance \($0.dollars)." } ?? ""
             items.append(Item(id: "openrouter", title: "OpenRouter", detail: "Signed in.\(balance)", state: .good))
         } else {
-            items.append(Item(id: "openrouter", title: "OpenRouter", detail: app.openRouter.lastError ?? "Not signed in.", nextStep: "Sign in to OpenRouter in Settings.", state: .failed))
+            items.append(Item(id: "openrouter", title: "OpenRouter", detail: app.openRouter.lastError ?? "Not signed in.", nextStep: "Sign in to OpenRouter in Settings.", state: .failed, action: .openRouter))
         }
 
         await app.sync.syncNow()
@@ -71,20 +76,22 @@ struct HealthCheckScreen: View {
         case .idle:
             items.append(Item(id: "saving", title: "Saving", detail: app.sync.lastSaved.map { "Saved \($0.friendlyAgo)." } ?? "Ready.", state: .good))
         case .failed(let message):
-            items.append(Item(id: "saving", title: "Saving", detail: message, nextStep: "Tap Save now in Settings after fixing the named cause.", state: .failed))
+            items.append(Item(id: "saving", title: "Saving", detail: message, nextStep: "Retry after fixing the named cause.", state: .failed, action: .save))
         case .off:
-            items.append(Item(id: "saving", title: "Saving", detail: "On this phone only.", nextStep: "Connect GitHub to back up data.", state: .warning))
+            items.append(Item(id: "saving", title: "Saving", detail: "On this phone only.", nextStep: "Connect GitHub to back up data.", state: .warning, action: .github))
         case .saving:
             items.append(Item(id: "saving", title: "Saving", detail: "Still saving.", state: .warning))
         }
 
         for connector in app.connectors.connected {
+            await app.connectors.recheck(connector)
             let state = app.connectors.states[connector.id] ?? .disconnected
             let detail = app.connectors.errors[connector.id] ?? state.rawValue
             items.append(Item(
                 id: "connector-\(connector.id)", title: connector.displayName, detail: detail,
                 nextStep: state == .connected ? nil : "Open Connectors and reconnect this service.",
-                state: state == .connected ? .good : (state == .connecting ? .warning : .failed)
+                state: state == .connected ? .good : (state == .connecting ? .warning : .failed),
+                action: state == .connected ? nil : .connector(connector.id)
             ))
         }
         if app.connectors.connected.isEmpty {
@@ -92,23 +99,42 @@ struct HealthCheckScreen: View {
         }
 
         if app.settings.chatComputerOff {
-            items.append(Item(id: "computer", title: "Chat computer", detail: "Turned off.", nextStep: "Turn it on in Settings if chats need commands.", state: .warning))
+            items.append(Item(id: "computer", title: "Chat computer", detail: "Turned off.", nextStep: "Turn it on in Settings if chats need commands.", state: .warning, action: .computer))
         } else {
             let ready = app.connectors.connected.contains { configuration in
                 app.connectors.states[configuration.id] == .connected &&
                     (app.settings.chatComputerServer == nil || app.settings.chatComputerServer == configuration.serverID)
             }
-            items.append(Item(id: "computer", title: "Chat computer", detail: ready ? "Connector is ready." : "No selected computer connector is connected.", nextStep: ready ? nil : "Connect the selected computer service.", state: ready ? .good : .failed))
+            items.append(Item(id: "computer", title: "Chat computer", detail: ready ? "Connector is ready." : "No selected computer connector is connected.", nextStep: ready ? nil : "Connect the selected computer service.", state: ready ? .good : .failed, action: ready ? nil : .computer))
         }
 
         await app.jobs.refresh()
+        var actionsError = app.jobs.lastError
+        if actionsError == nil, let github = app.github.client {
+            for repo in Set(app.jobs.jobs.compactMap(\.targetRepo)).prefix(5) {
+                do { _ = try await github.workflowRuns(repo, limit: 1) }
+                catch { actionsError = ErrorExplainer.explain(error).message; break }
+            }
+        }
         items.append(Item(
             id: "actions", title: "GitHub Actions",
-            detail: app.jobs.lastError ?? "Job status refreshed.",
-            nextStep: app.jobs.lastError == nil ? nil : "Open Jobs, fix the shown GitHub error, and retry.",
-            state: app.jobs.lastError == nil ? .good : .failed
+            detail: actionsError ?? "Actions responded and job status refreshed.",
+            nextStep: actionsError == nil ? nil : "Open Jobs, fix the shown GitHub error, and retry.",
+            state: actionsError == nil ? .good : .failed,
+            action: actionsError == nil ? nil : .jobs
         ))
         running = false
+    }
+
+    private func fix(_ action: Item.Action) {
+        switch action {
+        case .github: app.sheet = .connectGitHub
+        case .openRouter: app.sheet = .signInOpenRouter
+        case .save: Task { await app.sync.syncNow(); await run() }
+        case .connector(let id): app.sheet = .connectorDetail(id)
+        case .computer: app.sheet = .connectors
+        case .jobs: app.jobs.show()
+        }
     }
 
     private func icon(_ state: Item.State) -> String {

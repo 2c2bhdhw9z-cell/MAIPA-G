@@ -8,6 +8,7 @@ struct SettingsScreen: View {
     @Environment(\.theme) private var theme
     @State private var confirmDisconnect = false
     @State private var copiesSize: Int64?
+    @State private var freeSpace: Int64?
     /// The controls edit this copy; every change is saved straight away.
     @State private var draft = AppSettings()
     @State private var loaded = false
@@ -97,6 +98,7 @@ struct SettingsScreen: View {
                 await app.openRouter.refreshKeyInfo()
                 await app.github.refreshActionsBilling()
                 copiesSize = await app.snapshots.diskUsage()
+                freeSpace = try? app.paths.support.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage
             }
             .confirmationDialog("Disconnect GitHub?", isPresented: $confirmDisconnect, titleVisibility: .visible) {
                 Button("Disconnect", role: .destructive) {
@@ -482,6 +484,11 @@ struct SettingsScreen: View {
                 detail("OpenRouter key", app.openRouter.keyInfo?.label ?? (app.openRouter.isSignedIn ? "signed in" : "none"))
                 detail("iPhone's own AI", OnDeviceAI.status)
                 detail("Repo copies", copiesSize.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "…")
+                detail("Free iPhone storage", freeSpace.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "…")
+                if let freeSpace, freeSpace < 2 * 1024 * 1024 * 1024 {
+                    Text("Storage is low. Clear repo copies before opening another large repository.")
+                        .font(.caption).foregroundStyle(.orange)
+                }
                 if let failure = app.backgroundJobs.lastFailure {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Background task")
