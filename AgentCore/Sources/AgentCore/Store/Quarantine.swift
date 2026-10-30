@@ -37,6 +37,28 @@ public enum Quarantine {
         try FileManager.default.removeItem(at: fileURL)
     }
 
+    public static func quarantinedFile(for record: QuarantineRecord, dataDirectory: URL) -> URL {
+        dataDirectory.deletingLastPathComponent()
+            .appendingPathComponent("Unreadable", isDirectory: true)
+            .appendingPathComponent(record.quarantinedPath)
+    }
+
+    public static func retry(_ record: QuarantineRecord, dataDirectory: URL) throws {
+        let source = quarantinedFile(for: record, dataDirectory: dataDirectory)
+        let destination = dataDirectory.appendingPathComponent(record.originalPath)
+        guard !FileManager.default.fileExists(atPath: destination.path) else { throw CocoaError(.fileWriteFileExists) }
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: source, to: destination)
+        try? FileManager.default.removeItem(at: source.appendingPathExtension("reason.json"))
+    }
+
+    public static func discard(_ record: QuarantineRecord, dataDirectory: URL) throws {
+        let source = quarantinedFile(for: record, dataDirectory: dataDirectory)
+        if FileManager.default.fileExists(atPath: source.path) { try FileManager.default.removeItem(at: source) }
+        let reason = source.appendingPathExtension("reason.json")
+        if FileManager.default.fileExists(atPath: reason.path) { try FileManager.default.removeItem(at: reason) }
+    }
+
     public static func records(dataDirectory: URL) -> [QuarantineRecord] {
         let root = dataDirectory.deletingLastPathComponent().appendingPathComponent("Unreadable", isDirectory: true)
         guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else { return [] }

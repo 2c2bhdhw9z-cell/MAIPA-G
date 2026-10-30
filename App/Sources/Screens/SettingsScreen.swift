@@ -390,6 +390,7 @@ struct SettingsScreen: View {
                 Button("Open MAIPA-G-data on GitHub") { openURL(url) }
             }
             Button("Recently Deleted") { app.sheet = .recentlyDeleted }
+            Button("Unreadable files") { app.sheet = .unreadableFiles }
             Button(exporting ? "Preparing export…" : "Export everything to Files") {
                 Task { await exportEverything() }
             }

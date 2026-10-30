@@ -134,6 +134,7 @@ struct SheetContent: View {
         case .workflowMaker: NavigationStack { WorkflowMakerScreen() }
         case .memories: MemoriesScreen()
         case .recentlyDeleted: RecentlyDeletedScreen()
+        case .unreadableFiles: UnreadableFilesScreen()
         case .memoryEditor(let id):
             NavigationStack { MemoryEditorScreen(record: id.flatMap { value in app.memories.memories.first { $0.id == value } }) }
         case .groups(let target): GroupPicker(target: target)

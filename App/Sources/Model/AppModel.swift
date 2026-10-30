@@ -26,6 +26,7 @@ enum AppSheet: Identifiable, Hashable {
     case workflowMaker
     case memories
     case recentlyDeleted
+    case unreadableFiles
     case memoryEditor(UUID?)
     case groups(ComposerTarget)
     case specs(ChatRepo?)
@@ -55,6 +56,7 @@ enum AppSheet: Identifiable, Hashable {
         case .workflowMaker: return "workflow-maker"
         case .memories: return "memories"
         case .recentlyDeleted: return "recently-deleted"
+        case .unreadableFiles: return "unreadable-files"
         case .memoryEditor(let id): return "memory-editor-\(id?.uuidString ?? "new")"
         case .groups(let target): return "groups-\(target)"
         case .specs(let repo): return "specs-\(repo?.ref.fullName ?? "all")"
@@ -206,6 +208,10 @@ final class AppModel {
         await groups.load()
         await specs.load()
         await connectors.load()
+        let housekeeping = await DataHousekeeping(dataDirectory: paths.data).run()
+        if housekeeping.removedOrphanBlobs + housekeeping.purgedTrashItems + housekeeping.compactedJobs > 0 {
+            sync.request(after: 0)
+        }
         async let models: Void = openRouter.loadModels()
         async let key: Void = openRouter.refreshKeyInfo()
         await github.refresh()
