@@ -1,29 +1,34 @@
 # MAIPA-G plan
 
-**Status (30 October 2026, 6:28 PM ET): Build 59 (`build-59-2c89052`, 5.0 MB, PR #15) is the latest
-installable build: 0.1.0 (59), iPhone arm64, built from commit `14944f5`, checked by the AgentCore
+**Status (30 October 2026, 7:00 PM ET): Build 60 (`build-60-154bb18`, 5.0 MB, PR #16) is the latest
+installable build: 0.1.0 (60), iPhone arm64, built from commit `61c05ee`, checked by the AgentCore
 tests on Linux and macOS and an independent IPA inspection.
 
-Confirmed on the owner's phone with build 55 (4:04 PM): saving works (Settings showed "Saved just
-now", and the 173 MB Continuum .ipa is in MAIPA-G-data's files release), and the chat computer ran
-a real command through Sprites' `exec`. Stability 3 is done.
+Confirmed on the owner's phone with build 55 (4:04 PM) and build 59 (6:42 PM): saving works
+(Settings showed "Saved just now", and the 173 MB Continuum .ipa is in MAIPA-G-data's files
+release), the chat computer ran a real command through Sprites' `exec`, the clean Home screen and
+`+` menu are live, and huge pastes turn into `Pasted text.txt` attachments. Stability 3 is done.
 
-Built since then, none of it confirmed on the phone yet:
+Built since then:
 - Build 56 (PR #12): Check everything, Recently Deleted and Unreadable files open inside Settings;
   the Computer list shows only connectors that can run commands; tool setup starts by itself.
 - Build 57 (PR #13): the Sprite is held awake with Sprites' Tasks API while tools install (a Sprite
   pauses 30 seconds after the last command, which froze build 56's setup); Check everything shows
   the setup step and any tools that failed; Hugging Face's sandbox tool doesn't make it a computer;
   Edit memories opens inside Settings.
-- Build 58 (PR #14): chats work again. Since build 53 every chat sent OpenRouter four AIs (the
-  chosen one plus three backups) and OpenRouter refused them all with a 400; the phone failed seven
-  messages that way at 4:27-4:35 PM.
-- Build 59 (PR #15): upgraded chat and Autonomous system prompts; folded the Home shortcut strip
-  and the row under the message box into the `+` menu, fixed the crooked AI/Thinking button offset
-  and `Medium` wrapping, and moved OpenRouter balance to the side menu and context ring popover;
-  capped long user bubbles with a chunked `Full message` sheet, auto-converted 20,000+ character
-  pastes into text attachments with paginated `read_attachment` up to 25 MB, and stopped dropped
-  server connections from falsely claiming `This iPhone is offline`.
+- Build 58 (PR #14, confirmed working on phone): chats work again after capping OpenRouter `models`
+  at 3 items.
+- Build 59 (PR #15, confirmed on phone): upgraded chat and Autonomous system prompts; folded the
+  Home shortcut strip and the row under the message box into the `+` menu, aligned the AI/Thinking
+  pills, and moved OpenRouter balance to the side menu and context ring popover; capped long user
+  bubbles with a chunked `Full message` sheet, auto-converted 20,000+ character pastes into text
+  attachments with paginated `read_attachment` up to 25 MB, and stopped dropped server connections
+  from falsely claiming `This iPhone is offline`.
+- Build 60 (PR #16): moved memory stars off message text (beside user bubbles and into the bottom
+  footer of AI replies); moved the unlabeled top-bar `Compact` icon into the `+` menu and Context
+  ring popover with plain-English status; added live status and a direct download button under
+  `Check for a new build` in Settings; removed the floating keyboard `Done` pill and added
+  app-wide keyboard dismissal on downward swipe, outside tap, or screen/sheet switches.
 
 Still not done: Stability 11 (about 250 silent `try?` failures remain), necessary item 4 (sandbox
 for downloaded connectors blocks all network, so npx/uvx connectors can't install), and necessary
