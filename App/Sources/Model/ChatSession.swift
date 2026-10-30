@@ -385,6 +385,8 @@ final class ChatSession: Identifiable {
             tools.append(ReadAttachmentTool(attachments: allAttachments, store: app.attachmentStore))
         }
         var repoContext: SystemPrompt.RepoContext?
+        var repoHooks: [RepoHook] = []
+        var hookProblems: [String] = []
         if let repo = chat.repo {
             guard let github = app.github.client else {
                 fail(.signInNeeded, "Connect GitHub so MAIPA-G can read \(repo.ref.fullName).")
@@ -406,6 +408,9 @@ final class ChatSession: Identifiable {
                 }
                 let service = GitHubChangeService(github: github)
                 let rules = await service.resolveRules(in: workspace, directSaveSetting: app.settings.savesDirectly(to: repo.ref))
+                let loadedHooks = await RepoHooks.load(from: workspace)
+                repoHooks = loadedHooks.hooks
+                hookProblems = loadedHooks.problems
                 let saves = changeSession ?? ChangeSession(receipts: chat.saveReceipts ?? [])
                 changeSession = saves
                 let repoTools: [any AgentTool] = [
@@ -437,6 +442,22 @@ final class ChatSession: Identifiable {
                 commit: repoContext.commit
             ))
             canSyncStaged = true
+        }
+        // Hooks from the repo's .kiro/hooks run after the tools they listen to. Command hooks run
+        // on the chat computer, in the repo's copy, after the staged files are put there.
+        var hookRunner: HookedTool.CommandRunner?
+        if let repoContext, let workspace = changeWorkspace, let control = app.connectors.computerControl(), control.commandTool != nil {
+            let homePath = "repos/\(repoContext.ref.owner)/\(repoContext.ref.name)"
+            let cloneURL: String? = repoContext.isPrivate ? nil : "https://github.com/\(repoContext.ref.owner)/\(repoContext.ref.name).git"
+            let commit = repoContext.commit
+            hookRunner = { command in
+                _ = try await control.syncStagedChanges(homePath: homePath, cloneURL: cloneURL, commit: commit, changes: await workspace.stagedChanges())
+                return try await control.run("cd \"$HOME/\(homePath)\" && \(command)")
+            }
+        }
+        tools = HookedTool.wrap(tools, hooks: repoHooks, runCommand: hookRunner)
+        for problem in hookProblems {
+            _ = app.report(RepoHookProblem(message: problem), area: "hooks", operation: "read repo hooks")
         }
         var computer = await computerContext(app: app, repo: repoContext, stagedPatch: await changeWorkspace?.stagedDiff())
         computer?.appNote = computerNote

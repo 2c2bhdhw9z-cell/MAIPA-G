@@ -290,4 +290,61 @@ struct StabilityCompletionTests {
         #expect(["Bearer secret-token", "none"].contains(String(decoding: body, as: UTF8.self)))
         #endif
     }
+
+    struct FakeTool: AgentTool {
+        let name: String
+        var spec: ToolSpec { ToolSpec(name: name, description: "fake", parameters: ["type": "object"]) }
+        func runningSummary(for arguments: JSONValue) -> String { "…" }
+        func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+            ToolOutput(forModel: "\(name) done", summary: "done")
+        }
+    }
+
+    actor CommandLog {
+        var commands: [String] = []
+        func add(_ command: String) { commands.append(command) }
+    }
+
+    // Stability 46: hooks from the repo run on events, like the tests after every save.
+    @Test func S46_repoHooksRunAfterTheirEvents() async throws {
+        let v2 = RepoHooks.parse(path: ".kiro/hooks/tests.json", text: """
+        {"version":"v1","hooks":[
+          {"name":"Tests after save","trigger":"PostSave","action":{"type":"command","command":"swift test"}},
+          {"name":"Lint Swift edits","trigger":"PostFileSave","matcher":"\\\\.swift$","action":{"type":"command","command":"swift format lint"}},
+          {"name":"Wipe","trigger":"PostSave","action":{"type":"command","command":"rm -rf build"}},
+          {"name":"Unknown trigger","trigger":"PreToolUse","action":{"type":"command","command":"true"}}
+        ]}
+        """)
+        #expect(v2.problem == nil && v2.hooks.map(\.name) == ["Tests after save", "Lint Swift edits", "Wipe"])
+        let ide = RepoHooks.parse(path: ".kiro/hooks/docs.kiro.hook", text: """
+        {"enabled":true,"name":"Docs check","when":{"type":"fileEdited","patterns":["docs/**/*.md"]},"then":{"type":"askAgent","prompt":"Check the docs links."}}
+        """)
+        #expect(ide.hooks.count == 1 && ide.hooks[0].event == .fileSaved && ide.hooks[0].patterns == ["docs/**/*.md"])
+        #expect(RepoHooks.parse(path: ".kiro/hooks/off.kiro.hook", text: #"{"enabled":false,"name":"Off","when":{"type":"fileEdited"},"then":{"type":"askAgent","prompt":"x"}}"#).hooks.isEmpty)
+        #expect(RepoHooks.parse(path: ".kiro/hooks/bad.json", text: "{").problem != nil)
+        #expect(RepoHooks.isHookFile(".kiro/hooks/tests.json") && !RepoHooks.isHookFile(".kiro/hooks/sub/x.json") && !RepoHooks.isHookFile("docs/x.json"))
+
+        let log = CommandLog()
+        let hooks = v2.hooks + ide.hooks
+        let wrapped = HookedTool.wrap([FakeTool(name: "save_changes"), FakeTool(name: "edit_file"), FakeTool(name: "read_file")], hooks: hooks) { command in
+            await log.add(command)
+            return "ran \(command): ok"
+        }
+        #expect(wrapped[0] is HookedTool && wrapped[1] is HookedTool && !(wrapped[2] is HookedTool))
+
+        let saved = try await wrapped[0].run(arguments: [:]) { _ in }
+        #expect(saved.forModel.contains("Hook “Tests after save” ran `swift test`") && saved.forModel.contains("ran swift test: ok"))
+        #expect(saved.forModel.contains("Hook “Wipe” wasn't run automatically"))
+        #expect(await log.commands == ["swift test"])
+
+        let swiftEdit = try await wrapped[1].run(arguments: ["path": "Sources/App.swift"]) { _ in }
+        #expect(swiftEdit.forModel.contains("swift format lint") && !swiftEdit.forModel.contains("Docs check"))
+        let docsEdit = try await wrapped[1].run(arguments: ["path": "docs/guide/intro.md"]) { _ in }
+        #expect(docsEdit.forModel.contains("Hook “Docs check” (.kiro/hooks/docs.kiro.hook) asks: Check the docs links."))
+        #expect(await log.commands == ["swift test", "swift format lint"])
+
+        let noComputer = HookedTool.wrap([FakeTool(name: "save_changes")], hooks: hooks, runCommand: nil)
+        let unrun = try await noComputer[0].run(arguments: [:]) { _ in }
+        #expect(unrun.forModel.contains("this chat has no computer"))
+    }
 }
