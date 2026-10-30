@@ -134,12 +134,19 @@ struct CoreFormatTests {
         #expect(await groupStore.load(group.id)?.order == 2)
 
         let starMessage = UUID()
-        let firstStar = try await StarMemoryService.toggle(store: memoryStore, messageID: starMessage, text: "A starred message", currentMemoryID: nil)
+        let trash = TrashStore(dataDirectory: root)
+        let firstStar = try await StarMemoryService.toggle(store: memoryStore, trash: trash, messageID: starMessage, text: "A starred message", currentMemoryID: nil)
         let countAfterFirst = await memoryStore.loadAll().count
-        let secondStar = try await StarMemoryService.toggle(store: memoryStore, messageID: starMessage, text: "A starred message", currentMemoryID: firstStar)
+        let secondStar = try await StarMemoryService.toggle(store: memoryStore, trash: trash, messageID: starMessage, text: "A starred message", currentMemoryID: firstStar)
         #expect(countAfterFirst == 2)
         #expect(secondStar == nil)
-        if let firstStar { #expect(await memoryStore.load(firstStar) == nil) }
+        let starredID = try #require(firstStar)
+        #expect(await memoryStore.load(starredID) == nil)
+        // Un-starring is recoverable: the memory waits in Recently deleted and restores intact.
+        let trashed = try #require(await trash.list().first(where: { $0.id == starredID }))
+        #expect(trashed.kind == .memory && trashed.title == "A starred message")
+        try await trash.restore(trashed)
+        #expect(await memoryStore.load(starredID)?.text == "A starred message")
 
         let chatStore = ChatStore(dataDirectory: root)
         var grouped = Chat(title: "Keep me", groupID: group.id)

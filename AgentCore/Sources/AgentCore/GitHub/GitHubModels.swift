@@ -26,9 +26,15 @@ public struct GitHubUser: Codable, Sendable, Hashable {
     public var login: String
     public var name: String?
     public var avatarURL: String?
+    /// The account's plan, returned for the signed-in user ("free", "pro"…).
+    public var plan: Plan?
+
+    public struct Plan: Codable, Sendable, Hashable {
+        public var name: String?
+    }
 
     enum CodingKeys: String, CodingKey {
-        case id, login, name
+        case id, login, name, plan
         case avatarURL = "avatar_url"
     }
 }

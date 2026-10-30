@@ -241,26 +241,112 @@ public struct GitHubBuildInspector: Sendable {
 }
 
 
-public struct GitHubActionsBilling: Codable, Sendable, Hashable {
-    public var totalMinutesUsed: Double
-    public var totalPaidMinutesUsed: Double
-    public var includedMinutes: Double
-    public var minutesUsedBreakdown: [String: Double]
+/// One line of GitHub's current billing usage report (`/users/{user}/settings/billing/usage`).
+/// GitHub retired the previous `/settings/billing/actions` endpoint with its old billing platform.
+public struct GitHubUsageItem: Codable, Sendable, Hashable {
+    public var date: String?
+    public var product: String
+    public var sku: String
+    public var quantity: Double
+    public var unitType: String
+    public var netAmount: Double?
+    public var repositoryName: String?
 
-    enum CodingKeys: String, CodingKey {
-        case totalMinutesUsed = "total_minutes_used"
-        case totalPaidMinutesUsed = "total_paid_minutes_used"
-        case includedMinutes = "included_minutes"
-        case minutesUsedBreakdown = "minutes_used_breakdown"
+    public init(date: String? = nil, product: String, sku: String, quantity: Double, unitType: String, netAmount: Double? = nil, repositoryName: String? = nil) {
+        self.date = date
+        self.product = product
+        self.sku = sku
+        self.quantity = quantity
+        self.unitType = unitType
+        self.netAmount = netAmount
+        self.repositoryName = repositoryName
+    }
+
+    /// GitHub-hosted Windows minutes count double and macOS minutes ten times against the
+    /// included allowance.
+    public var allowanceMultiplier: Double {
+        let lower = sku.lowercased()
+        if lower.contains("macos") { return 10 }
+        if lower.contains("windows") { return 2 }
+        return 1
+    }
+
+    public var isActionsMinutes: Bool {
+        product.caseInsensitiveCompare("actions") == .orderedSame && unitType.lowercased().hasPrefix("minute")
+    }
+}
+
+public struct GitHubUsageReport: Codable, Sendable, Hashable {
+    public var usageItems: [GitHubUsageItem]
+    public init(usageItems: [GitHubUsageItem]) { self.usageItems = usageItems }
+}
+
+/// This month's private-repo Actions minutes, worked out from the usage report.
+public struct GitHubActionsBilling: Codable, Sendable, Hashable {
+    /// GitHub Free includes 2,000 private-repo minutes a month; Pro includes 3,000.
+    public var includedMinutes: Double
+    /// Private-repo minutes used this month, with the Windows and macOS multipliers applied.
+    public var totalMinutesUsed: Double
+    /// Dollars GitHub is charging this month for minutes beyond the allowance.
+    public var paidAmount: Double
+
+    public init(includedMinutes: Double, totalMinutesUsed: Double, paidAmount: Double) {
+        self.includedMinutes = includedMinutes
+        self.totalMinutesUsed = totalMinutesUsed
+        self.paidAmount = paidAmount
     }
 
     public var includedMinutesRemaining: Int {
         max(0, Int((includedMinutes - totalMinutesUsed).rounded(.down)))
     }
+
+    public var isLow: Bool { includedMinutesRemaining < 200 || paidAmount > 0 }
+
+    /// Public repos' minutes are free and don't use the allowance, so they are left out.
+    public static func summarize(_ items: [GitHubUsageItem], publicRepos: Set<String>, plan: String?) -> GitHubActionsBilling {
+        let included: Double = plan?.lowercased() == "pro" ? 3_000 : 2_000
+        var used = 0.0
+        var paid = 0.0
+        for item in items where item.isActionsMinutes {
+            if let repo = item.repositoryName, publicRepos.contains(repo.lowercased()) { continue }
+            used += item.quantity * item.allowanceMultiplier
+            paid += max(0, item.netAmount ?? 0)
+        }
+        return GitHubActionsBilling(includedMinutes: included, totalMinutesUsed: used, paidAmount: paid)
+    }
+
+    /// The next step when the token can't read billing. GitHub requires the "Plan" account
+    /// permission for the usage report, and an existing GitHub app keeps the permissions it was
+    /// made with until the owner adds it.
+    public static func explain(_ error: Error) -> String {
+        if let status = (error as? HTTPError)?.statusCode, status == 403 || status == 404 {
+            return "GitHub won't show Actions minutes to this app yet. In GitHub, open Settings → Developer settings → GitHub Apps → your MAIPA-G app → Permissions, set Account permissions → Plan to Read-only, save, then accept the new permission."
+        }
+        return ErrorExplainer.explain(error).message
+    }
 }
 
 public extension GitHubClient {
-    func actionsBilling(for user: String) async throws -> GitHubActionsBilling {
-        try await get(GitHubActionsBilling.self, "/users/\(Self.escape(user))/settings/billing/actions", auth: .user)
+    func actionsBilling(for user: String, plan: String? = nil, now: Date = Date()) async throws -> GitHubActionsBilling {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC") ?? .current
+        let parts = calendar.dateComponents([.year, .month], from: now)
+        let report = try await get(
+            GitHubUsageReport.self,
+            "/users/\(Self.escape(user))/settings/billing/usage",
+            query: ["year": String(parts.year ?? 2026), "month": String(parts.month ?? 1)],
+            auth: .user
+        )
+        var publicRepos = Set<String>()
+        let repoNames = Set(report.usageItems.filter(\.isActionsMinutes).compactMap(\.repositoryName))
+        for name in repoNames.prefix(50) {
+            let pieces = name.split(separator: "/", maxSplits: 1).map(String.init)
+            guard pieces.count == 2 else { continue }
+            // A repo the app can't see is counted as private, so the warning comes early, not late.
+            if let repo = try? await repositoryIfExists(RepoRef(owner: pieces[0], name: pieces[1]), auth: .user), !repo.isPrivate {
+                publicRepos.insert(name.lowercased())
+            }
+        }
+        return GitHubActionsBilling.summarize(report.usageItems, publicRepos: publicRepos, plan: plan)
     }
 }

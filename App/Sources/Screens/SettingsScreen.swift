@@ -391,11 +391,14 @@ struct SettingsScreen: View {
                 HStack {
                     Text("Private Actions minutes")
                     Spacer()
-                    Text("\(billing.includedMinutesRemaining) left")
-                        .foregroundStyle(billing.includedMinutesRemaining < 200 ? .orange : Theme.secondaryText)
+                    Text("\(billing.includedMinutesRemaining) of \(Int(billing.includedMinutes)) left")
+                        .foregroundStyle(billing.isLow ? .orange : Theme.secondaryText)
                 }
-                if billing.includedMinutesRemaining < 200 {
-                    Text("GitHub’s included private-repo minutes are running low.").font(.footnote).foregroundStyle(.orange)
+                if billing.paidAmount > 0 {
+                    Text(String(format: "GitHub is charging $%.2f this month for minutes beyond the allowance.", billing.paidAmount))
+                        .font(.footnote).foregroundStyle(.orange)
+                } else if billing.includedMinutesRemaining < 200 {
+                    Text("GitHub’s included private-repo minutes are running low. Autonomous jobs in private repos stop or start costing money when they run out.").font(.footnote).foregroundStyle(.orange)
                 }
             } else if let error = app.github.actionsBillingError {
                 Text("Actions minutes: \(error)").font(.footnote).foregroundStyle(Theme.secondaryText)

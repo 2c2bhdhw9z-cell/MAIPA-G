@@ -91,10 +91,11 @@ final class GitHubAccount {
     func refreshActionsBilling() async {
         guard let client, let login else { return }
         do {
-            actionsBilling = try await client.actionsBilling(for: login)
+            actionsBilling = try await client.actionsBilling(for: login, plan: user?.plan?.name)
             actionsBillingError = nil
         } catch {
-            actionsBillingError = ErrorExplainer.explain(error).message
+            actionsBilling = nil
+            actionsBillingError = GitHubActionsBilling.explain(error)
         }
     }
 

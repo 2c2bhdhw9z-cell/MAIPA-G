@@ -72,8 +72,12 @@ final class MemoryLibrary {
 
     /// Returns the new memory id, or nil when the tap removed an existing star.
     func toggleStar(messageID: UUID, text: String, currentMemoryID: UUID?) async -> UUID? {
+        guard let trash = app?.trash else {
+            lastError = "The star couldn't change because the app's storage isn't ready. Open the chat again and retry."
+            return currentMemoryID
+        }
         do {
-            let result = try await StarMemoryService.toggle(store: store, messageID: messageID, text: text, currentMemoryID: currentMemoryID)
+            let result = try await StarMemoryService.toggle(store: store, trash: trash, messageID: messageID, text: text, currentMemoryID: currentMemoryID)
             await load()
             app?.sync.request()
             return result

@@ -1,16 +1,20 @@
 import Foundation
 
 public enum StarMemoryService {
-    /// Creates one memory per message, or removes it when the same star is tapped again.
-    public static func toggle(store: ProductStore<MemoryRecord>, messageID: UUID, text: String, currentMemoryID: UUID?) async throws -> UUID? {
-        if let currentMemoryID {
-            try await store.delete(currentMemoryID)
+    /// Creates one memory per message, or moves it to Recently deleted when the same star is tapped
+    /// again. Un-starring never erases the memory: it stays restorable for 30 days.
+    public static func toggle(store: ProductStore<MemoryRecord>, trash: TrashStore, messageID: UUID, text: String, currentMemoryID: UUID?) async throws -> UUID? {
+        let existing: MemoryRecord?
+        if let currentMemoryID, let current = await store.load(currentMemoryID) {
+            existing = current
+        } else {
+            existing = await store.loadAll().first(where: { $0.sourceMessageID == messageID })
+        }
+        if let existing {
+            try await trash.move(id: existing.id, kind: .memory, title: String(existing.text.prefix(80)), originalPath: await store.relativePath(for: existing.id))
             return nil
         }
-        if let existing = await store.loadAll().first(where: { $0.sourceMessageID == messageID }) {
-            try await store.delete(existing.id)
-            return nil
-        }
+        if currentMemoryID != nil { return nil }
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { throw ToolInputError("Memory text can't be empty.") }
         let record = MemoryRecord(text: clean, source: .star, sourceMessageID: messageID)
