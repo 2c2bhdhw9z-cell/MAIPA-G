@@ -1,11 +1,12 @@
 # MAIPA-G plan
 
-**Status (30 October 2026): Build 29 (`build-29-3ee52f0`, 4.8 MB, PR #9) is the one to
-install. It passed 123 AgentCore tests on Linux and macOS, the complete 39-scene Dark/Light
-check, and independent IPA inspection: 0.1.0 (29), iPhone arm64. This batch addresses exactly 29
-active items: Stability 1-10, 13, 16, 19, 20, 22, 28, 30, 42 and 43; and newly found needs 2, 3,
-5, 6 and 8-13. The cancelled Stability slot 40 remains excluded, so 29 is half of the 58 active
-items. The remaining items below are still plan only.**
+**Status (30 October 2026): Build 29 (`build-29-3ee52f0`, 4.8 MB, PR #9) is the latest
+installable build. It passed 123 AgentCore tests on Linux and macOS, the complete 39-scene
+Dark/Light check, and independent IPA inspection: 0.1.0 (29), iPhone arm64. It contains a partial
+stability and safety tranche, but it does not constitute 29 fully completed backlog items. The
+previous status incorrectly counted partial implementations and already-present behavior as
+complete. The 58 active requirements still need a sentence-by-sentence completion audit before
+any completed total is stated.**
 
 ## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
 He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,
