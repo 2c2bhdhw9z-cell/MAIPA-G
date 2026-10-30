@@ -135,9 +135,7 @@ public enum SystemPrompt {
     static func computerSection(_ computer: ComputerContext) -> String {
         var steps = [
             "- The machine is named `\(computer.machine)`. List the machines, and if it doesn't exist, create it with exactly that name.",
-            "- The first time you use it, check for `$HOME/.maipa-g/ready`. If it's missing, run `curl -fsSL \(computerSetupURL) | bash` " +
-                "to install the usual tools. It's safe to run again if it stops part way. If a tool it installed isn't found, " +
-                "start the command with `. $HOME/.maipa-g/env.sh &&`.",
+            "- Use the tools already present in the provider's reviewed machine image. Do not download or run setup scripts, moving `latest` installers, or `curl | bash`. If a required tool is missing, explain which exact tool is unavailable instead of installing unverified code.",
         ]
         if let fullName = computer.repoFullName, let cloneURL = computer.cloneURL, let path = computer.repoPath {
             let branch = computer.branch.map { " on the branch \($0)" } ?? ""

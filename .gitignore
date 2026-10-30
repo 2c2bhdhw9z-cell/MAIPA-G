@@ -5,3 +5,5 @@ DerivedData/
 App/build/
 .DS_Store
 App/Info.plist
+__pycache__/
+*.pyc

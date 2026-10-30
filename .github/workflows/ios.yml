@@ -45,8 +45,10 @@ jobs:
         env:
           MAIPAG_NETWORK_TESTS: "1"
         run: swift test --package-path AgentCore --filter NetworkTests
+      - name: Check immutable CI dependencies and release gates
+        run: python3 scripts/check-ci-policy.py
       - name: Compile independent IPA checker
-        run: python3 -m py_compile scripts/check-ipa.py
+        run: python3 -m py_compile scripts/check-ipa.py scripts/check-ci-policy.py
 
   # Starts at once, alongside the Linux checks, so a Mac-only compile error shows up early.
   screens:
@@ -55,8 +57,13 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - name: Install reviewed XcodeGen 2.46.0
+        run: |
+          curl --proto '=https' --tlsv1.2 -fL 'https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip' -o "$RUNNER_TEMP/xcodegen.zip"
+          echo '4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  '"$RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/xcodegen/bin/xcodegen" --version
       - name: Take every screenshot
         env:
           MAIPAG_REQUIRE_COMPLETE: "1"
@@ -88,10 +95,13 @@ jobs:
           xcodebuild -version
           swift --version
           xcodebuild -showsdks | sed -n '/iOS/,/^$/p' || true
-      - name: Install XcodeGen
+      - name: Install reviewed XcodeGen 2.46.0
         run: |
-          brew install xcodegen
-          xcodegen --version
+          curl --proto '=https' --tlsv1.2 -fL 'https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip' -o "$RUNNER_TEMP/xcodegen.zip"
+          echo '4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  '"$RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/xcodegen/bin/xcodegen" --version
       # Run under a pseudo-terminal so each test's progress shows in the log as it happens, and
       # stop after 15 minutes: the whole suite takes seconds, so anything longer is a stuck test.
       - name: AgentCore tests (macOS)
