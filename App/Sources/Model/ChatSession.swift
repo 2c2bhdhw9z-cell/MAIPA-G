@@ -628,7 +628,9 @@ final class ChatSession: Identifiable {
                     notes.append("MAIPA-G checked `\(control.machine)` with a real command before this message; it answered.")
                     switch ComputerControl.toolState(output) {
                     case .ready:
-                        break
+                        if let failed = ComputerControl.failedTools(output) {
+                            notes.append("MAIPA-G's tool setup finished on this machine, but these didn't install: \(failed). If a task needs one of them, say it is missing.")
+                        }
                     case .installing:
                         notes.append("MAIPA-G's checked tool set is still installing on this machine in the background. Use the tools that are there; if one is missing, say which and that it is still installing.")
                     case .missing:

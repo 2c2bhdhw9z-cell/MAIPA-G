@@ -144,9 +144,18 @@ struct HealthCheckScreen: View {
                 case .healthy(let output):
                     switch ComputerControl.toolState(output) {
                     case .ready:
-                        items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) ran a command and its tools are installed.", state: .good))
+                        if let failed = ComputerControl.failedTools(output) {
+                            items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) ran a command. Its tools are installed except these, which failed: \(failed).", nextStep: "Set up tools tries those again.", state: .warning, action: .setupTools))
+                        } else {
+                            items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) ran a command and its tools are installed.", state: .good))
+                        }
                     case .installing:
-                        items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) runs commands. Its tools are still installing in the background; that takes about 15 to 30 minutes.", state: .good))
+                        let step = ComputerControl.setupStep(output).map { " Now: \($0)." } ?? ""
+                        if ComputerControl.setupPausesWhenIdle(output) {
+                            items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) runs commands. Its tools are still installing, but this computer couldn't be kept awake, so installing only moves on while it is in use.\(step)", state: .warning))
+                        } else {
+                            items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) runs commands. Its tools are still installing in the background; that takes about 15 to 30 minutes.\(step)", state: .good))
+                        }
                     case .missing:
                         // Nothing to tap: the checked tool setup starts by itself.
                         let revision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""

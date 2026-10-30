@@ -72,6 +72,10 @@ struct SettingsScreen: View {
                     loaded = true
                 }
             }
+            // The Memories page has the same switch and saves it straight away.
+            .onChange(of: app.settings.memoriesOn) { _, value in
+                if loaded, draft.memoriesOn != value { draft.memoriesOn = value }
+            }
             .onChange(of: draft) { _, edited in
                 guard loaded else { return }
                 let disabledAutonomous = app.settings.autonomousEnabled && !edited.autonomousEnabled
@@ -369,7 +373,7 @@ struct SettingsScreen: View {
     private var memories: some View {
         Section {
             Toggle("Use memories in new chats", isOn: $draft.memoriesOn)
-            Button("Edit memories") { app.sheet = .memories }
+            NavigationLink("Edit memories") { MemoriesScreen(embedded: true) }
         } header: { Text("Memories") } footer: {
             Text("Each memory also has its own switch. Memories start empty.")
         }
