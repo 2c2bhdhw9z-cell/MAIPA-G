@@ -621,8 +621,16 @@ final class ChatSession: Identifiable {
         if lastComputerCheck.map({ Date().timeIntervalSince($0) > 600 }) ?? true {
             do {
                 switch try await control.ensureMachine(allowCreate: true) {
-                case .healthy: notes.append("MAIPA-G checked `\(control.machine)` with a real command before this message; it answered.")
-                case .recreated: notes.append("`\(control.machine)` was missing, so MAIPA-G's own code created it again with that exact name and checked it with a real command.")
+                case .healthy(let output):
+                    notes.append("MAIPA-G checked `\(control.machine)` with a real command before this message; it answered.")
+                    if output.contains("maipa-g-tools-missing") {
+                        notes.append("MAIPA-G's verified tool setup hasn't finished on this machine (no ~/.maipa-g/ready). Use the tools that are there; if one is missing, say which, and suggest Settings → Check everything → Set up tools.")
+                    }
+                case .recreated:
+                    notes.append("`\(control.machine)` was missing, so MAIPA-G's own code created it again with that exact name and checked it with a real command.")
+                    let revision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
+                    do { notes.append(try await control.startVerifiedSetup(revision: revision)) }
+                    catch { notes.append("MAIPA-G couldn't start its verified tool setup: \(ErrorExplainer.explain(error).message)") }
                 }
                 lastComputerCheck = Date()
             } catch {

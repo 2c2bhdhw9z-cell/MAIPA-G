@@ -101,8 +101,29 @@ public struct ComputerControl: Sendable {
         return result.text
     }
 
-    /// The health check's real command: it proves the machine starts and runs a shell.
-    public static let healthCommand = "echo maipa-g-health-ok && uname -sm"
+    /// The health check's real command: it proves the machine starts and runs a shell, and says
+    /// whether MAIPA-G's verified tool setup has finished there.
+    public static let healthCommand = "echo maipa-g-health-ok && uname -sm && if [ -f \"$HOME/.maipa-g/ready\" ]; then echo maipa-g-tools-ready; else echo maipa-g-tools-missing; fi"
+
+    /// Starts MAIPA-G's tool setup in the background: the script comes from the app's exact
+    /// reviewed commit and runs only if its SHA-256 matches the copy compiled into the app.
+    public func startVerifiedSetup(revision: String) async throws -> String {
+        guard let url = SystemPrompt.computerSetupURL(revision: revision) else {
+            throw Failure.commandFailed("This build has no reviewed commit to take the setup script from.")
+        }
+        let sha = SystemPrompt.computerSetupSHA256
+        let script = """
+        set -euo pipefail
+        mkdir -p "$HOME/.maipa-g"
+        curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$HOME/.maipa-g/setup.sh" '\(url)'
+        echo '\(sha)  '"$HOME/.maipa-g/setup.sh" | sha256sum -c - >/dev/null
+        nohup bash "$HOME/.maipa-g/setup.sh" > "$HOME/.maipa-g/setup-run.log" 2>&1 < /dev/null &
+        echo maipa-g-setup-started
+        """
+        let output = try await run(script)
+        guard output.contains("maipa-g-setup-started") else { throw Failure.commandFailed(output) }
+        return "MAIPA-G started its verified tool setup on \(machine). Progress is in ~/.maipa-g/setup-run.log; ~/.maipa-g/ready appears when it finishes."
+    }
 
     public func healthCheck() async throws -> String {
         let output = try await run(Self.healthCommand)

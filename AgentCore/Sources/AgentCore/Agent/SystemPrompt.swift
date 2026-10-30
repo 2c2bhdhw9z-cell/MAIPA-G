@@ -146,8 +146,16 @@ public enum SystemPrompt {
         return parts.joined(separator: "\n\n")
     }
 
-    /// Where the computer setup script lives. The AI runs it once per machine.
+    /// Where the computer setup script lives. Only MAIPA-G's own code runs it, from the app's exact
+    /// reviewed commit, after checking `computerSetupSHA256`; the AI is never told to run it.
     public static let computerSetupURL = "https://raw.githubusercontent.com/2c2bhdhw9z-cell/MAIPA-G/main/docs/computer/setup.sh"
+    /// SHA-256 of docs/computer/setup.sh in this build. CI fails when the file and this differ.
+    public static let computerSetupSHA256 = "7e5ed0c86584c74a53476581a439547b289cb40782b3d6513f459c8756d1eb91"
+
+    public static func computerSetupURL(revision: String) -> String? {
+        guard revision.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil else { return nil }
+        return "https://raw.githubusercontent.com/2c2bhdhw9z-cell/MAIPA-G/\(revision)/docs/computer/setup.sh"
+    }
 
     static func computerSection(_ computer: ComputerContext) -> String {
         var steps = [

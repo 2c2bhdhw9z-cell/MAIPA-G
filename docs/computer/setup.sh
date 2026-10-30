@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Sets up MAIPA-G's standard tool set on an Ubuntu or Debian computer, such as a Fly.io Sprite.
-# The AI runs it the first time it uses a chat's computer:
+# MAIPA-G's own code (never the AI) downloads this file from the app's exact reviewed commit,
+# checks its SHA-256 against the copy compiled into the app, and only then runs it:
 #
-#   curl -fsSL https://raw.githubusercontent.com/2c2bhdhw9z-cell/MAIPA-G/main/docs/computer/setup.sh | bash
+#   curl -o ~/.maipa-g-setup.sh https://raw.githubusercontent.com/2c2bhdhw9z-cell/MAIPA-G/<commit>/docs/computer/setup.sh
+#   echo "<sha256>  $HOME/.maipa-g-setup.sh" | sha256sum -c - && bash ~/.maipa-g-setup.sh
 #
 # It installs only what is missing, so it is safe to run again, also after it stopped part way.
 # One tool failing doesn't stop the rest; failures are listed at the end. The screen gets one line
@@ -132,62 +134,171 @@ install_apt_batch() {
   apt_install "$@"
 }
 
-install_node() {
-  if fetch https://deb.nodesource.com/setup_lts.x "$TMP_DIR/nodesource_setup.sh" &&
-    as_root bash "$TMP_DIR/nodesource_setup.sh" &&
-    apt_install nodejs; then
-    return 0
+# ---- Reviewed exact versions (lock manifest) --------------------------------------------------
+# Every program this script downloads and runs or unpacks is an exact reviewed version, checked
+# against the SHA-256 (or SHA-512) recorded here before it is used. Nothing follows a moving
+# "latest" or pipes an installer into a shell. Updating a tool means changing its line here, and
+# MAIPA-G's own copy of this file's checksum (SystemPrompt.computerSetupSHA256), in one review.
+NODE_VERSION=v26.13.0
+NODE_SHA256_X64=d28a96af6c38596f6d9d97c0ee531c13d238d757742387d1928de822d959e997
+NODE_SHA256_ARM64=406fe3fbde1c054adff8b297c16fdb5af6659db327c1ac8acd46b56ef1af9a92
+UV_VERSION=0.13.6
+UV_SHA256_X64=f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645
+UV_SHA256_ARM64=229e194255c7958d86d56e8790d969a6f74736592133f0dfd0076f754c642c1d
+RUFF_VERSION=0.17.3
+RUFF_SHA256_X64=2b0890f5a55900af741f133918c2656919bbf18c2ab7741b4ca8403a90e647a9
+RUFF_SHA256_ARM64=3f4639152c0e42bb5938e6c23d53d527a38f3133e000102934518f90529fa299
+PYTEST_VERSION=9.2.0
+RUSTUP_VERSION=1.29.2
+RUSTUP_SHA256_X64=5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4
+RUSTUP_SHA256_ARM64=a9c168dbea81a84671c6b7a5c1795cb0eb699020110d107ddfca427bd797e697
+RUST_TOOLCHAIN=1.99.1
+DOTNET_VERSION=10.0.403
+DOTNET_SHA512_X64=b7b3d8461cf98b07d2552ce9199702fa3ad010ac2671a5f8cd5136f7534e50f6855ba7bbb02b11494563f1d04156276a31cda1103b900e5eecd0d9473dc7b9c5
+DOTNET_SHA512_ARM64=0966aa2b70f4677b8319be9df447a78a0dcd6164836425b55a68fd714f4023feb87b4cac21b9a996b79472ad54487cd0adcd2a9dfd570e2b2a1d26423a2baa9b
+BUN_VERSION=bun-v1.4.4
+BUN_SHA256_X64=bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c
+BUN_SHA256_ARM64=baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e
+DENO_VERSION=v2.9.8
+DENO_SHA256_X64=e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609
+DENO_SHA256_ARM64=d49596c20b9788cf8f5d8ddf644103d4bde56ed239753f0bdb92ba9361d51905
+SWIFTLY_VERSION=1.2.0
+SWIFTLY_SHA256_X64=0b26b568811404374c7d7f07276b6aad4145db5d1893a45f307de6a94ca8d9c3
+SWIFTLY_SHA256_ARM64=590d855e03807791f1b84aab77471bf7e31f9e3b22151972526077da296ecf96
+SWIFT_VERSION=6.4.2
+# npm checks each package against the registry's SHA-512 integrity for these exact versions;
+# --ignore-scripts keeps package install scripts from running.
+NPM_GLOBALS="pnpm@12.16.1 yarn@1.22.22 typescript@7.0.2"
+
+# The value for this machine's CPU: pick X86_64_VALUE ARM64_VALUE.
+pick() {
+  case "$(uname -m)" in
+    x86_64 | amd64) printf '%s' "$1" ;;
+    aarch64 | arm64) printf '%s' "$2" ;;
+    *) echo "No reviewed build for $(uname -m)." >&2; return 1 ;;
+  esac
+}
+
+# verified_fetch URL FILE CHECKSUM: downloads, then refuses the file unless its SHA-256 (or, for
+# "sha512:…", SHA-512) matches the reviewed value exactly.
+verified_fetch() {
+  local url=$1 file=$2 expected=$3 actual=""
+  fetch "$url" "$file" || return 1
+  case "$expected" in
+    sha512:*) expected=${expected#sha512:}; actual=$(sha512sum "$file" | cut -d' ' -f1) ;;
+    *) actual=$(sha256sum "$file" | cut -d' ' -f1) ;;
+  esac
+  if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+    echo "Checksum mismatch for $url (expected $expected, got $actual). Not using it."
+    rm -f "$file"
+    return 1
   fi
-  echo "NodeSource didn't work, so trying this release's own nodejs and npm."
-  apt_install nodejs npm
+}
+
+install_node() {
+  local arch sum dir tool
+  arch=$(pick x64 arm64) && sum=$(pick "$NODE_SHA256_X64" "$NODE_SHA256_ARM64") || return 1
+  verified_fetch "https://nodejs.org/dist/$NODE_VERSION/node-$NODE_VERSION-linux-$arch.tar.xz" "$TMP_DIR/node.tar.xz" "$sum" || return 1
+  dir="$HOME/.local/node-$NODE_VERSION"
+  rm -rf "$dir" && mkdir -p "$dir" "$HOME/.local/bin" &&
+    tar -xJf "$TMP_DIR/node.tar.xz" -C "$dir" --strip-components=1 || return 1
+  for tool in node npm npx; do ln -sf "$dir/bin/$tool" "$HOME/.local/bin/$tool"; done
 }
 
 npm_global() {
   local prefix=""
   prefix=$(npm config get prefix 2>/dev/null) || prefix=""
   if [ "$(id -u)" -eq 0 ] || { [ -n "$prefix" ] && [ -w "$prefix/lib" ] && [ -w "$prefix/bin" ]; }; then
-    npm install -g "$@"
+    npm install -g --ignore-scripts --no-audit --no-fund "$@"
   else
-    as_root "$(command -v npm)" install -g "$@"
+    as_root "$(command -v npm)" install -g --ignore-scripts --no-audit --no-fund "$@"
   fi
 }
 
+# install_binary_tarball NAME URL CHECKSUM BINARY...: unpacks reviewed binaries into ~/.local/bin.
+install_binary_tarball() {
+  local name=$1 url=$2 sum=$3 binary="" found=""
+  shift 3
+  verified_fetch "$url" "$TMP_DIR/$name.tar.gz" "$sum" || return 1
+  rm -rf "$TMP_DIR/$name" && mkdir -p "$TMP_DIR/$name" "$HOME/.local/bin" &&
+    tar -xzf "$TMP_DIR/$name.tar.gz" -C "$TMP_DIR/$name" || return 1
+  for binary in "$@"; do
+    found=$(find "$TMP_DIR/$name" -type f -name "$binary" -perm -u+x | head -n 1)
+    [ -n "$found" ] || { echo "$binary is missing from $url"; return 1; }
+    install -m 0755 "$found" "$HOME/.local/bin/$binary" || return 1
+  done
+}
+
 install_uv() {
-  fetch https://astral.sh/uv/install.sh "$TMP_DIR/uv-install.sh" &&
-    env UV_NO_MODIFY_PATH=1 sh "$TMP_DIR/uv-install.sh"
+  local triple
+  triple=$(pick x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu) || return 1
+  install_binary_tarball uv "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$triple.tar.gz" \
+    "$(pick "$UV_SHA256_X64" "$UV_SHA256_ARM64")" uv uvx
+}
+
+install_ruff() {
+  local triple
+  triple=$(pick x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu) || return 1
+  install_binary_tarball ruff "https://github.com/astral-sh/ruff/releases/download/$RUFF_VERSION/ruff-$triple.tar.gz" \
+    "$(pick "$RUFF_SHA256_X64" "$RUFF_SHA256_ARM64")" ruff
 }
 
 install_rust() {
   if have rustup; then
     # rustup is there but has no working toolchain, as after a stopped run.
-    rustup default stable
+    rustup default "$RUST_TOOLCHAIN"
     return
   fi
-  fetch https://sh.rustup.rs "$TMP_DIR/rustup-init.sh" &&
-    sh "$TMP_DIR/rustup-init.sh" -y --no-modify-path
+  local triple
+  triple=$(pick x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu) || return 1
+  verified_fetch "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/$triple/rustup-init" "$TMP_DIR/rustup-init" \
+    "$(pick "$RUSTUP_SHA256_X64" "$RUSTUP_SHA256_ARM64")" || return 1
+  chmod +x "$TMP_DIR/rustup-init" &&
+    # rustup checks every toolchain component against the release manifest's hashes.
+    "$TMP_DIR/rustup-init" -y --no-modify-path --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
 }
 
 install_dotnet() {
-  fetch https://dot.net/v1/dotnet-install.sh "$TMP_DIR/dotnet-install.sh" &&
-    bash "$TMP_DIR/dotnet-install.sh" --channel LTS --install-dir "$HOME/.dotnet"
+  local arch
+  arch=$(pick x64 arm64) || return 1
+  verified_fetch "https://builds.dotnet.microsoft.com/dotnet/Sdk/$DOTNET_VERSION/dotnet-sdk-$DOTNET_VERSION-linux-$arch.tar.gz" "$TMP_DIR/dotnet.tar.gz" \
+    "sha512:$(pick "$DOTNET_SHA512_X64" "$DOTNET_SHA512_ARM64")" || return 1
+  mkdir -p "$HOME/.dotnet" && tar -xzf "$TMP_DIR/dotnet.tar.gz" -C "$HOME/.dotnet"
+}
+
+# install_binary_zip NAME URL CHECKSUM BINARY DESTINATION
+install_binary_zip() {
+  local name=$1 url=$2 sum=$3 binary=$4 destination=$5 found=""
+  verified_fetch "$url" "$TMP_DIR/$name.zip" "$sum" || return 1
+  rm -rf "$TMP_DIR/$name" && mkdir -p "$TMP_DIR/$name" "$destination" &&
+    unzip -q -o "$TMP_DIR/$name.zip" -d "$TMP_DIR/$name" || return 1
+  found=$(find "$TMP_DIR/$name" -type f -name "$binary" | head -n 1)
+  [ -n "$found" ] || { echo "$binary is missing from $url"; return 1; }
+  install -m 0755 "$found" "$destination/$binary"
 }
 
 install_bun() {
-  fetch https://bun.sh/install "$TMP_DIR/bun-install.sh" && bash "$TMP_DIR/bun-install.sh"
+  local arch
+  arch=$(pick x64 aarch64) || return 1
+  install_binary_zip bun "https://github.com/oven-sh/bun/releases/download/$BUN_VERSION/bun-linux-$arch.zip" \
+    "$(pick "$BUN_SHA256_X64" "$BUN_SHA256_ARM64")" bun "$HOME/.bun/bin"
 }
 
 install_deno() {
-  # With its output going to the log the installer asks nothing and leaves shell files alone.
-  fetch https://deno.land/install.sh "$TMP_DIR/deno-install.sh" && sh "$TMP_DIR/deno-install.sh"
+  local arch
+  arch=$(pick x86_64 aarch64) || return 1
+  install_binary_zip deno "https://github.com/denoland/deno/releases/download/$DENO_VERSION/deno-$arch-unknown-linux-gnu.zip" \
+    "$(pick "$DENO_SHA256_X64" "$DENO_SHA256_ARM64")" deno "$HOME/.deno/bin"
 }
 
-# swift.org's swiftly steps, without questions: set swiftly up, install the latest Swift, then
-# install the system packages that Swift release asks for.
+# swift.org's swiftly steps, without questions: set up the reviewed swiftly, install the reviewed
+# Swift release (swiftly checks the toolchain's PGP signature), then the system packages it lists.
 install_swift() {
   local swiftly_home="${SWIFTLY_HOME_DIR:-$HOME/.local/share/swiftly}"
   local swiftly="${SWIFTLY_BIN_DIR:-$swiftly_home/bin}/swiftly"
   if [ ! -x "$swiftly" ]; then
-    fetch "https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz" "$TMP_DIR/swiftly.tar.gz" &&
+    verified_fetch "https://download.swift.org/swiftly/linux/swiftly-$SWIFTLY_VERSION-$(uname -m).tar.gz" "$TMP_DIR/swiftly.tar.gz" \
+      "$(pick "$SWIFTLY_SHA256_X64" "$SWIFTLY_SHA256_ARM64")" &&
       tar -zxf "$TMP_DIR/swiftly.tar.gz" -C "$TMP_DIR" &&
       "$TMP_DIR/swiftly" init --assume-yes --quiet-shell-followup --skip-install || return 1
   fi
@@ -197,7 +308,7 @@ install_swift() {
   fi
   hash -r
   rm -f "$TMP_DIR/swift-post-install.sh"
-  "$swiftly" install latest --use --assume-yes --post-install-file "$TMP_DIR/swift-post-install.sh" || return 1
+  "$swiftly" install "$SWIFT_VERSION" --use --assume-yes --post-install-file "$TMP_DIR/swift-post-install.sh" || return 1
   if [ -s "$TMP_DIR/swift-post-install.sh" ]; then
     as_root bash "$TMP_DIR/swift-post-install.sh" || return 1
   fi
@@ -265,7 +376,6 @@ npm|npm|npm --version
 pnpm|pnpm|pnpm --version
 yarn|yarn|yarn --version
 typescript|tsc|tsc --version
-playwright|playwright|playwright --version
 go|go|go version
 rust|rustc|rustc --version
 cargo|cargo|cargo --version
@@ -315,11 +425,6 @@ report_versions() {
   done <<EOF
 $TOOL_VERSIONS
 EOF
-  if [ -f "$STATE_DIR/playwright-chromium" ]; then
-    say "  chromium     installed for Playwright"
-  else
-    say "  chromium     missing (for Playwright)"
-  fi
 }
 
 main() {
@@ -373,42 +478,44 @@ main() {
   fi
 
   if ! have node; then
-    run_step "Node.js LTS" install_node || add_failure "Node.js"
+    run_step "Node.js $NODE_VERSION" install_node || add_failure "Node.js"
   fi
   if have node && ! have npm; then
     run_step "npm" apt_install npm || add_failure "npm"
   fi
   if have npm; then
-    have pnpm || globals="$globals pnpm"
-    have yarn || globals="$globals yarn"
-    have tsc || globals="$globals typescript"
-    have playwright || globals="$globals playwright"
+    local spec=""
+    for spec in $NPM_GLOBALS; do
+      case "$spec" in
+        pnpm@*) have pnpm || globals="$globals $spec" ;;
+        yarn@*) have yarn || globals="$globals $spec" ;;
+        typescript@*) have tsc || globals="$globals $spec" ;;
+      esac
+    done
     if [ -n "$globals" ]; then
       # shellcheck disable=SC2086 # one word per package
       run_step "npm install -g$globals" npm_global $globals || add_failure "npm:$globals"
     fi
   fi
-  if have npx && [ ! -f "$STATE_DIR/playwright-chromium" ]; then
-    if run_step "Playwright's Chromium" npx --yes playwright install --with-deps chromium; then
-      date -u '+%Y-%m-%dT%H:%M:%SZ' >"$STATE_DIR/playwright-chromium"
-    else
-      add_failure "Playwright's Chromium"
-    fi
-  fi
+  # Playwright's browsers come from a download Playwright doesn't checksum, so this script no
+  # longer installs them. Install Playwright in a project with its lockfile when a test needs it.
 
   if ! works uv --version; then
     run_step "uv" install_uv || add_failure "uv"
   fi
+  if ! works ruff --version; then
+    run_step "ruff $RUFF_VERSION" install_ruff || add_failure "ruff"
+  fi
   if have uv; then
-    have ruff || run_step "ruff (uv tool install)" uv tool install ruff || add_failure "ruff"
-    have pytest || run_step "pytest (uv tool install)" uv tool install pytest || add_failure "pytest"
+    # uv checks every wheel against the package index's SHA-256 for this exact version.
+    have pytest || run_step "pytest $PYTEST_VERSION (uv tool install)" uv tool install "pytest==$PYTEST_VERSION" || add_failure "pytest"
   fi
 
   if ! works cargo --version; then
-    run_step "Rust (rustup)" install_rust || add_failure "Rust"
+    run_step "Rust $RUST_TOOLCHAIN (rustup $RUSTUP_VERSION)" install_rust || add_failure "Rust"
   fi
   if ! works dotnet --version; then
-    run_step ".NET SDK (LTS)" install_dotnet || add_failure ".NET"
+    run_step ".NET SDK $DOTNET_VERSION" install_dotnet || add_failure ".NET"
   fi
   if [ -x "$HOME/.dotnet/dotnet" ]; then
     export DOTNET_ROOT="$HOME/.dotnet"
@@ -420,7 +527,7 @@ main() {
     run_step "Deno" install_deno || add_failure "Deno"
   fi
   if ! works swift --version; then
-    run_step "Swift (swiftly)" install_swift || add_failure "Swift"
+    run_step "Swift $SWIFT_VERSION (swiftly $SWIFTLY_VERSION)" install_swift || add_failure "Swift"
   fi
   hash -r
 

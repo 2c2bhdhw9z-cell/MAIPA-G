@@ -10,7 +10,7 @@ struct HealthCheckScreen: View {
 
     private struct Item: Identifiable {
         enum State { case good, warning, failed }
-        enum Action { case github, openRouter, save, connector(UUID), computer, replaceComputer, jobs }
+        enum Action { case github, openRouter, save, connector(UUID), computer, replaceComputer, setupTools, jobs }
         let id: String
         var title: String
         var detail: String
@@ -36,7 +36,7 @@ struct HealthCheckScreen: View {
                                 Text(next).font(.footnote).foregroundStyle(item.state == .failed ? Theme.danger : .orange)
                             }
                             if let action = item.action {
-                                Button("Fix") { fix(action) }.font(.footnote.weight(.semibold))
+                                Button(Self.label(for: action)) { fix(action) }.font(.footnote.weight(.semibold))
                             }
                         }
                     }
@@ -56,6 +56,17 @@ struct HealthCheckScreen: View {
             } message: {
                 Text("MAIPA-G deletes the machine that isn't answering and creates a new one with the same name. Files on it are lost; your repos on GitHub and the phone's staged changes are not.")
             }
+        }
+    }
+
+    private func setupTools() async {
+        guard let control = app.connectors.computerControl() else { return }
+        let revision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
+        do {
+            let message = try await control.startVerifiedSetup(revision: revision)
+            items.append(Item(id: "computer-setup", title: "Tool setup", detail: message, state: .good))
+        } catch {
+            items.append(Item(id: "computer-setup", title: "Tool setup", detail: ErrorExplainer.explain(error).message, nextStep: "Check the computer service, then try Set up tools again.", state: .failed, action: .setupTools))
         }
     }
 
@@ -125,7 +136,11 @@ struct HealthCheckScreen: View {
             do {
                 switch try await control.ensureMachine(allowCreate: true) {
                 case .healthy(let output):
-                    items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) ran a command: \(Self.firstLine(output, skipping: "maipa-g-health-ok"))", state: .good))
+                    if output.contains("maipa-g-tools-missing") {
+                        items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) ran a command, but MAIPA-G's verified tool setup hasn't finished there.", nextStep: "Set up tools installs reviewed, checksum-verified versions in the background.", state: .warning, action: .setupTools))
+                    } else {
+                        items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) ran a command: \(Self.firstLine(output, skipping: "maipa-g-health-ok"))", state: .good))
+                    }
                 case .recreated(let output):
                     items.append(Item(id: "computer", title: "Chat computer", detail: "\(control.machine) was missing, so MAIPA-G created it again. It ran a command: \(Self.firstLine(output, skipping: "maipa-g-health-ok"))", state: .good))
                 }
@@ -176,7 +191,16 @@ struct HealthCheckScreen: View {
         case .connector(let id): app.sheet = .connectorDetail(id)
         case .computer: app.sheet = .connectors
         case .replaceComputer: confirmReplace = true
+        case .setupTools: Task { await setupTools() }
         case .jobs: app.jobs.show()
+        }
+    }
+
+    private static func label(for action: Item.Action) -> String {
+        switch action {
+        case .setupTools: "Set up tools"
+        case .replaceComputer: "Replace machine"
+        default: "Fix"
         }
     }
 
