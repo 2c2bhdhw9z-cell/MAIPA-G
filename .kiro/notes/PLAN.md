@@ -7,7 +7,15 @@ commit). Its checksummed Autonomous runner is published as `runner-3f07b9f…`. 
 GitHub's temporary pull-request commit, so its Autonomous callers pointed at a runner that never
 existed; Build 53 fixes that. The owner deleted the Dark/Light screenshot job at 2:40 PM ("Delete.
 The. Mother. Fucking. Screenshot job."), so necessary item 8 is cancelled like Stability 40 and
-builds no longer get a screen check. By Kiro's count, 54 of the 57 active requirements are done.
+builds no longer get a screen check. Kiro counted 54 of the 57 active requirements as done, but
+the owner's phone (3:04 PM) and its synced diagnostics show that count was wrong: the chat
+computer's command call is wrong for the real Sprites service (it gets back `{"count":0,"sessions":[]}`),
+so Stability 10, 31, 33, 34 and 35 don't work there, and "Replace machine" deleted and recreated
+`mcp-maipa-g` without fixing it; saving never finishes (a large attached .ipa can't upload, files
+deleted since the last save count as failures, and 52 GitHub failures hide their reason), so
+Stability 3 isn't done; and the Actions-minutes 403 shows a generic message instead of the Plan
+permission steps, so Stability 14 isn't done. Errors still show iOS's "The operation couldn't be
+completed (… error 1)" placeholder instead of their real reason.
 Not done: Stability 11 (about 250 silent `try?` failures and the generic fallback error remain),
 necessary item 4 (no read-only folder grants, network allow-list or separate package install for
 downloaded connectors; their sandbox blocks all network, so npx/uvx connectors can't install), and
