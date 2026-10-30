@@ -11,6 +11,8 @@ final class UpdateChecker {
     static let latestDownload = URL(string: "https://github.com/2c2bhdhw9z-cell/MAIPA-G/releases/latest/download/MAIPA-G.ipa")!
 
     private(set) var newer: GitHubRelease?
+    private(set) var isChecking = false
+    private(set) var statusMessage: String?
     @ObservationIgnored private var lastCheck: Date?
 
     let currentBuild = Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "") ?? 0
@@ -28,9 +30,39 @@ final class UpdateChecker {
 
     /// Checks at most once an hour unless `force`.
     func check(using client: GitHubClient, force: Bool = false) async {
+        if isChecking { return }
         if !force, let lastCheck, Date().timeIntervalSince(lastCheck) < 3600 { return }
         lastCheck = Date()
-        guard let release = try? await client.latestRelease(Self.repo), let number = release.buildNumber else { return }
-        newer = number > currentBuild ? release : nil
+        if force {
+            isChecking = true
+            statusMessage = nil
+        }
+        defer { isChecking = false }
+        do {
+            guard let release = try await client.latestRelease(Self.repo), let number = release.buildNumber else {
+                if force {
+                    statusMessage = "You’re on the newest build (build \(currentBuild))."
+                    Haptics.selection()
+                }
+                return
+            }
+            if number > currentBuild {
+                newer = release
+                if force {
+                    statusMessage = "Build \(number) is out and ready to install."
+                    Haptics.tap()
+                }
+            } else {
+                newer = nil
+                if force {
+                    statusMessage = "You’re on the newest build (build \(currentBuild))."
+                    Haptics.selection()
+                }
+            }
+        } catch {
+            if force {
+                statusMessage = ErrorExplainer.explain(error).cause
+            }
+        }
     }
 }

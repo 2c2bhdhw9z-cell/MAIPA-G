@@ -44,10 +44,17 @@ struct RootView: View {
             }
         }
         .background(Theme.surface.ignoresSafeArea())
+        .background(KeyboardDismissAttachment().frame(width: 0, height: 0))
+        .scrollDismissesKeyboard(.interactively)
         .environment(\.theme, theme)
         .tint(theme.accent)
+        .onChange(of: app.sheet) { _, _ in KeyboardDismiss.dismiss() }
+        .onChange(of: app.isMenuOpen) { _, _ in KeyboardDismiss.dismiss() }
+        .onChange(of: app.library.openSession?.id) { _, _ in KeyboardDismiss.dismiss() }
         .sheet(item: $app.sheet) { sheet in
             SheetContent(sheet: sheet)
+                .background(KeyboardDismissAttachment().frame(width: 0, height: 0))
+                .scrollDismissesKeyboard(.interactively)
                 .environment(\.theme, theme)
                 .tint(theme.accent)
         }
