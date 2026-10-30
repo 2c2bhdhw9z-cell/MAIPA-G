@@ -22,6 +22,16 @@ for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
 ios = (ROOT / ".github/workflows/ios.yml").read_text()
 if "needs: [checks, screens]" not in ios:
     errors.append("ios.yml: IPA job must require checks and screens")
+# Every iOS job checks out the exact PR head, never GitHub's temporary merge commit, and the IPA
+# must embed that revision: Autonomous callers download runner-<revision>.
+head_ref = "ref: ${{ github.event.pull_request.head.sha || github.sha }}"
+if ios.count("uses: actions/checkout@") != ios.count(head_ref):
+    errors.append("ios.yml: every checkout must use the exact PR head")
+for expected in ('MAIPAG_REVIEWED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}', '--revision "${{ github.event.pull_request.head.sha || github.sha }}"'):
+    if expected not in ios:
+        errors.append(f"ios.yml: must pin the reviewed revision: {expected}")
+if '--revision "$PR_HEAD"' not in (ROOT / "scripts/publish-verified-ipa.sh").read_text():
+    errors.append("publish-verified-ipa.sh: must check the IPA's reviewed revision")
 for expected in (
     "XcodeGen/releases/download/2.46.0/xcodegen.zip",
     "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806",
