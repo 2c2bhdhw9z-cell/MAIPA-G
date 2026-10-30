@@ -12,7 +12,7 @@ the owner's phone (3:04 PM) and its synced diagnostics show that count was wrong
 computer's command call is wrong for the real Sprites service (it gets back `{"count":0,"sessions":[]}`),
 so Stability 10, 31, 33, 34 and 35 don't work there, and "Replace machine" deleted and recreated
 `mcp-maipa-g` without fixing it; saving never finishes (a large attached .ipa can't upload, files
-deleted since the last save count as failures, and 52 GitHub failures hide their reason), so
+deleted since the last save count as failures, and 54 GitHub failures hide their reason), so
 Stability 3 isn't done; and the Actions-minutes 403 shows a generic message instead of the Plan
 permission steps, so Stability 14 isn't done. Errors still show iOS's "The operation couldn't be
 completed (… error 1)" placeholder instead of their real reason.
