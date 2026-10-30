@@ -147,7 +147,7 @@ struct HealthCheckScreen: View {
         if actionsError == nil, let github = app.github.client {
             // With no jobs yet, Actions is still checked against the data repo or the open repo.
             var repos = Array(Set(app.jobs.jobs.compactMap(\.targetRepo))).sorted { $0.fullName < $1.fullName }
-            if repos.isEmpty { repos = [app.sync.repo, app.repo?.ref].compactMap { $0 } }
+            if repos.isEmpty { repos = [app.sync.repo, app.repo(for: .home)?.ref].compactMap { $0 } }
             for repo in repos.prefix(5) {
                 do { _ = try await github.workflowRuns(repo, limit: 1); probed.append(repo.fullName) }
                 catch { actionsError = ErrorExplainer.explain(error).message; break }
