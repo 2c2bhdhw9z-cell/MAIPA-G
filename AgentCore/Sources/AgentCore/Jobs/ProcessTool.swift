@@ -488,7 +488,30 @@ public struct StdioMCPTool: AgentTool {
 
     public func runningSummary(for arguments: JSONValue) -> String { "Using \(server.id)…" }
 
+    /// A raw JSON-RPC call gets the same typed approval as a named connector tool: `tools/call`
+    /// is judged by the tool it names and its arguments; reads pass; any other method asks.
+    public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
+        Self.approval(serverID: server.id, arguments: arguments)
+    }
+
+    static func approval(serverID: String, arguments: JSONValue) -> ToolApprovalRequest? {
+        let method = arguments["method"]?.stringValue ?? ""
+        let readMethods: Set<String> = ["initialize", "notifications/initialized", "ping", "tools/list", "resources/list", "resources/read", "resources/templates/list", "prompts/list", "prompts/get", "completion/complete"]
+        if readMethods.contains(method) { return nil }
+        if method == "tools/call" {
+            let toolName = arguments["params"]?["name"]?.stringValue ?? ""
+            let definition = ConnectorToolDefinition(serverID: serverID, serverName: serverID, originalName: toolName.isEmpty ? "unnamed" : toolName)
+            return ConnectorActionPolicy.approval(for: definition, arguments: arguments["params"]?["arguments"] ?? .object([:]))
+        }
+        return ToolApprovalRequest(question: "Allow \(String(serverID.prefix(60))) to handle the request “\(String(method.prefix(80)))”? MAIPA-G can't tell what it changes.")
+    }
+
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        if let approval = Self.approval(serverID: server.id, arguments: arguments) { throw ToolApprovalRequired(approval) }
+        return try await runApproved(arguments: arguments, progress: progress)
+    }
+
+    public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let method = try arguments.requiredString("method")
         let request: JSONValue = [
             "jsonrpc": "2.0", "id": 1, "method": .string(method),

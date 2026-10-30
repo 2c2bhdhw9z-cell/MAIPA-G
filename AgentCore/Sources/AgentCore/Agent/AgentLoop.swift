@@ -416,6 +416,13 @@ private struct Runner {
                 continue
             }
             let wasApproved: Bool
+            var pendingApproval: ToolApprovalRequest?
+            if call.questions == nil {
+                pendingApproval = await tool.approvalRequest(for: arguments)
+                if pendingApproval == nil, outsideContentSeen() {
+                    pendingApproval = await tool.approvalAfterOutsideContent(for: arguments)
+                }
+            }
             if let questions = call.questions {
                 guard let answer = questions.answers?.first else {
                     waiting = true
@@ -430,7 +437,7 @@ private struct Runner {
                     continue
                 }
                 wasApproved = true
-            } else if let approval = await tool.approvalRequest(for: arguments) {
+            } else if let approval = pendingApproval {
                 turn.steps[stepIndex].toolCalls[callIndex].questions = QuestionSet(questions: [
                     .init(text: approval.question, options: [approval.allowLabel, "Don't allow"]),
                 ])
@@ -509,6 +516,25 @@ private struct Runner {
         try Task.checkCancellation()
         return waiting
     }
+
+    /// Whether anything from outside the person's own words is in the conversation: OpenRouter's
+    /// own web tools (their citations), or a finished call to a tool that brings outside content,
+    /// in this turn or an earlier one the AI still sees.
+    func outsideContentSeen() -> Bool {
+        let earlier = chat.messages.dropLast().compactMap(\.assistantTurn)
+        for candidate in earlier + [turn] {
+            for step in candidate.steps {
+                if !(step.citations ?? []).isEmpty { return true }
+                for call in step.toolCalls where call.result != nil && call.status != .waitingForUser {
+                    if tools[call.name]?.bringsOutsideContent == true || call.name.hasPrefix("mcp_") || Self.outsideContentToolNames.contains(call.name) { return true }
+                }
+            }
+        }
+        return false
+    }
+
+    /// Outside-content tools by name, for earlier turns whose tools may not be loaded now.
+    static let outsideContentToolNames: Set<String> = ["web_search", "read_web_page", "read_file", "search_code", "read_repo_file", "read_other_repo_file"]
 
     mutating func apply(_ result: (Int, Result<ToolOutput, Error>), stepIndex: Int) {
         let callIndex = result.0
