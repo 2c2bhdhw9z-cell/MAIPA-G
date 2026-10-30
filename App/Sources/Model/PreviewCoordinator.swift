@@ -47,7 +47,7 @@ final class PreviewCoordinator {
                 let paths = Self.relativeFiles(destination)
                 guard let built = WebProjectDetector.detect(paths: paths), built.kind != .buildArtifact || paths.contains(built.entryPath) else { throw WebPreviewError.missingResource("index.html in the preview artifact") }
                 project = built
-                manifest = PublishedPreviewManifest(entryPath: built.entryPath, files: Set(paths), allowedHTTPSHosts: app?.settings.previewAllowedHosts[repo.ref.fullName] ?? [])
+                manifest = PublishedPreviewManifest(entryPath: built.entryPath, files: Set(paths), allowedHTTPSHosts: app.settings.previewAllowedHosts[repo.ref.fullName] ?? [])
             } else {
                 buildProject = nil
                 let prefix = detected.rootPath.isEmpty ? "" : detected.rootPath + "/"

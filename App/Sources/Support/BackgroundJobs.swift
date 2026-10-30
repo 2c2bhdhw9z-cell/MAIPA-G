@@ -1,3 +1,4 @@
+import AgentCore
 import BackgroundTasks
 import Foundation
 import Observation
