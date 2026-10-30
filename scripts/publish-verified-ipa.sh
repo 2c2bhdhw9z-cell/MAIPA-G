@@ -32,7 +32,7 @@ gh api "repos/$REPO/actions/artifacts/$ARTIFACT_ID/zip" >"$TMP/artifact.zip"
 unzip -q "$TMP/artifact.zip" -d "$TMP/artifact"
 IPA="$(find "$TMP/artifact" -name 'MAIPA-G.ipa' -type f -print -quit)"
 [ -n "$IPA" ] || { echo "error: artifact contains no MAIPA-G.ipa" >&2; exit 1; }
-python3 "$ROOT/scripts/check-ipa.py" "$IPA" --build "$RUN_NUMBER"
+python3 "$ROOT/scripts/check-ipa.py" "$IPA" --build "$RUN_NUMBER" --revision "$PR_HEAD"
 cp "$IPA" "$TMP/MAIPA-G.ipa"; cp "$IPA" "$TMP/MAIPA-G-$RUN_NUMBER.ipa"
 
 RUNNER_ARTIFACT_ID="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[] | select(.name|startswith("MAIPAGRunner-linux-")) | .id' | head -n1)"
