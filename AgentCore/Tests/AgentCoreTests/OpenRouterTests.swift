@@ -173,6 +173,29 @@ struct OpenRouterTests {
         #expect(transport.request?.url.path == "/api/v1/images")
     }
 
+    @Test func imageGenerationRejectsEmptyOrMalformedResults() async {
+        final class EmptyImageTransport: HTTPTransport, @unchecked Sendable {
+            let body: Data
+            init(_ json: String) { body = Data(json.utf8) }
+            func send(_ request: HTTPRequest) async throws -> HTTPResponse { HTTPResponse(status: 200, body: body) }
+            func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse {
+                HTTPStreamResponse(status: 404, headers: [:], body: AsyncThrowingStream { $0.finish() })
+            }
+        }
+
+        let responses = [
+            #"{"data":[]}"#,
+            #"{"data":[{"b64_json":"not base64"}]}"#,
+            #"{"data":[{"mime_type":"image/png"}]}"#,
+        ]
+        for response in responses {
+            let client = OpenRouterClient(transport: EmptyImageTransport(response), apiKey: "key")
+            await #expect(throws: HTTPError.self) {
+                _ = try await client.generateImages(prompt: "A robot", model: "image/model")
+            }
+        }
+    }
+
     @Test func signInURLCarriesPKCE() {
         let pkce = PKCE(verifier: "dBjftJeZ4CVP-mJ92K9rIn2ky-qD9-kOaeH-SiUpY4U")
         let url = OpenRouterClient.signInURL(callback: URL(string: "https://example.github.io/MAIPA-G/openrouter/")!, pkce: pkce, state: "s1")

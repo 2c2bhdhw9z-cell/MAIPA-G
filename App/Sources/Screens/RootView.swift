@@ -22,9 +22,12 @@ struct RootView: View {
                     .frame(width: width)
                     .offset(x: (progress - 1) * width * 0.25)
                     .opacity(0.4 + 0.6 * progress)
+                    .accessibilityHidden(!app.isMenuOpen)
+                    .accessibilityAction(.escape) { close() }
 
                 main
                     .frame(width: proxy.size.width)
+                    .accessibilityHidden(app.isMenuOpen)
                     .clipShape(RoundedRectangle(cornerRadius: progress * 28, style: .continuous))
                     .shadow(color: .black.opacity(0.25 * progress), radius: 20, x: -4)
                     // Watches swipes alongside everything else, so it never blocks a tap, a scroll
@@ -104,6 +107,7 @@ struct SheetContent: View {
     var body: some View {
         switch sheet {
         case .settings: SettingsScreen()
+        case .healthCheck: HealthCheckScreen()
         case .connectGitHub: ConnectGitHubSheet()
         case .signInOpenRouter: SignInOpenRouterSheet()
         case .models(let target): ModelPicker(target: target)
@@ -129,6 +133,7 @@ struct SheetContent: View {
             }
         case .workflowMaker: NavigationStack { WorkflowMakerScreen() }
         case .memories: MemoriesScreen()
+        case .recentlyDeleted: RecentlyDeletedScreen()
         case .memoryEditor(let id):
             NavigationStack { MemoryEditorScreen(record: id.flatMap { value in app.memories.memories.first { $0.id == value } }) }
         case .groups(let target): GroupPicker(target: target)

@@ -15,16 +15,32 @@ public actor ProductStore<Record: ProductRecord> {
     public func loadAll() -> [Record] {
         let directory = dataDirectory.appendingPathComponent(folder, isDirectory: true)
         guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return [] }
-        return files.filter { $0.pathExtension == "json" }.compactMap { url in
-            guard let data = try? Data(contentsOf: url) else { return nil }
-            return try? JSONCoding.decoder().decode(Record.self, from: data)
-        }.sorted { $0.updatedAt > $1.updatedAt }
+        var records: [Record] = []
+        for url in files where url.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: url) else { continue }
+            do {
+                records.append(try JSONCoding.decoder().decode(Record.self, from: data))
+            } catch {
+                try? Quarantine.setAside(
+                    fileURL: url,
+                    dataDirectory: dataDirectory,
+                    relativePath: "\(folder)/\(url.lastPathComponent)",
+                    error: error
+                )
+            }
+        }
+        return records.sorted { $0.updatedAt > $1.updatedAt }
     }
 
     public func load(_ id: UUID) -> Record? {
         let url = dataDirectory.appendingPathComponent(relativePath(for: id))
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONCoding.decoder().decode(Record.self, from: data)
+        do {
+            return try JSONCoding.decoder().decode(Record.self, from: data)
+        } catch {
+            try? Quarantine.setAside(fileURL: url, dataDirectory: dataDirectory, relativePath: relativePath(for: id), error: error)
+            return nil
+        }
     }
 
     public func save(_ record: Record) throws {

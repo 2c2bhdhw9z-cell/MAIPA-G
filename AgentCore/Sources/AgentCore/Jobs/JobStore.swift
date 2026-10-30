@@ -36,6 +36,26 @@ public actor JobStore {
         return job
     }
 
+    @discardableResult
+    public func compactFinished(now: Date = Date()) async throws -> Int {
+        var changed = 0
+        for var job in await records.loadAll() {
+            let age = now.timeIntervalSince(job.updatedAt)
+            let eligible = (job.status == .done && age >= 14 * 24 * 60 * 60)
+                || ([.failed, .stopped].contains(job.status) && age >= 30 * 24 * 60 * 60)
+            guard eligible, var object = job.state.objectValue, object["compactedAt"] == nil else { continue }
+            for key in ["workflowCheckpoint", "workspacePatch", "customAgents", "stdioConnectors"] {
+                object[key] = nil
+            }
+            object["compactedAt"] = .string(ISO8601.string(from: now))
+            job.state = .object(object)
+            job.updatedAt = now
+            try await records.save(job)
+            changed += 1
+        }
+        return changed
+    }
+
     public func delete(_ id: UUID) async throws {
         try await records.delete(id)
     }

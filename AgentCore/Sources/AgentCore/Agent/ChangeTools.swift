@@ -76,7 +76,20 @@ public struct SaveChangesTool: AgentTool {
     }
     public var spec: ToolSpec { ToolSpec(name: name, description: "Save all staged file changes safely. Repository rules decide direct save versus a pull request.", parameters: ["type": "object", "properties": ["title": ["type": "string"], "summary": ["type": "string"]], "required": ["title"]]) }
     public func runningSummary(for arguments: JSONValue) -> String { "Saving changes…" }
+    public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
+        guard rules.directSave, selectedBranch == defaultBranch, await session.activeReceipt() == nil else { return nil }
+        return ToolApprovalRequest(question: "Allow MAIPA-G to save these staged changes directly to \(defaultBranch)?", allowLabel: "Save directly")
+    }
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        if rules.directSave, selectedBranch == defaultBranch, await session.activeReceipt() == nil {
+            throw ToolInputError("Saving directly to the default branch needs the person's approval.")
+        }
+        return try await save(arguments: arguments)
+    }
+    public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        try await save(arguments: arguments)
+    }
+    private func save(arguments: JSONValue) async throws -> ToolOutput {
         let title = try arguments.requiredString("title")
         let receipt = try await service.save(workspace, selectedBranch: selectedBranch, defaultBranch: defaultBranch, rules: rules, title: title, body: arguments.optionalString("summary") ?? "Changes made by MAIPA-G.", activeReceipt: await session.activeReceipt())
         await session.record(receipt)
@@ -140,10 +153,14 @@ public struct DeleteFileTool: AgentTool {
     public var spec: ToolSpec { ToolSpec(name: name, description: "Stage deletion of a file. MAIPA-G always asks the person before deleting.", parameters: ["type": "object", "properties": ["path": ["type": "string"]], "required": ["path"]]) }
     public func runningSummary(for arguments: JSONValue) -> String { "Deleting \(arguments.optionalString("path") ?? "a file")…" }
     public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
-        guard let path = arguments.optionalString("path"), !authorization.allows(.deletion, path: path) else { return nil }
+        guard let path = arguments.optionalString("path") else { return nil }
         return ToolApprovalRequest(question: "Allow MAIPA-G to delete \(path)?")
     }
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        let path = try arguments.requiredString("path")
+        throw ChangeWorkspaceError.deletionApprovalRequired(path)
+    }
+    public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let path = try arguments.requiredString("path")
         guard rules.permitsDeletion(at: path) else { throw ToolInputError("Repository rules do not allow deleting \(path).") }
         try await workspace.delete(path: path, approved: true)

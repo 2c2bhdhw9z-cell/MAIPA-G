@@ -13,8 +13,8 @@ struct WebPreviewScreen: View {
     var body: some View {
         NavigationStack {
             Group {
-                if let root = app.previews.directory, let project = app.previews.project {
-                    PreviewWebView(root: root, project: project, browser: $browser, coordinator: app.previews)
+                if let root = app.previews.directory, let project = app.previews.project, let manifest = app.previews.manifest {
+                    PreviewWebView(root: root, project: project, manifest: manifest, browser: $browser, coordinator: app.previews)
                 } else if app.previews.isLoading { ProgressView("Opening current saved site…") }
                 else if let error = app.previews.error {
                     ContentUnavailableView("Preview could not open", systemImage: "safari", description: Text(error))
@@ -69,6 +69,7 @@ final class PreviewBrowserModel {
 struct PreviewWebView: UIViewRepresentable {
     let root: URL
     let project: WebPreviewProject
+    let manifest: PublishedPreviewManifest
     @Binding var browser: PreviewBrowserModel?
     let coordinator: PreviewCoordinator
 
@@ -77,7 +78,7 @@ struct PreviewWebView: UIViewRepresentable {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
-        configuration.setURLSchemeHandler(PreviewSchemeHandler(root: root, entryPath: project.entryPath), forURLScheme: "maipag-preview")
+        configuration.setURLSchemeHandler(PreviewSchemeHandler(root: root, manifest: manifest), forURLScheme: "maipag-preview")
         let script = "window._maipagConsole=[];['log','warn','error'].forEach(k=>{const o=console[k];console[k]=function(...a){window._maipagConsole.push(k+': '+a.join(' '));o.apply(console,a)}});"
         configuration.userContentController.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         let view = WKWebView(frame: .zero, configuration: configuration)

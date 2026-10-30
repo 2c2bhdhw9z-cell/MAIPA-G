@@ -108,7 +108,8 @@ final class ChatLibrary {
             return
         }
         guard let chat = await store.load(id) else { return }
-        let session = ChatSession(chat: chat, app: app)
+        let draft = await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: id.uuidString.lowercased()))
+        let session = ChatSession(chat: chat, app: app, draft: draft)
         sessions[id] = session
         openSession = session
         dropIdleSessions()
@@ -176,12 +177,24 @@ final class ChatLibrary {
     }
 
     func delete(_ id: UUID) async {
+        let summary = summaries.first { $0.id == id }
         sessions[id]?.stop()
         sessions[id] = nil
         if openSession?.id == id { openSession = nil }
-        await store.delete(id)
-        summaries.removeAll { $0.id == id }
-        app?.sync.request()
+        do {
+            try await app?.trash.move(
+                id: id,
+                kind: .chat,
+                title: summary?.title ?? "Chat",
+                originalPath: ChatStore.relativePath(for: id)
+            )
+            try? await store.deleteItem(at: ComposerDraft.path(for: id.uuidString.lowercased()))
+            summaries.removeAll { $0.id == id }
+            app?.sync.request()
+        } catch {
+            // Keep the item visible when moving it to Recently Deleted fails.
+            await reloadFromDisk()
+        }
     }
 
     func removeGroup(_ groupID: UUID) async {

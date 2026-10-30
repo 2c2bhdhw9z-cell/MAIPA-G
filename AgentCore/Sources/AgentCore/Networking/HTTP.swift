@@ -9,6 +9,9 @@ public struct HTTPRequest: Sendable {
     public var url: URL
     public var headers: [String: String]
     public var body: Data?
+    /// OAuth and other credential-bearing calls can reject redirects before a body or secret is
+    /// replayed to a different address.
+    public var followsRedirects: Bool
     /// Longest silence allowed between two packets. AI replies can pause while the model thinks, and
     /// OpenRouter sends a keep-alive comment every few seconds, so two minutes is generous.
     public var idleTimeout: TimeInterval
@@ -18,13 +21,15 @@ public struct HTTPRequest: Sendable {
         url: URL,
         headers: [String: String] = [:],
         body: Data? = nil,
-        idleTimeout: TimeInterval = 60
+        idleTimeout: TimeInterval = 60,
+        followsRedirects: Bool = true
     ) {
         self.method = method
         self.url = url
         self.headers = headers
         self.body = body
         self.idleTimeout = idleTimeout
+        self.followsRedirects = followsRedirects
     }
 
     public static func json<Body: Encodable>(
@@ -165,10 +170,23 @@ public extension HTTPTransport {
 
 // MARK: - URLSession
 
+private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+}
+
 /// The real transport. One session for whole responses and one for streams, so the streaming
 /// delegate never sees tasks it did not start.
 public final class URLSessionTransport: HTTPTransport, @unchecked Sendable {
     private let plainSession: URLSession
+    private let noRedirectSession: URLSession
     private let streamSession: URLSession
     private let streamDelegate: StreamingDelegate
 
@@ -180,6 +198,7 @@ public final class URLSessionTransport: HTTPTransport, @unchecked Sendable {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.urlCache = nil
         plainSession = URLSession(configuration: configuration)
+        noRedirectSession = URLSession(configuration: configuration, delegate: NoRedirectDelegate(), delegateQueue: nil)
 
         let delegate = StreamingDelegate()
         streamDelegate = delegate
@@ -188,13 +207,15 @@ public final class URLSessionTransport: HTTPTransport, @unchecked Sendable {
 
     deinit {
         plainSession.finishTasksAndInvalidate()
+        noRedirectSession.finishTasksAndInvalidate()
         streamSession.finishTasksAndInvalidate()
     }
 
     public func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         let urlRequest = Self.makeURLRequest(request)
         do {
-            let (data, response) = try await plainSession.data(for: urlRequest)
+            let session = request.followsRedirects ? plainSession : noRedirectSession
+            let (data, response) = try await session.data(for: urlRequest)
             guard let http = response as? HTTPURLResponse else {
                 throw HTTPError.transport("Not an HTTP response", isOffline: false)
             }

@@ -9,8 +9,8 @@ import Observation
 final class ChatSession: Identifiable {
     let id: UUID
     private(set) var chat: Chat
-    var draft = ""
-    var draftAttachments: [AttachmentReference] = []
+    var draft = "" { didSet { scheduleDraftSave() } }
+    var draftAttachments: [AttachmentReference] = [] { didSet { scheduleDraftSave() } }
     var webEnabled = true
     var autonomous = false
     private(set) var isRunning = false
@@ -23,14 +23,31 @@ final class ChatSession: Identifiable {
     @ObservationIgnored private var pendingTurn: AssistantTurn?
     @ObservationIgnored private var flushScheduled = false
     @ObservationIgnored private var saveTask: Task<Void, Never>?
+    @ObservationIgnored private var draftSaveTask: Task<Void, Never>?
     @ObservationIgnored private var lastSaved = Date()
-    /// The read-only token for cloning this chat's private repo onto its computer.
-    @ObservationIgnored private var computerToken: (repo: RepoRef, token: String, expiresAt: Date)?
 
-    init(chat: Chat, app: AppModel?) {
+    init(chat: Chat, app: AppModel?, draft: ComposerDraft? = nil) {
         self.id = chat.id
         self.chat = chat
         self.app = app
+        self.draft = draft?.text ?? ""
+        self.draftAttachments = draft?.attachments ?? []
+    }
+
+    private func scheduleDraftSave() {
+        guard !PreviewScenes.isActive, let store = app?.library.store else { return }
+        draftSaveTask?.cancel()
+        let value = ComposerDraft(text: draft, attachments: draftAttachments)
+        let path = ComposerDraft.path(for: id.uuidString.lowercased())
+        draftSaveTask = Task {
+            do { try await Task.sleep(nanoseconds: 400_000_000) } catch { return }
+            do {
+                if value.isEmpty { try await store.deleteItem(at: path) }
+                else { try await store.saveDocument(value, at: path) }
+            } catch {
+                // The chat itself still remains on the phone; the next edit retries this draft.
+            }
+        }
     }
 
     var lastTurn: AssistantTurn? { chat.lastAssistantTurn }
@@ -449,10 +466,7 @@ final class ChatSession: Identifiable {
         guard let repo else { return SystemPrompt.ComputerContext(service: connector.displayName, machine: machine) }
         let owner = repo.ref.owner
         let name = repo.ref.name
-        var cloneURL = "https://github.com/\(owner)/\(name).git"
-        if repo.isPrivate, let token = await readOnlyCloneToken(for: repo.ref, app: app) {
-            cloneURL = "https://x-access-token:\(token)@github.com/\(owner)/\(name).git"
-        }
+        let cloneURL = "https://github.com/\(owner)/\(name).git"
         return SystemPrompt.ComputerContext(
             service: connector.displayName,
             machine: machine,
@@ -462,18 +476,6 @@ final class ChatSession: Identifiable {
             commit: repo.commit,
             repoPath: "$HOME/repos/\(owner)/\(name)"
         )
-    }
-
-    /// A token that can only read this chat's private repo, kept until five minutes before it runs
-    /// out. Nil when GitHub won't make one; the plain address is used then.
-    private func readOnlyCloneToken(for repo: RepoRef, app: AppModel) async -> String? {
-        if let cached = computerToken, cached.repo == repo, cached.expiresAt.timeIntervalSinceNow > 5 * 60 {
-            return cached.token
-        }
-        computerToken = nil
-        guard let fresh = try? await app.github.readOnlyToken(for: repo) else { return nil }
-        computerToken = (repo: repo, token: fresh.token, expiresAt: fresh.expiresAt)
-        return fresh.token
     }
 
     // MARK: Titles and saving

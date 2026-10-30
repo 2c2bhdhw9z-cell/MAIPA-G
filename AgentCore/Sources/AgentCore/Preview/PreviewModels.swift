@@ -15,6 +15,26 @@ public struct WebPreviewProject: Codable, Sendable, Hashable {
     }
 }
 
+public struct PublishedPreviewManifest: Codable, Sendable, Hashable {
+    public var entryPath: String
+    public var files: Set<String>
+    public var allowedHTTPSHosts: Set<String>
+
+    public init(entryPath: String, files: Set<String>, allowedHTTPSHosts: Set<String> = []) {
+        self.entryPath = entryPath
+        self.files = files
+        self.allowedHTTPSHosts = Set(allowedHTTPSHosts.map { $0.lowercased() })
+    }
+
+    public func allows(_ path: String) -> Bool { files.contains(path) }
+
+    public var contentSecurityPolicy: String {
+        let hosts = allowedHTTPSHosts.sorted().map { "https://\($0)" }.joined(separator: " ")
+        let connect = hosts.isEmpty ? "'none'" : hosts
+        return "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: \(hosts); font-src 'self' data:; connect-src \(connect); form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'"
+    }
+}
+
 public enum PreviewArtifactExtractor {
     public static func extract(_ data: Data, to destination: URL) throws {
         let manager = FileManager.default

@@ -50,7 +50,7 @@ final class AutomationLibrary {
             app?.sync.request()
             return copy
         } catch {
-            lastError = String(describing: error)
+            lastError = ErrorExplainer.explain(error).message
             return nil
         }
     }
@@ -66,8 +66,11 @@ final class AutomationLibrary {
     }
 
     func deleteAgent(_ id: UUID) async {
-        do { try await agentStore.delete(id); await load(); app?.sync.request() }
-        catch { lastError = String(describing: error) }
+        guard let record = customAgents.first(where: { $0.id == id }) else { return }
+        do {
+            try await app?.trash.move(id: id, kind: .agent, title: record.definition.name, originalPath: await agentStore.relativePath(for: id))
+            await load(); app?.sync.request()
+        } catch { lastError = ErrorExplainer.explain(error).message }
     }
 
     @discardableResult
@@ -81,7 +84,7 @@ final class AutomationLibrary {
             app?.sync.request()
             return copy
         } catch {
-            lastError = String(describing: error)
+            lastError = ErrorExplainer.explain(error).message
             return nil
         }
     }
@@ -98,8 +101,11 @@ final class AutomationLibrary {
     }
 
     func deleteWorkflow(_ id: UUID) async {
-        do { try await workflowStore.delete(id); await load(); app?.sync.request() }
-        catch { lastError = String(describing: error) }
+        guard let record = customWorkflows.first(where: { $0.id == id }) else { return }
+        do {
+            try await app?.trash.move(id: id, kind: .workflow, title: record.definition.name, originalPath: await workflowStore.relativePath(for: id))
+            await load(); app?.sync.request()
+        } catch { lastError = ErrorExplainer.explain(error).message }
     }
 
     func makeWorkflow(description: String) async -> WorkflowRecord? {
@@ -136,7 +142,7 @@ final class AutomationLibrary {
             let draft = try WorkflowDraftBuilder.generatedDraft(from: text, agentIDs: Set(definitions.map(\.id)))
             return WorkflowRecord(definition: draft)
         } catch {
-            lastError = String(describing: error)
+            lastError = ErrorExplainer.explain(error).message
             return nil
         }
     }

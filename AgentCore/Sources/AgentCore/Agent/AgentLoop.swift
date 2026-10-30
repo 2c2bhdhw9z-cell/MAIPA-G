@@ -345,6 +345,18 @@ private struct Runner {
         for callIndex in turn.steps[stepIndex].toolCalls.indices {
             let call = turn.steps[stepIndex].toolCalls[callIndex]
             guard call.result == nil else { continue }
+            let repeatedFailures = turn.steps.prefix(stepIndex).flatMap(\.toolCalls).filter {
+                $0.name == call.name && $0.arguments == call.arguments && $0.status == .failed
+            }.count
+            if repeatedFailures >= 2 {
+                fail(
+                    stepIndex,
+                    callIndex,
+                    message: "This exact tool call already failed twice. Change the approach or ask the person what to do next.",
+                    summary: "Stopped a repeated failing tool call"
+                )
+                continue
+            }
             if call.name == AskUserTool.name {
                 if let answers = call.questions?.answerText {
                     turn.steps[stepIndex].toolCalls[callIndex].result = answers

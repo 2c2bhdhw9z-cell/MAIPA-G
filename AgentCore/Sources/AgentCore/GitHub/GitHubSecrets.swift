@@ -4,6 +4,7 @@ import Clibsodium
 public enum GitHubSecretError: Error, Sendable, Equatable {
     case invalidPublicKey
     case encryptionFailed
+    case invalidReviewedRevision
 }
 
 /// GitHub repository secrets use libsodium's anonymous sealed-box format.
@@ -36,6 +37,14 @@ public extension GitHubClient {
         try await get(GitHubActionsPublicKey.self, Self.path(repo, "/actions/secrets/public-key"))
     }
 
+    func deleteActionsSecret(_ repo: RepoRef, name: String) async throws {
+        do {
+            _ = try await send("DELETE", Self.path(repo, "/actions/secrets/\(Self.escape(name))"))
+        } catch let error as GitHubAPIError where error.isNotFound {
+            // Already absent is the desired state.
+        }
+    }
+
     /// Encrypts locally before sending. The clear value is never part of an HTTP body or URL.
     func putActionsSecret(_ repo: RepoRef, name: String, value: String) async throws {
         let key = try await actionsPublicKey(repo)
@@ -52,59 +61,70 @@ public extension GitHubClient {
 /// person has tapped the setup button.
 public actor AutonomousSetup {
     public static let callerPath = ".github/workflows/maipa-g.yml"
-    public static let callerWorkflow = """
-    name: MAIPA-G Autonomous
+    public static func callerWorkflow(reviewedRevision: String) throws -> String {
+        let revision = reviewedRevision.lowercased()
+        guard revision.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil else {
+            throw GitHubSecretError.invalidReviewedRevision
+        }
+        return """
+        name: MAIPA-G Autonomous
 
-    on:
-      workflow_dispatch:
-        inputs:
-          job_id:
-            description: Private MAIPA-G job id
-            required: true
-            type: string
-          target_ref:
-            description: Target branch
-            required: true
-            type: string
-          data_owner:
-            description: Private data owner
-            required: true
-            type: string
-          data_repo:
-            description: Private data repository
-            required: true
-            type: string
-          data_branch:
-            description: Private data branch
-            required: true
-            type: string
+        on:
+          workflow_dispatch:
+            inputs:
+              job_id:
+                description: Private MAIPA-G job id
+                required: true
+                type: string
+              target_ref:
+                description: Target branch
+                required: true
+                type: string
+              data_owner:
+                description: Private data owner
+                required: true
+                type: string
+              data_repo:
+                description: Private data repository
+                required: true
+                type: string
+              data_branch:
+                description: Private data branch
+                required: true
+                type: string
 
-    permissions:
-      actions: write
-      contents: write
-      pull-requests: write
-      checks: read
-      statuses: read
+        permissions:
+          actions: write
+          contents: write
+          pull-requests: write
+          checks: read
+          statuses: read
 
-    jobs:
-      agent:
-        uses: 2c2bhdhw9z-cell/MAIPA-G/.github/workflows/agent.yml@main
-        with:
-          job_id: ${{ inputs.job_id }}
-          target_ref: ${{ inputs.target_ref }}
-          data_owner: ${{ inputs.data_owner }}
-          data_repo: ${{ inputs.data_repo }}
-          data_branch: ${{ inputs.data_branch }}
-        secrets: inherit
-    """
+        jobs:
+          agent:
+            uses: 2c2bhdhw9z-cell/MAIPA-G/.github/workflows/agent.yml@\(revision)
+            with:
+              job_id: ${{ inputs.job_id }}
+              target_ref: ${{ inputs.target_ref }}
+              data_owner: ${{ inputs.data_owner }}
+              data_repo: ${{ inputs.data_repo }}
+              data_branch: ${{ inputs.data_branch }}
+              maipag_revision: \(revision)
+            secrets:
+              MAIPAG_APP_ID: ${{ secrets.MAIPAG_APP_ID }}
+              MAIPAG_APP_PRIVATE_KEY: ${{ secrets.MAIPAG_APP_PRIVATE_KEY }}
+              OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+              MAIPAG_MCP_SECRETS: ${{ secrets.MAIPAG_MCP_SECRETS }}
+        """
+    }
 
     private let github: GitHubClient
     public init(github: GitHubClient) { self.github = github }
 
-    public func isInstalled(in repo: RepoRef, ref: String) async throws -> Bool {
+    public func isInstalled(in repo: RepoRef, ref: String, reviewedRevision: String) async throws -> Bool {
         do {
-            _ = try await github.fileContents(repo, path: Self.callerPath, ref: ref)
-            return true
+            let contents = try await github.fileContents(repo, path: Self.callerPath, ref: ref)
+            return contents == Data(try Self.callerWorkflow(reviewedRevision: reviewedRevision).utf8)
         } catch let error as GitHubAPIError where error.isNotFound {
             return false
         }
@@ -114,7 +134,8 @@ public actor AutonomousSetup {
     public func install(
         in repo: RepoRef,
         branch: String,
-        secrets: [String: String]
+        secrets: [String: String],
+        reviewedRevision: String
     ) async throws -> String {
         for (name, value) in secrets.sorted(by: { $0.key < $1.key }) {
             try await github.putActionsSecret(repo, name: name, value: value)
@@ -122,7 +143,8 @@ public actor AutonomousSetup {
         guard let head = try await github.branchHead(repo, branch: branch) else {
             throw GitHubChangeFailure.noHead
         }
-        let blob = try await github.createBlob(repo, contents: Data(Self.callerWorkflow.utf8))
+        let workflow = try Self.callerWorkflow(reviewedRevision: reviewedRevision)
+        let blob = try await github.createBlob(repo, contents: Data(workflow.utf8))
         let baseTree = try await github.commitTree(repo, commit: head)
         let tree = try await github.createTree(repo, base: baseTree, changes: [.init(path: Self.callerPath, blobSHA: blob)])
         let commit = try await github.createCommit(

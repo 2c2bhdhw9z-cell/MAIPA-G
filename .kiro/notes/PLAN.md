@@ -1,9 +1,9 @@
 # MAIPA-G plan
 
-**Status (30 October 2026): Build 25 (`build-25-480fa98`, 4.6 MB, PR #8) is the one to
-install. It is built and checked: 0.1.0 (25), iPhone arm64, 19 entries. Reports 5-18, the missing
-tools, the stability list and the 13 newly found needs below are plan only and have not been built.
-Current Spec step: requirements; the owner has not approved the design or task list yet.**
+**Status (30 October 2026): Build 25 (`build-25-480fa98`, 4.6 MB, PR #8) remains the
+installed build. The owner approved implementation on 30 October and asked for the backlog work
+in this batch. Work is in progress on `safety-and-stability-half`; no newer `.ipa` has passed the
+complete build and Dark/Light screen gate yet.**
 
 ## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
 He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,

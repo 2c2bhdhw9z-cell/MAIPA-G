@@ -44,7 +44,15 @@ public enum BoundedProcess {
         if replacingEnvironment {
             process.environment = environment
         } else {
-            let inherited = sanitizedEnvironment(ProcessInfo.processInfo.environment)
+            let home = temporary.appendingPathComponent("home", isDirectory: true)
+            let temp = temporary.appendingPathComponent("tmp", isDirectory: true)
+            try manager.createDirectory(at: home, withIntermediateDirectories: true)
+            try manager.createDirectory(at: temp, withIntermediateDirectories: true)
+            var inherited = sanitizedEnvironment(ProcessInfo.processInfo.environment)
+            inherited["HOME"] = home.path
+            inherited["TMPDIR"] = temp.path
+            inherited["XDG_CONFIG_HOME"] = home.appendingPathComponent(".config", isDirectory: true).path
+            inherited["XDG_CACHE_HOME"] = home.appendingPathComponent(".cache", isDirectory: true).path
             process.environment = inherited.merging(environment) { _, supplied in supplied }
         }
         process.standardOutput = output
@@ -84,10 +92,10 @@ public enum BoundedProcess {
     }
 
     static func sanitizedEnvironment(_ environment: [String: String]) -> [String: String] {
-        environment.filter { key, _ in
-            let upper = key.uppercased()
-            return !upper.contains("TOKEN") && !upper.contains("SECRET") && !upper.contains("PASSWORD") && !upper.contains("PRIVATE_KEY") && key != "OPENROUTER_API_KEY" && key != "GH_TOKEN" && key != "GITHUB_TOKEN"
-        }
+        // Model-selected commands get an allow-list, not a deny-list. In particular, GitHub
+        // Actions control files and *_KEY_FILE indirections must never reach child processes.
+        let allowed: Set<String> = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ", "CI"]
+        return environment.filter { key, _ in allowed.contains(key.uppercased()) }
     }
 
     static func minimalChildEnvironment(home: URL, additions: [String: String] = [:]) -> [String: String] {
@@ -105,10 +113,21 @@ public enum BoundedProcess {
     private static func read(_ url: URL, limit: Int) -> String {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return "" }
         defer { try? handle.close() }
-        let data = (try? handle.read(upToCount: limit + 1)) ?? Data()
-        let clipped = data.count > limit
-        let text = String(decoding: data.prefix(limit), as: UTF8.self)
-        return clipped ? text + "\n[Output cut off]" : text
+        let size = (try? handle.seekToEnd()) ?? 0
+        if size <= UInt64(limit) {
+            try? handle.seek(toOffset: 0)
+            let data = (try? handle.readToEnd()) ?? Data()
+            return String(decoding: data, as: UTF8.self)
+        }
+        let headCount = max(1, limit / 2)
+        let tailCount = max(1, limit - headCount)
+        try? handle.seek(toOffset: 0)
+        let head = (try? handle.read(upToCount: headCount)) ?? Data()
+        try? handle.seek(toOffset: size - UInt64(tailCount))
+        let tail = (try? handle.read(upToCount: tailCount)) ?? Data()
+        return String(decoding: head, as: UTF8.self)
+            + "\n[Output cut: \(size - UInt64(limit)) bytes omitted]\n"
+            + String(decoding: tail, as: UTF8.self)
     }
 }
 
@@ -200,14 +219,34 @@ public struct ProcessTool: AgentTool {
 
     public func runningSummary(for arguments: JSONValue) -> String { "Running a command…" }
 
-    public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? { nil }
+    public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
+        guard let command = arguments.optionalString("command"), Self.needsApproval(command) else { return nil }
+        return ToolApprovalRequest(question: "Allow MAIPA-G to run this command? It may execute code or change files.\n\(String(command.prefix(500)))")
+    }
 
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
-        try await execute(arguments: arguments, approved: false, progress: progress)
+        let command = try arguments.requiredString("command")
+        if Self.needsApproval(command) {
+            throw ToolApprovalRequired(ToolApprovalRequest(question: "Allow MAIPA-G to run this command? It may execute code or change files.\n\(String(command.prefix(500)))"))
+        }
+        return try await execute(arguments: arguments, approved: false, progress: progress)
     }
 
     public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         try await execute(arguments: arguments, approved: true, progress: progress)
+    }
+
+    static func needsApproval(_ command: String) -> Bool {
+        let value = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, !value.contains("\n"),
+              !value.contains(where: { ";|&><`$(){}".contains($0) })
+        else { return true }
+        let words = value.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard let first = words.first else { return true }
+        if first == "pwd" && words.count == 1 { return false }
+        if first == "git", let operation = words.dropFirst().first,
+           ["status", "diff", "log", "show"].contains(operation) { return false }
+        return true
     }
 
     private func execute(arguments: JSONValue, approved: Bool, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {

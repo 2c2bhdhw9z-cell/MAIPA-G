@@ -165,7 +165,8 @@ struct AgentLoopTests {
         let second = try #require(transport.sentBodies.last?["messages"]?.arrayValue)
         #expect(second.map { $0["role"]?.stringValue ?? "" } == ["system", "user", "assistant", "tool", "tool"])
         #expect(second[2]["tool_calls"]?.arrayValue?.count == 2)
-        #expect(second[3]["content"] == "contents of README.md")
+        #expect(second[3]["content"]?.stringValue?.contains("untrusted_tool_data") == true)
+        #expect(second[3]["content"]?.stringValue?.contains("contents of README.md") == true)
         #expect(second[3]["tool_call_id"] == "c1")
     }
 
@@ -640,7 +641,7 @@ struct AgentLoopTests {
         _ = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["commit", "-m", "base"], directory: root)
         let before = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["rev-parse", "HEAD"], directory: root)
         let tool = ProcessTool(directory: root)
-        await #expect(throws: ToolInputError.self) {
+        await #expect(throws: ToolApprovalRequired.self) {
             _ = try await tool.run(arguments: ["command": "rm Package.swift && git add -A && git commit -m hidden"], progress: { _ in })
         }
         let after = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["rev-parse", "HEAD"], directory: root)
@@ -662,8 +663,8 @@ struct AgentLoopTests {
         _ = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["config", "user.email", "test@example.com"], directory: root)
         _ = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["commit", "--allow-empty", "-m", "base"], directory: root)
         let tool = ProcessTool(directory: root)
-        #expect(await tool.approvalRequest(for: ["command": "rm old.txt"]) == nil)
-        let output = try await tool.run(arguments: ["command": "printf cloud-runner"], progress: { _ in })
+        #expect(await tool.approvalRequest(for: ["command": "rm old.txt"]) != nil)
+        let output = try await tool.runApproved(arguments: ["command": "printf cloud-runner"], progress: { _ in })
         #expect(output.forModel == "Exit code: 0\ncloud-runner")
         let logger = RedactingLogger(secrets: ["secret-token"])
         #expect(logger.redact("value secret-token value") == "value *** value")

@@ -11,6 +11,7 @@ enum ComposerTarget: Hashable, Sendable {
 
 enum AppSheet: Identifiable, Hashable {
     case settings
+    case healthCheck
     case connectGitHub
     case signInOpenRouter
     case models(ComposerTarget)
@@ -24,6 +25,7 @@ enum AppSheet: Identifiable, Hashable {
     case workflowEditor(String?)
     case workflowMaker
     case memories
+    case recentlyDeleted
     case memoryEditor(UUID?)
     case groups(ComposerTarget)
     case specs(ChatRepo?)
@@ -38,6 +40,7 @@ enum AppSheet: Identifiable, Hashable {
     var id: String {
         switch self {
         case .settings: return "settings"
+        case .healthCheck: return "health-check"
         case .connectGitHub: return "github"
         case .signInOpenRouter: return "openrouter"
         case .models(let target): return "models-\(target)"
@@ -51,6 +54,7 @@ enum AppSheet: Identifiable, Hashable {
         case .workflowEditor(let id): return "workflow-editor-\(id ?? "new")"
         case .workflowMaker: return "workflow-maker"
         case .memories: return "memories"
+        case .recentlyDeleted: return "recently-deleted"
         case .memoryEditor(let id): return "memory-editor-\(id?.uuidString ?? "new")"
         case .groups(let target): return "groups-\(target)"
         case .specs(let repo): return "specs-\(repo?.ref.fullName ?? "all")"
@@ -69,16 +73,45 @@ enum AppSheet: Identifiable, Hashable {
 @MainActor
 @Observable
 final class HomeDraft {
-    var text = ""
+    var text = "" { didSet { scheduleSave() } }
     /// New chats start on Auto.
     var model: ModelChoice = .auto
     var thinking: ThinkingLevel = .default
     var repo: ChatRepo?
-    var attachments: [AttachmentReference] = []
+    var attachments: [AttachmentReference] = [] { didSet { scheduleSave() } }
     var groupID: UUID?
     var webEnabled = true
     /// Always starts off for a new chat.
     var autonomous = false
+
+    @ObservationIgnored weak var app: AppModel?
+    @ObservationIgnored private var saveTask: Task<Void, Never>?
+    @ObservationIgnored private var isLoading = false
+
+    func load() async {
+        guard let store = app?.library.store else { return }
+        isLoading = true
+        if let value = await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: "home")) {
+            text = value.text
+            attachments = value.attachments
+        }
+        isLoading = false
+    }
+
+    private func scheduleSave() {
+        guard !isLoading, !PreviewScenes.isActive, let store = app?.library.store else { return }
+        saveTask?.cancel()
+        let value = ComposerDraft(text: text, attachments: attachments)
+        saveTask = Task {
+            do { try await Task.sleep(nanoseconds: 400_000_000) } catch { return }
+            do {
+                if value.isEmpty { try await store.deleteItem(at: ComposerDraft.path(for: "home")) }
+                else { try await store.saveDocument(value, at: ComposerDraft.path(for: "home")) }
+            } catch {
+                // A later edit or background save retries without discarding the in-memory draft.
+            }
+        }
+    }
 }
 
 /// The app's state, shared by every screen.
@@ -94,6 +127,9 @@ final class AppModel {
     let updates: UpdateChecker
     let snapshots: SnapshotStore
     let attachmentStore: AttachmentStore
+    let trash: TrashStore
+    let diagnostics: DiagnosticsLog
+    let metricKit: MetricKitCollector
     let notifications = Notifications()
     let jobs: JobCoordinator
     let automations: AutomationLibrary
@@ -122,6 +158,10 @@ final class AppModel {
         updates = UpdateChecker()
         snapshots = SnapshotStore(root: paths.repoCopies)
         attachmentStore = AttachmentStore(dataDirectory: paths.data)
+        trash = TrashStore(dataDirectory: paths.data)
+        let diagnostics = DiagnosticsLog(dataDirectory: paths.data, installIDURL: paths.support.appendingPathComponent("install-id.txt"))
+        self.diagnostics = diagnostics
+        metricKit = MetricKitCollector(diagnostics: diagnostics)
         jobs = JobCoordinator(dataDirectory: paths.data)
         automations = AutomationLibrary(dataDirectory: paths.data)
         memories = MemoryLibrary(dataDirectory: paths.data)
@@ -131,6 +171,8 @@ final class AppModel {
         previews = PreviewCoordinator(root: paths.previews)
         settings = Self.readSettings(paths)
         library.app = self
+        home.app = self
+        openRouter.app = self
         sync.app = self
         jobs.app = self
         automations.app = self
@@ -153,9 +195,11 @@ final class AppModel {
             await showPreview(scene)
             return
         }
+        metricKit.start()
         openRouter.restore()
         github.restore()
         await library.load()
+        await home.load()
         await jobs.load()
         await automations.load()
         await memories.load()
@@ -182,6 +226,7 @@ final class AppModel {
     }
 
     func disconnectGitHub() async {
+        await jobs.cleanupAllAutonomousSecrets()
         await sync.syncNow()
         await sync.reset()
         await github.disconnect()
@@ -218,10 +263,13 @@ final class AppModel {
 
     private static func readSettings(_ paths: AppPaths) -> AppSettings {
         let url = paths.data.appendingPathComponent(AppSettings.fileName)
-        guard let data = try? Data(contentsOf: url), let settings = try? JSONCoding.decoder().decode(AppSettings.self, from: data) else {
+        guard let data = try? Data(contentsOf: url) else { return AppSettings() }
+        do {
+            return try JSONCoding.decoder().decode(AppSettings.self, from: data)
+        } catch {
+            try? Quarantine.setAside(fileURL: url, dataDirectory: paths.data, relativePath: AppSettings.fileName, error: error)
             return AppSettings()
         }
-        return settings
     }
 
     func updateSettings(_ change: (inout AppSettings) -> Void) {

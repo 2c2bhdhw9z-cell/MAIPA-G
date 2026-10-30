@@ -12,9 +12,15 @@ APP_DIR="$ROOT/App"
 OUT="$APP_DIR/build/screenshots"
 DERIVED="$APP_DIR/build/SimulatorDerivedData"
 DEVICE_NAME="${MAIPAG_SIMULATOR:-iPhone 17 Pro Max}"
-SCENES="${MAIPAG_SCENES:-home-new home chat questions working thinking menu settings connect models files jobs job-needs-you agents agent-editor workflows workflow-editor workflow-maker specs spec-requirements spec-design spec-tasks memories memory-editor chat-memory menu-agents menu-workflows menu-memories groups connectors connector-detail connector-auth chat-connector photo-input picture-generating picture-result preview preview-error files-web}"
+EXPECTED_SCENES="$(tr '\n' ' ' < "$ROOT/scripts/screenshot-scenes.txt" | xargs)"
+SCENES="${MAIPAG_SCENES:-$EXPECTED_SCENES}"
+if [ "${MAIPAG_REQUIRE_COMPLETE:-0}" = "1" ] && [ "$SCENES" != "$EXPECTED_SCENES" ]; then
+  echo "error: complete screen check must use every scene in scripts/screenshot-scenes.txt" >&2
+  exit 2
+fi
 BUNDLE_ID="dev.maipag.app"
 
+rm -rf "$OUT"
 mkdir -p "$OUT"
 (cd "$APP_DIR" && xcodegen generate --spec project.yml --project .)
 RESOLVED_DIR="$APP_DIR/MAIPA-G.xcodeproj/project.xcworkspace/xcshareddata/swiftpm"
@@ -145,6 +151,14 @@ for appearance in dark light; do
 done
 
 rm -f "$OUT/.probe.bmp"
+for appearance in dark light; do
+  for scene in $EXPECTED_SCENES; do
+    [ -s "$OUT/$appearance-$scene.png" ] || {
+      echo "::error::missing expected screenshot $appearance-$scene.png"
+      failures=$((failures + 1))
+    }
+  done
+done
 xcrun simctl shutdown "$UDID" || true
 echo "==> screenshots in $OUT"
 [ "$failures" -eq 0 ] || exit 1

@@ -10,6 +10,16 @@ public enum FileRead: Sendable, Hashable {
     case missing(suggestions: [String])
 }
 
+/// The same read result with strict decoding metadata retained for format-preserving edits.
+enum DecodedFileRead: Sendable {
+    case text(TextFileCodec.Document, bytes: Int)
+    case binary(bytes: Int)
+    case tooLarge(bytes: Int)
+    case folder
+    case symlink(target: String)
+    case missing(suggestions: [String])
+}
+
 /// A repo at one commit, as the AI's tools see it. All tools in one answer share one workspace, so
 /// they all see the same version of every file even if someone pushes in the meantime.
 ///
@@ -119,12 +129,25 @@ public actor RepoWorkspace {
     }
 
     public func readFile(_ rawPath: String) async throws -> FileRead {
+        switch try await readDecodedFile(rawPath) {
+        case .text(let document, let bytes): return .text(document.text, bytes: bytes)
+        case .binary(let bytes): return .binary(bytes: bytes)
+        case .tooLarge(let bytes): return .tooLarge(bytes: bytes)
+        case .folder: return .folder
+        case .symlink(let target): return .symlink(target: target)
+        case .missing(let suggestions): return .missing(suggestions: suggestions)
+        }
+    }
+
+    func readDecodedFile(_ rawPath: String) async throws -> DecodedFileRead {
         let path = Self.normalize(rawPath)
         if let snapshot, let file = snapshot.file(path) {
             switch file.kind {
             case .text:
-                let data = snapshot.contents(of: path) ?? Data()
-                return .text(String(decoding: data, as: UTF8.self), bytes: data.count)
+                guard let data = snapshot.contents(of: path), let document = TextFileCodec.decode(data) else {
+                    return .binary(bytes: file.size)
+                }
+                return .text(document, bytes: data.count)
             case .binary: return .binary(bytes: file.size)
             case .tooLarge: return .tooLarge(bytes: file.size)
             case .symlink: return .symlink(target: file.linkTarget ?? "")
@@ -149,8 +172,8 @@ public actor RepoWorkspace {
             data = try await github.blob(repo, sha: entry.sha)
             fileCache[path] = data
         }
-        if data.prefix(SnapshotStore.binarySniffLength).contains(0) { return .binary(bytes: data.count) }
-        return .text(String(decoding: data, as: UTF8.self), bytes: data.count)
+        guard let document = TextFileCodec.decode(data) else { return .binary(bytes: data.count) }
+        return .text(document, bytes: data.count)
     }
 
     static func normalize(_ path: String) -> String {

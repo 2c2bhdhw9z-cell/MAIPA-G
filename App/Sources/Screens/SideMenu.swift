@@ -18,6 +18,7 @@ struct SideMenu: View {
     @State private var showRename = false
     @State private var showDelete = false
     @State private var newTitle = ""
+    @AccessibilityFocusState(for: .voiceOver) private var newChatFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -28,6 +29,13 @@ struct SideMenu: View {
             footer
         }
         .background(Theme.surface.ignoresSafeArea())
+        .onChange(of: app.isMenuOpen) { _, isOpen in
+            guard isOpen else { return }
+            Task { @MainActor in
+                await Task.yield()
+                newChatFocused = true
+            }
+        }
         .alert("Rename chat", isPresented: $showRename) {
             TextField("Name", text: $newTitle)
             Button("Save") {
@@ -40,7 +48,7 @@ struct SideMenu: View {
                 if let chat = selected { Task { await app.library.delete(chat.id) } }
             }
         } message: {
-            Text("It's removed from this phone and from your MAIPA-G-data repo.")
+            Text("It stays in Recently Deleted for 30 days.")
         }
     }
 
@@ -60,6 +68,7 @@ struct SideMenu: View {
             Spark(size: 34)
             Text("MAIPA-G")
                 .font(.rounded(.title3, weight: .bold))
+                .accessibilityAddTraits(.isHeader)
             Spacer()
             Button {
                 app.newChat()
@@ -72,6 +81,7 @@ struct SideMenu: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("New chat")
+            .accessibilityFocused($newChatFocused)
         }
         .padding(.horizontal, 16)
         .padding(.top, 12)

@@ -22,28 +22,45 @@ public actor ChatStore {
         let manager = FileManager.default
         guard let files = try? manager.contentsOfDirectory(at: chatsDirectory, includingPropertiesForKeys: nil) else { return [] }
         let decoder = JSONCoding.decoder()
+        let redactor = SensitiveDataRedactor()
         var chats: [Chat] = []
         for file in files where file.pathExtension == "json" {
-            guard let data = try? Data(contentsOf: file) else { continue }
-            if let chat = try? decoder.decode(Chat.self, from: data) {
+            guard let original = try? Data(contentsOf: file) else { continue }
+            let data = (try? redactor.redactJSON(original)) ?? original
+            do {
+                let chat = try decoder.decode(Chat.self, from: data)
                 chats.append(chat)
-            } else {
-                let aside = dataDirectory.deletingLastPathComponent().appendingPathComponent("Unreadable", isDirectory: true)
-                try? manager.createDirectory(at: aside, withIntermediateDirectories: true)
-                try? manager.moveItem(at: file, to: aside.appendingPathComponent(file.lastPathComponent + ".\(Int(Date().timeIntervalSince1970))"))
+                if data != original { try? data.write(to: file, options: .atomic) }
+            } catch {
+                try? Quarantine.setAside(
+                    fileURL: file,
+                    dataDirectory: dataDirectory,
+                    relativePath: "chats/" + file.lastPathComponent,
+                    error: error
+                )
             }
         }
         return chats.sorted { $0.updatedAt > $1.updatedAt }
     }
 
     public func load(_ id: UUID) -> Chat? {
-        guard let data = try? Data(contentsOf: url(for: id)) else { return nil }
-        return try? JSONCoding.decoder().decode(Chat.self, from: data)
+        let file = url(for: id)
+        guard let original = try? Data(contentsOf: file) else { return nil }
+        let data = (try? SensitiveDataRedactor().redactJSON(original)) ?? original
+        do {
+            let chat = try JSONCoding.decoder().decode(Chat.self, from: data)
+            if data != original { try? data.write(to: file, options: .atomic) }
+            return chat
+        } catch {
+            try? Quarantine.setAside(fileURL: file, dataDirectory: dataDirectory, relativePath: Self.relativePath(for: id), error: error)
+            return nil
+        }
     }
 
     public func save(_ chat: Chat) throws {
         try FileManager.default.createDirectory(at: chatsDirectory, withIntermediateDirectories: true)
-        let data = try JSONCoding.encoder(pretty: true).encode(chat)
+        let encoded = try JSONCoding.encoder(pretty: true).encode(chat)
+        let data = try SensitiveDataRedactor().redactJSON(encoded)
         try data.write(to: url(for: chat.id), options: .atomic)
     }
 

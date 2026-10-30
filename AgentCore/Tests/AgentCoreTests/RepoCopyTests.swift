@@ -222,6 +222,13 @@ struct RepoCopyTests {
         #expect(rules.promptText.contains("Sources/Generated/AGENTS.md"))
     }
 
+    @Test func scopedDirectSaveSentenceDoesNotChangeTheWholeRepository() {
+        let rules = RepoWriteRules.resolve(documents: [
+            (".kiro/steering/owner-rules.md", "Notes and rules files can go straight to main. Other work uses a pull request."),
+        ], directSaveSetting: false)
+        #expect(!rules.directSave)
+    }
+
     @Test func linkHeaderPagination() {
         let header = #"<https://api.github.com/installation/repositories?per_page=100&page=2>; rel="next", <https://api.github.com/installation/repositories?per_page=100&page=5>; rel="last""#
         #expect(GitHubClient.nextPage(from: header)?.absoluteString == "https://api.github.com/installation/repositories?per_page=100&page=2")
@@ -244,11 +251,14 @@ struct RepoCopyTests {
         #expect(watched.succeeded)
         #expect(watched.runs.allSatisfy { $0.headSHA == "abc" })
         try await client.putActionsSecret(repo, name: "OPENROUTER_API_KEY", value: "private-value")
+        try await client.deleteActionsSecret(repo, name: "OPENROUTER_API_KEY")
 
         let dispatch = try #require(transport.requests.first { $0.url.path.hasSuffix("/dispatches") })
         let dispatchBody = try #require(dispatch.body.flatMap(JSONValue.parse))
         #expect(dispatchBody["inputs"]?["job_id"] == "opaque-id")
-        let upload = try #require(transport.requests.first { $0.url.path.hasSuffix("/actions/secrets/OPENROUTER_API_KEY") })
+        let upload = try #require(transport.requests.first { $0.method == "PUT" && $0.url.path.hasSuffix("/actions/secrets/OPENROUTER_API_KEY") })
+        let deletion = try #require(transport.requests.first { $0.method == "DELETE" && $0.url.path.hasSuffix("/actions/secrets/OPENROUTER_API_KEY") })
+        #expect(deletion.body == nil)
         let uploadBody = try #require(upload.body.flatMap(JSONValue.parse))
         #expect(uploadBody["key_id"] == "key-1")
         #expect(uploadBody["encrypted_value"] != "private-value")
@@ -271,6 +281,20 @@ struct RepoCopyTests {
         #expect(!reusable.contains("GH_TOKEN:"))
         #expect(reusable.contains("MAIPAG_TARGET_TOKEN"))
         #expect(reusable.contains("MAIPAG_DATA_TOKEN"))
+    }
+
+    @Test func autonomousCallerPinsReviewedCodeAndNamesSecrets() throws {
+        let revision = String(repeating: "a", count: 40)
+        let workflow = try AutonomousSetup.callerWorkflow(reviewedRevision: revision)
+        #expect(workflow.contains("agent.yml@\(revision)"))
+        #expect(workflow.contains("maipag_revision: \(revision)"))
+        #expect(!workflow.contains("secrets: inherit"))
+        for name in ["MAIPAG_APP_ID", "MAIPAG_APP_PRIVATE_KEY", "OPENROUTER_API_KEY", "MAIPAG_MCP_SECRETS"] {
+            #expect(workflow.contains("\(name): ${{ secrets.\(name) }}"))
+        }
+        #expect(throws: GitHubSecretError.self) {
+            _ = try AutonomousSetup.callerWorkflow(reviewedRevision: "main")
+        }
     }
 
     @Test func buildInspectionDoesNotDispatch() async throws {
@@ -357,7 +381,8 @@ struct GitHubAuthTests {
         let plain = SystemPrompt.make(userLogin: nil, repo: nil, computer: SystemPrompt.ComputerContext(service: "Sprites", machine: "mcp-maipa-g"))
         #expect(plain.contains("This chat has a real Linux computer through the Sprites connector."))
         #expect(plain.contains("`mcp-maipa-g`"))
-        #expect(plain.contains("curl -fsSL \(SystemPrompt.computerSetupURL) | bash"))
+        #expect(plain.contains("Do not download or run setup scripts"))
+        #expect(!plain.contains(SystemPrompt.computerSetupURL))
         #expect(!plain.contains("git clone"))
 
         let open = SystemPrompt.make(userLogin: nil, repo: nil, computer: SystemPrompt.ComputerContext(
@@ -372,8 +397,9 @@ struct GitHubAuthTests {
             service: "Sprites", machine: "mcp-maipa-g", repoFullName: "octo/app", cloneURL: "https://x-access-token:ghs_abc@github.com/octo/app.git",
             branch: "main", commit: "0123456789abcdef", repoPath: "$HOME/repos/octo/app"
         ))
-        #expect(secret.contains("`git -C $HOME/repos/octo/app remote set-url origin https://github.com/octo/app.git`"))
-        #expect(secret.contains("Never print, echo or repeat the clone URL's token outside those git commands."))
+        #expect(!secret.contains("ghs_abc"))
+        #expect(secret.contains("https://github.com/octo/app.git"))
+        #expect(secret.contains("Never place a token"))
     }
 
     #if canImport(Security)
