@@ -240,7 +240,7 @@ public actor MCPConnectorSession {
             let page = try await client.listTools(cursor: cursor)
             for tool in page.tools {
                 let schema = (try? JSONValue.parse(JSONEncoder().encode(tool.inputSchema))) ?? ["type": "object"]
-                output.append(ConnectorToolDefinition(serverID: configuration.serverID, serverName: configuration.displayName, originalName: tool.name, title: tool.title, description: tool.description ?? "", inputSchema: schema))
+                output.append(ConnectorToolDefinition(serverID: configuration.serverID, serverName: configuration.displayName, originalName: tool.name, title: tool.title, description: tool.description ?? "", inputSchema: schema, readOnlyHint: tool.annotations.readOnlyHint, destructiveHint: tool.annotations.destructiveHint))
             }
             cursor = page.nextCursor
         } while cursor != nil
@@ -372,7 +372,7 @@ public actor AutonomousStdioConnector {
                 let page = try await client.listTools(cursor: cursor)
                 definitions += page.tools.map { tool in
                     let schema = (try? JSONValue.parse(JSONEncoder().encode(tool.inputSchema))) ?? ["type": "object"]
-                    return ConnectorToolDefinition(serverID: configuration.serverID, serverName: configuration.displayName, originalName: tool.name, title: tool.title, description: tool.description ?? "", inputSchema: schema)
+                    return ConnectorToolDefinition(serverID: configuration.serverID, serverName: configuration.displayName, originalName: tool.name, title: tool.title, description: tool.description ?? "", inputSchema: schema, readOnlyHint: tool.annotations.readOnlyHint, destructiveHint: tool.annotations.destructiveHint)
                 }
                 cursor = page.nextCursor
             } while cursor != nil
@@ -442,7 +442,18 @@ public struct AutonomousMCPTool: AgentTool {
 
     public func runningSummary(for arguments: JSONValue) -> String { "Using \(definition.serverName) · \(definition.title)…" }
 
+    public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
+        ConnectorActionPolicy.approval(for: definition, arguments: arguments)
+    }
+
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        if let approval = ConnectorActionPolicy.approval(for: definition, arguments: arguments) {
+            throw ToolApprovalRequired(approval)
+        }
+        return try await runApproved(arguments: arguments, progress: progress)
+    }
+
+    public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         progress("Waiting for \(definition.serverName)…")
         let connector = self.connector, name = definition.originalName
         let response = try await WorkspaceTurnstile.shared.run {

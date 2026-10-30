@@ -69,11 +69,15 @@ public struct ConnectorToolDefinition: Codable, Sendable, Hashable, Identifiable
     public var title: String
     public var description: String
     public var inputSchema: JSONValue
+    /// The server's own MCP hints. They can only add an approval, never remove one.
+    public var readOnlyHint: Bool?
+    public var destructiveHint: Bool?
 
-    public init(serverID: String, serverName: String, originalName: String, title: String? = nil, description: String = "", inputSchema: JSONValue = ["type": "object"]) {
+    public init(serverID: String, serverName: String, originalName: String, title: String? = nil, description: String = "", inputSchema: JSONValue = ["type": "object"], readOnlyHint: Bool? = nil, destructiveHint: Bool? = nil) {
         self.serverID = serverID; self.serverName = serverName; self.originalName = originalName
         self.namespacedName = Self.namespace(server: serverName, tool: originalName)
         self.title = title ?? originalName; self.description = description; self.inputSchema = inputSchema
+        self.readOnlyHint = readOnlyHint; self.destructiveHint = destructiveHint
     }
 
     public static func namespace(server: String, tool: String) -> String {
