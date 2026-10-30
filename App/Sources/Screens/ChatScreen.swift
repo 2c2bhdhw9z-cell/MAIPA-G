@@ -39,7 +39,7 @@ struct ChatScreen: View {
                 .padding(.vertical, 12)
                 .animation(theme.messagesSlideIn ? .snappy : nil, value: session.chat.messages.count)
             }
-            .scrollDismissesKeyboard(.immediately)
+            .scrollDismissesKeyboard(.interactively)
             .defaultScrollAnchor(.bottom)
             .simultaneousGesture(
                 DragGesture(minimumDistance: 12).onChanged { value in
@@ -119,7 +119,9 @@ struct ChatScreen: View {
                     onSpec: { app.sheet = .specs(session.chat.repo) },
                     onPicture: { app.sheet = .pictureGenerator(.chat(session.id)) },
                     onPreview: { if let repo = session.chat.repo { app.sheet = .webPreview(repo) } },
-                    onFiles: { if let repo = session.chat.repo { app.sheet = .files(repo, .chat(session.id)) } }
+                    onFiles: { if let repo = session.chat.repo { app.sheet = .files(repo, .chat(session.id)) } },
+                    canCompact: session.canCompact,
+                    onCompact: { session.compact() }
                 )
                 .padding(.horizontal, 12)
                 .padding(.bottom, 6)
@@ -164,8 +166,6 @@ struct ChatScreen: View {
                         Button { showingDiff = true } label: { Image(systemName: "doc.text.magnifyingglass") }
                             .accessibilityLabel("View changes")
                     }
-                    Button { session.compact() } label: { Image(systemName: "rectangle.compress.vertical") }
-                        .accessibilityLabel("Compact older messages")
                     Button { app.newChat() } label: { Image(systemName: "square.and.pencil") }
                         .accessibilityLabel("New chat")
                 }

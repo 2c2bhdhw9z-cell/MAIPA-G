@@ -46,6 +46,8 @@ struct Composer: View {
     var onPicture: () -> Void
     var onPreview: () -> Void
     var onFiles: (() -> Void)? = nil
+    var canCompact = false
+    var onCompact: (() -> Void)? = nil
 
     private static let pasteAttachmentThreshold = 20_000
 
@@ -97,7 +99,9 @@ struct Composer: View {
                         used: contextUsedTokens,
                         limit: contextLimitTokens,
                         balance: app.openRouter.balance,
-                        freeRequestsLeft: app.openRouter.freeRequestsLeft
+                        freeRequestsLeft: app.openRouter.freeRequestsLeft,
+                        canCompact: canCompact,
+                        onCompact: onCompact
                     )
                     sendButton
                 }
@@ -183,13 +187,6 @@ struct Composer: View {
         .alert("Attachment", isPresented: Binding(get: { importError != nil }, set: { if !$0 { importError = nil } })) {
             Button("OK") {}
         } message: { Text(importError ?? "") }
-        .toolbar {
-            ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
-                Button("Done") { focused = false }
-                    .fontWeight(.semibold)
-            }
-        }
         .onChange(of: isRunning) { _, running in
             if running { focused = false }
         }
@@ -222,6 +219,7 @@ struct Composer: View {
             Section("Thinking") {
                 ForEach(thinkingLevels.reversed(), id: \.self) { level in
                     Button {
+                        focused = false
                         onPickThinking(level)
                     } label: {
                         if level == thinking { Label(level.label, systemImage: "checkmark") }
@@ -252,10 +250,14 @@ struct Composer: View {
     private var plusMenu: some View {
         Menu {
             Section {
-                Button { choosingPhoto = true } label: {
+                Button {
+                    focused = false
+                    choosingPhoto = true
+                } label: {
                     Label("Photo library", systemImage: "photo.on.rectangle")
                 }
                 Button {
+                    focused = false
                     if CameraPicker.isAvailable { takingPhoto = true }
                     else { importError = "The camera isn't available." }
                 } label: {
@@ -282,6 +284,13 @@ struct Composer: View {
                 Button(action: onPickGroup) {
                     Label("Group", systemImage: "folder.badge.plus")
                     Text(groupName ?? "None")
+                }
+                if let onCompact {
+                    Button(action: onCompact) {
+                        Label("Compact older messages", systemImage: "rectangle.compress.vertical")
+                        Text(canCompact ? "Frees AI memory" : "Chat is still short")
+                    }
+                    .disabled(!canCompact)
                 }
             }
 
@@ -386,6 +395,8 @@ private struct ContextMeter: View {
     var limit: Int?
     var balance: Double?
     var freeRequestsLeft: Int?
+    var canCompact = false
+    var onCompact: (() -> Void)? = nil
     @State private var showsDetails = false
     @Environment(\.theme) private var theme
 
@@ -434,6 +445,18 @@ private struct ContextMeter: View {
                 Text("Context is everything this AI can keep in mind for its next answer. The ring fills as this chat grows.")
                     .font(.footnote)
                     .foregroundStyle(Theme.secondaryText)
+                if let onCompact {
+                    Button {
+                        showsDetails = false
+                        onCompact()
+                    } label: {
+                        Label("Compact older messages", systemImage: "rectangle.compress.vertical")
+                            .font(.footnote.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!canCompact)
+                    .padding(.top, 2)
+                }
             }
             .padding(18)
             .frame(width: 290)

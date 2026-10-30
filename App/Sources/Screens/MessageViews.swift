@@ -28,24 +28,28 @@ struct MessageRow: View, Equatable {
     }
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            switch message.body {
-            case .user(let user):
-                UserBubble(message: user, onEdit: { actions.editMessage(message.id, user.text) })
-            case .assistant(let turn):
-                AssistantTurnView(messageID: message.id, turn: turn, isLatest: isLatest, modelName: modelName, actions: actions)
-            }
-            if canStar {
-                Button { actions.toggleStar(message.id) } label: {
-                    Image(systemName: message.starredMemoryID == nil ? "star" : "star.fill")
-                        .font(.caption)
-                        .foregroundStyle(message.starredMemoryID == nil ? Theme.secondaryText : .yellow)
-                        .padding(7)
-                }
-                .buttonStyle(.plain)
-                .padding(.top, 6)
-                .accessibilityLabel(message.starredMemoryID == nil ? "Save as memory" : "Remove memory")
-            }
+        switch message.body {
+        case .user(let user):
+            UserBubble(
+                message: user,
+                isStarred: message.starredMemoryID != nil,
+                canStar: canStar,
+                onToggleStar: {
+                    actions.toggleStar(message.id)
+                    Haptics.selection()
+                },
+                onEdit: { actions.editMessage(message.id, user.text) }
+            )
+        case .assistant(let turn):
+            AssistantTurnView(
+                messageID: message.id,
+                turn: turn,
+                isLatest: isLatest,
+                isStarred: message.starredMemoryID != nil,
+                canStar: canStar,
+                modelName: modelName,
+                actions: actions
+            )
         }
     }
 
@@ -59,6 +63,9 @@ struct MessageRow: View, Equatable {
 
 struct UserBubble: View {
     var message: UserMessage
+    var isStarred: Bool
+    var canStar: Bool
+    var onToggleStar: () -> Void
     var onEdit: () -> Void
     @Environment(\.theme) private var theme
     @State private var showingFullText = false
@@ -87,8 +94,19 @@ struct UserBubble: View {
     }
 
     var body: some View {
-        HStack {
-            Spacer(minLength: 48)
+        HStack(alignment: .center, spacing: 6) {
+            Spacer(minLength: 36)
+            if canStar {
+                Button(action: onToggleStar) {
+                    Image(systemName: isStarred ? "star.fill" : "star")
+                        .font(.caption)
+                        .foregroundStyle(isStarred ? .yellow : Theme.secondaryText.opacity(0.75))
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isStarred ? "Remove memory" : "Save as memory")
+            }
             VStack(alignment: .leading, spacing: 8) {
                 if !message.text.isEmpty {
                     Text(previewText)
@@ -119,6 +137,11 @@ struct UserBubble: View {
             .background(theme.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(theme.accent.opacity(0.25)))
             .contextMenu {
+                if canStar {
+                    Button(action: onToggleStar) {
+                        Label(isStarred ? "Remove memory" : "Save as memory", systemImage: isStarred ? "star.slash" : "star")
+                    }
+                }
                 if isLongText {
                     Button { showingFullText = true } label: { Label("Show full message", systemImage: "doc.text.magnifyingglass") }
                 }
@@ -207,6 +230,8 @@ struct AssistantTurnView: View {
     var messageID: UUID
     var turn: AssistantTurn
     var isLatest: Bool
+    var isStarred: Bool
+    var canStar: Bool
     var modelName: (String) -> String
     var actions: TurnActions
     @Environment(\.theme) private var theme
@@ -254,20 +279,34 @@ struct AssistantTurnView: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 6) {
-            let models = turn.modelsUsed.map(modelName)
-            if !models.isEmpty {
-                Text(models.joined(separator: ", "))
+        HStack(spacing: 12) {
+            HStack(spacing: 6) {
+                let models = turn.modelsUsed.map(modelName)
+                if !models.isEmpty {
+                    Text(models.joined(separator: ", "))
+                }
+                if let route = turn.routeLabel, route.hasPrefix("Auto") || route == "Free AIs" {
+                    Text("·")
+                    Text(route)
+                }
+                if let cost = turn.usage.cost {
+                    Text("·")
+                    Text(cost.dollars)
+                }
             }
-            if let route = turn.routeLabel, route.hasPrefix("Auto") || route == "Free AIs" {
-                Text("·")
-                Text(route)
+            .lineLimit(1)
+            Spacer(minLength: 4)
+            if canStar {
+                Button {
+                    actions.toggleStar(messageID)
+                    Haptics.selection()
+                } label: {
+                    Image(systemName: isStarred ? "star.fill" : "star")
+                        .foregroundStyle(isStarred ? .yellow : Theme.secondaryText)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isStarred ? "Remove memory" : "Save as memory")
             }
-            if let cost = turn.usage.cost {
-                Text("·")
-                Text(cost.dollars)
-            }
-            Spacer()
             let text = turn.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n")
             if !text.isEmpty {
                 Button {
@@ -282,7 +321,6 @@ struct AssistantTurnView: View {
         }
         .font(.caption)
         .foregroundStyle(Theme.secondaryText)
-        .lineLimit(1)
     }
 }
 

@@ -182,8 +182,10 @@ final class ChatSession: Identifiable {
         start()
     }
 
+    var canCompact: Bool { !isRunning && chat.messages.count > 4 }
+
     func compact() {
-        guard !isRunning, chat.messages.count > 4 else { return }
+        guard canCompact else { return }
         let throughIndex = chat.messages.count - 3
         let older = chat.messages[...throughIndex]
         var lines: [String] = []

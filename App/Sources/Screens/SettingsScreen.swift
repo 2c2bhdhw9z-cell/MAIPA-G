@@ -522,8 +522,29 @@ struct SettingsScreen: View {
                 Spacer()
                 Text("\(app.updates.currentVersion) (build \(app.updates.currentBuild))").foregroundStyle(Theme.secondaryText)
             }
-            Button("Check for a new build") {
+            Button {
                 Task { await app.updates.check(using: app.github.publicClient, force: true) }
+            } label: {
+                HStack {
+                    Text(app.updates.isChecking ? "Checking GitHub…" : "Check for a new build")
+                    Spacer()
+                    if app.updates.isChecking {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+            }
+            .disabled(app.updates.isChecking)
+            if let message = app.updates.statusMessage {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(app.updates.newer != nil ? theme.accent : Theme.secondaryText)
+            }
+            if let newer = app.updates.newerBuildNumber {
+                Button("Download build \(newer) (.ipa)") {
+                    if app.sync.isEverythingBackedUp { openURL(app.updates.downloadURL) }
+                    else { confirmUnsafeUpdate = true }
+                }
+                .fontWeight(.semibold)
             }
         }
     }
