@@ -17,4 +17,4 @@ The app keeps OpenRouter, GitHub, and connector credentials in the iPhone Keycha
 - `App/` contains the SwiftUI iPhone app. `App/project.yml` describes the generated Xcode project and `App/package-ipa.sh` packages the IPA.
 - `AgentCore/` contains the cross-platform agent, GitHub, OpenRouter, MCP, workflow, preview, and persistence code. Run `swift test --package-path AgentCore` on Linux or macOS.
 - `docs/` contains the GitHub Pages sign-in callbacks and MCP Client ID Metadata Document.
-- `scripts/` contains the Dark/Light screenshot matrix and independent IPA release checks.
+- `scripts/` contains the independent IPA release checks.

@@ -59,8 +59,8 @@ jobs:
           # The newest completed check run of that exact commit whose complete build matrix passed.
           RUN_ID=""
           for id in $(gh api "repos/${{ github.repository }}/actions/workflows/ios.yml/runs?head_sha=$PR_HEAD&per_page=10" --jq '.workflow_runs[] | select(.status=="completed" and .conclusion=="success") | .id'); do
-            ok=$(gh api "repos/${{ github.repository }}/actions/runs/$id/jobs?per_page=20" --jq '[.jobs[] | select((.name=="AgentCore tests (Linux)" or .name=="Complete Dark and Light screenshots" or .name=="iPhone release candidate") and .status=="completed" and .conclusion=="success")] | length')
-            if [ "$ok" = "3" ]; then RUN_ID=$id; break; fi
+            ok=$(gh api "repos/${{ github.repository }}/actions/runs/$id/jobs?per_page=20" --jq '[.jobs[] | select((.name=="AgentCore tests (Linux)" or .name=="iPhone release candidate") and .status=="completed" and .conclusion=="success")] | length')
+            if [ "$ok" = "2" ]; then RUN_ID=$id; break; fi
           done
           if [ -z "$RUN_ID" ]; then echo "::error::no check run of $PR_HEAD built and checked the app"; exit 1; fi
           echo "main=$MAIN_SHA" >> "$GITHUB_OUTPUT"

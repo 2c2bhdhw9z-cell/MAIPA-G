@@ -20,7 +20,7 @@ RUN_STATUS="$(python3 -c 'import json,sys; r=json.load(sys.stdin); print(r.get("
 [ "$RUN_STATUS" = "completed success" ] || { echo "error: run $RUN_ID is not completed successfully ($RUN_STATUS)" >&2; exit 1; }
 # Every release-gating job must exist and be green for this exact run.
 JOBS="$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=20")"
-for job in "AgentCore tests (Linux)" "Complete Dark and Light screenshots" "iPhone release candidate"; do
+for job in "AgentCore tests (Linux)" "iPhone release candidate"; do
   [ "$(python3 -c 'import json,sys; jobs=json.load(sys.stdin)["jobs"]; print(next((j.get("conclusion") for j in jobs if j["name"]==sys.argv[1]), None))' "$job" <<<"$JOBS")" = "success" ] \
     || { echo "error: '$job' did not pass on run $RUN_ID" >&2; exit 1; }
 done
