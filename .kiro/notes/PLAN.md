@@ -1,16 +1,15 @@
 # MAIPA-G plan
 
-**Status (30 October 2026, 3:51 PM ET): Build 55 (`build-55-3ba91ae`, 5.2 MB, PR #11) is the latest
-installable build: 0.1.0 (55), iPhone arm64, built from commit `97cb058`, checked by the AgentCore
-tests on Linux and macOS and an independent IPA inspection. It fixes what failed on the owner's
-phone with build 53, but none of it is confirmed on the phone yet:
-- Saving: attachments and media of 20 MB or more are stored as assets of MAIPA-G-data's private
-  draft release "MAIPA-G files" (Git keeps a pointer), big uploads run in a background session,
-  blob saves retry, and files deleted mid-save no longer count as failures. Stability 3 counts as
-  done only once MAIPA-G-data shows the owner's large .ipa and all his chats saved.
-- Chat computer: commands now go to Sprites' `exec` (build 53 picked `exec_list`). Stability 10,
-  31, 33, 34 and 35 count as done only once Check everything passes on the phone. Build 53's
-  "Replace machine" deleted and recreated `mcp-maipa-g`.
+**Status (30 October 2026, 4:25 PM ET): Build 56 (`build-56-0f6bc5a`, PR #12) is the latest
+installable build: 0.1.0 (56), iPhone arm64, checked by the AgentCore tests on Linux and macOS and an
+independent IPA inspection. Build 55, on the owner's phone at 4:04 PM, confirmed:
+- Saving finished: the 173 MB Continuum .ipa is in MAIPA-G-data's private "MAIPA-G files" draft
+  release with its pointer committed, and Saving shows "Saved just now". Stability 3 is done.
+- The chat computer ran a command through Sprites' `exec`. Stability 10 is done; 31, 33, 34 and 35
+  still need a real chat on the computer to confirm.
+Build 56 opens Check everything, Recently Deleted and Unreadable files inside Settings, lists only
+connectors that run commands as computers (not Hugging Face), and installs the computer's tools by
+itself instead of asking the owner to tap Set up tools.
 - Errors show their real reason instead of iOS's "operation couldn't be completed" placeholder,
   and the Actions-minutes 403 shows the Plan-permission steps (the owner still has to add the
   permission; Stability 14 counts once minutes show).
