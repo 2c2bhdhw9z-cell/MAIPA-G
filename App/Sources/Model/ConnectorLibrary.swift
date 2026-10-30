@@ -287,12 +287,20 @@ final class ConnectorLibrary {
         guard let settings = app?.settings, !settings.chatComputerOff else { return nil }
         let ready = connected.filter { states[$0.id] == .connected }
         if let chosen = settings.chatComputerServer {
-            return ready.first { $0.serverID == chosen }
+            return ready.first { $0.serverID == chosen && canRunCommands($0) }
         }
         return ready.first { connector in
             guard let host = connector.endpoint?.host?.lowercased() else { return false }
             return host == "sprites.dev" || host.hasSuffix(".sprites.dev")
-        }
+        } ?? ready.first(where: canRunCommands)
+    }
+
+    /// Whether this connector is a computer: its tools include one that runs a command. Before
+    /// its tools have loaded, only Sprites counts.
+    func canRunCommands(_ configuration: ConnectorConfiguration) -> Bool {
+        if let tools = toolDefinitions[configuration.id], !tools.isEmpty { return ComputerControl.hasCommandTool(tools) }
+        guard let host = configuration.endpoint?.host?.lowercased() else { return false }
+        return host == "sprites.dev" || host.hasSuffix(".sprites.dev")
     }
 
     /// App-driven control of the chat computer: health checks, recreating a missing machine,

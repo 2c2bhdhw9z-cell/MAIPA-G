@@ -211,4 +211,16 @@ struct SpritesToolTests {
         #expect(risk("create_sprite") == .spends && risk("checkpoint_create") == nil)
         #expect(OutsideContentBoundary.connectorApproval(Self.tools.first { $0.originalName == "exec_list" }!, arguments: [:]) == nil)
     }
+
+    // Hugging Face is a connector, not a computer; Sprites is both.
+    @Test func onlyConnectorsThatRunCommandsAreComputers() {
+        let huggingFace = ["hf_whoami", "space_search", "model_search", "paper_search", "hub_repo_details", "hf_doc_search", "dynamic_space", "gr1_flux1_schnell_infer"].map {
+            ConnectorToolDefinition(serverID: "huggingface", serverName: "Hugging Face", originalName: $0)
+        }
+        #expect(!ComputerControl.hasCommandTool(huggingFace))
+        #expect(ComputerControl.hasCommandTool(Self.tools))
+        #expect(ComputerControl.toolState("maipa-g-health-ok\nLinux\nmaipa-g-tools-ready") == .ready)
+        #expect(ComputerControl.toolState("maipa-g-health-ok\nmaipa-g-tools-installing") == .installing)
+        #expect(ComputerControl.toolState("maipa-g-health-ok\nmaipa-g-tools-missing") == .missing)
+    }
 }

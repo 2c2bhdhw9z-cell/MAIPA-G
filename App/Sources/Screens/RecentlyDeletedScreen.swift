@@ -4,12 +4,14 @@ import SwiftUI
 struct RecentlyDeletedScreen: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
+    /// Pushed inside Settings: no stack of its own and no Done button (Back returns to Settings).
+    var embedded = false
     @State private var entries: [TrashEntry] = []
     @State private var error: String?
     @State private var deleting: TrashEntry?
 
     var body: some View {
-        NavigationStack {
+        OwnNavigationStack(embedded: embedded) {
             Group {
                 if entries.isEmpty {
                     ContentUnavailableView("Nothing recently deleted", systemImage: "trash")
@@ -34,7 +36,11 @@ struct RecentlyDeletedScreen: View {
             }
             .navigationTitle("Recently Deleted")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .toolbar {
+                if !embedded {
+                    ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                }
+            }
             .task { await reload() }
             .confirmationDialog("Delete forever?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
                 Button("Delete forever", role: .destructive) {

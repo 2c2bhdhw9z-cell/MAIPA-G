@@ -150,3 +150,18 @@ extension Double {
         return formatted(.currency(code: "USD").precision(.fractionLength(2)))
     }
 }
+
+/// Wraps a screen in its own NavigationStack when it opens as a sheet, and not when it is pushed
+/// inside another screen's stack (a stack inside a stack misbehaves).
+struct OwnNavigationStack<Content: View>: View {
+    let embedded: Bool
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        if embedded {
+            content()
+        } else {
+            NavigationStack { content() }
+        }
+    }
+}
