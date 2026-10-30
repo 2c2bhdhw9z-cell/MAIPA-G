@@ -34,8 +34,11 @@ public enum SystemPrompt {
         public var commit: String?
         /// Where the repo's copy lives on the machine, such as `$HOME/repos/owner/name`.
         public var repoPath: String?
+        /// Current phone-staged patch that must be applied before running checks.
+        public var stagedPatch: String?
+        public var approximateHourlyCost: Double?
 
-        public init(service: String, machine: String, repoFullName: String? = nil, cloneURL: String? = nil, branch: String? = nil, commit: String? = nil, repoPath: String? = nil) {
+        public init(service: String, machine: String, repoFullName: String? = nil, cloneURL: String? = nil, branch: String? = nil, commit: String? = nil, repoPath: String? = nil, stagedPatch: String? = nil, approximateHourlyCost: Double? = nil) {
             self.service = service
             self.machine = machine
             self.repoFullName = repoFullName
@@ -43,6 +46,8 @@ public enum SystemPrompt {
             self.branch = branch
             self.commit = commit
             self.repoPath = repoPath
+            self.stagedPatch = stagedPatch
+            self.approximateHourlyCost = approximateHourlyCost
         }
     }
 
@@ -134,7 +139,7 @@ public enum SystemPrompt {
 
     static func computerSection(_ computer: ComputerContext) -> String {
         var steps = [
-            "- The machine is named `\(computer.machine)`. List the machines, and if it doesn't exist, create it with exactly that name.",
+            "- The machine is named `\(computer.machine)`. Check it before the first command. If it is missing, create it with exactly that name. If its health check or a simple `pwd` fails twice, replace that machine automatically, then restore the repository from GitHub before continuing.",
             "- Use the tools already present in the provider's reviewed machine image. Do not download or run setup scripts, moving `latest` installers, or `curl | bash`. If a required tool is missing, explain which exact tool is unavailable instead of installing unverified code.",
         ]
         if let fullName = computer.repoFullName, let cloneURL = computer.cloneURL, let path = computer.repoPath {
@@ -143,6 +148,13 @@ public enum SystemPrompt {
             steps.append("- Keep a copy of \(fullName) at `\(path)`\(branch)\(commit). If it is public and missing, clone it with `git clone \(cloneURL) \(path)`. For a private repo, use MAIPA-G's trusted computer setup; never ask for or construct a credential URL.")
             steps.append("- Never place a token, password, secret, or credential-file location in a command, tool argument, answer, or saved chat.")
             steps.append("- The copy on the computer is for running and checking. To change the repo, still use create_file, edit_file, delete_file and save_changes, and make the same edits on the computer when you need to test them.")
+            if let patch = computer.stagedPatch, patch != "No staged changes." {
+                steps.append("- Before any build or test, make the computer checkout match these phone-staged changes exactly. Do not test the old checkout:\n```diff\n\(String(patch.prefix(80_000)))\n```")
+            }
+        }
+        steps.append("- Before risky or long work, create a provider checkpoint when the computer service supports it. Reuse it for recovery and say when a checkpoint was unavailable.")
+        if let hourly = computer.approximateHourlyCost {
+            steps.append("- The configured approximate running cost is $\(String(format: "%.3f", hourly)) per hour. Include elapsed time and an approximate cost when reporting long computer work.")
         }
         steps.append("- Report command output honestly. Never claim a command ran if it didn't.")
         return """

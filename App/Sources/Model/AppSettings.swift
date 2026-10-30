@@ -89,6 +89,7 @@ struct AppSettings: Codable, Equatable, Sendable {
     /// The machine chats use on that computer. Sprites' default sign-in only allows names that
     /// start with mcp-.
     var chatComputerMachine = AppSettings.defaultChatComputerMachine
+    var chatComputerHourlyCost: Double = 0.10
     /// Exact HTTPS hosts explicitly allowed for each repository preview.
     var previewAllowedHosts: [String: Set<String>] = [:]
 
@@ -111,6 +112,7 @@ struct AppSettings: Codable, Equatable, Sendable {
         chatComputerServer = try? c.decodeIfPresent(String.self, forKey: .chatComputerServer)
         chatComputerOff = (try? c.decodeIfPresent(Bool.self, forKey: .chatComputerOff)) ?? false
         chatComputerMachine = (try? c.decodeIfPresent(String.self, forKey: .chatComputerMachine)) ?? AppSettings.defaultChatComputerMachine
+        chatComputerHourlyCost = try c.decodeIfPresent(Double.self, forKey: .chatComputerHourlyCost) ?? 0.10
         previewAllowedHosts = (try? c.decodeIfPresent([String: Set<String>].self, forKey: .previewAllowedHosts)) ?? [:]
     }
 

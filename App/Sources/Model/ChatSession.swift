@@ -417,7 +417,7 @@ final class ChatSession: Identifiable {
                 return
             }
         }
-        let computer = await computerContext(app: app, repo: repoContext)
+        let computer = await computerContext(app: app, repo: repoContext, stagedPatch: await changeWorkspace?.stagedDiff())
 
         let hasRepo = chat.repo != nil
         var difficulty = TaskDifficulty.estimate(lastMessage, hasRepo: hasRepo)
@@ -570,10 +570,10 @@ final class ChatSession: Identifiable {
     }
 
     /// What the AI is told about this chat's computer, or nil when the chat has none.
-    private func computerContext(app: AppModel, repo: SystemPrompt.RepoContext?) async -> SystemPrompt.ComputerContext? {
+    private func computerContext(app: AppModel, repo: SystemPrompt.RepoContext?, stagedPatch: String? = nil) async -> SystemPrompt.ComputerContext? {
         guard app.openRouter.supportsTools(chat.model), let connector = computerConnector(app) else { return nil }
         let machine = app.settings.chatComputerMachineName
-        guard let repo else { return SystemPrompt.ComputerContext(service: connector.displayName, machine: machine) }
+        guard let repo else { return SystemPrompt.ComputerContext(service: connector.displayName, machine: machine, approximateHourlyCost: app.settings.chatComputerHourlyCost) }
         let owner = repo.ref.owner
         let name = repo.ref.name
         let cloneURL = "https://github.com/\(owner)/\(name).git"
@@ -584,7 +584,9 @@ final class ChatSession: Identifiable {
             cloneURL: cloneURL,
             branch: repo.branch,
             commit: repo.commit,
-            repoPath: "$HOME/repos/\(owner)/\(name)"
+            repoPath: "$HOME/repos/\(owner)/\(name)",
+            stagedPatch: stagedPatch,
+            approximateHourlyCost: app.settings.chatComputerHourlyCost
         )
     }
 

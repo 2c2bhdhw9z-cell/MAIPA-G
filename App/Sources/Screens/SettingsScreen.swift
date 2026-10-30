@@ -88,6 +88,7 @@ struct SettingsScreen: View {
                     settings.chatComputerServer = edited.chatComputerServer
                     settings.chatComputerOff = edited.chatComputerOff
                     settings.chatComputerMachine = edited.chatComputerMachine
+                    settings.chatComputerHourlyCost = edited.chatComputerHourlyCost
                     settings.previewAllowedHosts = edited.previewAllowedHosts
                 }
                 if disabledAutonomous {
@@ -264,6 +265,10 @@ struct SettingsScreen: View {
                 }
             }
             if !draft.chatComputerOff {
+                LabeledContent("Approximate cost per hour") {
+                    TextField("0.10", value: $draft.chatComputerHourlyCost, format: .number.precision(.fractionLength(0...3)))
+                        .multilineTextAlignment(.trailing).keyboardType(.decimalPad)
+                }
                 LabeledContent("Machine name") {
                     TextField(AppSettings.defaultChatComputerMachine, text: $draft.chatComputerMachine)
                         .multilineTextAlignment(.trailing)
