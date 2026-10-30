@@ -408,4 +408,47 @@ struct StabilityCompletionTests {
         #expect(await vault.secrets[old] == ["UNRELATED": "theirs"])
         #expect(!cleared.failures.isEmpty && cleared.failures.allSatisfy { $0.hasPrefix("me/recorded") })
     }
+
+    // Necessary 3: in the CI's real GitHub Actions environment (ubuntu-24.04, like agent.yml),
+    // set the credentials up exactly as agent.yml does, take them the way MAIPAGRunner does, then
+    // run a command the way run_shell does and check it can't see or read any of them.
+    @Test(.serialized) func N03_realActionsEnvironmentKeepsCredentialsFromCommands() async throws {
+        let base = ProcessInfo.processInfo.environment["RUNNER_TEMP"].map { URL(fileURLWithPath: $0, isDirectory: true) } ?? FileManager.default.temporaryDirectory
+        let folder = base.appendingPathComponent("maipag-n03-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var values: [String: String] = [:]
+        for variable in RunnerSecrets.fileVariables {
+            let value = "secret-\(variable.lowercased())-\(UUID().uuidString)"
+            let file = folder.appendingPathComponent("maipag-\(variable.lowercased())")
+            try Data(value.utf8).write(to: file)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+            setenv(variable, file.path, 1)
+            values[variable] = value
+        }
+        setenv("GITHUB_TOKEN", "ghs_test_token_\(UUID().uuidString)", 1)
+        let tokenValue = ProcessInfo.processInfo.environment["GITHUB_TOKEN"] ?? ""
+
+        let taken = RunnerSecrets.take()
+        #expect(taken == values)
+        for variable in RunnerSecrets.fileVariables + ["GITHUB_TOKEN"] {
+            #expect(ProcessInfo.processInfo.environment[variable] == nil, "\(variable) must be cleared")
+        }
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+        #expect(leftovers.isEmpty, "credential files must be deleted: \(leftovers)")
+
+        let workspace = folder.appendingPathComponent("workspace", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        let probe = "env; echo ---; ls -la \"\(folder.path)\" 2>&1; cat \"\(folder.path)\"/maipag-* 2>&1; echo done"
+        let result = try await BoundedProcess.run(executable: "/bin/bash", arguments: ["-c", probe], directory: workspace, timeout: 30)
+        let output = result.stdout + result.stderr
+        #expect(output.contains("done"))
+        for value in values.values + [tokenValue] { #expect(!output.contains(value), "a credential reached the command") }
+        let inherited = output.components(separatedBy: "---").first ?? ""
+        let names = inherited.split(separator: "\n").compactMap { $0.split(separator: "=", maxSplits: 1).first.map(String.init) }
+        for name in names {
+            #expect(!name.hasSuffix("_FILE") && !name.contains("TOKEN") && !name.contains("SECRET") && !name.hasSuffix("_KEY"), "\(name) reached the command")
+            #expect(!name.hasPrefix("GITHUB_") && !name.hasPrefix("ACTIONS_") && !name.hasPrefix("RUNNER_"), "Actions variable \(name) reached the command")
+        }
+    }
 }
