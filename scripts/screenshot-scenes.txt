@@ -37,4 +37,3 @@ picture-result
 preview
 preview-error
 files-web
-preview-isolation

@@ -122,22 +122,24 @@ struct PreviewWebView: UIViewRepresentable {
         DispatchQueue.main.async { browser = model; context.coordinator.browser = model }
         let entry = URL(string: "maipag-preview://site/\(project.entryPath)")!
         let owner = coordinator
-        // The page loads only after the network block list is in place, so not even its first
-        // script runs without it. If the list can't be built, the page doesn't load at all.
+        // The page loads once the network block list is in place. If the list can't be built,
+        // the page still opens (the preview's content security rules still block outside
+        // addresses) and the reason is shown in the preview's messages, never a blank page.
         if let data = try? JSONSerialization.data(withJSONObject: rules),
            let source = String(data: data, encoding: .utf8) {
             WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "maipag-preview-\(manifest.allowedHTTPSHosts.sorted().joined(separator: "-"))", encodedContentRuleList: source) { list, error in
                 Task { @MainActor in
-                    guard let list else {
-                        owner.recordConsole("error: the preview's network block list couldn't be built (\(error?.localizedDescription ?? "unknown")), so the page wasn't opened.")
-                        return
+                    if let list {
+                        view.configuration.userContentController.add(list)
+                    } else {
+                        owner.recordConsole("warning: the preview's network block list couldn't be built (\(error?.localizedDescription ?? "unknown")); outside addresses are blocked by the page's content rules only.")
                     }
-                    view.configuration.userContentController.add(list)
                     view.load(URLRequest(url: entry))
                 }
             }
         } else {
-            owner.recordConsole("error: the preview's network block list couldn't be built, so the page wasn't opened.")
+            owner.recordConsole("warning: the preview's network block list couldn't be built; outside addresses are blocked by the page's content rules only.")
+            view.load(URLRequest(url: entry))
         }
         return view
     }
