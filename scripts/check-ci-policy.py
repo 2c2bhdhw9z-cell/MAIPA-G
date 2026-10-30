@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Fail when workflow dependencies drift back to moving or incomplete release gates."""
+import json
 from pathlib import Path
 import re
 
@@ -38,6 +39,29 @@ release = (ROOT / "scripts/publish-verified-ipa.sh").read_text()
 for required in ("AgentCore tests (Linux)", "Complete Dark and Light screenshots", "iPhone release candidate"):
     if required not in release:
         errors.append(f"publish-verified-ipa.sh: missing release gate {required}")
+manifest = json.loads((ROOT / "docs/regressions/2026-10-29.json").read_text())
+reports = manifest.get("reports", [])
+expected_ids = {f"OCT29-{number:02d}" for number in range(1, 19)}
+actual_ids = {item.get("id") for item in reports}
+if actual_ids != expected_ids or len(reports) != 18:
+    errors.append("29 October regression manifest must contain OCT29-01 through OCT29-18 exactly once")
+evidence_text = "\n".join(
+    path.read_text(errors="ignore")
+    for folder in (ROOT / "AgentCore/Tests", ROOT / "scripts", ROOT / ".kiro/notes")
+    for path in folder.rglob("*") if path.is_file()
+)
+scenes = set((ROOT / "scripts/screenshot-scenes.txt").read_text().split())
+for item in reports:
+    status = item.get("status")
+    evidence = item.get("evidence", "")
+    if status not in {"covered", "owner-waived"}:
+        errors.append(f"{item.get('id')}: invalid regression status {status}")
+    if evidence.startswith("screenshot:"):
+        if evidence.split(":", 1)[1] not in scenes:
+            errors.append(f"{item.get('id')}: missing screenshot scene {evidence}")
+    elif evidence not in evidence_text:
+        errors.append(f"{item.get('id')}: evidence not found: {evidence}")
+
 if errors:
     raise SystemExit("\n".join(errors))
 print("CI supply-chain pins and release gates are complete")
