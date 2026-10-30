@@ -47,7 +47,7 @@ final class ConnectorLibrary {
                 nextCursor = page.nextCursor
             }
             try? JSONCoding.encoder().encode(catalog).write(to: cacheURL, options: .atomic)
-        } catch { if catalog.isEmpty { errors[UUID()] = String(describing: error) } }
+        } catch { if catalog.isEmpty { errors[UUID()] = ErrorExplainer.explain(error).message } }
     }
 
     /// Looks up one familiar service without replacing the screen's current catalogue/search.
@@ -161,6 +161,7 @@ final class ConnectorLibrary {
         try? await store.save(record)
         connected.removeAll { $0.id == configuration.id }; connected.append(configuration)
         app?.sync.request()
+        await app?.jobs.reconcileAutonomousConnectorSecrets()
     }
 
     private func restore(_ configuration: ConnectorConfiguration) async {
@@ -185,7 +186,7 @@ final class ConnectorLibrary {
             toolDefinitions[configuration.id] = tools; states[configuration.id] = .connected; errors[configuration.id] = nil
         } catch {
             states[configuration.id] = credential == nil ? .authorizationNeeded : .failed
-            errors[configuration.id] = String(describing: error)
+            errors[configuration.id] = ErrorExplainer.explain(error).message
         }
     }
 
@@ -219,7 +220,7 @@ final class ConnectorLibrary {
                 await authorize(configuration, dynamicRegistration: true, scopes: scopes)
                 return
             }
-            states[configuration.id] = .failed; errors[configuration.id] = String(describing: error)
+            states[configuration.id] = .failed; errors[configuration.id] = ErrorExplainer.explain(error).message
         }
     }
 
@@ -239,6 +240,7 @@ final class ConnectorLibrary {
     func remove(_ configuration: ConnectorConfiguration) async {
         await disconnect(configuration); try? await store.delete(configuration.id)
         for name in configuration.secretNames { Keychain.remove(account: stdioSecretKey(configuration.id, name: name)) }
+        await app?.jobs.reconcileAutonomousConnectorSecrets()
         connected.removeAll { $0.id == configuration.id }; app?.sync.request()
     }
 

@@ -37,6 +37,14 @@ public extension GitHubClient {
         try await get(GitHubActionsPublicKey.self, Self.path(repo, "/actions/secrets/public-key"))
     }
 
+    func deleteActionsSecret(_ repo: RepoRef, name: String) async throws {
+        do {
+            _ = try await send("DELETE", Self.path(repo, "/actions/secrets/\(Self.escape(name))"))
+        } catch let error as GitHubAPIError where error.isNotFound {
+            // Already absent is the desired state.
+        }
+    }
+
     /// Encrypts locally before sending. The clear value is never part of an HTTP body or URL.
     func putActionsSecret(_ repo: RepoRef, name: String, value: String) async throws {
         let key = try await actionsPublicKey(repo)
@@ -113,10 +121,10 @@ public actor AutonomousSetup {
     private let github: GitHubClient
     public init(github: GitHubClient) { self.github = github }
 
-    public func isInstalled(in repo: RepoRef, ref: String) async throws -> Bool {
+    public func isInstalled(in repo: RepoRef, ref: String, reviewedRevision: String) async throws -> Bool {
         do {
-            _ = try await github.fileContents(repo, path: Self.callerPath, ref: ref)
-            return true
+            let contents = try await github.fileContents(repo, path: Self.callerPath, ref: ref)
+            return contents == Data(try Self.callerWorkflow(reviewedRevision: reviewedRevision).utf8)
         } catch let error as GitHubAPIError where error.isNotFound {
             return false
         }

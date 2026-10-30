@@ -106,10 +106,11 @@ public actor DiagnosticsLog {
 
     private func prune(before cutoff: Date) {
         let folder = dataDirectory.appendingPathComponent("diagnostics/\(installID.uuidString.lowercased())", isDirectory: true)
-        let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
         for file in files {
-            let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantFuture
-            if modified < cutoff { try? FileManager.default.removeItem(at: file) }
+            if let document = load(file), document.updatedAt < cutoff {
+                try? FileManager.default.removeItem(at: file)
+            }
         }
     }
 }

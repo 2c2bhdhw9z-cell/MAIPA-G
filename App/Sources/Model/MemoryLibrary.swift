@@ -46,7 +46,7 @@ final class MemoryLibrary {
             app?.sync.request()
             return record
         } catch {
-            lastError = String(describing: error)
+            lastError = ErrorExplainer.explain(error).message
             return nil
         }
     }
@@ -67,7 +67,7 @@ final class MemoryLibrary {
             try await app?.trash.move(id: id, kind: .memory, title: String(record.text.prefix(80)), originalPath: await store.relativePath(for: id))
             await load()
             app?.sync.request()
-        } catch { lastError = String(describing: error) }
+        } catch { lastError = ErrorExplainer.explain(error).message }
     }
 
     /// Returns the new memory id, or nil when the tap removed an existing star.
@@ -78,7 +78,7 @@ final class MemoryLibrary {
             app?.sync.request()
             return result
         } catch {
-            lastError = String(describing: error)
+            lastError = ErrorExplainer.explain(error).message
             return currentMemoryID
         }
     }

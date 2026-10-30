@@ -31,7 +31,7 @@ final class SpecCoordinator {
             specs = await core.all()
             await draft(record)
             return record
-        } catch { lastError = String(describing: error); return nil }
+        } catch { lastError = ErrorExplainer.explain(error).message; return nil }
     }
 
     func draft(_ record: SpecRecord) async {
@@ -43,12 +43,12 @@ final class SpecCoordinator {
             return
         }
         do { _ = try await core.setActiveJob(job.id, for: record.id); specs = await core.all() }
-        catch { lastError = String(describing: error) }
+        catch { lastError = ErrorExplainer.explain(error).message }
     }
 
     func saveArtifact(_ record: SpecRecord, stage: SpecStage, text: String) async -> SpecRecord? {
         do { let saved = try await core.updateArtifact(record.id, stage: stage, text: text); specs = await core.all(); app?.sync.request(); return saved }
-        catch { lastError = String(describing: error); return nil }
+        catch { lastError = ErrorExplainer.explain(error).message; return nil }
     }
 
     func approve(_ record: SpecRecord, text: String) async {
@@ -59,7 +59,7 @@ final class SpecCoordinator {
             app?.sync.request()
             if advanced.stage == .execution { await saveApprovedArtifacts(advanced) }
             else if advanced.stage != .completed { await draft(advanced) }
-        } catch { lastError = String(describing: error) }
+        } catch { lastError = ErrorExplainer.explain(error).message }
     }
 
     func execute(_ task: SpecTask, in record: SpecRecord) async {
@@ -74,7 +74,7 @@ final class SpecCoordinator {
         let repo = ChatRepo(ref: record.repo, branch: workingBranch, defaultBranch: record.defaultBranch, isPrivate: app.github.repo(named: record.repo.fullName)?.isPrivate ?? false)
         guard let job = await app.jobs.start(workflow: workflow, request: task.title, repo: repo) else { return }
         do { _ = try await core.setActiveJob(job.id, for: record.id, taskID: task.id); specs = await core.all() }
-        catch { lastError = String(describing: error) }
+        catch { lastError = ErrorExplainer.explain(error).message }
     }
 
     func refreshJobs() async {
@@ -95,7 +95,7 @@ final class SpecCoordinator {
                         _ = try await core.updateArtifact(record.id, stage: record.stage, text: output)
                         _ = try await core.setActiveJob(nil, for: record.id)
                     }
-                } catch { lastError = String(describing: error) }
+                } catch { lastError = ErrorExplainer.explain(error).message }
             case .failed, .stopped:
                 lastError = job.result?.summary ?? "The spec step didn't finish."
                 _ = try? await core.setActiveJob(nil, for: record.id)
@@ -130,7 +130,7 @@ final class SpecCoordinator {
 
     func delete(_ id: UUID) async {
         do { try await core.delete(id); specs = await core.all(); app?.sync.request() }
-        catch { lastError = String(describing: error) }
+        catch { lastError = ErrorExplainer.explain(error).message }
     }
 
     private func saveApprovedArtifacts(_ record: SpecRecord) async {

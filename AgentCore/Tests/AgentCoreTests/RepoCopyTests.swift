@@ -251,11 +251,14 @@ struct RepoCopyTests {
         #expect(watched.succeeded)
         #expect(watched.runs.allSatisfy { $0.headSHA == "abc" })
         try await client.putActionsSecret(repo, name: "OPENROUTER_API_KEY", value: "private-value")
+        try await client.deleteActionsSecret(repo, name: "OPENROUTER_API_KEY")
 
         let dispatch = try #require(transport.requests.first { $0.url.path.hasSuffix("/dispatches") })
         let dispatchBody = try #require(dispatch.body.flatMap(JSONValue.parse))
         #expect(dispatchBody["inputs"]?["job_id"] == "opaque-id")
-        let upload = try #require(transport.requests.first { $0.url.path.hasSuffix("/actions/secrets/OPENROUTER_API_KEY") })
+        let upload = try #require(transport.requests.first { $0.method == "PUT" && $0.url.path.hasSuffix("/actions/secrets/OPENROUTER_API_KEY") })
+        let deletion = try #require(transport.requests.first { $0.method == "DELETE" && $0.url.path.hasSuffix("/actions/secrets/OPENROUTER_API_KEY") })
+        #expect(deletion.body == nil)
         let uploadBody = try #require(upload.body.flatMap(JSONValue.parse))
         #expect(uploadBody["key_id"] == "key-1")
         #expect(uploadBody["encrypted_value"] != "private-value")
@@ -393,8 +396,9 @@ struct GitHubAuthTests {
             service: "Sprites", machine: "mcp-maipa-g", repoFullName: "octo/app", cloneURL: "https://x-access-token:ghs_abc@github.com/octo/app.git",
             branch: "main", commit: "0123456789abcdef", repoPath: "$HOME/repos/octo/app"
         ))
-        #expect(secret.contains("`git -C $HOME/repos/octo/app remote set-url origin https://github.com/octo/app.git`"))
-        #expect(secret.contains("Never print, echo or repeat the clone URL's token outside those git commands."))
+        #expect(!secret.contains("ghs_abc"))
+        #expect(secret.contains("https://github.com/octo/app.git"))
+        #expect(secret.contains("Never place a token"))
     }
 
     #if canImport(Security)

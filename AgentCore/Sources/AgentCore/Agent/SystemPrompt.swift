@@ -28,7 +28,7 @@ public enum SystemPrompt {
         /// The machine to use, created with exactly this name when it doesn't exist yet.
         public var machine: String
         public var repoFullName: String?
-        /// Where to clone the repo from. For a private repo it carries a short-lived read-only token.
+        /// Public repository address. Credentials are never placed in model-visible context.
         public var cloneURL: String?
         public var branch: String?
         public var commit: String?
@@ -39,14 +39,11 @@ public enum SystemPrompt {
             self.service = service
             self.machine = machine
             self.repoFullName = repoFullName
-            self.cloneURL = cloneURL
+            self.cloneURL = cloneURL.map { SensitiveDataRedactor().redact($0) }
             self.branch = branch
             self.commit = commit
             self.repoPath = repoPath
         }
-
-        /// True when the clone URL has a token in it, which must not stay on the machine.
-        var cloneURLHasToken: Bool { cloneURL?.contains("@") == true }
     }
 
     public static func make(
@@ -145,13 +142,8 @@ public enum SystemPrompt {
         if let fullName = computer.repoFullName, let cloneURL = computer.cloneURL, let path = computer.repoPath {
             let branch = computer.branch.map { " on the branch \($0)" } ?? ""
             let commit = computer.commit.map { " at commit \($0.prefix(7))" } ?? ""
-            steps.append("- Keep a copy of \(fullName) at `\(path)`\(branch)\(commit). If it's missing, clone it with `git clone \(cloneURL) \(path)`. Otherwise fetch and check out that commit.")
-            if computer.cloneURLHasToken {
-                steps.append(
-                    "- Right after cloning, run `git -C \(path) remote set-url origin https://github.com/\(fullName).git` so no token stays on the machine. " +
-                        "Later fetches still need the token, so fetch from the clone URL rather than origin. Never print, echo or repeat the clone URL's token outside those git commands."
-                )
-            }
+            steps.append("- Keep a copy of \(fullName) at `\(path)`\(branch)\(commit). If it is public and missing, clone it with `git clone \(cloneURL) \(path)`. For a private repo, use MAIPA-G's trusted computer setup; never ask for or construct a credential URL.")
+            steps.append("- Never place a token, password, secret, or credential-file location in a command, tool argument, answer, or saved chat.")
             steps.append("- The copy on the computer is for running and checking. To change the repo, still use create_file, edit_file, delete_file and save_changes, and make the same edits on the computer when you need to test them.")
         }
         steps.append("- Report command output honestly. Never claim a command ran if it didn't.")

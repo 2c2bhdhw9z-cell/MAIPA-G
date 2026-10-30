@@ -243,7 +243,7 @@ struct PictureViewer: View {
             image = decoded
         } catch {
             image = nil
-            error = userMessage(for: error)
+            self.error = userMessage(for: error)
         }
     }
 

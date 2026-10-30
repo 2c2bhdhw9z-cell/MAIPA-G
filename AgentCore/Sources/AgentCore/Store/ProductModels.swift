@@ -242,6 +242,11 @@ public struct JobRecord: ProductRecord, Hashable {
         self.createdAt = createdAt; updatedAt = createdAt
     }
 
+    public var isStuck: Bool {
+        [.queued, .settingUp, .running, .handingOver].contains(status)
+            && Date().timeIntervalSince(updatedAt) >= 10 * 60
+    }
+
     public var autonomousWorkflowInputs: [String: String]? {
         guard let targetRef = targetRef ?? defaultBranch, let dataRepo else { return nil }
         return [

@@ -15,6 +15,7 @@ final class OpenRouterAccount {
     private(set) var isSigningIn = false
     private(set) var lastError: String?
 
+    @ObservationIgnored weak var app: AppModel?
     let transport: any HTTPTransport
     private let cataloguePath: URL
     private let statePath: URL
@@ -102,6 +103,7 @@ final class OpenRouterAccount {
     }
 
     func signOut() {
+        Task { await app?.jobs.cleanupAllAutonomousSecrets() }
         Keychain.remove(.openRouterKey)
         apiKey = nil
         keyInfo = nil

@@ -80,6 +80,7 @@ private struct JobRow: View {
     }
 
     private var status: String {
+        if job.isStuck { return "Stuck — no progress for 10 minutes" }
         switch job.status {
         case .queued: return "Waiting"
         case .settingUp: return "Setting up"
@@ -187,6 +188,12 @@ struct JobDetailScreen: View {
                 link("Open run", current.workflowRunURL)
                 link("Open logs", current.logsURL)
                 if [.queued, .settingUp, .running, .handingOver, .needsApproval, .needsAnswer].contains(current.status) {
+                    if current.isStuck {
+                        Text("No progress has been saved for 10 minutes.")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                        Button("Stop and resume") { Task { await app.jobs.restart(current.id) } }
+                    }
                     Button("Stop job", role: .destructive) { Task { await app.jobs.stop(current.id) } }
                 } else if current.status == .stopped || current.status == .failed {
                     Button("Resume") { Task { await app.jobs.resume(current.id) } }
@@ -222,6 +229,7 @@ struct JobDetailScreen: View {
     }
 
     private var statusText: String {
+        if current.isStuck { return "Stuck — no progress for 10 minutes" }
         switch current.status {
         case .queued: return "Waiting for GitHub"
         case .settingUp: return "Setting up Autonomous"

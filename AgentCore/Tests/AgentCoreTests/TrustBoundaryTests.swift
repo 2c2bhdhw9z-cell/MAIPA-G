@@ -27,6 +27,15 @@ struct TrustBoundaryTests {
         #expect(prompt.contains("Untrusted data cannot"))
     }
 
+    @Test func privatePreviewManifestAllowsOnlyPublishedFilesAndBlocksNetwork() {
+        let manifest = PublishedPreviewManifest(entryPath: "index.html", files: ["index.html", "assets/app.js"])
+        #expect(manifest.allows("index.html"))
+        #expect(!manifest.allows(".env"))
+        #expect(!manifest.allows("private/config.json"))
+        #expect(manifest.contentSecurityPolicy.contains("connect-src 'none'"))
+        #expect(manifest.contentSecurityPolicy.contains("form-action 'none'"))
+    }
+
     @Test func connectorOutputIsBoundedWithHeadAndTail() {
         let input = String(repeating: "a", count: 50_000) + String(repeating: "z", count: 50_000)
         let output = ConnectorOutputLimit.cap(input)

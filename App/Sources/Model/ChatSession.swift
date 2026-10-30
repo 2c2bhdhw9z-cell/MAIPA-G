@@ -25,8 +25,6 @@ final class ChatSession: Identifiable {
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored private var draftSaveTask: Task<Void, Never>?
     @ObservationIgnored private var lastSaved = Date()
-    /// The read-only token for cloning this chat's private repo onto its computer.
-    @ObservationIgnored private var computerToken: (repo: RepoRef, token: String, expiresAt: Date)?
 
     init(chat: Chat, app: AppModel?, draft: ComposerDraft? = nil) {
         self.id = chat.id
@@ -468,10 +466,7 @@ final class ChatSession: Identifiable {
         guard let repo else { return SystemPrompt.ComputerContext(service: connector.displayName, machine: machine) }
         let owner = repo.ref.owner
         let name = repo.ref.name
-        var cloneURL = "https://github.com/\(owner)/\(name).git"
-        if repo.isPrivate, let token = await readOnlyCloneToken(for: repo.ref, app: app) {
-            cloneURL = "https://x-access-token:\(token)@github.com/\(owner)/\(name).git"
-        }
+        let cloneURL = "https://github.com/\(owner)/\(name).git"
         return SystemPrompt.ComputerContext(
             service: connector.displayName,
             machine: machine,
@@ -481,18 +476,6 @@ final class ChatSession: Identifiable {
             commit: repo.commit,
             repoPath: "$HOME/repos/\(owner)/\(name)"
         )
-    }
-
-    /// A token that can only read this chat's private repo, kept until five minutes before it runs
-    /// out. Nil when GitHub won't make one; the plain address is used then.
-    private func readOnlyCloneToken(for repo: RepoRef, app: AppModel) async -> String? {
-        if let cached = computerToken, cached.repo == repo, cached.expiresAt.timeIntervalSinceNow > 5 * 60 {
-            return cached.token
-        }
-        computerToken = nil
-        guard let fresh = try? await app.github.readOnlyToken(for: repo) else { return nil }
-        computerToken = (repo: repo, token: fresh.token, expiresAt: fresh.expiresAt)
-        return fresh.token
     }
 
     // MARK: Titles and saving

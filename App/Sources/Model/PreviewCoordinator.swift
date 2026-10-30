@@ -6,6 +6,7 @@ import Observation
 @Observable
 final class PreviewCoordinator {
     private(set) var project: WebPreviewProject?
+    private(set) var manifest: PublishedPreviewManifest?
     private(set) var directory: URL?
     private(set) var isLoading = false
     private(set) var error: String?
@@ -46,21 +47,36 @@ final class PreviewCoordinator {
                 let paths = Self.relativeFiles(destination)
                 guard let built = WebProjectDetector.detect(paths: paths), built.kind != .buildArtifact || paths.contains(built.entryPath) else { throw WebPreviewError.missingResource("index.html in the preview artifact") }
                 project = built
+                manifest = PublishedPreviewManifest(entryPath: built.entryPath, files: Set(paths))
             } else {
                 buildProject = nil
                 let prefix = detected.rootPath.isEmpty ? "" : detected.rootPath + "/"
-                for entry in entries where entry.isFile && entry.path.hasPrefix(prefix) {
+                let publishedEntries: [GitTreeEntry]
+                if detected.rootPath.isEmpty {
+                    // A root index does not publish every sibling in a private repository. Only
+                    // the entry point is exposed; projects needing assets should use public/,
+                    // docs/, site/, or a verified build artifact.
+                    publishedEntries = entries.filter { $0.isFile && !$0.isSymlink && $0.path == detected.entryPath }
+                } else {
+                    publishedEntries = entries.filter { $0.isFile && !$0.isSymlink && $0.path.hasPrefix(prefix) }
+                }
+                var publishedPaths = Set<String>()
+                for entry in publishedEntries {
                     let relative = String(entry.path.dropFirst(prefix.count))
-                    guard SnapshotStore.isSafeRelativePath(relative) else { continue }
+                    guard SnapshotStore.isSafeRelativePath(relative), !relative.split(separator: "/").contains(where: { $0.hasPrefix(".") }) else { continue }
                     let data = try await github.fileContents(repo.ref, path: entry.path, ref: commit)
                     let url = destination.appendingPathComponent(relative)
                     try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
                     try data.write(to: url, options: .atomic)
+                    publishedPaths.insert(relative)
                 }
-                project = WebPreviewProject(kind: detected.kind, entryPath: detected.entryPath.split(separator: "/").last.map(String.init) ?? "index.html", rootPath: "")
+                let entryPath = detected.entryPath.split(separator: "/").last.map(String.init) ?? "index.html"
+                guard publishedPaths.contains(entryPath) else { throw WebPreviewError.missingResource(entryPath) }
+                project = WebPreviewProject(kind: detected.kind, entryPath: entryPath, rootPath: "")
+                manifest = PublishedPreviewManifest(entryPath: entryPath, files: publishedPaths)
             }
             directory = destination
-        } catch { self.error = String(describing: error); project = nil; directory = nil }
+        } catch { self.error = ErrorExplainer.explain(error).message; project = nil; manifest = nil; directory = nil }
     }
 
     func build(_ repo: ChatRepo) async -> Bool {
@@ -75,10 +91,11 @@ final class PreviewCoordinator {
         return values.compactMap { ($0 as? URL).map { String($0.path.dropFirst(root.path.count + 1)) } }
     }
 
-    func previewError() { directory = nil; project = nil; error = "The built preview artifact did not contain an index.html file." }
+    func previewError() { directory = nil; project = nil; manifest = nil; error = "The built preview artifact did not contain an index.html file." }
 
     func previewFixture() {
         directory = Bundle.main.resourceURL
         project = WebPreviewProject(kind: .staticSite, entryPath: "PreviewFixture.html")
+        manifest = PublishedPreviewManifest(entryPath: "PreviewFixture.html", files: ["PreviewFixture.html"])
     }
 }

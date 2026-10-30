@@ -172,6 +172,7 @@ final class AppModel {
         settings = Self.readSettings(paths)
         library.app = self
         home.app = self
+        openRouter.app = self
         sync.app = self
         jobs.app = self
         automations.app = self
@@ -225,6 +226,7 @@ final class AppModel {
     }
 
     func disconnectGitHub() async {
+        await jobs.cleanupAllAutonomousSecrets()
         await sync.syncNow()
         await sync.reset()
         await github.disconnect()

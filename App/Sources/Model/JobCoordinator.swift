@@ -28,6 +28,7 @@ final class JobCoordinator {
     var activeCount: Int { jobs.filter { ![.done, .failed, .stopped].contains($0.status) }.count }
 
     func load() async {
+        _ = try? await store.compactFinished()
         jobs = await store.all()
         startWatching()
     }
@@ -68,7 +69,8 @@ final class JobCoordinator {
             return nil
         }
         let setup = AutonomousSetup(github: github)
-        let installed = (try? await setup.isInstalled(in: repo.ref, ref: repo.defaultBranch)) == true
+        let reviewedRevision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
+        let installed = (try? await setup.isInstalled(in: repo.ref, ref: repo.defaultBranch, reviewedRevision: reviewedRevision)) == true
         let commit: String
         do { commit = try await github.resolveCommit(repo.ref, ref: repo.branch) }
         catch { lastError = app.github.describe(error); return nil }
@@ -168,7 +170,7 @@ final class JobCoordinator {
             }
             return job
         } catch {
-            lastError = String(describing: error)
+            lastError = ErrorExplainer.explain(error).message
             return nil
         }
     }
@@ -293,7 +295,7 @@ final class JobCoordinator {
                 }
             }
             await reloadAndSync()
-        } catch { lastError = String(describing: error) }
+        } catch { lastError = ErrorExplainer.explain(error).message }
     }
 
     private func workflowState(definition: WorkflowDefinition, request: String) -> JSONValue {
@@ -361,7 +363,7 @@ final class JobCoordinator {
             do {
                 _ = try await store.answer(jobID, questionID: questionID, answer: answer)
                 Task { [weak self] in await self?.runOnPhone(workflow: workflow, request: job.state["request"]?.stringValue ?? "", jobID: jobID, answer: answer) }
-            } catch { lastError = String(describing: error) }
+            } catch { lastError = ErrorExplainer.explain(error).message }
             return
         }
         do {
@@ -390,7 +392,7 @@ final class JobCoordinator {
                 try? await github.cancelWorkflowRun(repo, runID: run)
             }
             await reloadAndSync()
-        } catch { lastError = String(describing: error) }
+        } catch { lastError = ErrorExplainer.explain(error).message }
     }
 
     func delete(_ id: UUID) async {
@@ -416,7 +418,12 @@ final class JobCoordinator {
             jobs = await store.all()
             app.sync.request(after: 0)
             await app.sync.syncNow()
-        } catch { lastError = String(describing: error) }
+        } catch { lastError = ErrorExplainer.explain(error).message }
+    }
+
+    func restart(_ id: UUID) async {
+        await stop(id)
+        await resume(id)
     }
 
     func resume(_ id: UUID) async {
@@ -431,7 +438,7 @@ final class JobCoordinator {
                     await self?.runOnPhone(workflow: workflow, request: job.state["request"]?.stringValue ?? "", jobID: id)
                     self?.localRuns[id] = nil
                 }
-            } catch { lastError = String(describing: error) }
+            } catch { lastError = ErrorExplainer.explain(error).message }
             return
         }
         do {
@@ -494,11 +501,44 @@ final class JobCoordinator {
         }
     }
 
+    func reconcileAutonomousConnectorSecrets() async {
+        guard let app, let github = app.github.client else { return }
+        let repos = Set(jobs.compactMap(\.targetRepo))
+        var failures: [String] = []
+        for repo in repos {
+            do {
+                if let value = app.connectors.autonomousSecretsJSON() {
+                    try await github.putActionsSecret(repo, name: "MAIPAG_MCP_SECRETS", value: value)
+                } else {
+                    try await github.deleteActionsSecret(repo, name: "MAIPAG_MCP_SECRETS")
+                }
+            } catch {
+                failures.append("\(repo.fullName): \(error.localizedDescription)")
+            }
+        }
+        lastError = failures.isEmpty ? nil : "Autonomous secret cleanup failed for " + failures.joined(separator: "; ")
+    }
+
+    func cleanupAllAutonomousSecrets() async {
+        guard let app, let github = app.github.client else { return }
+        let names = ["MAIPAG_APP_ID", "MAIPAG_APP_PRIVATE_KEY", "OPENROUTER_API_KEY", "MAIPAG_MCP_SECRETS"]
+        var failures: [String] = []
+        for repo in Set(jobs.compactMap(\.targetRepo)) {
+            for name in names {
+                do { try await github.deleteActionsSecret(repo, name: name) }
+                catch { failures.append("\(repo.fullName) / \(name): \(error.localizedDescription)") }
+            }
+        }
+        lastError = failures.isEmpty ? nil : "Autonomous secret cleanup failed for " + failures.joined(separator: "; ")
+    }
+
     private func dispatch(_ job: JobRecord) async throws {
         guard let app, let github = app.github.client, let repo = job.targetRepo else { return }
         await app.sync.syncNow()
         if let connectorSecrets = app.connectors.autonomousSecretsJSON() {
             try await github.putActionsSecret(repo, name: "MAIPAG_MCP_SECRETS", value: connectorSecrets)
+        } else {
+            try await github.deleteActionsSecret(repo, name: "MAIPAG_MCP_SECRETS")
         }
         let dispatchRef = job.state["previewBuild"]?.boolValue == true ? (job.targetRef ?? job.defaultBranch ?? "main") : (job.defaultBranch ?? "main")
         guard let inputs = job.autonomousWorkflowInputs else { throw ToolInputError("This job is missing its private data-repository identity.") }

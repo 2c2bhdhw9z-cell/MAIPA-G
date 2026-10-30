@@ -40,7 +40,7 @@ final class GroupLibrary {
             await load()
             app?.sync.request()
             return record
-        } catch { lastError = String(describing: error); return nil }
+        } catch { lastError = ErrorExplainer.explain(error).message; return nil }
     }
 
     func move(from offsets: IndexSet, to destination: Int) async {
@@ -58,7 +58,7 @@ final class GroupLibrary {
             }
             await load()
             app?.sync.request()
-        } catch { lastError = String(describing: error) }
+        } catch { lastError = ErrorExplainer.explain(error).message }
     }
 
     func delete(_ id: UUID) async {
@@ -67,7 +67,7 @@ final class GroupLibrary {
             await app?.library.removeGroup(id)
             await load()
             app?.sync.request()
-        } catch { lastError = String(describing: error) }
+        } catch { lastError = ErrorExplainer.explain(error).message }
     }
 
     func name(for id: UUID?) -> String? {
