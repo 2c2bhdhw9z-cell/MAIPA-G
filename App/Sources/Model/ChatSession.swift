@@ -371,6 +371,13 @@ final class ChatSession: Identifiable {
         tools.append(contentsOf: app.connectors.agentTools())
         tools.append(AddMemoryTool(store: app.memories.store))
         tools.append(EditMemoryTool(store: app.memories.store))
+        if let github = app.github.client {
+            tools.append(CreateRepositoryTool(github: github))
+            tools.append(ReadOtherRepositoryFileTool(github: github, repositories: app.github.repos))
+            tools.append(LiveStatusTool { [weak app] in
+                await MainActor.run { app?.liveStatusText() ?? "MAIPA-G is no longer open." }
+            })
+        }
         if !allAttachments.filter({ $0.kind == .text }).isEmpty {
             tools.append(ReadAttachmentTool(attachments: allAttachments, store: app.attachmentStore))
         }
@@ -449,7 +456,13 @@ final class ChatSession: Identifiable {
         let input = AgentTurnInput(
             chat: chat,
             route: route,
-            systemPrompt: SystemPrompt.make(userLogin: app.github.login, repo: repoContext, computer: computer, memories: chat.memoryContext),
+            systemPrompt: SystemPrompt.make(
+                userLogin: app.github.login,
+                repo: repoContext,
+                computer: computer,
+                memories: chat.memoryContext,
+                connectedRepositories: app.github.repos.map(\.fullName)
+            ),
             tools: tools,
             allowTools: app.openRouter.supportsTools(chat.model),
             spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil,

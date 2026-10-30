@@ -188,6 +188,25 @@ final class AppModel {
         home.repo = settings.lastRepo
     }
 
+    func liveStatusText() -> String {
+        var lines = [
+            "GitHub: " + (github.isConnected ? "connected as \(github.login ?? "unknown")" : "not connected"),
+            "OpenRouter: " + (openRouter.isSignedIn ? "signed in" : "not signed in"),
+            "Chosen AI: \(openRouter.label(for: home.model))",
+            "Chat computer: \(settings.chatComputerOff ? "off" : (settings.chatComputerServer ?? "automatic"))",
+            "Saving: \(String(describing: sync.status))",
+        ]
+        if let balance = openRouter.balance { lines.append("OpenRouter credit: \(balance.dollars)") }
+        for connector in connectors.connected {
+            lines.append("Connector \(connector.displayName): \(connectors.states[connector.id]?.rawValue ?? "unknown")")
+        }
+        for job in jobs.jobs.prefix(50) {
+            let step = job.steps.last(where: { $0.status == .running || $0.status == .failed })?.title ?? job.steps.last?.title ?? "no step"
+            lines.append("Job \(job.title): \(job.status.rawValue); step: \(step); run: \(job.workflowRunURL ?? "none"); result: \(job.result?.summary ?? "none")")
+        }
+        return lines.joined(separator: "\n")
+    }
+
     @discardableResult
     func report(_ error: Error, area: String, operation: String, path: String? = nil) -> ErrorExplanation {
         let explanation = ErrorExplainer.explain(error)
