@@ -1,25 +1,30 @@
 # MAIPA-G plan
 
-**Status (30 October 2026, 3:51 PM ET): Build 55 (`build-55-3ba91ae`, 5.2 MB, PR #11) is the latest
-installable build: 0.1.0 (55), iPhone arm64, built from commit `97cb058`, checked by the AgentCore
-tests on Linux and macOS and an independent IPA inspection. It fixes what failed on the owner's
-phone with build 53, but none of it is confirmed on the phone yet:
-- Saving: attachments and media of 20 MB or more are stored as assets of MAIPA-G-data's private
-  draft release "MAIPA-G files" (Git keeps a pointer), big uploads run in a background session,
-  blob saves retry, and files deleted mid-save no longer count as failures. Stability 3 counts as
-  done only once MAIPA-G-data shows the owner's large .ipa and all his chats saved.
-- Chat computer: commands now go to Sprites' `exec` (build 53 picked `exec_list`). Stability 10,
-  31, 33, 34 and 35 count as done only once Check everything passes on the phone. Build 53's
-  "Replace machine" deleted and recreated `mcp-maipa-g`.
-- Errors show their real reason instead of iOS's "operation couldn't be completed" placeholder,
-  and the Actions-minutes 403 shows the Plan-permission steps (the owner still has to add the
-  permission; Stability 14 counts once minutes show).
+**Status (30 October 2026, 5:10 PM ET): Build 58 (`build-58-9dddcb4`, 5.2 MB, PR #14) is the latest
+installable build: 0.1.0 (58), iPhone arm64, built from commit `209b7ab`, checked by the AgentCore
+tests on Linux and macOS and an independent IPA inspection.
+
+Confirmed on the owner's phone with build 55 (4:04 PM): saving works (Settings showed "Saved just
+now", and the 173 MB Continuum .ipa is in MAIPA-G-data's files release), and the chat computer ran
+a real command through Sprites' `exec`. Stability 3 is done.
+
+Built since then, none of it confirmed on the phone yet:
+- Build 56 (PR #12): Check everything, Recently Deleted and Unreadable files open inside Settings;
+  the Computer list shows only connectors that can run commands; tool setup starts by itself.
+- Build 57 (PR #13): the Sprite is held awake with Sprites' Tasks API while tools install (a Sprite
+  pauses 30 seconds after the last command, which froze build 56's setup); Check everything shows
+  the setup step and any tools that failed; Hugging Face's sandbox tool doesn't make it a computer;
+  Edit memories opens inside Settings.
+- Build 58 (PR #14): chats work again. Since build 53 every chat sent OpenRouter four AIs (the
+  chosen one plus three backups) and OpenRouter refused them all with a 400; the phone failed seven
+  messages that way at 4:27-4:35 PM.
 
 Still not done: Stability 11 (about 250 silent `try?` failures remain), necessary item 4 (sandbox
 for downloaded connectors blocks all network, so npx/uvx connectors can't install), and necessary
-item 6's leak test (deleted on the owner's order). Cancelled by the owner: Stability 40 and
-necessary item 8 (the screenshot job was deleted at 2:40 PM). The 37 items finished before noon were
-spot-checked, not re-audited sentence by sentence.**
+item 6's leak test (deleted on the owner's order). Waiting on the phone: Stability 10, 31, 33, 34
+and 35 (chat-computer features) and 14 (the owner has to add the GitHub app's Plan permission).
+Cancelled by the owner: Stability 40 and necessary item 8 (the screenshot job was deleted at 2:40
+PM). The 37 items finished before noon were spot-checked, not re-audited sentence by sentence.**
 
 ## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
 He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,
