@@ -1,13 +1,15 @@
 # MAIPA-G plan
 
-**Status (30 October 2026, 7:00 PM ET): Build 60 (`build-60-154bb18`, 5.0 MB, PR #16) is the latest
-installable build: 0.1.0 (60), iPhone arm64, built from commit `61c05ee`, checked by the AgentCore
+**Status (30 October 2026, 7:45 PM ET): Build 61 (`build-61-f874a6b`, 5.1 MB, PR #17) is the latest
+installable build: 0.1.0 (61), iPhone arm64, built from commit `5d3a5c5`, checked by the AgentCore
 tests on Linux and macOS and an independent IPA inspection.
 
-Confirmed on the owner's phone with build 55 (4:04 PM) and build 59 (6:42 PM): saving works
-(Settings showed "Saved just now", and the 173 MB Continuum .ipa is in MAIPA-G-data's files
-release), the chat computer ran a real command through Sprites' `exec`, the clean Home screen and
-`+` menu are live, and huge pastes turn into `Pasted text.txt` attachments. Stability 3 is done.
+Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
+saving works (Settings and the side menu showed "Saved just now", and the 173 MB Continuum .ipa is
+in MAIPA-G-data's files release), the chat computer ran a real command through Sprites' `exec` (with
+all green checks on GitHub, OpenRouter, Saving, Hugging Face, Sprites MCP Server, and GitHub Actions),
+the clean Home screen and `+` menu are live, huge pastes turn into `Pasted text.txt` attachments,
+and keyboard dismissal works without the `Done` button. Stability 3 is done.
 
 Built since then:
 - Build 56 (PR #12): Check everything, Recently Deleted and Unreadable files open inside Settings;
@@ -24,11 +26,22 @@ Built since then:
   bubbles with a chunked `Full message` sheet, auto-converted 20,000+ character pastes into text
   attachments with paginated `read_attachment` up to 25 MB, and stopped dropped server connections
   from falsely claiming `This iPhone is offline`.
-- Build 60 (PR #16): moved memory stars off message text (beside user bubbles and into the bottom
-  footer of AI replies); moved the unlabeled top-bar `Compact` icon into the `+` menu and Context
-  ring popover with plain-English status; added live status and a direct download button under
-  `Check for a new build` in Settings; removed the floating keyboard `Done` pill and added
-  app-wide keyboard dismissal on downward swipe, outside tap, or screen/sheet switches.
+- Build 60 (PR #16, confirmed on phone): moved memory stars off message text (beside user bubbles
+  and into the bottom footer of AI replies); moved the unlabeled top-bar `Compact` icon into the
+  `+` menu and Context ring popover with plain-English status; added live status and a direct
+  download button under `Check for a new build` in Settings; removed the floating keyboard `Done`
+  pill and added app-wide keyboard dismissal on downward swipe, outside tap, or screen/sheet
+  switches.
+- Build 61 (PR #17): kept the chat computer (`mcp-maipa-g`) awake until its one-time tool install
+  finishes (added `POST /v1/tasks`, `sprite-env curl`, `sudo curl`, and `/.sprite/bin` to
+  `setup.sh`, plus an automatic 20-second app-side keep-awake ping while setup runs, live 15-second
+  step refresh in `Check everything`, and recursive JSON output parsing so `Now: …` always shows);
+  enabled selecting multiple photos (up to 20, ordered) and multiple files at once in the `+` menu;
+  changed Side Menu `Agents` and `Workflows` taps to open runnable detail screens with plain-English
+  explanations instead of `… copy` editors (with swipe-to-delete on custom copies); and fixed
+  swipe-to-delete buttons to be red (`Theme.danger`, `allowsFullSwipe: false`) and replaced broken
+  iOS 26 floating speech-bubble confirmation popovers with centered alerts that always include a
+  `Cancel` button.
 
 Still not done: Stability 11 (about 250 silent `try?` failures remain), necessary item 4 (sandbox
 for downloaded connectors blocks all network, so npx/uvx connectors can't install), and necessary
