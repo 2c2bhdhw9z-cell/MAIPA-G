@@ -104,10 +104,19 @@ struct PreviewWebView: UIViewRepresentable {
         let script = "window._maipagConsole=[];['log','warn','error'].forEach(k=>{const o=console[k];console[k]=function(...a){window._maipagConsole.push(k+': '+a.join(' '));o.apply(console,a)}});"
         configuration.userContentController.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         let view = WKWebView(frame: .zero, configuration: configuration)
-        let trigger: [String: Any] = manifest.allowedHTTPSHosts.isEmpty
-            ? ["url-filter": "^(https?|wss?)://"]
-            : ["url-filter": "^(https?|wss?)://", "unless-domain": manifest.allowedHTTPSHosts.sorted()]
-        let rules: [[String: Any]] = [["trigger": trigger, "action": ["type": "block"]]]
+        // WebKit's block lists don't accept "|" in a filter (the old "^(https?|wss?)://" never
+        // compiled, so no list was ever installed), and "unless-domain" means the page's own
+        // domain, not the request's. So: block every web and socket address, then let only the
+        // owner's allowed hosts through with later "ignore-previous-rules" rules.
+        var rules: [[String: Any]] = ["^https?://", "^wss?://"].map { filter -> [String: Any] in
+            ["trigger": ["url-filter": filter], "action": ["type": "block"]]
+        }
+        for host in manifest.allowedHTTPSHosts.sorted() {
+            let escaped = host.replacingOccurrences(of: ".", with: "\\.")
+            for scheme in ["https", "wss"] {
+                rules.append(["trigger": ["url-filter": "^\(scheme)://\(escaped)[:/]"], "action": ["type": "ignore-previous-rules"]])
+            }
+        }
         view.navigationDelegate = context.coordinator
         let model = PreviewBrowserModel(); model.webView = view
         DispatchQueue.main.async { browser = model; context.coordinator.browser = model }
@@ -142,9 +151,11 @@ struct PreviewWebView: UIViewRepresentable {
             browser?.update()
             collectConsole(webView)
             // Messages a page logs after it finishes loading are collected a little later too.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self, weak webView] in
-                guard let webView else { return }
-                self?.collectConsole(webView)
+            for delay in [3.0, 6.0, 10.0, 15.0] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak webView] in
+                    guard let webView else { return }
+                    self?.collectConsole(webView)
+                }
             }
         }
 
