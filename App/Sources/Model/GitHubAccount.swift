@@ -322,7 +322,9 @@ final class GitHubAccount {
         installationID.map { URL(string: "https://github.com/settings/installations/\($0)")! }
     }
 
-    func describe(_ error: Error) -> String {
+    func describe(_ error: Error, file: String = #fileID, function: String = #function) -> String {
+        // Recorded in the diagnostics log like every other explained error.
+        _ = ErrorExplainer.explain(error, file: file, function: function)
         if let error = error as? GitHubAPIError {
             if error.isRateLimited { return "GitHub's hourly limit was reached. It resets within the hour." }
             if error.isUnauthorized { return "GitHub didn't accept MAIPA-G's key. Connect GitHub again in Settings." }

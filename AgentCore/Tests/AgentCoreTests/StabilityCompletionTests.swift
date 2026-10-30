@@ -475,4 +475,31 @@ struct StabilityCompletionTests {
         let check = try #require(script.range(of: "sha256sum -c -")), run = try #require(script.range(of: "nohup bash"))
         #expect(check.lowerBound < run.lowerBound && script.hasPrefix("set -euo pipefail"))
     }
+
+    final class SeenErrors: @unchecked Sendable {
+        let lock = NSLock()
+        var entries: [(String, String)] = []
+        func add(_ area: String, _ operation: String) { lock.lock(); entries.append((area, operation)); lock.unlock() }
+    }
+
+    // Stability 8: every error explained to the person also reaches the redacted diagnostics
+    // log, named by where it happened, without a second recording from the log itself.
+    @Test(.serialized) func S08_everyExplainedErrorIsRecordedForDiagnostics() async throws {
+        let seen = SeenErrors()
+        ErrorExplainer.recorder.set { _, area, operation in seen.add(area, operation) }
+        defer { ErrorExplainer.recorder.set(nil) }
+        _ = ErrorExplainer.explain(HTTPError.status(code: 500, body: "token ghp_abcdefghijklmnopqrstuvwxyz0123456789", headers: [:]))
+        _ = ErrorExplainer.explain(CancellationError())
+        _ = ErrorExplainer.describe(HTTPError.status(code: 404, body: "", headers: [:]))
+        let recorded = seen.entries.filter { $0.0 == "StabilityCompletionTests" }
+        #expect(recorded.count == 1 && recorded.first?.1.hasPrefix("S08_everyExplainedErrorIsRecordedForDiagnostics") == true)
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let log = DiagnosticsLog(dataDirectory: root, installIDURL: root.appendingPathComponent("id.txt"))
+        await log.record(error: HTTPError.status(code: 500, body: "token ghp_abcdefghijklmnopqrstuvwxyz0123456789", headers: [:]), area: "Sync", operation: "upload")
+        #expect(!seen.entries.contains { $0.0 == "DiagnosticsLog" }, "the log must not record itself again")
+        let entry = try #require(await log.recentEntries().first)
+        #expect(entry.area == "Sync" && !entry.technical.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"))
+    }
 }

@@ -201,14 +201,15 @@ final class OpenRouterAccount {
         }
     }
 
-    func describe(_ error: Error) -> String {
+    func describe(_ error: Error, file: String = #fileID, function: String = #function) -> String {
         if let error = error as? OpenRouterAPIError {
+            _ = ErrorExplainer.explain(error, file: file, function: function)
             switch error.kind {
             case .invalidKey: return "OpenRouter didn't accept that sign-in. Try again."
             default: return "OpenRouter said: \(error.message)"
             }
         }
         if let error = error as? HTTPError, error.isOffline { return "You're offline." }
-        return ErrorExplainer.explain(error).message
+        return ErrorExplainer.explain(error, file: file, function: function).message
     }
 }

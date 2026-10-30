@@ -163,6 +163,12 @@ final class AppModel {
         trash = TrashStore(dataDirectory: paths.data)
         let diagnostics = DiagnosticsLog(dataDirectory: paths.data, installIDURL: paths.support.appendingPathComponent("install-id.txt"))
         self.diagnostics = diagnostics
+        // Every error explained anywhere in the app also lands in the redacted diagnostics log.
+        if !PreviewScenes.isActive {
+            ErrorExplainer.recorder.set { error, area, operation in
+                Task { await diagnostics.record(error: error, area: area, operation: operation) }
+            }
+        }
         metricKit = MetricKitCollector(diagnostics: diagnostics)
         jobs = JobCoordinator(dataDirectory: paths.data)
         automations = AutomationLibrary(dataDirectory: paths.data)
@@ -209,7 +215,7 @@ final class AppModel {
 
     @discardableResult
     func report(_ error: Error, area: String, operation: String, path: String? = nil) -> ErrorExplanation {
-        let explanation = ErrorExplainer.explain(error)
+        let explanation = ErrorExplainer.describe(error)
         Task { await diagnostics.record(error: error, area: area, operation: operation, path: path) }
         return explanation
     }
