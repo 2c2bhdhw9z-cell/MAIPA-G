@@ -144,3 +144,71 @@ struct SaveEverythingTests {
         #expect(minutes.contains("Plan") && minutes.contains("Read-only"))
     }
 }
+
+@Suite("The real Sprites tools")
+struct SpritesToolTests {
+    /// Sprites MCP's tools as its README (superfly/sprites-mcp) documents them, with `exec_list`
+    /// listed before `exec`, as it was on the owner's phone.
+    static let tools: [ConnectorToolDefinition] = {
+        func tool(_ name: String, _ properties: [String: JSONValue], readOnly: Bool? = nil) -> ConnectorToolDefinition {
+            ConnectorToolDefinition(serverID: "dev.sprites/mcp", serverName: "Sprites MCP Server", originalName: name, inputSchema: ["type": "object", "properties": .object(properties)], readOnlyHint: readOnly)
+        }
+        let sprite: JSONValue = ["type": "string"]
+        return [
+            tool("list_sprites", ["prefix": ["type": "string"]], readOnly: true),
+            tool("exec_list", ["sprite": sprite], readOnly: true),
+            tool("exec_kill", ["sprite": sprite, "session_id": ["type": "string"]]),
+            tool("exec", ["sprite": sprite, "cmd": ["type": "array", "items": ["type": "string"]], "dir": ["type": "string"], "stdin": ["type": "boolean"]]),
+            tool("create_sprite", ["name": ["type": "string"], "wait_for_capacity": ["type": "boolean"]]),
+            tool("destroy_sprite", ["name": ["type": "string"]]),
+            tool("checkpoint_create", ["sprite": sprite, "comment": ["type": "string"]]),
+            tool("checkpoint_restore", ["sprite": sprite, "checkpoint_id": ["type": "string"]]),
+        ]
+    }()
+
+    @Test func commandsGoToExecAsBashArguments() throws {
+        let control = ComputerControl(tools: Self.tools, machine: "mcp-maipa-g") { _, _ in ("", false) }
+        let exec = try #require(control.commandTool)
+        #expect(exec.originalName == "exec", "not exec_list or exec_kill")
+        let arguments = control.commandArguments("echo hi && uname -sm", tool: exec)
+        #expect(arguments["sprite"]?.stringValue == "mcp-maipa-g")
+        #expect(arguments["cmd"]?.arrayValue?.compactMap(\.stringValue) == ["bash", "-lc", "echo hi && uname -sm"])
+        #expect(control.listTool?.originalName == "list_sprites" && control.createTool?.originalName == "create_sprite")
+        #expect(control.destroyTool?.originalName == "destroy_sprite" && control.checkpointTool?.originalName == "checkpoint_create")
+
+        // A schema that only says "string" gets one string.
+        let plain = ConnectorToolDefinition(serverID: "x", serverName: "X", originalName: "run_command", inputSchema: ["type": "object", "properties": ["command": ["type": "string"]]])
+        let other = ComputerControl(tools: [plain], machine: "box") { _, _ in ("", false) }
+        #expect(other.commandArguments("ls", tool: plain)["command"]?.stringValue == "ls")
+    }
+
+    @Test func theHealthCheckRunsThroughExecAndRecreationWaitsForCapacity() async throws {
+        actor Calls { var list: [(String, JSONValue)] = []; func add(_ name: String, _ arguments: JSONValue) { list.append((name, arguments)) } }
+        let calls = Calls()
+        let control = ComputerControl(tools: Self.tools, machine: "mcp-maipa-g") { name, arguments in
+            await calls.add(name, arguments)
+            if name == "exec_list" { return (#"{"count":0,"sessions":[]}"#, false) }
+            if name == "exec" { return ("maipa-g-health-ok\nLinux x86_64\nmaipa-g-tools-ready", false) }
+            return ("ok", false)
+        }
+        guard case .healthy(let output) = try await control.ensureMachine(allowCreate: true) else { Issue.record("expected healthy"); return }
+        #expect(output.contains("maipa-g-health-ok"))
+        let made = await calls.list
+        #expect(made.map(\.0) == ["exec"])
+        try await control.createMachine()
+        let create = try #require(await calls.list.last)
+        #expect(create.0 == "create_sprite" && create.1["name"]?.stringValue == "mcp-maipa-g" && create.1["wait_for_capacity"]?.boolValue == true)
+    }
+
+    @Test func lookingAtSessionsNeverAsksButKillingDoes() {
+        func risk(_ name: String) -> ConnectorActionPolicy.Risk? {
+            ConnectorActionPolicy.risk(for: Self.tools.first { $0.originalName == name }!, arguments: ["sprite": "mcp-maipa-g"])
+        }
+        #expect(risk("exec_list") == nil)
+        #expect(risk("list_sprites") == nil)
+        #expect(risk("exec_kill") == .deletes)
+        #expect(risk("destroy_sprite") == .deletes && risk("checkpoint_restore") == .deletes)
+        #expect(risk("create_sprite") == .spends && risk("checkpoint_create") == nil)
+        #expect(OutsideContentBoundary.connectorApproval(Self.tools.first { $0.originalName == "exec_list" }!, arguments: [:]) == nil)
+    }
+}

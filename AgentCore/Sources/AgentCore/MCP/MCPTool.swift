@@ -93,6 +93,8 @@ public enum ConnectorActionPolicy {
         if let first = nameWords.first, readWords.contains(first) { return hinted }
         if nameWords.contains(where: deletingWords.contains) { return .deletes }
         if nameWords.contains(where: commandWords.contains) {
+            // exec_list, exec_status, exec_logs… only look at sessions.
+            if nameWords.contains(where: { ["list", "get", "status", "logs", "log", "info", "inspect"].contains($0) }) { return hinted }
             let command = commandText(arguments)
             if command.isEmpty || ShellRisk.isRisky(command) { return .runsRiskyCommand(command) }
             return nil
