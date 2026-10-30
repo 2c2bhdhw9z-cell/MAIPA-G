@@ -27,8 +27,12 @@ final class PreviewCoordinator {
             resolvedCommit = commit
             let workspace = RepoWorkspace(repo: repo.ref, branch: repo.branch, commit: commit, github: github, store: app!.snapshots)
             let entries = try await workspace.tree().entries
-            let packageData = try? await github.fileContents(repo.ref, path: "package.json", ref: commit)
-            guard let detected = WebProjectDetector.detect(paths: entries.map(\.path), packageJSON: packageData) else { throw WebPreviewError.noWebEntryPoint }
+            let paths = entries.map(\.path)
+            let packagePath = paths.contains("package.json") ? "package.json" : WebProjectDetector.packageFolder(paths: paths).map { "\($0)/package.json" }
+            // A missing package.json just means "no build script": the detector then uses npm run build.
+            var packageData: Data?
+            if let packagePath { packageData = try? await github.fileContents(repo.ref, path: packagePath, ref: commit) }
+            guard let detected = WebProjectDetector.detect(paths: paths, packageJSON: packageData) else { throw WebPreviewError.noWebEntryPoint }
             let destination = root.appendingPathComponent("\(repo.ref.owner)-\(repo.ref.name)-\(commit.prefix(12))", isDirectory: true)
             try? FileManager.default.removeItem(at: destination)
             try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)

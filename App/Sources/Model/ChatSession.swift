@@ -509,13 +509,14 @@ final class ChatSession: Identifiable {
             requiresInitialSpendApproval: !route.isFree
         )
         let account = app.openRouter
-        let environment = AgentEnvironment(
+        var environment = AgentEnvironment(
             openRouter: OpenRouterClient(transport: app.transport, apiKey: apiKey),
             freeRoute: {
                 ModelRouter.route(choice: .free, difficulty: judgedDifficulty, thinking: thinking, account: AccountState(), catalogue: catalogue, requiresImageInput: hasImageInput)
             },
             onOutOfCredits: { await account.markOutOfCredits() }
         )
+        environment.onModelRestricted = { model in await account.markRestricted(model) }
 
         let run = AgentLoop.start(input, environment: environment)
         self.run = run

@@ -18,6 +18,8 @@ public struct OpenRouterAPIError: Error, Sendable, Hashable, CustomStringConvert
         case noModelAvailable
         case providerFailed
         case moderated
+        /// OpenRouter only offers this model to listed apps ("agentic harnesses"), never to MAIPA-G.
+        case appRestricted
         case badRequest
         case other
     }
@@ -75,6 +77,7 @@ public struct OpenRouterAPIError: Error, Sendable, Hashable, CustomStringConvert
             return .outOfCredits
         case 403:
             if source.contains("budget") || source == "openrouter_key_limit" { return .spendingCapReached }
+            if lowered.contains("harness") || lowered.contains("openrouter.ai/apps") || (lowered.contains("only available") && lowered.contains("app")) { return .appRestricted }
             if lowered.contains("moderation") || lowered.contains("flagged") { return .moderated }
             return .other
         case 429:

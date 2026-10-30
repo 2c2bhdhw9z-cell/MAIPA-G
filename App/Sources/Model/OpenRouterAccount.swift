@@ -135,6 +135,16 @@ final class OpenRouterAccount {
         }
     }
 
+    /// Models OpenRouter refused to MAIPA-G as app-restricted. They stay out of the AI picker.
+    private(set) var restrictedModelIDs: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "openRouterRestrictedModels") ?? [])
+
+    func markRestricted(_ modelID: String) {
+        guard !modelID.isEmpty, modelID != "openrouter/auto", !restrictedModelIDs.contains(modelID) else { return }
+        restrictedModelIDs.insert(modelID)
+        UserDefaults.standard.set(restrictedModelIDs.sorted(), forKey: "openRouterRestrictedModels")
+        models.removeAll { $0.id == modelID }
+    }
+
     /// Remembers that a paid request was refused for lack of credit.
     func markOutOfCredits() {
         accountState.outOfCreditsAt = Date()
@@ -161,7 +171,7 @@ final class OpenRouterAccount {
     }
 
     private func setModels(_ list: [ModelInfo]) {
-        models = list.filter(\.isChatModel)
+        models = list.filter { $0.isChatModel && !restrictedModelIDs.contains($0.id) }
         modelsByID = Dictionary(list.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
 

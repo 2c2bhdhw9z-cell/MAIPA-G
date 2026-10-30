@@ -46,6 +46,8 @@ public struct AgentEnvironment: Sendable {
     public var freeRoute: @Sendable () -> Route
     /// Told when a paid request is refused for lack of credit, so the app can remember it.
     public var onOutOfCredits: @Sendable () async -> Void
+    /// Called with a model OpenRouter refused to MAIPA-G as app-restricted, so it can be hidden.
+    public var onModelRestricted: @Sendable (String) async -> Void = { _ in }
 
     public init(openRouter: OpenRouterClient, freeRoute: @escaping @Sendable () -> Route, onOutOfCredits: @escaping @Sendable () async -> Void) {
         self.openRouter = openRouter
@@ -98,6 +100,9 @@ public enum AgentLoop {
     public static func run(_ input: AgentTurnInput, environment: AgentEnvironment) -> AsyncStream<AgentEvent> {
         start(input, environment: environment).events
     }
+
+    /// The plain words a failed turn shows for `error`.
+    static func describe(_ error: Error) -> TurnFailure { Runner.describe(error) }
 }
 
 private struct Runner {
@@ -204,6 +209,9 @@ private struct Runner {
             stopRunningTools(reason: "Didn't finish")
             turn.status = .failed
             turn.failure = Self.describe(error)
+            if let api = error as? OpenRouterAPIError, api.kind == .appRestricted {
+                await environment.onModelRestricted(route.model)
+            }
         }
         if Task.isCancelled, turn.status == .running { turn.status = .stopped }
         emit(milestone: true)
@@ -574,6 +582,8 @@ private struct Runner {
                 return TurnFailure(kind: .providerFailed, message: "The AI's service had a problem partway through. Try again.", detail: api.description)
             case .moderated:
                 return TurnFailure(kind: .other, message: "The AI's provider refused this request.", detail: api.description)
+            case .appRestricted:
+                return TurnFailure(kind: .other, message: "OpenRouter only lets certain listed apps use this AI, so MAIPA-G can't. It's now hidden from the AI picker. Pick another AI, or Auto, and try again.", detail: api.description)
             case .badRequest, .other:
                 let explanation = ErrorExplainer.explain(api)
                 return TurnFailure(kind: .other, message: explanation.message, detail: api.description)

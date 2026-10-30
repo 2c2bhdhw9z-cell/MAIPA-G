@@ -759,15 +759,15 @@ public struct CloudRunner: Sendable {
               let expectedCommit = job.state["previewCommit"]?.stringValue else { throw CloudRunnerError.missingRequest }
         let actualCommit = try await git(["rev-parse", "HEAD"]).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         guard actualCommit == expectedCommit else { throw CloudRunnerError.commandFailed }
-        let install: String
-        if FileManager.default.fileExists(atPath: configuration.workspace.appendingPathComponent("pnpm-lock.yaml").path) { install = "pnpm install --frozen-lockfile" }
-        else if FileManager.default.fileExists(atPath: configuration.workspace.appendingPathComponent("yarn.lock").path) { install = "yarn install --immutable" }
-        else if FileManager.default.fileExists(atPath: configuration.workspace.appendingPathComponent("package-lock.json").path) { install = "npm ci" }
-        else { install = "npm install" }
-        let result = try await BoundedProcess.run(executable: "/bin/bash", arguments: ["-lc", "\(install) && \(command)"], directory: configuration.workspace, timeout: 900, outputLimit: 80_000)
+        // A project inside a folder (web/, site/…) installs, builds and outputs in that folder.
+        let rootPath = job.state["previewRoot"]?.stringValue ?? ""
+        guard rootPath.isEmpty || SnapshotStore.isSafeRelativePath(rootPath) else { throw CloudRunnerError.missingRequest }
+        let project = rootPath.isEmpty ? configuration.workspace : configuration.workspace.appendingPathComponent(rootPath, isDirectory: true)
+        let install = Self.previewInstallCommand(in: project)
+        let result = try await BoundedProcess.run(executable: "/bin/bash", arguments: ["-lc", "\(install) && \(command)"], directory: project, timeout: 900, outputLimit: 80_000)
         guard result.exitCode == 0 else { throw CloudRunnerError.commandFailed }
         let outputs = job.state["previewOutputDirectories"]?.arrayValue?.compactMap(\.stringValue) ?? ["dist", "build", "out", ".output/public"]
-        guard let source = outputs.map({ configuration.workspace.appendingPathComponent($0, isDirectory: true) }).first(where: { FileManager.default.fileExists(atPath: $0.appendingPathComponent("index.html").path) }) else {
+        guard let source = outputs.map({ project.appendingPathComponent($0, isDirectory: true) }).first(where: { FileManager.default.fileExists(atPath: $0.appendingPathComponent("index.html").path) }) else {
             throw WebPreviewError.missingResource("built index.html")
         }
         let destination = configuration.workspace.appendingPathComponent(".maipag-preview-artifact", isDirectory: true)
@@ -781,6 +781,13 @@ public struct CloudRunner: Sendable {
         job.updatedAt = Date()
         try await store.save(job)
         logger.progress("Preview build finished and is ready for artifact upload.")
+    }
+
+    static func previewInstallCommand(in project: URL) -> String {
+        if FileManager.default.fileExists(atPath: project.appendingPathComponent("pnpm-lock.yaml").path) { return "pnpm install --frozen-lockfile" }
+        if FileManager.default.fileExists(atPath: project.appendingPathComponent("yarn.lock").path) { return "yarn install --immutable" }
+        if FileManager.default.fileExists(atPath: project.appendingPathComponent("package-lock.json").path) { return "npm ci" }
+        return "npm install"
     }
 
     private func stdioTools(for job: JobRecord) async throws -> [any AgentTool] {

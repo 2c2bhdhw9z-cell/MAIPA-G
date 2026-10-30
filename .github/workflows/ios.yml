@@ -67,6 +67,8 @@ jobs:
         run: swift test --package-path AgentCore --filter NetworkTests
       - name: Check immutable CI dependencies and release gates
         run: python3 scripts/check-ci-policy.py
+      - name: 29 October UI regression checks
+        run: python3 scripts/check-regressions.py
       - name: Compile independent IPA checker
         run: python3 -m py_compile scripts/check-ipa.py scripts/check-ci-policy.py
 

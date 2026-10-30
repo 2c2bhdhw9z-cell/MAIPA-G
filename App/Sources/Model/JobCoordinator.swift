@@ -145,6 +145,7 @@ final class JobCoordinator {
                 "previewBuild": true,
                 "previewBuildCommand": .string(command),
                 "previewOutputDirectories": .array(outputs),
+                "previewRoot": .string(project.rootPath),
                 "previewCommit": .string(commit),
                 "buildExplicitlyRequested": true,
             ]
