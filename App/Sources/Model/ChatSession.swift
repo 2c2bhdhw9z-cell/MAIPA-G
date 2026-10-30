@@ -455,6 +455,9 @@ final class ChatSession: Identifiable {
                 return try await control.run("cd \"$HOME/\(homePath)\" && \(command)")
             }
         }
+        if let control = app.connectors.computerControl(), control.commandTool != nil, app.openRouter.supportsTools(chat.model) {
+            tools.append(ComputerTaskTool(control: control, homePath: repoContext.map { "repos/\($0.ref.owner)/\($0.ref.name)" }))
+        }
         tools = HookedTool.wrap(tools, hooks: repoHooks, runCommand: hookRunner)
         for problem in hookProblems {
             _ = app.report(RepoHookProblem(message: problem), area: "hooks", operation: "read repo hooks")

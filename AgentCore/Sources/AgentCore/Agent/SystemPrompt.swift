@@ -180,6 +180,7 @@ public enum SystemPrompt {
         if let hourly = computer.approximateHourlyCost {
             steps.append("- The configured approximate running cost is $\(String(format: "%.3f", hourly)) per hour. Include elapsed time and an approximate cost when reporting long computer work.")
         }
+        steps.append("- For a build, test or install that may take more than a few minutes, use computer_task (start, then status by task_id) so it keeps running in the background instead of timing out.")
         steps.append("- Report command output honestly. Never claim a command ran if it didn't.")
         if let note = computer.appNote, !note.isEmpty {
             steps.append("- Already done by MAIPA-G's own code before this message:\n\(note)")

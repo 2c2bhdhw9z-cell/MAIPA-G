@@ -502,4 +502,40 @@ struct StabilityCompletionTests {
         let entry = try #require(await log.recentEntries().first)
         #expect(entry.area == "Sync" && !entry.technical.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"))
     }
+
+    // Stability 31: a long command keeps running in the background on the computer, can be
+    // checked by id and stopped, and its whole process group ends on Stop.
+    @Test func S31_longCommandsRunInTheBackgroundAndStop() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: home.appendingPathComponent("repos/me/app"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let machine = LocalMachine(home: home, exists: true)
+        let control = ComputerControl(tools: Self.machineTools(), machine: "mcp-maipa-g") { tool, arguments in
+            try await machine.call(tool, arguments)
+        }
+        let tool = ComputerTaskTool(control: control, homePath: "repos/me/app")
+        let quick = try await tool.run(arguments: ["operation": "start", "command": "pwd; echo built"]) { _ in }
+        let quickID = try #require(quick.forModel.split(separator: " ").first { $0.hasPrefix("task-") }).description
+        var status = ""
+        for _ in 0..<50 {
+            status = try await control.backgroundStatus(quickID)
+            if status.hasPrefix("finished") { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        #expect(status.hasPrefix("finished: maipa-g-exit 0") && status.contains("built") && status.contains("repos/me/app"))
+
+        let slow = try await control.startBackground("sleep 30; echo never", homePath: "repos/me/app", id: "task-slow1")
+        #expect(try await control.backgroundStatus(slow).hasPrefix("running"))
+        #expect(try await control.stopBackground(slow).contains("stopped"))
+        var after = ""
+        for _ in 0..<50 {
+            after = try await control.backgroundStatus(slow)
+            if !after.hasPrefix("running") { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        #expect(after.hasPrefix("stopped without finishing") && !after.contains("never"), "status after stop: \(after)")
+        // A risky background command still asks first.
+        await #expect(throws: ToolApprovalRequired.self) { _ = try await tool.run(arguments: ["operation": "start", "command": "rm -rf build"]) { _ in } }
+        await #expect(throws: ComputerControl.Failure.self) { _ = try await control.backgroundStatus("../../etc") }
+    }
 }

@@ -301,3 +301,165 @@ public struct SyncStagedToComputerTool: AgentTool {
         return ToolOutput(forModel: "The computer copy at ~/\(homePath) now matches the staged changes. git status:\n\(shown)", summary: "Synced staged changes to the computer", detail: shown)
     }
 }
+
+// MARK: Long commands in the background (Stability 31)
+
+extension ComputerControl {
+    /// A tool for keeping the machine running a long command: the service's own background-service
+    /// tool when it has one (Sprites keeps a machine with a running service awake), otherwise a
+    /// detached shell job. Either way the output goes to ~/.maipa-g/tasks/<id>.log.
+    public var serviceTool: ConnectorToolDefinition? {
+        tool { ($0.first == "create" || $0.first == "start") && $0.contains(where: { ["service", "services", "task", "tasks"].contains($0) }) }
+    }
+
+    static func isTaskID(_ id: String) -> Bool {
+        !id.isEmpty && id.count <= 40 && id.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" }
+    }
+
+    public func startBackground(_ command: String, homePath: String?, id: String = "task-" + UUID().uuidString.prefix(8).lowercased()) async throws -> String {
+        guard Self.isTaskID(id) else { throw Failure.commandFailed("Bad task id") }
+        if let homePath { guard Self.isSafeRelativePath(homePath) else { throw Failure.commandFailed("Unsafe checkout path \(homePath)") } }
+        let folder = homePath.map { "\"$HOME/\($0)\"" } ?? "\"$HOME\""
+        let wrapped = "cd \(folder) && { \(command) ; } ; echo \"maipa-g-exit $?\""
+        if let service = serviceTool {
+            var arguments: [String: JSONValue] = [:]
+            arguments[Self.machineKey(service.inputSchema) ?? "sprite"] = .string(machine)
+            let keys = Self.properties(service.inputSchema).keys
+            if let nameKey = keys.first(where: { ["name", "service", "service_name", "id"].contains($0) && $0 != Self.machineKey(service.inputSchema) }) {
+                arguments[nameKey] = .string(id)
+            }
+            let commandKey = Self.commandKey(service.inputSchema) ?? "command"
+            let logged = "mkdir -p \"$HOME/.maipa-g/tasks\" && (\(wrapped)) > \"$HOME/.maipa-g/tasks/\(id).log\" 2>&1"
+            if Self.properties(service.inputSchema)[commandKey]?["type"]?.stringValue == "array" {
+                arguments[commandKey] = .array(["bash", "-lc", .string(logged)])
+            } else {
+                arguments[commandKey] = .string(logged)
+            }
+            let result = try await call(service.originalName, .object(arguments))
+            if result.isError { throw Failure.commandFailed(result.text) }
+            return id
+        }
+        let script = """
+        set -eu
+        mkdir -p "$HOME/.maipa-g/tasks"
+        # Let go of every inherited descriptor, so the command answering this call returns now
+        # instead of waiting for the background task to finish.
+        if [ -d /proc/$$/fd ]; then
+          for fd in /proc/$$/fd/*; do fd=${fd##*/}; case "$fd" in 0|1|2) ;; *) eval "exec $fd>&-" 2>/dev/null || true ;; esac; done
+        fi
+        # Its own process group, so Stop ends everything the command started.
+        if command -v setsid >/dev/null 2>&1; then
+          setsid nohup bash -lc \(Self.shellQuote(wrapped)) > "$HOME/.maipa-g/tasks/\(id).log" 2>&1 < /dev/null &
+        else
+          nohup bash -lc \(Self.shellQuote(wrapped)) > "$HOME/.maipa-g/tasks/\(id).log" 2>&1 < /dev/null &
+        fi
+        echo $! > "$HOME/.maipa-g/tasks/\(id).pid"
+        echo maipa-g-task-started
+        """
+        let output = try await run(script)
+        guard output.contains("maipa-g-task-started") else { throw Failure.commandFailed(output) }
+        return id
+    }
+
+    /// Whether the task is still running, its exit status when done, and the end of its output.
+    public func backgroundStatus(_ id: String) async throws -> String {
+        guard Self.isTaskID(id) else { throw Failure.commandFailed("Bad task id") }
+        return try await run("""
+        log="$HOME/.maipa-g/tasks/\(id).log"; pid_file="$HOME/.maipa-g/tasks/\(id).pid"
+        [ -f "$log" ] || { echo "No task \(id) on this machine."; exit 0; }
+        # A finished process nobody has collected yet (a zombie) counts as stopped.
+        alive() { if [ -r "/proc/$1/stat" ]; then [ "$(cut -d' ' -f3 "/proc/$1/stat")" != "Z" ]; else kill -0 "$1" 2>/dev/null; fi; }
+        if grep -q '^maipa-g-exit ' "$log"; then echo "finished: $(grep '^maipa-g-exit ' "$log" | tail -n 1)";
+        elif [ -f "$pid_file" ] && ! alive "$(cat "$pid_file")"; then echo "stopped without finishing";
+        else echo running; fi
+        echo ---; tail -n 60 "$log" | cut -c1-400
+        """)
+    }
+
+    public func stopBackground(_ id: String) async throws -> String {
+        guard Self.isTaskID(id) else { throw Failure.commandFailed("Bad task id") }
+        return try await run("""
+        pid_file="$HOME/.maipa-g/tasks/\(id).pid"
+        alive() { if [ -r "/proc/$1/stat" ]; then [ "$(cut -d' ' -f3 "/proc/$1/stat")" != "Z" ]; else kill -0 "$1" 2>/dev/null; fi; }
+        if [ ! -f "$pid_file" ]; then echo "No running task \(id) started by MAIPA-G here."; exit 0; fi
+        pid=$(cat "$pid_file")
+        kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        i=0; while alive "$pid" && [ $i -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
+        # Anything that ignored the polite stop is ended for certain.
+        if alive "$pid"; then kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true; fi
+        echo "stopped \(id)"
+        """)
+    }
+}
+
+/// Lets the AI run long builds and tests in the background on the chat computer and check them
+/// later, instead of one command that times out.
+public struct ComputerTaskTool: AgentTool {
+    public let name = "computer_task"
+    let control: ComputerControl
+    let homePath: String?
+
+    public init(control: ComputerControl, homePath: String?) {
+        self.control = control
+        self.homePath = homePath
+    }
+
+    public var spec: ToolSpec {
+        ToolSpec(name: name, description: "Run a long command (over a few minutes) in the background on the chat computer, in the repo's copy when the chat has a repo, then check or stop it by id. Output is kept in ~/.maipa-g/tasks/<id>.log.", parameters: [
+            "type": "object",
+            "properties": [
+                "operation": ["type": "string", "enum": ["start", "status", "stop"]],
+                "command": ["type": "string", "description": "For start: the shell command."],
+                "task_id": ["type": "string", "description": "For status and stop."],
+            ],
+            "required": ["operation"],
+            "additionalProperties": false,
+        ])
+    }
+
+    public func runningSummary(for arguments: JSONValue) -> String {
+        switch arguments["operation"]?.stringValue {
+        case "status": "Checking a background task…"
+        case "stop": "Stopping a background task…"
+        default: "Starting a background task…"
+        }
+    }
+
+    public var bringsOutsideContent: Bool { true }
+
+    public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
+        guard arguments["operation"]?.stringValue == "start" else { return nil }
+        let command = arguments["command"]?.stringValue ?? ""
+        guard ShellRisk.isRisky(command) else { return nil }
+        return ToolApprovalRequest(question: "Allow MAIPA-G to run this in the background on the computer? It can delete files, change the machine or reach other services.\n\(String(command.prefix(500)))", allowLabel: "Run command")
+    }
+
+    public func approvalAfterOutsideContent(for arguments: JSONValue) async -> ToolApprovalRequest? {
+        guard arguments["operation"]?.stringValue == "start", ShellRisk.reachesNetwork(arguments["command"]?.stringValue ?? "") else { return nil }
+        return ToolApprovalRequest(question: "This chat now contains text from the web, a repo or a connector. Allow a background command that reaches the network?\n\(String((arguments["command"]?.stringValue ?? "").prefix(500)))", allowLabel: "Run command")
+    }
+
+    public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        if let approval = await approvalRequest(for: arguments) { throw ToolApprovalRequired(approval) }
+        return try await runApproved(arguments: arguments, progress: progress)
+    }
+
+    public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        switch arguments["operation"]?.stringValue ?? "start" {
+        case "status":
+            let id = try arguments.requiredString("task_id")
+            let text = try await control.backgroundStatus(id)
+            return ToolOutput(forModel: text, summary: "Checked background task \(id)", detail: text)
+        case "stop":
+            let id = try arguments.requiredString("task_id")
+            let text = try await control.stopBackground(id)
+            return ToolOutput(forModel: text, summary: "Stopped background task \(id)", detail: text)
+        case "start":
+            let command = try arguments.requiredString("command")
+            let id = try await control.startBackground(command, homePath: homePath)
+            return ToolOutput(forModel: "Started background task \(id) on \(control.machine). Check it with computer_task status and task_id \(id).", summary: "Started background task \(id)", detail: command)
+        default:
+            throw ToolInputError("operation must be start, status or stop.")
+        }
+    }
+}
