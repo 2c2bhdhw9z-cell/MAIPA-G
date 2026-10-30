@@ -16,6 +16,14 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
     var beforeNextUpdate: (() -> Void)?
     /// Rejects one exact blob payload so per-file sync isolation can be tested.
     var rejectedBlob: Data?
+    /// Answers this many blob uploads with a temporary 502 first.
+    var temporaryBlobFailures = 0
+    /// Runs once, just before the next blob is stored, to simulate the phone changing files.
+    var beforeNextBlob: (() -> Void)?
+    /// The private files release: id → (tag, assets by id).
+    var releases: [Int: (tag: String, assets: [Int: (name: String, data: Data)])] = [:]
+    var assetUploads = 0
+    var failAssetUploads = false
 
     struct Tokens: GitHubTokenProvider {
         func installationToken() async throws -> String { "installation" }
@@ -25,7 +33,24 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
     var client: GitHubClient { GitHubClient(transport: self, tokens: Tokens()) }
 
     func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse {
-        HTTPStreamResponse(status: 500, headers: [:], body: AsyncThrowingStream { $0.finish() })
+        // Release asset storage, reached through GitHub's redirect.
+        if request.url.host == "objects.example", let id = Int(request.url.lastPathComponent) {
+            let data: Data? = lock.withLock { releases.values.compactMap { $0.assets[id]?.data }.first }
+            guard request.headers["Authorization"] == nil else {
+                return HTTPStreamResponse(status: 400, headers: [:], body: AsyncThrowingStream { $0.finish() })
+            }
+            guard let data else { return HTTPStreamResponse(status: 404, headers: [:], body: AsyncThrowingStream { $0.finish() }) }
+            return HTTPStreamResponse(status: 200, headers: [:], body: AsyncThrowingStream { continuation in
+                continuation.yield(data.prefix(data.count / 2))
+                continuation.yield(data.suffix(data.count - data.count / 2))
+                continuation.finish()
+            })
+        }
+        return HTTPStreamResponse(status: 500, headers: [:], body: AsyncThrowingStream { $0.finish() })
+    }
+
+    func asset(named name: String) -> Data? {
+        lock.withLock { releases.values.flatMap { $0.assets.values }.first { $0.name == name }?.data }
     }
 
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
@@ -108,6 +133,14 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
             head = sha
             return json(["object": ["sha": .string(sha)]])
         case ("POST", prefix + "/git/blobs"):
+            if temporaryBlobFailures > 0 {
+                temporaryBlobFailures -= 1
+                return json(["message": "Server Error"], status: 502)
+            }
+            if let hook = beforeNextBlob {
+                beforeNextBlob = nil
+                hook()
+            }
             let data = Data(base64Encoded: body?["content"]?.stringValue ?? "") ?? Data()
             if data == rejectedBlob { return json(["message": "fixture rejected this blob"], status: 500) }
             let sha = Hashing.gitBlobID(data)
@@ -126,7 +159,32 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
             let id = newID("commit")
             commits[id] = (body?["tree"]?.stringValue ?? "", body?["parents"]?.arrayValue?.first?.stringValue)
             return json(["sha": .string(id)], status: 201)
+        case ("GET", prefix + "/releases"):
+            return json(.array(releases.sorted { $0.key < $1.key }.map { ["id": .number(Double($0.key)), "tag_name": .string($0.value.tag), "draft": true] }))
+        case ("POST", prefix + "/releases"):
+            let id = releases.count + 1
+            releases[id] = (body?["tag_name"]?.stringValue ?? "", [:])
+            return json(["id": .number(Double(id)), "tag_name": body?["tag_name"] ?? "", "draft": true], status: 201)
         default:
+            if path.hasPrefix(prefix + "/releases/"), path.hasSuffix("/assets"),
+               let id = Int(path.dropFirst((prefix + "/releases/").count).dropLast("/assets".count)), releases[id] != nil {
+                if request.method == "GET" {
+                    return json(.array(releases[id]!.assets.sorted { $0.key < $1.key }.map { ["id": .number(Double($0.key)), "name": .string($0.value.name), "size": .number(Double($0.value.data.count))] }))
+                }
+                if request.method == "POST", request.url.host == "uploads.github.com" {
+                    if failAssetUploads { return json(["message": "fixture refused the upload"], status: 500) }
+                    let name = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "name" }?.value ?? ""
+                    if releases[id]!.assets.values.contains(where: { $0.name == name }) { return json(["message": "Validation Failed", "errors": [["code": "already_exists"]]], status: 422) }
+                    assetUploads += 1
+                    let assetID = 1_000 + assetUploads
+                    releases[id]!.assets[assetID] = (name, request.body ?? Data())
+                    return json(["id": .number(Double(assetID)), "name": .string(name), "size": .number(Double(request.body?.count ?? 0))], status: 201)
+                }
+            }
+            if request.method == "GET", path.hasPrefix(prefix + "/releases/assets/"), let id = Int(path.dropFirst((prefix + "/releases/assets/").count)) {
+                guard !request.followsRedirects, request.headers["Accept"] == "application/octet-stream" else { return json(["message": "Expected a download request"], status: 400) }
+                return HTTPResponse(status: 302, headers: ["Location": "https://objects.example/assets/\(id)"])
+            }
             if request.method == "GET", path.hasPrefix(prefix + "/git/ref/heads/") {
                 let branch = String(path.dropFirst((prefix + "/git/ref/heads/").count)).removingPercentEncoding ?? ""
                 guard let sha = branchHeads[branch] else { return json(["message": "Not Found"], status: 404) }

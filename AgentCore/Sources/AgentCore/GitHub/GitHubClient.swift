@@ -97,7 +97,8 @@ public struct GitHubClient: Sendable {
         body: JSONValue? = nil,
         auth: Auth = .installation,
         accept: String = "application/vnd.github+json",
-        allow: Set<Int> = []
+        allow: Set<Int> = [],
+        followsRedirects: Bool = true
     ) async throws -> HTTPResponse {
         let url = url(path, query: query)
         let isRead = method == "GET" || method == "HEAD"
@@ -105,7 +106,7 @@ public struct GitHubClient: Sendable {
         let response = try await withRetries(isRead ? .standard : .none, retryAfter: defaultRetryDelay) {
             var headers = try await headers(auth, accept: accept)
             if encodedBody != nil { headers["Content-Type"] = "application/json" }
-            let response = try await transport.send(HTTPRequest(method: method, url: url, headers: headers, body: encodedBody, idleTimeout: 60))
+            let response = try await transport.send(HTTPRequest(method: method, url: url, headers: headers, body: encodedBody, idleTimeout: 60, followsRedirects: followsRedirects))
             if isRead, [502, 503, 504].contains(response.status) {
                 throw HTTPError.status(code: response.status, body: response.text, headers: response.headers)
             }
@@ -323,11 +324,113 @@ public struct GitHubClient: Sendable {
         return tree
     }
 
+    /// Creating a blob is idempotent (the same bytes always get the same id), so a dropped
+    /// connection, a busy GitHub or a short rate limit is retried instead of failing the file.
     public func createBlob(_ repo: RepoRef, contents: Data) async throws -> String {
         let body: JSONValue = ["content": .string(contents.base64EncodedString()), "encoding": "base64"]
-        let response = try await send("POST", Self.path(repo, "/git/blobs"), body: body)
-        guard let sha = JSONValue.parse(response.body)?["sha"]?.stringValue else { throw GitHubAPIError(status: response.status, message: "No blob id") }
-        return sha
+        return try await withRetries(Self.idempotentWrite, retryAfter: Self.writeRetryDelay) { [self] in
+            let response = try await send("POST", Self.path(repo, "/git/blobs"), body: body)
+            guard let sha = JSONValue.parse(response.body)?["sha"]?.stringValue else { throw GitHubAPIError(status: response.status, message: "GitHub didn't return the saved file's id") }
+            return sha
+        }
+    }
+
+    static let idempotentWrite = RetryPolicy(maxAttempts: 4, baseDelay: 2, maxDelay: 60)
+
+    /// Waits worth taking for a write that is safe to repeat.
+    static func writeRetryDelay(_ error: Error) -> TimeInterval? {
+        if let github = error as? GitHubAPIError {
+            if let reset = github.rateLimitResetsAt {
+                let wait = reset.timeIntervalSinceNow
+                return wait <= 60 ? max(wait, 1) : nil
+            }
+            if github.isRateLimited { return 30 }
+            return github.status == 429 || (500...504).contains(github.status) ? 0 : nil
+        }
+        return defaultRetryDelay(error)
+    }
+
+    // MARK: Big files, kept as private release assets
+
+    /// The draft release in MAIPA-G-data that holds files too big for Git, created when first
+    /// needed. Drafts are visible only to the repo's owner and its app.
+    public static let filesReleaseTag = "maipa-g-files"
+
+    public func filesRelease(_ repo: RepoRef) async throws -> Int {
+        let list = try await send("GET", Self.path(repo, "/releases"), query: ["per_page": "100"])
+        if let releases = JSONValue.parse(list.body)?.arrayValue,
+           let existing = releases.first(where: { $0["tag_name"]?.stringValue == Self.filesReleaseTag }),
+           let id = existing["id"]?.intValue {
+            return id
+        }
+        let created = try await send("POST", Self.path(repo, "/releases"), body: [
+            "tag_name": .string(Self.filesReleaseTag),
+            "name": "MAIPA-G files",
+            "body": "Big attachments and media saved by MAIPA-G. Each file is named by its SHA-256.",
+            "draft": true,
+        ])
+        guard let id = JSONValue.parse(created.body)?["id"]?.intValue else { throw GitHubAPIError(status: created.status, message: "GitHub didn't return the files release's id") }
+        return id
+    }
+
+    public struct ReleaseAsset: Sendable, Hashable {
+        public var id: Int
+        public var name: String
+        public var size: Int
+    }
+
+    public func releaseAssets(_ repo: RepoRef, releaseID: Int) async throws -> [ReleaseAsset] {
+        var assets: [ReleaseAsset] = []
+        var page = 1
+        while page <= 100 {
+            let response = try await send("GET", Self.path(repo, "/releases/\(releaseID)/assets"), query: ["per_page": "100", "page": String(page)])
+            let items = JSONValue.parse(response.body)?.arrayValue ?? []
+            assets += items.compactMap { item in
+                guard let id = item["id"]?.intValue, let name = item["name"]?.stringValue else { return nil }
+                return ReleaseAsset(id: id, name: name, size: item["size"]?.intValue ?? 0)
+            }
+            if items.count < 100 { break }
+            page += 1
+        }
+        return assets
+    }
+
+    /// Streams `file` from disk to the release. An asset that already exists under that name
+    /// (an earlier attempt that finished) counts as uploaded.
+    public func uploadReleaseAsset(_ repo: RepoRef, releaseID: Int, name: String, file: URL) async throws -> ReleaseAsset {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "uploads.github.com"
+        components.percentEncodedPath = Self.path(repo, "/releases/\(releaseID)/assets")
+        components.queryItems = [URLQueryItem(name: "name", value: name)]
+        guard let url = components.url else { throw GitHubAPIError(status: 0, message: "Bad upload address") }
+        return try await withRetries(Self.idempotentWrite, retryAfter: Self.writeRetryDelay) { [self] in
+            var headers = try await headers(.installation, accept: "application/vnd.github+json")
+            headers["Content-Type"] = "application/octet-stream"
+            let response = try await transport.upload(HTTPRequest(method: "POST", url: url, headers: headers, idleTimeout: 300, followsRedirects: false), fromFile: file)
+            if response.status == 422, let existing = try await releaseAssets(repo, releaseID: releaseID).first(where: { $0.name == name }) {
+                return existing
+            }
+            guard response.isSuccess else { throw GitHubAPIError(response: response) }
+            guard let item = JSONValue.parse(response.body), let id = item["id"]?.intValue else { throw GitHubAPIError(status: response.status, message: "GitHub didn't return the uploaded file's id") }
+            return ReleaseAsset(id: id, name: name, size: item["size"]?.intValue ?? 0)
+        }
+    }
+
+    /// Streams an asset to `destination`. GitHub answers with a short-lived storage address;
+    /// the app's token is sent only to GitHub, never to that storage.
+    public func downloadReleaseAsset(_ repo: RepoRef, assetID: Int, to destination: URL) async throws {
+        let response = try await send("GET", Self.path(repo, "/releases/assets/\(assetID)"), accept: "application/octet-stream", allow: [301, 302, 303, 307, 308], followsRedirects: false)
+        if response.isSuccess {
+            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try response.body.write(to: destination, options: .atomic)
+            return
+        }
+        guard let location = response.header("location"), let url = URL(string: location), url.scheme == "https" else {
+            throw GitHubAPIError(status: response.status, message: "GitHub didn't say where the saved file is")
+        }
+        let stored = try await transport.download(HTTPRequest(url: url, idleTimeout: 120), to: destination)
+        guard stored.isSuccess else { throw GitHubAPIError(status: stored.status, message: "GitHub's file storage answered HTTP \(stored.status)") }
     }
 
     /// One change in a new tree: a file's new blob, or nil to delete the file.

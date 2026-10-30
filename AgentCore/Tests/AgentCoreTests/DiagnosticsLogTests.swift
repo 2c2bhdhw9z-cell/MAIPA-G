@@ -13,7 +13,11 @@ struct DiagnosticsLogTests {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
 
         await log.record(error: ToolInputError("failed with \(secret)"), area: "saving", operation: "upload", path: "chats/a.json", now: now)
+        // A repeat within 5 minutes doesn't rewrite the file (that would cause a save each time);
+        // a later repeat counts.
         await log.record(error: ToolInputError("failed with \(secret)"), area: "saving", operation: "upload", path: "chats/a.json", now: now.addingTimeInterval(30))
+        #expect(await log.recentEntries().first?.count == 1)
+        await log.record(error: ToolInputError("failed with \(secret)"), area: "saving", operation: "upload", path: "chats/a.json", now: now.addingTimeInterval(400))
         let entries = await log.recentEntries()
         let entry = try #require(entries.first)
 

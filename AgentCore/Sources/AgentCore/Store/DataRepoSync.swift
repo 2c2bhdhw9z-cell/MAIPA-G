@@ -61,11 +61,19 @@ public actor DataRepoSync {
     private let dataDirectory: URL
     private let stateURL: URL
     public private(set) var state: State
+    /// Attachments and media at least this big are too large to go through Git. They are stored
+    /// whole, by SHA-256, as assets of MAIPA-G-data's private "MAIPA-G files" draft release, and
+    /// Git keeps a small pointer next to where the file would be. Release assets hold up to 2 GB.
+    public let largeFileThreshold: Int
+    public static let defaultLargeFileThreshold = 20 * 1024 * 1024
+    public static let pointerSuffix = ".maipa-g-file.json"
+    private var largeHashes: [String: (size: Int, modified: Date, sha256: String)] = [:]
 
-    public init(github: GitHubClient, dataDirectory: URL, stateURL: URL) {
+    public init(github: GitHubClient, dataDirectory: URL, stateURL: URL, largeFileThreshold: Int = DataRepoSync.defaultLargeFileThreshold) {
         self.github = github
         self.dataDirectory = dataDirectory
         self.stateURL = stateURL
+        self.largeFileThreshold = largeFileThreshold
         if let data = try? Data(contentsOf: stateURL), let saved = try? JSONCoding.decoder().decode(State.self, from: data) {
             state = saved
         } else {
@@ -177,6 +185,12 @@ public actor DataRepoSync {
             // An unreadable local file is never interpreted as a deletion. Keep the last agreed
             // blob on GitHub and retry the local read on the next sync.
             if scan.unreadablePaths.contains(path) { continue }
+            // A big file the phone has, still saved in Git by an older build: its pointer takes
+            // over, and the Git copy goes once the release copy is safe (checked below).
+            if scan.largeRealPaths.contains(path) {
+                if remote[path] != nil { deleteThere.append(path) }
+                continue
+            }
             let l = local[path], r = remote[path], b = base[path]
             if l == r { continue }
             let localChanged = l != b
@@ -201,6 +215,10 @@ public actor DataRepoSync {
         var skipped = scan.unreadablePaths
         for path in conflicts {
             guard let sha = remote[path] else { continue }
+            if Self.isPointer(path) {
+                uploads.append(path)
+                continue
+            }
             do {
                 let theirs = try await github.blob(repo, sha: sha)
                 let mine = try Data(contentsOf: dataDirectory.appendingPathComponent(path))
@@ -229,8 +247,28 @@ public actor DataRepoSync {
             }
         }
         var downloadedSuccessfully: [String] = []
+        var downloadStore: LargeFileStore?
         for (path, data) in fetched where !skipped.contains(path) {
             let url = dataDirectory.appendingPathComponent(path)
+            if Self.isPointer(path) {
+                // A big file saved from another phone: fetch it from the release and check it.
+                guard currentBlobID(forPath: path) == local[path] else {
+                    skipped.insert(path)
+                    continue
+                }
+                do {
+                    guard let pointer = LargeFilePointer.parse(data), pointer.path == Self.realPath(forPointer: path) else {
+                        throw GitHubAPIError(status: 0, message: "The saved pointer for \(Self.realPath(forPointer: path)) can't be read")
+                    }
+                    if downloadStore == nil { downloadStore = try await LargeFileStore(github: github, repo: repo) }
+                    try await downloadStore?.fetch(pointer, into: dataDirectory)
+                    downloadedSuccessfully.append(path)
+                } catch {
+                    skipped.insert(path)
+                    report.problems.append(FileProblem(path: Self.realPath(forPointer: path), stage: .download, message: ErrorExplainer.describe(error).message))
+                }
+                continue
+            }
             guard currentBlobID(at: url) == local[path] else {
                 skipped.insert(path)
                 continue
@@ -252,8 +290,8 @@ public actor DataRepoSync {
         }
         var deletedHereSuccessfully: [String] = []
         for path in deleteHere {
-            let url = dataDirectory.appendingPathComponent(path)
-            guard currentBlobID(at: url) == local[path] else {
+            let url = Self.isPointer(path) ? dataDirectory.appendingPathComponent(Self.realPath(forPointer: path)) : dataDirectory.appendingPathComponent(path)
+            guard currentBlobID(forPath: path) == local[path] else {
                 skipped.insert(path)
                 continue
             }
@@ -277,19 +315,35 @@ public actor DataRepoSync {
         // still committed together, while failed paths remain pending for the next sync.
         var changes: [GitHubClient.TreeChange] = []
         var successfulUploads: [String] = []
+        var store: LargeFileStore?
         for path in uploads {
             let url = dataDirectory.appendingPathComponent(path)
             do {
-                let data = try Data(contentsOf: url)
+                let data: Data
+                if let large = scan.largeFiles[path] {
+                    if store == nil { store = try await LargeFileStore(github: github, repo: repo) }
+                    try await store?.ensure(large)
+                    data = large.pointer
+                } else {
+                    data = try Data(contentsOf: url)
+                }
                 let blob = try await github.createBlob(repo, contents: data)
                 changes.append(GitHubClient.TreeChange(path: path, blobSHA: blob))
                 successfulUploads.append(path)
+            } catch where Self.isMissingFile(error) {
+                // Deleted or replaced on the phone after this sync looked at it: not a failure.
+                // The next sync sees what is there now.
+                agreed[path] = base[path]
             } catch {
                 agreed[path] = base[path]
-                report.problems.append(FileProblem(path: path, stage: .upload, message: error.localizedDescription))
+                report.problems.append(FileProblem(path: path, stage: .upload, message: ErrorExplainer.describe(error).message))
             }
         }
-        let committedDeletes = deleteThere.filter { remote[$0] != nil }
+        // A file moving from Git to the files release keeps its Git copy until the release copy
+        // and its pointer are saved.
+        let unsavedLargeFiles = Set(uploads.filter { Self.isPointer($0) && !successfulUploads.contains($0) }.map(Self.realPath(forPointer:)))
+        let committedDeletes = deleteThere.filter { remote[$0] != nil && !unsavedLargeFiles.contains($0) }
+        for path in deleteThere where unsavedLargeFiles.contains(path) { agreed[path] = base[path] }
         for path in committedDeletes {
             changes.append(GitHubClient.TreeChange(path: path, blobSHA: nil))
         }
@@ -323,6 +377,38 @@ public actor DataRepoSync {
         var files: [String: String] = [:]
         var unreadablePaths: Set<String> = []
         var problems: [FileProblem] = []
+        /// Pointer path → the big file it stands for.
+        var largeFiles: [String: LargeFile] = [:]
+        /// Where those big files really are.
+        var largeRealPaths: Set<String> = []
+    }
+
+    static func isPointer(_ path: String) -> Bool {
+        path.hasSuffix(pointerSuffix) && managedBlobPrefixes.contains(where: path.hasPrefix)
+    }
+
+    static func realPath(forPointer path: String) -> String {
+        String(path.dropLast(pointerSuffix.count))
+    }
+
+    static func isMissingFile(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain, [NSFileReadNoSuchFileError, NSFileNoSuchFileError].contains(nsError.code) { return true }
+        if nsError.domain == NSPOSIXErrorDomain, nsError.code == Int(ENOENT) { return true }
+        return false
+    }
+
+    /// The pointer for a big file, from a cached SHA-256 while its size and date are unchanged.
+    private func largeFile(at url: URL, path: String, size: Int, modified: Date) throws -> LargeFile {
+        let sha: String
+        if let cached = largeHashes[path], cached.size == size, cached.modified == modified {
+            sha = cached.sha256
+        } else {
+            sha = try Hashing.sha256Hex(fileAt: url)
+            largeHashes[path] = (size, modified, sha)
+        }
+        let pointer = LargeFilePointer(path: path, size: size, sha256: sha)
+        return LargeFile(url: url, pointer: pointer.encoded(), sha256: sha, size: size)
     }
 
     private func localFiles() -> LocalScan {
@@ -341,9 +427,23 @@ public actor DataRepoSync {
             while path.hasPrefix("/") { path.removeFirst() }
             guard Self.isManaged(path) else { continue }
             do {
-                guard try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else { continue }
+                let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey])
+                guard values.isRegularFile == true else { continue }
+                // A pointer file never lives on the phone; one that does is ignored.
+                if Self.isPointer(path) { continue }
+                if let size = values.fileSize, size >= largeFileThreshold, Self.managedBlobPrefixes.contains(where: path.hasPrefix) {
+                    let large = try largeFile(at: url, path: path, size: size, modified: values.contentModificationDate ?? .distantPast)
+                    let pointerPath = path + Self.pointerSuffix
+                    scan.files[pointerPath] = Hashing.gitBlobID(large.pointer)
+                    scan.largeFiles[pointerPath] = large
+                    scan.largeRealPaths.insert(path)
+                    continue
+                }
                 let data = try Data(contentsOf: url)
                 scan.files[path] = Hashing.gitBlobID(data)
+            } catch where Self.isMissingFile(error) {
+                // Gone between listing and reading: deleted, not unreadable.
+                continue
             } catch {
                 scan.unreadablePaths.insert(path)
                 scan.problems.append(FileProblem(path: path, stage: .read, message: error.localizedDescription))
@@ -358,6 +458,18 @@ public actor DataRepoSync {
 
     private func currentBlobID(at url: URL) -> String? {
         (try? Data(contentsOf: url)).map(Hashing.gitBlobID)
+    }
+
+    /// The blob id this path has on the phone right now; for a pointer, the pointer of the big
+    /// file it stands for.
+    private func currentBlobID(forPath path: String) -> String? {
+        guard Self.isPointer(path) else { return currentBlobID(at: dataDirectory.appendingPathComponent(path)) }
+        let real = Self.realPath(forPointer: path)
+        let url = dataDirectory.appendingPathComponent(real)
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]), let size = values.fileSize,
+              let large = try? largeFile(at: url, path: real, size: size, modified: values.contentModificationDate ?? .distantPast)
+        else { return nil }
+        return Hashing.gitBlobID(large.pointer)
     }
 
     private func fetchBlobs(_ repo: RepoRef, paths: [String], ids: [String: String]) async throws -> [String: Data] {
@@ -408,3 +520,85 @@ public actor DataRepoSync {
     }
 }
 
+
+
+/// A big attachment or media file kept as a release asset.
+struct LargeFile: Sendable {
+    var url: URL
+    var pointer: Data
+    var sha256: String
+    var size: Int
+    var assetName: String { sha256 + ".bin" }
+}
+
+/// What Git keeps in place of a big file: where it goes, how big it is, and its SHA-256.
+struct LargeFilePointer: Codable, Sendable, Hashable {
+    var format = 1
+    var path: String
+    var size: Int
+    var sha256: String
+    var storage = "release-asset"
+
+    init(path: String, size: Int, sha256: String) {
+        self.path = path
+        self.size = size
+        self.sha256 = sha256
+    }
+
+    func encoded() -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        return (try? encoder.encode(self)) ?? Data()
+    }
+
+    static func parse(_ data: Data) -> LargeFilePointer? {
+        guard let pointer = try? JSONDecoder().decode(LargeFilePointer.self, from: data),
+              pointer.format == 1, pointer.sha256.count == 64, pointer.sha256.allSatisfy(\.isHexDigit),
+              pointer.size >= 0, SnapshotStore.isSafeRelativePath(pointer.path)
+        else { return nil }
+        return pointer
+    }
+}
+
+/// Uploads and fetches big files in MAIPA-G-data's private files release, once per file.
+actor LargeFileStore {
+    private let github: GitHubClient
+    private let repo: RepoRef
+    private let releaseID: Int
+    private var assets: [String: GitHubClient.ReleaseAsset]
+
+    init(github: GitHubClient, repo: RepoRef) async throws {
+        self.github = github
+        self.repo = repo
+        releaseID = try await github.filesRelease(repo)
+        assets = Dictionary(try await github.releaseAssets(repo, releaseID: releaseID).map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// Uploads the file unless the release already has these exact bytes.
+    func ensure(_ file: LargeFile) async throws {
+        if let existing = assets[file.assetName], existing.size == file.size { return }
+        let uploaded = try await github.uploadReleaseAsset(repo, releaseID: releaseID, name: file.assetName, file: file.url)
+        assets[uploaded.name] = uploaded
+    }
+
+    /// Downloads the file a pointer names, checks its size and SHA-256, then puts it in place.
+    func fetch(_ pointer: LargeFilePointer, into dataDirectory: URL) async throws {
+        guard let asset = assets[pointer.sha256 + ".bin"] else {
+            throw GitHubAPIError(status: 404, message: "\(pointer.path) isn't in MAIPA-G-data's files release yet; the phone that has it will upload it")
+        }
+        let destination = dataDirectory.appendingPathComponent(pointer.path)
+        let temporary = destination.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).download")
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        try await github.downloadReleaseAsset(repo, assetID: asset.id, to: temporary)
+        let size = (try? FileManager.default.attributesOfItem(atPath: temporary.path)[.size] as? Int) ?? -1
+        guard size == pointer.size, try Hashing.sha256Hex(fileAt: temporary) == pointer.sha256 else {
+            throw GitHubAPIError(status: 0, message: "The download of \(pointer.path) didn't match its saved checksum, so it wasn't used")
+        }
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
+        } else {
+            try FileManager.default.moveItem(at: temporary, to: destination)
+        }
+    }
+}

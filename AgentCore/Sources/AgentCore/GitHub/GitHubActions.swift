@@ -319,7 +319,8 @@ public struct GitHubActionsBilling: Codable, Sendable, Hashable {
     /// permission for the usage report, and an existing GitHub app keeps the permissions it was
     /// made with until the owner adds it.
     public static func explain(_ error: Error) -> String {
-        if let status = (error as? HTTPError)?.statusCode, status == 403 || status == 404 {
+        let status = (error as? GitHubAPIError)?.status ?? (error as? HTTPError)?.statusCode
+        if let status, status == 403 || status == 404 {
             return "GitHub won't show Actions minutes to this app yet. In GitHub, open Settings → Developer settings → GitHub Apps → your MAIPA-G app → Permissions, set Account permissions → Plan to Read-only, save, then accept the new permission."
         }
         return ErrorExplainer.explain(error).message

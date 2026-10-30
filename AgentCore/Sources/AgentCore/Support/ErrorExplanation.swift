@@ -57,6 +57,9 @@ public enum ErrorExplainer {
             if error.isOffline {
                 return ErrorExplanation(cause: "This iPhone is offline.", nextStep: "Reconnect and try again; local work remains on the phone.", technical: technical, isTemporary: true)
             }
+            if case .transport(let message, _) = error {
+                return ErrorExplanation(cause: "The connection failed: \(message)", nextStep: "MAIPA-G tries again by itself; check the connection if it keeps happening.", technical: technical, isTemporary: true)
+            }
             if let status = error.statusCode {
                 return ErrorExplanation(cause: "The server returned HTTP \(status).", nextStep: status >= 500 || status == 429 ? "Wait a moment and try again." : "Check the account or request details, then try again.", technical: technical, isTemporary: status >= 500 || status == 429)
             }
@@ -79,7 +82,12 @@ public enum ErrorExplainer {
             default: break
             }
         }
-        let description = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        var description = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Never show iOS's "The operation couldn't be completed (… error 1)" placeholder: say
+        // what the error itself says instead.
+        if description.isEmpty || isPlaceholder(description) {
+            description = SensitiveDataRedactor().redact(String(describing: error))
+        }
         return ErrorExplanation(
             cause: description.isEmpty ? "\(String(reflecting: Swift.type(of: error))) failed." : description,
             nextStep: "Try again. Technical details were saved in diagnostics.",
