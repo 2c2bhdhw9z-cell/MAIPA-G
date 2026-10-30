@@ -22,16 +22,12 @@ enum MAIPAGRunnerMain {
             return
         }
         let environment = ProcessInfo.processInfo.environment
-        func takeSecret(_ variable: String) -> String? {
-            guard let path = environment[variable], !path.isEmpty else { return nil }
-            defer { try? FileManager.default.removeItem(atPath: path) }
-            guard let data = FileManager.default.contents(atPath: path), !data.isEmpty else { return nil }
-            return String(decoding: data, as: UTF8.self)
-        }
-        let targetSecret = takeSecret("MAIPAG_TARGET_TOKEN_FILE")
-        let dataSecret = takeSecret("MAIPAG_DATA_TOKEN_FILE")
-        let openRouterSecret = takeSecret("OPENROUTER_API_KEY_FILE")
-        let mcpSecretText = takeSecret("MAIPAG_MCP_SECRETS_FILE") ?? ""
+        // Reads and deletes the credential files and clears their variables before anything runs.
+        let secrets = RunnerSecrets.take(environment: environment)
+        let targetSecret = secrets["MAIPAG_TARGET_TOKEN_FILE"]
+        let dataSecret = secrets["MAIPAG_DATA_TOKEN_FILE"]
+        let openRouterSecret = secrets["OPENROUTER_API_KEY_FILE"]
+        let mcpSecretText = secrets["MAIPAG_MCP_SECRETS_FILE"] ?? ""
         guard
             let idText = environment["MAIPAG_JOB_ID"], let id = UUID(uuidString: idText),
             let repoText = environment["GITHUB_REPOSITORY"], let repo = RepoRef(fullName: repoText),
@@ -56,11 +52,8 @@ enum MAIPAGRunnerMain {
             FileHandle.standardError.write(Data("MAIPAGRunner: trusted runner files must be outside the target workspace.\n".utf8))
             exit(2)
         }
-        // Secret files are deleted above and only nonsecret file-path variables remain in the
-        // inherited environment before any model-directed shell or third-party MCP child starts.
-        for key in ["MAIPAG_TARGET_TOKEN_FILE", "MAIPAG_DATA_TOKEN_FILE", "OPENROUTER_API_KEY_FILE", "MAIPAG_MCP_SECRETS_FILE", "GH_TOKEN", "GITHUB_TOKEN"] {
-            unsetenv(key)
-        }
+        // RunnerSecrets.take deleted the files and cleared their variables above, before any
+        // model-directed shell or third-party MCP child starts.
         let configuration = CloudRunnerConfiguration(
             jobID: id,
             targetRepository: repo,

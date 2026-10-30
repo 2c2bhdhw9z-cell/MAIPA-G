@@ -139,14 +139,48 @@ public actor RepoWorkspace {
         }
     }
 
+    /// A Git LFS pointer is replaced by the real file, checked against its recorded checksum.
+    func resolvingLFS(_ data: Data, path: String) async throws -> DecodedFileRead? {
+        guard let pointer = GitLFSPointer.parse(data) else { return nil }
+        guard pointer.size <= SnapshotStore.maxStoredFileSize else { return .tooLarge(bytes: pointer.size) }
+        let real: Data
+        if let cached = fileCache["lfs:" + pointer.oid] {
+            real = cached
+        } else {
+            real = try await github.lfsObject(repo, pointer: pointer)
+            fileCache["lfs:" + pointer.oid] = real
+        }
+        guard let document = TextFileCodec.decode(real) else { return .binary(bytes: real.count) }
+        return .text(document, bytes: real.count)
+    }
+
+    /// A file inside a submodule is read from the submodule's own GitHub repo at the exact
+    /// commit this repo pins.
+    func readFromSubmodule(_ path: String, tree: GitTree) async throws -> DecodedFileRead? {
+        guard let link = tree.entries.first(where: { $0.type == "commit" && path.hasPrefix($0.path + "/") }) else { return nil }
+        guard case .text(let document, _) = try await readDecodedFile(".gitmodules"),
+              let module = GitSubmodules.parse(document.text, parent: repo).first(where: { $0.path == link.path })
+        else { throw ToolInputError("\(link.path) is a submodule whose source isn't on GitHub, so MAIPA-G can't read inside it.") }
+        let inner = String(path.dropFirst(link.path.count + 1))
+        let data: Data
+        do {
+            data = try await github.fileContents(module.repo, path: inner, ref: link.sha)
+        } catch let error as GitHubAPIError where error.isNotFound {
+            throw ToolInputError("\(inner) wasn't found in the submodule \(module.repo.fullName) at \(link.sha.prefix(7)), or MAIPA-G's GitHub app can't see that repo.")
+        }
+        if let lfs = try await resolvingLFS(data, path: path) { return lfs }
+        guard let document = TextFileCodec.decode(data) else { return .binary(bytes: data.count) }
+        return .text(document, bytes: data.count)
+    }
+
     func readDecodedFile(_ rawPath: String) async throws -> DecodedFileRead {
         let path = Self.normalize(rawPath)
         if let snapshot, let file = snapshot.file(path) {
             switch file.kind {
             case .text:
-                guard let data = snapshot.contents(of: path), let document = TextFileCodec.decode(data) else {
-                    return .binary(bytes: file.size)
-                }
+                guard let data = snapshot.contents(of: path) else { return .binary(bytes: file.size) }
+                if let lfs = try await resolvingLFS(data, path: path) { return lfs }
+                guard let document = TextFileCodec.decode(data) else { return .binary(bytes: file.size) }
                 return .text(document, bytes: data.count)
             case .binary: return .binary(bytes: file.size)
             case .tooLarge: return .tooLarge(bytes: file.size)
@@ -156,6 +190,7 @@ public actor RepoWorkspace {
         let tree = try await tree()
         guard let entry = tree.entries.first(where: { $0.path == path }) else {
             if path.isEmpty { return .folder }
+            if let inside = try await readFromSubmodule(path, tree: tree) { return inside }
             return .missing(suggestions: Self.suggestions(for: path, in: tree))
         }
         if entry.isFolder { return .folder }
@@ -172,6 +207,7 @@ public actor RepoWorkspace {
             data = try await github.blob(repo, sha: entry.sha)
             fileCache[path] = data
         }
+        if let lfs = try await resolvingLFS(data, path: path) { return lfs }
         guard let document = TextFileCodec.decode(data) else { return .binary(bytes: data.count) }
         return .text(document, bytes: data.count)
     }

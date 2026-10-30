@@ -6,6 +6,8 @@ import UIKit
 struct TurnActions {
     var answer: ([String]) -> Void
     var retry: () -> Void
+    var retryAnswer: (UUID) -> Void
+    var editMessage: (UUID, String) -> Void
     var keepGoing: () -> Void
     var approveSpending: () -> Void
     var switchToFree: () -> Void
@@ -29,9 +31,9 @@ struct MessageRow: View, Equatable {
         ZStack(alignment: .topTrailing) {
             switch message.body {
             case .user(let user):
-                UserBubble(message: user)
+                UserBubble(message: user, onEdit: { actions.editMessage(message.id, user.text) })
             case .assistant(let turn):
-                AssistantTurnView(turn: turn, isLatest: isLatest, modelName: modelName, actions: actions)
+                AssistantTurnView(messageID: message.id, turn: turn, isLatest: isLatest, modelName: modelName, actions: actions)
             }
             if canStar {
                 Button { actions.toggleStar(message.id) } label: {
@@ -57,6 +59,7 @@ struct MessageRow: View, Equatable {
 
 struct UserBubble: View {
     var message: UserMessage
+    var onEdit: () -> Void
     @Environment(\.theme) private var theme
 
     var body: some View {
@@ -78,6 +81,7 @@ struct UserBubble: View {
                 .background(theme.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(theme.accent.opacity(0.25)))
                 .contextMenu {
+                    Button(action: onEdit) { Label("Edit and resend", systemImage: "pencil") }
                     if !message.text.isEmpty { Button { UIPasteboard.general.string = message.text } label: { Label("Copy", systemImage: "doc.on.doc") } }
                 }
         }
@@ -85,6 +89,7 @@ struct UserBubble: View {
 }
 
 struct AssistantTurnView: View {
+    var messageID: UUID
     var turn: AssistantTurn
     var isLatest: Bool
     var modelName: (String) -> String
@@ -117,6 +122,10 @@ struct AssistantTurnView: View {
             }
             if turn.status != .running, !turn.steps.isEmpty {
                 footer
+                Button("Retry this answer") { actions.retryAnswer(messageID) }
+                    .font(.caption.weight(.semibold))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(theme.accent)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -225,7 +234,7 @@ struct GeneratedImageCard: View {
         .task {
             do {
                 let data = try await app.attachmentStore.data(for: result.attachment)
-                guard let decoded = UIImage(data: data) else {
+                guard let decoded = ImageDownsampler.image(from: data, maxPixelSize: 1_280) else {
                     failed = true
                     return
                 }
@@ -566,7 +575,9 @@ struct SpendCheckCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("This job has cost \(spent.dollars) so far, so I stopped to ask.", systemImage: "dollarsign.circle")
+            Label(spent == 0
+                  ? "This AI can use OpenRouter credit. I stopped before sending anything so you can approve it."
+                  : "This job has cost \(spent.dollars) so far, so I stopped to ask.", systemImage: "dollarsign.circle")
                 .font(.subheadline)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 10) {

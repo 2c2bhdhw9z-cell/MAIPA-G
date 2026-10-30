@@ -34,9 +34,18 @@ public protocol AgentTool: Sendable {
     /// Called after the person approves this exact tool call. Most tools run identically; shell
     /// tools use the flag to accept a workspace delta that could only be known after execution.
     func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput
+    /// True when this tool's results come from outside the person's own words: web pages and web
+    /// search, connectors, and repository files anyone could have written.
+    var bringsOutsideContent: Bool { get }
+    /// Once outside content is in the conversation, an action with effects beyond MAIPA-G (a
+    /// connector write, a command that reaches the network, paid generation) pauses for the
+    /// person, so text from a page, repo or connector can never set it off on its own.
+    func approvalAfterOutsideContent(for arguments: JSONValue) async -> ToolApprovalRequest?
 }
 
 public extension AgentTool {
+    var bringsOutsideContent: Bool { false }
+    func approvalAfterOutsideContent(for arguments: JSONValue) async -> ToolApprovalRequest? { nil }
     func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? { nil }
     func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         try await run(arguments: arguments, progress: progress)

@@ -9,6 +9,9 @@ struct WebPreviewScreen: View {
     let repo: ChatRepo
     @State private var browser: PreviewBrowserModel?
     @State private var showDetails = false
+    @State private var showHostEntry = false
+    @State private var hostEntry = ""
+    @State private var hostError: String?
 
     var body: some View {
         NavigationStack {
@@ -38,11 +41,30 @@ struct WebPreviewScreen: View {
                     Button { browser?.reload() } label: { Image(systemName: "arrow.clockwise") }
                     Button { Task { await app.previews.refresh(repo); browser?.reload() } } label: { Image(systemName: "externaldrive.badge.icloud") }
                     Spacer()
+                    Button { showHostEntry = true } label: { Image(systemName: "network") }
+                        .accessibilityLabel("Allow preview network host")
                     Button { showDetails = true } label: { Image(systemName: "terminal") }
                     if let url = browser?.currentURL { Link(destination: url) { Image(systemName: "safari") } }
                 }
             }
             .task { if app.previews.directory == nil, app.previews.error == nil, !PreviewScenes.isActive { await app.previews.refresh(repo) } }
+            .alert("Allow one HTTPS host", isPresented: $showHostEntry) {
+                TextField("api.example.com", text: $hostEntry)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button("Allow") {
+                    do {
+                        try app.allowPreviewHost(hostEntry, for: repo.ref)
+                        Task { await app.previews.refresh(repo); browser?.reload() }
+                    } catch { hostError = ErrorExplainer.explain(error).message }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Preview network access is blocked by default. This allows only the exact host you enter.")
+            }
+            .alert("Host not allowed", isPresented: Binding(get: { hostError != nil }, set: { if !$0 { hostError = nil } })) {
+                Button("OK") {}
+            } message: { Text(hostError ?? "") }
             .sheet(isPresented: $showDetails) {
                 NavigationStack {
                     List(app.previews.console, id: \.self) { Text($0).font(.system(.caption, design: .monospaced)) }
@@ -82,10 +104,43 @@ struct PreviewWebView: UIViewRepresentable {
         let script = "window._maipagConsole=[];['log','warn','error'].forEach(k=>{const o=console[k];console[k]=function(...a){window._maipagConsole.push(k+': '+a.join(' '));o.apply(console,a)}});"
         configuration.userContentController.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         let view = WKWebView(frame: .zero, configuration: configuration)
+        // WebKit's block lists don't accept "|" in a filter (the old "^(https?|wss?)://" never
+        // compiled, so no list was ever installed), and "unless-domain" means the page's own
+        // domain, not the request's. So: block every web and socket address, then let only the
+        // owner's allowed hosts through with later "ignore-previous-rules" rules.
+        var rules: [[String: Any]] = ["^https?://", "^wss?://"].map { filter -> [String: Any] in
+            ["trigger": ["url-filter": filter], "action": ["type": "block"]]
+        }
+        for host in manifest.allowedHTTPSHosts.sorted() {
+            let escaped = host.replacingOccurrences(of: ".", with: "\\.")
+            for scheme in ["https", "wss"] {
+                rules.append(["trigger": ["url-filter": "^\(scheme)://\(escaped)[:/]"], "action": ["type": "ignore-previous-rules"]])
+            }
+        }
         view.navigationDelegate = context.coordinator
         let model = PreviewBrowserModel(); model.webView = view
         DispatchQueue.main.async { browser = model; context.coordinator.browser = model }
-        view.load(URLRequest(url: URL(string: "maipag-preview://site/\(project.entryPath)")!))
+        let entry = URL(string: "maipag-preview://site/\(project.entryPath)")!
+        let owner = coordinator
+        // The page loads once the network block list is in place. If the list can't be built,
+        // the page still opens (the preview's content security rules still block outside
+        // addresses) and the reason is shown in the preview's messages, never a blank page.
+        if let data = try? JSONSerialization.data(withJSONObject: rules),
+           let source = String(data: data, encoding: .utf8) {
+            WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "maipag-preview-\(manifest.allowedHTTPSHosts.sorted().joined(separator: "-"))", encodedContentRuleList: source) { list, error in
+                Task { @MainActor in
+                    if let list {
+                        view.configuration.userContentController.add(list)
+                    } else {
+                        owner.recordConsole("warning: the preview's network block list couldn't be built (\(error?.localizedDescription ?? "unknown")); outside addresses are blocked by the page's content rules only.")
+                    }
+                    view.load(URLRequest(url: entry))
+                }
+            }
+        } else {
+            owner.recordConsole("warning: the preview's network block list couldn't be built; outside addresses are blocked by the page's content rules only.")
+            view.load(URLRequest(url: entry))
+        }
         return view
     }
     func updateUIView(_ uiView: WKWebView, context: Context) {}
@@ -96,6 +151,17 @@ struct PreviewWebView: UIViewRepresentable {
         init(owner: PreviewCoordinator, browser: PreviewBrowserModel?) { self.owner = owner; self.browser = browser }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             browser?.update()
+            collectConsole(webView)
+            // Messages a page logs after it finishes loading are collected a little later too.
+            for delay in [3.0, 6.0, 10.0, 15.0] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak webView] in
+                    guard let webView else { return }
+                    self?.collectConsole(webView)
+                }
+            }
+        }
+
+        private func collectConsole(_ webView: WKWebView) {
             webView.evaluateJavaScript("window._maipagConsole || []") { [weak self] value, _ in
                 guard let messages = value as? [String] else { return }
                 Task { @MainActor in messages.forEach { self?.owner?.recordConsole($0) } }

@@ -8,6 +8,7 @@ struct SettingsScreen: View {
     @Environment(\.theme) private var theme
     @State private var confirmDisconnect = false
     @State private var copiesSize: Int64?
+    @State private var freeSpace: Int64?
     /// The controls edit this copy; every change is saved straight away.
     @State private var draft = AppSettings()
     @State private var loaded = false
@@ -51,6 +52,7 @@ struct SettingsScreen: View {
                 look
                 workflowPolicy
                 chatComputer
+                previewHosts
                 memories
                 money
                 notifications
@@ -72,6 +74,7 @@ struct SettingsScreen: View {
             }
             .onChange(of: draft) { _, edited in
                 guard loaded else { return }
+                let disabledAutonomous = app.settings.autonomousEnabled && !edited.autonomousEnabled
                 app.updateSettings { settings in
                     settings.appearance = edited.appearance
                     settings.accent = edited.accent
@@ -81,15 +84,24 @@ struct SettingsScreen: View {
                     settings.notificationsOn = edited.notificationsOn
                     settings.directSaveRepos = edited.directSaveRepos
                     settings.workflowPolicy = edited.workflowPolicy
+                    settings.autonomousEnabled = edited.autonomousEnabled
                     settings.memoriesOn = edited.memoriesOn
                     settings.chatComputerServer = edited.chatComputerServer
                     settings.chatComputerOff = edited.chatComputerOff
                     settings.chatComputerMachine = edited.chatComputerMachine
+                    settings.chatComputerHourlyCost = edited.chatComputerHourlyCost
+                    settings.previewAllowedHosts = edited.previewAllowedHosts
+                }
+                if disabledAutonomous {
+                    app.home.autonomous = false
+                    Task { await app.jobs.cleanupAllAutonomousSecrets() }
                 }
             }
             .task {
                 await app.openRouter.refreshKeyInfo()
+                await app.github.refreshActionsBilling()
                 copiesSize = await app.snapshots.diskUsage()
+                freeSpace = try? app.paths.support.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage
             }
             .confirmationDialog("Disconnect GitHub?", isPresented: $confirmDisconnect, titleVisibility: .visible) {
                 Button("Disconnect", role: .destructive) {
@@ -222,6 +234,7 @@ struct SettingsScreen: View {
 
     private var workflowPolicy: some View {
         Section {
+            Toggle("Autonomous enabled", isOn: $draft.autonomousEnabled)
             Picker("Use Autonomous", selection: $draft.workflowPolicy) {
                 ForEach(WorkflowPolicy.allCases) { policy in Text(policy.label).tag(policy) }
             }
@@ -240,6 +253,42 @@ struct SettingsScreen: View {
         case connector(String)
     }
 
+    /// Every outside host a website preview may reach, by repo, each removable. Previews reach
+    /// nothing outside the phone until a host is added from that repo's preview.
+    private var previewHosts: some View {
+        Section {
+            let repos = draft.previewAllowedHosts.filter { !$0.value.isEmpty }.keys.sorted()
+            if repos.isEmpty {
+                Text("None. Website previews can't reach any outside host.")
+                    .foregroundStyle(Theme.secondaryText)
+            }
+            ForEach(repos, id: \.self) { repo in
+                ForEach((draft.previewAllowedHosts[repo] ?? []).sorted(), id: \.self) { host in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(host).font(.body.monospaced())
+                        Text(repo).font(.caption).foregroundStyle(Theme.secondaryText)
+                    }
+                    .swipeActions {
+                        Button("Remove", role: .destructive) { removePreviewHost(host, from: repo) }
+                    }
+                    .contextMenu {
+                        Button("Remove", role: .destructive) { removePreviewHost(host, from: repo) }
+                    }
+                    .accessibilityAction(named: "Remove") { removePreviewHost(host, from: repo) }
+                }
+            }
+        } header: {
+            Text("Preview network access")
+        } footer: {
+            Text("Add a host from a repo's preview with the network button. Swipe a host to remove it; the preview loses access the next time it opens.")
+        }
+    }
+
+    private func removePreviewHost(_ host: String, from repo: String) {
+        draft.previewAllowedHosts[repo]?.remove(host)
+        if draft.previewAllowedHosts[repo]?.isEmpty == true { draft.previewAllowedHosts[repo] = nil }
+    }
+
     private var chatComputer: some View {
         Section {
             Picker("Computer", selection: computerChoice) {
@@ -253,6 +302,10 @@ struct SettingsScreen: View {
                 }
             }
             if !draft.chatComputerOff {
+                LabeledContent("Approximate cost per hour") {
+                    TextField("0.10", value: $draft.chatComputerHourlyCost, format: .number.precision(.fractionLength(0...3)))
+                        .multilineTextAlignment(.trailing).keyboardType(.decimalPad)
+                }
                 LabeledContent("Machine name") {
                     TextField(AppSettings.defaultChatComputerMachine, text: $draft.chatComputerMachine)
                         .multilineTextAlignment(.trailing)
@@ -371,6 +424,22 @@ struct SettingsScreen: View {
                 Spacer()
                 Text(saveStatus).foregroundStyle(Theme.secondaryText)
             }
+            if let billing = app.github.actionsBilling {
+                HStack {
+                    Text("Private Actions minutes")
+                    Spacer()
+                    Text("\(billing.includedMinutesRemaining) of \(Int(billing.includedMinutes)) left")
+                        .foregroundStyle(billing.isLow ? .orange : Theme.secondaryText)
+                }
+                if billing.paidAmount > 0 {
+                    Text(String(format: "GitHub is charging $%.2f this month for minutes beyond the allowance.", billing.paidAmount))
+                        .font(.footnote).foregroundStyle(.orange)
+                } else if billing.includedMinutesRemaining < 200 {
+                    Text("GitHub’s included private-repo minutes are running low. Autonomous jobs in private repos stop or start costing money when they run out.").font(.footnote).foregroundStyle(.orange)
+                }
+            } else if let error = app.github.actionsBillingError {
+                Text("Actions minutes: \(error)").font(.footnote).foregroundStyle(Theme.secondaryText)
+            }
             if case .failed(let message) = app.sync.status {
                 Text(message).font(.footnote).foregroundStyle(Theme.danger)
             }
@@ -382,6 +451,13 @@ struct SettingsScreen: View {
                         .foregroundStyle(Theme.danger)
                 }
             }
+            if let error = app.jobs.lastError, error.contains("secret cleanup") || error.contains("Autonomous secrets") {
+                Text(error).font(.footnote).foregroundStyle(Theme.danger)
+                Button("Retry Autonomous cleanup") { Task { await app.jobs.retryPendingSecretCleanup() } }
+            }
+            if app.github.isConnected {
+                Button("Find repos with old Autonomous secrets") { Task { await app.jobs.migrateAutonomousLedger() } }
+            }
             if app.github.isConnected {
                 Button("Save now") { Task { await app.sync.syncNow() } }
                     .disabled(app.sync.status == .saving)
@@ -390,6 +466,7 @@ struct SettingsScreen: View {
                 Button("Open MAIPA-G-data on GitHub") { openURL(url) }
             }
             Button("Recently Deleted") { app.sheet = .recentlyDeleted }
+            Button("Unreadable files") { app.sheet = .unreadableFiles }
             Button(exporting ? "Preparing export…" : "Export everything to Files") {
                 Task { await exportEverything() }
             }
@@ -456,6 +533,17 @@ struct SettingsScreen: View {
                 detail("OpenRouter key", app.openRouter.keyInfo?.label ?? (app.openRouter.isSignedIn ? "signed in" : "none"))
                 detail("iPhone's own AI", OnDeviceAI.status)
                 detail("Repo copies", copiesSize.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "…")
+                detail("Free iPhone storage", freeSpace.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "…")
+                if let freeSpace, freeSpace < 2 * 1024 * 1024 * 1024 {
+                    Text("Storage is low. Clear repo copies before opening another large repository.")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                if let failure = app.backgroundJobs.lastFailure {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Background task")
+                        Text(failure).font(.caption).foregroundStyle(Theme.danger)
+                    }
+                }
                 Button("Clear repo copies") {
                     Task {
                         await app.snapshots.removeAll()

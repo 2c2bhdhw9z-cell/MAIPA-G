@@ -16,8 +16,39 @@ public struct ErrorExplanation: Sendable, Hashable {
     public var message: String { "\(cause) \(nextStep)" }
 }
 
+/// Where explained errors are also written, so the redacted diagnostics log sees every failure the
+/// person is shown, not only the ones a call site remembered to report.
+public final class ErrorRecorder: @unchecked Sendable {
+    public typealias Record = @Sendable (_ error: Error, _ area: String, _ operation: String) -> Void
+    private let lock = NSLock()
+    private var record: Record?
+
+    public func set(_ record: Record?) {
+        lock.lock(); self.record = record; lock.unlock()
+    }
+
+    func callAsFunction(_ error: Error, area: String, operation: String) {
+        lock.lock(); let record = self.record; lock.unlock()
+        record?(error, area, operation)
+    }
+}
+
 public enum ErrorExplainer {
-    public static func explain(_ error: Error) -> ErrorExplanation {
+    public static let recorder = ErrorRecorder()
+
+    /// Explains `error` for the person and records it (redacted) in the diagnostics log, named by
+    /// the file and function that hit it.
+    public static func explain(_ error: Error, file: String = #fileID, function: String = #function) -> ErrorExplanation {
+        let explanation = describe(error)
+        if !(error is CancellationError) {
+            let area = file.split(separator: "/").last.map { String($0.split(separator: ".").first ?? $0) } ?? file
+            recorder(error, area: area, operation: function)
+        }
+        return explanation
+    }
+
+    /// The explanation alone, without recording it (for the diagnostics log itself).
+    public static func describe(_ error: Error) -> ErrorExplanation {
         let technical = SensitiveDataRedactor().redact(String(describing: error))
         if error is CancellationError {
             return ErrorExplanation(cause: "The operation was interrupted.", nextStep: "Try again.", technical: technical, isTemporary: true)

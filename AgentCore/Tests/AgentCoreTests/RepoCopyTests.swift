@@ -165,8 +165,16 @@ struct RepoCopyTests {
         try await secondChanges.edit(path: "README.md", text: "again\n")
         let second = try await service.save(secondChanges, selectedBranch: "main", defaultBranch: "main", rules: RepoWriteRules(directSave: true), title: "Again")
         github.commitRemotely(["OTHER.md": Data("intervening".utf8)])
-        await #expect(throws: ChangeWorkspaceError.self) { _ = try await service.undo(second) }
+        _ = try await service.undo(second)
+        #expect(github.remoteFile("README.md") == Data("old\n".utf8))
         #expect(github.remoteFile("OTHER.md") != nil)
+
+        let thirdBase = RepoWorkspace(repo: repo, branch: "main", commit: try #require(github.head), github: github.client, store: SnapshotStore(root: root))
+        let thirdChanges = ChangeWorkspace(base: thirdBase)
+        try await thirdChanges.edit(path: "README.md", text: "third\n")
+        let third = try await service.save(thirdChanges, selectedBranch: "main", defaultBranch: "main", rules: RepoWriteRules(directSave: true), title: "Third")
+        github.commitRemotely(["README.md": Data("someone else\n".utf8)])
+        await #expect(throws: ChangeWorkspaceError.self) { _ = try await service.undo(third) }
     }
 
     @Test func defaultBranchSaveOpensAndResolvesPullRequest() async throws {

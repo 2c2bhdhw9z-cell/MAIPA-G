@@ -89,8 +89,14 @@ public actor ChatStore {
     }
 
     public func loadDocument<T: Decodable>(_ type: T.Type, at relativePath: String) -> T? {
-        guard let data = try? Data(contentsOf: dataDirectory.appendingPathComponent(relativePath)) else { return nil }
-        return try? JSONCoding.decoder().decode(type, from: data)
+        let url = dataDirectory.appendingPathComponent(relativePath)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        do {
+            return try JSONCoding.decoder().decode(type, from: data)
+        } catch {
+            try? Quarantine.setAside(fileURL: url, dataDirectory: dataDirectory, relativePath: relativePath, error: error)
+            return nil
+        }
     }
 
     /// Writes attachment/media bytes atomically inside the mirrored folder.

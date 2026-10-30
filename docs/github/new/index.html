@@ -47,6 +47,7 @@
         //   repository_creation: make new repos, and the private MAIPA-G-data repo. This is the
         //     narrow permission GitHub added on 13 October 2026; "administration" would also allow
         //     deleting and transferring repos, which MAIPA-G never needs.
+        //   plan (account): read this month's Actions minutes from GitHub's billing usage report
         default_permissions: {
           metadata: "read",
           contents: "write",
@@ -57,7 +58,8 @@
           checks: "read",
           statuses: "read",
           secrets: "write",
-          repository_creation: "write"
+          repository_creation: "write",
+          plan: "read"
         }
       };
       var form = document.getElementById("create");

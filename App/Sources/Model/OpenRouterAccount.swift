@@ -78,8 +78,11 @@ final class OpenRouterAccount {
                 return
             }
             let key = try await client.exchangeSignInCode(code, pkce: pkce)
+            let previous = apiKey
             Keychain.setString(key, for: .openRouterKey)
             apiKey = key
+            // A new key replaces the old one in every repo that holds MAIPA-G's Autonomous secrets.
+            if previous != nil, previous != key { Task { await app?.jobs.rotateAutonomousSecrets() } }
             accountState = AccountState()
             saveState()
             await refreshKeyInfo()
@@ -132,6 +135,16 @@ final class OpenRouterAccount {
         }
     }
 
+    /// Models OpenRouter refused to MAIPA-G as app-restricted. They stay out of the AI picker.
+    private(set) var restrictedModelIDs: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "openRouterRestrictedModels") ?? [])
+
+    func markRestricted(_ modelID: String) {
+        guard !modelID.isEmpty, modelID != "openrouter/auto", !restrictedModelIDs.contains(modelID) else { return }
+        restrictedModelIDs.insert(modelID)
+        UserDefaults.standard.set(restrictedModelIDs.sorted(), forKey: "openRouterRestrictedModels")
+        models.removeAll { $0.id == modelID }
+    }
+
     /// Remembers that a paid request was refused for lack of credit.
     func markOutOfCredits() {
         accountState.outOfCreditsAt = Date()
@@ -158,7 +171,7 @@ final class OpenRouterAccount {
     }
 
     private func setModels(_ list: [ModelInfo]) {
-        models = list.filter(\.isChatModel)
+        models = list.filter { $0.isChatModel && !restrictedModelIDs.contains($0.id) }
         modelsByID = Dictionary(list.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
@@ -188,14 +201,15 @@ final class OpenRouterAccount {
         }
     }
 
-    func describe(_ error: Error) -> String {
+    func describe(_ error: Error, file: String = #fileID, function: String = #function) -> String {
         if let error = error as? OpenRouterAPIError {
+            _ = ErrorExplainer.explain(error, file: file, function: function)
             switch error.kind {
             case .invalidKey: return "OpenRouter didn't accept that sign-in. Try again."
             default: return "OpenRouter said: \(error.message)"
             }
         }
         if let error = error as? HTTPError, error.isOffline { return "You're offline." }
-        return "Something went wrong signing in to OpenRouter."
+        return ErrorExplainer.explain(error, file: file, function: function).message
     }
 }

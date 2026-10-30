@@ -18,6 +18,7 @@ def main() -> None:
     parser.add_argument("ipa")
     parser.add_argument("--build")
     parser.add_argument("--version")
+    parser.add_argument("--revision", help="the exact reviewed commit the build must embed")
     args = parser.parse_args()
 
     with zipfile.ZipFile(args.ipa) as archive:
@@ -50,6 +51,8 @@ def main() -> None:
         reviewed_revision = info.get("MAIPAGReviewedRevision")
         if not isinstance(reviewed_revision, str) or len(reviewed_revision) != 40 or any(char not in "0123456789abcdef" for char in reviewed_revision.lower()):
             fail(f"reviewed source revision is invalid: {reviewed_revision!r}")
+        if args.revision and reviewed_revision != args.revision:
+            fail(f"reviewed source revision is {reviewed_revision!r}, expected the PR head {args.revision!r}")
         photo_add_description = info.get("NSPhotoLibraryAddUsageDescription")
         if not isinstance(photo_add_description, str) or not photo_add_description.strip():
             fail("Photos add-only usage description is missing")

@@ -203,8 +203,8 @@ struct PictureViewer: View {
                 ) { value in
                     Task { @MainActor in progress = value }
                 }
-                guard let value = values.first(where: { UIImage(data: $0.data) != nil }),
-                      let decoded = UIImage(data: value.data)
+                guard let value = values.first(where: { ImageDownsampler.image(from: $0.data) != nil }),
+                      let decoded = ImageDownsampler.image(from: value.data)
                 else { throw PictureError.noReadableImage }
 
                 // Validate bytes before saving either the attachment or its metadata.
@@ -239,7 +239,7 @@ struct PictureViewer: View {
         defer { isLoadingStoredImage = false }
         do {
             let data = try await app.attachmentStore.data(for: generated.attachment)
-            guard let decoded = UIImage(data: data) else { throw PictureError.storedImageUnreadable }
+            guard let decoded = ImageDownsampler.image(from: data) else { throw PictureError.storedImageUnreadable }
             image = decoded
         } catch {
             image = nil
@@ -270,7 +270,7 @@ struct PictureViewer: View {
             }
 
             let data = try await app.attachmentStore.data(for: generated.attachment)
-            guard UIImage(data: data) != nil else { throw PictureError.storedImageUnreadable }
+            guard ImageDownsampler.image(from: data) != nil else { throw PictureError.storedImageUnreadable }
             try await addPhoto(data)
             saveState = .saved
         } catch {

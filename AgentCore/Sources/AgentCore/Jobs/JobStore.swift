@@ -13,8 +13,9 @@ public actor JobStore {
 
     @discardableResult
     public func create(_ job: JobRecord) async throws -> JobRecord {
-        try await records.save(job)
-        return job
+        let safe = try SensitiveDataRedactor().redactCodable(job)
+        try await records.save(safe)
+        return safe
     }
 
     @discardableResult
@@ -22,8 +23,9 @@ public actor JobStore {
         var copy = job
         copy.format = JobRecord.currentFormat
         copy.updatedAt = date
-        try await records.save(copy)
-        return copy
+        let safe = try SensitiveDataRedactor().redactCodable(copy)
+        try await records.save(safe)
+        return safe
     }
 
     @discardableResult
@@ -32,8 +34,9 @@ public actor JobStore {
         try change(&job)
         job.format = JobRecord.currentFormat
         job.updatedAt = Date()
-        try await records.save(job)
-        return job
+        let safe = try SensitiveDataRedactor().redactCodable(job)
+        try await records.save(safe)
+        return safe
     }
 
     @discardableResult
@@ -50,7 +53,7 @@ public actor JobStore {
             object["compactedAt"] = .string(ISO8601.string(from: now))
             job.state = .object(object)
             job.updatedAt = now
-            try await records.save(job)
+            try await records.save(try SensitiveDataRedactor().redactCodable(job))
             changed += 1
         }
         return changed

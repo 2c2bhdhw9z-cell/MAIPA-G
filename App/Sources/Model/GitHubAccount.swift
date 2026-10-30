@@ -21,6 +21,8 @@ final class GitHubAccount {
     private(set) var repos: [GitHubRepo] = []
     private(set) var isLoadingRepos = false
     private(set) var reposError: String?
+    private(set) var actionsBilling: GitHubActionsBilling?
+    private(set) var actionsBillingError: String?
     /// What the connect sheet shows while it works, such as "Setting up…".
     private(set) var progress: String?
     private(set) var lastError: String?
@@ -84,6 +86,17 @@ final class GitHubAccount {
                 await MainActor.run { Keychain.setValue(token, for: .githubUserToken) }
             }
         )
+    }
+
+    func refreshActionsBilling() async {
+        guard let client, let login else { return }
+        do {
+            actionsBilling = try await client.actionsBilling(for: login, plan: user?.plan?.name)
+            actionsBillingError = nil
+        } catch {
+            actionsBilling = nil
+            actionsBillingError = GitHubActionsBilling.explain(error)
+        }
     }
 
     /// Fills in who the user is and their repos, and notices if the app was deleted or uninstalled
@@ -309,7 +322,9 @@ final class GitHubAccount {
         installationID.map { URL(string: "https://github.com/settings/installations/\($0)")! }
     }
 
-    func describe(_ error: Error) -> String {
+    func describe(_ error: Error, file: String = #fileID, function: String = #function) -> String {
+        // Recorded in the diagnostics log like every other explained error.
+        _ = ErrorExplainer.explain(error, file: file, function: function)
         if let error = error as? GitHubAPIError {
             if error.isRateLimited { return "GitHub's hourly limit was reached. It resets within the hour." }
             if error.isUnauthorized { return "GitHub didn't accept MAIPA-G's key. Connect GitHub again in Settings." }
@@ -324,6 +339,6 @@ final class GitHubAccount {
             }
         }
         if case GitHubAppSession.Failure.userSignInExpired = error { return "Your GitHub sign-in ran out. Sign in again in Settings." }
-        return "Something went wrong talking to GitHub."
+        return ErrorExplainer.explain(error).message
     }
 }

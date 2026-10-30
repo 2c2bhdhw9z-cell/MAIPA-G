@@ -77,6 +77,8 @@ struct AppSettings: Codable, Equatable, Sendable {
     var directSaveRepos: [String: Bool] = [:]
     /// When work moves to an Autonomous GitHub runner. Big jobs too is the factory default.
     var workflowPolicy: WorkflowPolicy = .bigJobs
+    /// Global Autonomous switch. Turning it off removes MAIPA-G-managed Actions secrets.
+    var autonomousEnabled = true
     /// Master switch for adding enabled memories to newly started chats.
     var memoriesOn = true
     /// The connector (its serverID) that gives chats a Linux computer to run commands on. Nil is
@@ -87,6 +89,9 @@ struct AppSettings: Codable, Equatable, Sendable {
     /// The machine chats use on that computer. Sprites' default sign-in only allows names that
     /// start with mcp-.
     var chatComputerMachine = AppSettings.defaultChatComputerMachine
+    var chatComputerHourlyCost: Double = 0.10
+    /// Exact HTTPS hosts explicitly allowed for each repository preview.
+    var previewAllowedHosts: [String: Set<String>] = [:]
 
     init() {}
 
@@ -102,10 +107,13 @@ struct AppSettings: Codable, Equatable, Sendable {
         notificationsOn = try c.decodeIfPresent(Bool.self, forKey: .notificationsOn) ?? true
         directSaveRepos = try c.decodeIfPresent([String: Bool].self, forKey: .directSaveRepos) ?? [:]
         workflowPolicy = (try? c.decodeIfPresent(WorkflowPolicy.self, forKey: .workflowPolicy)) ?? .bigJobs
+        autonomousEnabled = try c.decodeIfPresent(Bool.self, forKey: .autonomousEnabled) ?? true
         memoriesOn = try c.decodeIfPresent(Bool.self, forKey: .memoriesOn) ?? true
         chatComputerServer = try? c.decodeIfPresent(String.self, forKey: .chatComputerServer)
         chatComputerOff = (try? c.decodeIfPresent(Bool.self, forKey: .chatComputerOff)) ?? false
         chatComputerMachine = (try? c.decodeIfPresent(String.self, forKey: .chatComputerMachine)) ?? AppSettings.defaultChatComputerMachine
+        chatComputerHourlyCost = try c.decodeIfPresent(Double.self, forKey: .chatComputerHourlyCost) ?? 0.10
+        previewAllowedHosts = (try? c.decodeIfPresent([String: Set<String>].self, forKey: .previewAllowedHosts)) ?? [:]
     }
 
     func savesDirectly(to repo: RepoRef) -> Bool { directSaveRepos[repo.fullName] ?? false }

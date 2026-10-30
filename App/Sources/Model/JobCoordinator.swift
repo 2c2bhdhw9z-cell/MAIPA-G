@@ -12,11 +12,13 @@ final class JobCoordinator {
 
     @ObservationIgnored weak var app: AppModel?
     @ObservationIgnored private let store: JobStore
+    @ObservationIgnored private let provisioningStore: ProductStore<AutonomousInstallationRecord>
     @ObservationIgnored private var watcher: Task<Void, Never>?
     @ObservationIgnored private var localRuns: [UUID: Task<Void, Never>] = [:]
 
     init(dataDirectory: URL) {
         store = JobStore(dataDirectory: dataDirectory)
+        provisioningStore = ProductStore(dataDirectory: dataDirectory, folder: "autonomous-installations")
     }
 
     deinit {
@@ -62,7 +64,7 @@ final class JobCoordinator {
 
     @discardableResult
     func start(request: String, repo: ChatRepo, workflow: WorkflowDefinition? = nil, additionalState: [String: JSONValue] = [:]) async -> JobRecord? {
-        guard let app, let github = app.github.client else { return nil }
+        guard let app, app.settings.autonomousEnabled, let github = app.github.client else { return nil }
         await app.sync.syncNow()
         guard let dataRepo = app.sync.repo else {
             lastError = "MAIPA-G needs its private data repo before Autonomous can start."
@@ -143,6 +145,7 @@ final class JobCoordinator {
                 "previewBuild": true,
                 "previewBuildCommand": .string(command),
                 "previewOutputDirectories": .array(outputs),
+                "previewRoot": .string(project.rootPath),
                 "previewCommit": .string(commit),
                 "buildExplicitlyRequested": true,
             ]
@@ -218,6 +221,7 @@ final class JobCoordinator {
                 systemPrompt: SystemPrompt.make(userLogin: login, repo: nil, agent: invocation.definition, workflowContext: invocation.context),
                 tools: [WebSearchTool(transport: transport), ReadWebPageTool(transport: transport)] + invocation.tools,
                 spendLimit: invocation.spendLimit,
+                requiresInitialSpendApproval: !route.isFree,
                 agent: invocation.definition
             )
             let environment = AgentEnvironment(
@@ -339,6 +343,19 @@ final class JobCoordinator {
                 secrets: setupSecrets,
                 reviewedRevision: Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
             )
+            let existingInstallations = await provisioningStore.loadAll()
+            let record = existingInstallations.first(where: { $0.repo == repo }).map { existing -> AutonomousInstallationRecord in
+                var copy = existing
+                copy.managedSecrets = Set(setupSecrets.keys)
+                copy.reviewedRevision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
+                copy.updatedAt = Date()
+                return copy
+            } ?? AutonomousInstallationRecord(
+                repo: repo,
+                managedSecrets: Set(setupSecrets.keys),
+                reviewedRevision: Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
+            )
+            try await provisioningStore.save(record)
             job.recordAutonomousSetupCommit(setupCommit)
             job.status = .queued
             job.steps = [JobStepRecord(title: "Waiting for GitHub", status: .pending)]
@@ -501,19 +518,54 @@ final class JobCoordinator {
         }
     }
 
+    func updateAutonomousWorkflows() async {
+        guard let app, let github = app.github.client,
+              let credentials = app.github.credentials,
+              let openRouterKey = app.openRouter.apiKey,
+              let revision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String,
+              revision.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil
+        else { return }
+        var secrets = [
+            "MAIPAG_APP_ID": String(credentials.appID),
+            "MAIPAG_APP_PRIVATE_KEY": credentials.privateKeyPEM,
+            "OPENROUTER_API_KEY": openRouterKey,
+        ]
+        if let connectorSecrets = app.connectors.autonomousSecretsJSON() { secrets["MAIPAG_MCP_SECRETS"] = connectorSecrets }
+        var failures: [String] = []
+        for var record in await provisioningStore.loadAll() {
+            do {
+                guard let repository = try await github.repositoryIfExists(record.repo) else { continue }
+                let setup = AutonomousSetup(github: github)
+                if try await setup.isInstalled(in: record.repo, ref: repository.defaultBranch, reviewedRevision: revision) { continue }
+                _ = try await setup.install(in: record.repo, branch: repository.defaultBranch, secrets: secrets, reviewedRevision: revision)
+                record.reviewedRevision = revision
+                record.managedSecrets = Set(secrets.keys)
+                record.updatedAt = Date()
+                try await provisioningStore.save(record)
+            } catch {
+                failures.append("\(record.repo.fullName): \(ErrorExplainer.explain(error).message)")
+            }
+        }
+        if !failures.isEmpty { lastError = "Autonomous workflow update failed for " + failures.joined(separator: "; ") }
+    }
+
     func reconcileAutonomousConnectorSecrets() async {
         guard let app, let github = app.github.client else { return }
-        let repos = Set(jobs.compactMap(\.targetRepo))
+        let records = await provisioningStore.loadAll()
         var failures: [String] = []
-        for repo in repos {
+        for var record in records {
             do {
                 if let value = app.connectors.autonomousSecretsJSON() {
-                    try await github.putActionsSecret(repo, name: "MAIPAG_MCP_SECRETS", value: value)
+                    try await github.putActionsSecret(record.repo, name: "MAIPAG_MCP_SECRETS", value: value)
+                    record.managedSecrets.insert("MAIPAG_MCP_SECRETS")
                 } else {
-                    try await github.deleteActionsSecret(repo, name: "MAIPAG_MCP_SECRETS")
+                    try await github.deleteActionsSecret(record.repo, name: "MAIPAG_MCP_SECRETS")
+                    record.managedSecrets.remove("MAIPAG_MCP_SECRETS")
                 }
+                record.updatedAt = Date()
+                try await provisioningStore.save(record)
             } catch {
-                failures.append("\(repo.fullName): \(error.localizedDescription)")
+                failures.append("\(record.repo.fullName): \(ErrorExplainer.explain(error).message)")
             }
         }
         lastError = failures.isEmpty ? nil : "Autonomous secret cleanup failed for " + failures.joined(separator: "; ")
@@ -521,15 +573,81 @@ final class JobCoordinator {
 
     func cleanupAllAutonomousSecrets() async {
         guard let app, let github = app.github.client else { return }
-        let names = ["MAIPAG_APP_ID", "MAIPAG_APP_PRIVATE_KEY", "OPENROUTER_API_KEY", "MAIPAG_MCP_SECRETS"]
+        let known = Set(["MAIPAG_APP_ID", "MAIPAG_APP_PRIVATE_KEY", "OPENROUTER_API_KEY", "MAIPAG_MCP_SECRETS"])
+        let records = await provisioningStore.loadAll()
         var failures: [String] = []
-        for repo in Set(jobs.compactMap(\.targetRepo)) {
-            for name in names {
-                do { try await github.deleteActionsSecret(repo, name: name) }
-                catch { failures.append("\(repo.fullName) / \(name): \(error.localizedDescription)") }
+        for record in records {
+            var failed = false
+            for name in record.managedSecrets.union(known) {
+                do { try await github.deleteActionsSecret(record.repo, name: name) }
+                catch {
+                    failed = true
+                    failures.append("\(record.repo.fullName) / \(name): \(ErrorExplainer.explain(error).message)")
+                }
             }
+            if !failed { try? await provisioningStore.delete(record.id) }
         }
         lastError = failures.isEmpty ? nil : "Autonomous secret cleanup failed for " + failures.joined(separator: "; ")
+    }
+
+    /// Repos set up by builds before the record existed are found by their secret names and
+    /// caller workflow, and added so later cleanups and sign-in changes reach them too.
+    func migrateAutonomousLedger() async {
+        guard let app, let github = app.github.client else { return }
+        let repos = app.github.repos.map(\.ref)
+        var branches: [RepoRef: String] = [:]
+        for repo in app.github.repos { branches[repo.ref] = repo.defaultBranch }
+        let defaultBranches = branches
+        let existing = await provisioningStore.loadAll()
+        let result = await AutonomousSecretLedger.migrate(
+            repos: repos, existing: existing,
+            secretNames: { repo in try await github.actionsSecretNames(repo) },
+            // A missing caller file is an expected "no"; the secret-name check above already
+            // reported any access problem for this repo.
+            hasCaller: { repo in (try? await github.fileContents(repo, path: AutonomousSetup.callerPath, ref: defaultBranches[repo] ?? "main")) != nil }
+        )
+        for record in result.added {
+            do { try await provisioningStore.save(record) }
+            catch { lastError = "Couldn't record \(record.repo.fullName)'s Autonomous secrets: \(ErrorExplainer.explain(error).message)" }
+        }
+        if !result.added.isEmpty { app.sync.request() }
+        if !result.failures.isEmpty {
+            lastError = "Couldn't check these repos for old Autonomous secrets: " + result.failures.prefix(5).joined(separator: "; ") + ". Tap Find repos with old Autonomous secrets to retry."
+        }
+        UserDefaults.standard.set(true, forKey: Self.ledgerMigratedKey)
+    }
+
+    static let ledgerMigratedKey = "autonomousLedgerMigrated"
+
+    /// After the OpenRouter key or the GitHub app's key changes, every recorded repo gets the new
+    /// values, so no repo keeps a revoked or old credential.
+    func rotateAutonomousSecrets() async {
+        guard let app, let github = app.github.client, let credentials = app.github.credentials else { return }
+        let records = await provisioningStore.loadAll()
+        guard !records.isEmpty else { return }
+        var values = [
+            "MAIPAG_APP_ID": String(credentials.appID),
+            "MAIPAG_APP_PRIVATE_KEY": credentials.privateKeyPEM,
+        ]
+        if let key = app.openRouter.apiKey, app.settings.autonomousEnabled { values["OPENROUTER_API_KEY"] = key }
+        if let connectors = app.connectors.autonomousSecretsJSON() { values["MAIPAG_MCP_SECRETS"] = connectors }
+        if !app.settings.autonomousEnabled { values = [:] }
+        let result = await AutonomousSecretLedger.rotate(
+            records: records, values: values,
+            put: { repo, name, value in try await github.putActionsSecret(repo, name: name, value: value) },
+            delete: { repo, name in try await github.deleteActionsSecret(repo, name: name) }
+        )
+        for record in result.records {
+            do { try await provisioningStore.save(record) }
+            catch { lastError = "Couldn't update the record for \(record.repo.fullName): \(ErrorExplainer.explain(error).message)" }
+        }
+        app.sync.request()
+        lastError = result.failures.isEmpty ? nil : "Updating Autonomous secrets failed for " + result.failures.joined(separator: "; ") + ". Retry from Settings."
+    }
+
+    func retryPendingSecretCleanup() async {
+        if app?.openRouter.isSignedIn == true, app?.settings.autonomousEnabled == true { await rotateAutonomousSecrets() }
+        else { await cleanupAllAutonomousSecrets() }
     }
 
     private func dispatch(_ job: JobRecord) async throws {

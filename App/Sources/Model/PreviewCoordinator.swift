@@ -27,8 +27,12 @@ final class PreviewCoordinator {
             resolvedCommit = commit
             let workspace = RepoWorkspace(repo: repo.ref, branch: repo.branch, commit: commit, github: github, store: app!.snapshots)
             let entries = try await workspace.tree().entries
-            let packageData = try? await github.fileContents(repo.ref, path: "package.json", ref: commit)
-            guard let detected = WebProjectDetector.detect(paths: entries.map(\.path), packageJSON: packageData) else { throw WebPreviewError.noWebEntryPoint }
+            let paths = entries.map(\.path)
+            let packagePath = paths.contains("package.json") ? "package.json" : WebProjectDetector.packageFolder(paths: paths).map { "\($0)/package.json" }
+            // A missing package.json just means "no build script": the detector then uses npm run build.
+            var packageData: Data?
+            if let packagePath { packageData = try? await github.fileContents(repo.ref, path: packagePath, ref: commit) }
+            guard let detected = WebProjectDetector.detect(paths: paths, packageJSON: packageData) else { throw WebPreviewError.noWebEntryPoint }
             let destination = root.appendingPathComponent("\(repo.ref.owner)-\(repo.ref.name)-\(commit.prefix(12))", isDirectory: true)
             try? FileManager.default.removeItem(at: destination)
             try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
@@ -47,7 +51,7 @@ final class PreviewCoordinator {
                 let paths = Self.relativeFiles(destination)
                 guard let built = WebProjectDetector.detect(paths: paths), built.kind != .buildArtifact || paths.contains(built.entryPath) else { throw WebPreviewError.missingResource("index.html in the preview artifact") }
                 project = built
-                manifest = PublishedPreviewManifest(entryPath: built.entryPath, files: Set(paths))
+                manifest = PublishedPreviewManifest(entryPath: built.entryPath, files: Set(paths), allowedHTTPSHosts: app.settings.previewAllowedHosts[repo.ref.fullName] ?? [])
             } else {
                 buildProject = nil
                 let prefix = detected.rootPath.isEmpty ? "" : detected.rootPath + "/"
@@ -73,7 +77,7 @@ final class PreviewCoordinator {
                 let entryPath = detected.entryPath.split(separator: "/").last.map(String.init) ?? "index.html"
                 guard publishedPaths.contains(entryPath) else { throw WebPreviewError.missingResource(entryPath) }
                 project = WebPreviewProject(kind: detected.kind, entryPath: entryPath, rootPath: "")
-                manifest = PublishedPreviewManifest(entryPath: entryPath, files: publishedPaths)
+                manifest = PublishedPreviewManifest(entryPath: entryPath, files: publishedPaths, allowedHTTPSHosts: app?.settings.previewAllowedHosts[repo.ref.fullName] ?? [])
             }
             directory = destination
         } catch { self.error = ErrorExplainer.explain(error).message; project = nil; manifest = nil; directory = nil }
@@ -84,7 +88,11 @@ final class PreviewCoordinator {
         return await app.jobs.startPreviewBuild(repo: repo, project: project, commit: commit) != nil
     }
 
-    func recordConsole(_ message: String) { if !message.isEmpty { console.append(String(message.prefix(1_000))); if console.count > 100 { console.removeFirst() } } }
+    func recordConsole(_ message: String) {
+        guard !message.isEmpty else { return }
+        if !console.contains(message) { console.append(String(message.prefix(1_000))) }
+        if console.count > 100 { console.removeFirst() }
+    }
 
     private static func relativeFiles(_ root: URL) -> [String] {
         guard let values = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else { return [] }

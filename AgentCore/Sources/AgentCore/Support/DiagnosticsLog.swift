@@ -40,7 +40,7 @@ public actor DiagnosticsLog {
     }
 
     public func record(error: Error, area: String, operation: String, path: String? = nil, now: Date = Date()) {
-        let explanation = ErrorExplainer.explain(error)
+        let explanation = ErrorExplainer.describe(error)
         let file = url(for: now)
         var document = load(file) ?? DiagnosticsDocument(installID: installID, updatedAt: now, entries: [])
         let cause = redactor.redact(explanation.cause)

@@ -14,11 +14,16 @@ final class ChatSession: Identifiable {
     var webEnabled = true
     var autonomous = false
     private(set) var isRunning = false
+    private(set) var mergeCheckStatus: String?
+    private(set) var mergeWarning: String?
 
     @ObservationIgnored weak var app: AppModel?
     @ObservationIgnored private var run: AgentRun?
     @ObservationIgnored private var workspace: RepoWorkspace?
     @ObservationIgnored private var changeWorkspace: ChangeWorkspace?
+    /// What MAIPA-G last put on the chat computer, so unchanged staged edits aren't sent again.
+    @ObservationIgnored private var lastComputerSync: String?
+    @ObservationIgnored private var lastComputerCheck: Date?
     @ObservationIgnored private var changeSession: ChangeSession?
     @ObservationIgnored private var pendingTurn: AssistantTurn?
     @ObservationIgnored private var flushScheduled = false
@@ -45,7 +50,7 @@ final class ChatSession: Identifiable {
                 if value.isEmpty { try await store.deleteItem(at: path) }
                 else { try await store.saveDocument(value, at: path) }
             } catch {
-                // The chat itself still remains on the phone; the next edit retries this draft.
+                _ = app?.report(error, area: "draft", operation: "save chat draft", path: path)
             }
         }
     }
@@ -100,6 +105,29 @@ final class ChatSession: Identifiable {
         start()
     }
 
+    func resumeInterruptedTurn() {
+        guard !isRunning, lastTurn?.status == .running else { return }
+        start()
+    }
+
+    func stagedDiff() async -> String {
+        await changeWorkspace?.stagedDiff() ?? "No staged changes in this turn."
+    }
+
+    func branchDiff() async -> String {
+        guard let app, let github = app.github.client, let repo = chat.repo else { return "Connect GitHub to load the branch diff." }
+        let branch = (chat.saveReceipts ?? []).last { $0.pullRequest != nil && $0.resolution == nil }?.branch ?? repo.branch
+        do {
+            let comparison = try await github.compare(repo.ref, base: repo.defaultBranch, head: branch)
+            if comparison.files.isEmpty { return "No branch changes." }
+            return String(comparison.files.map { file in
+                "--- \(file.status): \(file.path)\n" + (file.patch ?? "GitHub did not provide a text patch for this file.")
+            }.joined(separator: "\n\n").prefix(200_000))
+        } catch {
+            return ErrorExplainer.explain(error).message
+        }
+    }
+
     /// Answers the AI's numbered questions and lets it carry on.
     func answer(_ answers: [String]) {
         guard !isRunning, var turn = lastTurn, let pending = turn.pendingQuestions else { return }
@@ -125,6 +153,55 @@ final class ChatSession: Identifiable {
             return
         }
         run?.cancel()
+    }
+
+    /// Runs any saved answer again, rewinding messages after it but preserving the preceding user
+    /// message and all tool results that belong to earlier turns.
+    func retryAnswer(_ messageID: UUID) {
+        guard !isRunning, let index = chat.messages.firstIndex(where: { $0.id == messageID }),
+              chat.messages[index].assistantTurn != nil else { return }
+        chat.messages.removeSubrange(index...)
+        chat.messages.append(ChatMessage(body: .assistant(AssistantTurn())))
+        chat.compactedSummary = nil
+        chat.compactedThroughMessageID = nil
+        touch()
+        start()
+    }
+
+    func editAndResend(_ messageID: UUID, text: String) {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isRunning, !clean.isEmpty,
+              let index = chat.messages.firstIndex(where: { $0.id == messageID }),
+              case .user(let original) = chat.messages[index].body else { return }
+        chat.messages.removeSubrange(index...)
+        chat.messages.append(ChatMessage(body: .user(UserMessage(text: clean, attachments: original.attachments))))
+        chat.messages.append(ChatMessage(body: .assistant(AssistantTurn())))
+        chat.compactedSummary = nil
+        chat.compactedThroughMessageID = nil
+        touch()
+        start()
+    }
+
+    func compact() {
+        guard !isRunning, chat.messages.count > 4 else { return }
+        let throughIndex = chat.messages.count - 3
+        let older = chat.messages[...throughIndex]
+        var lines: [String] = []
+        for message in older {
+            switch message.body {
+            case .user(let user):
+                if !user.text.isEmpty { lines.append("Person: " + String(user.text.prefix(1_500))) }
+            case .assistant(let turn):
+                let text = turn.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n")
+                if !text.isEmpty { lines.append("MAIPA-G: " + String(text.prefix(2_500))) }
+            }
+            if lines.joined(separator: "\n").count >= 18_000 { break }
+        }
+        guard !lines.isEmpty else { return }
+        chat.compactedSummary = String(lines.joined(separator: "\n\n").prefix(20_000))
+        chat.compactedThroughMessageID = chat.messages[throughIndex].id
+        appendNotice("Compacted older messages for future AI requests. The full chat remains visible.")
+        touch()
     }
 
     /// Runs the last message again, after a failure.
@@ -190,16 +267,44 @@ final class ChatSession: Identifiable {
         touch()
     }
 
-    func addLastSave() async {
+    func addLastSave(force: Bool = false) async {
         guard let app, let github = app.github.client, var receipts = chat.saveReceipts,
-              let index = receipts.indices.last, receipts[index].pullRequest != nil, receipts[index].resolution == nil else { return }
+              let index = receipts.indices.last, let pull = receipts[index].pullRequest, receipts[index].resolution == nil else { return }
         do {
+            let result = try await GitHubRunWatcher(github: github, maximumPolls: 1, discoveryPolls: 1, sleeper: {}).wait(
+                repo: receipts[index].repo,
+                commit: receipts[index].savedCommit,
+                branch: receipts[index].branch,
+                redacting: RedactingLogger()
+            )
+            if result.succeeded {
+                mergeCheckStatus = result.discovery == .confirmedNoChecks ? "No automatic checks" : "Checks passed"
+            } else {
+                let failed = result.runs.filter { $0.conclusion != nil && !["success", "neutral", "skipped"].contains($0.conclusion!) }.map(\.name)
+                    + result.checks.filter { $0.conclusion != nil && !["success", "neutral", "skipped"].contains($0.conclusion!) }.map(\.name)
+                    + result.statuses.filter { $0.state != "success" }.map(\.context)
+                mergeCheckStatus = failed.isEmpty ? "Checks are pending or did not start" : "Failing: " + failed.joined(separator: ", ")
+                if !force {
+                    mergeWarning = "\(mergeCheckStatus ?? "Checks did not pass"). Add pull request #\(pull.number) anyway?"
+                    return
+                }
+            }
             try await GitHubChangeService(github: github).addIt(receipts[index])
             receipts[index].resolution = "added"
             chat.saveReceipts = receipts
+            mergeWarning = nil
             appendNotice("Added the pull request and removed its side branch.")
-        } catch { appendNotice("Couldn't add it: \(error)") }
+        } catch {
+            let explanation = ErrorExplainer.explain(error)
+            if let api = error as? GitHubAPIError, api.status == 409 || api.status == 422 {
+                appendNotice("GitHub could not merge pull request #\(pull.number): \(explanation.cause) Open the pull request, resolve the named conflicting files, then tap Add it again. \(pull.htmlURL)")
+            } else {
+                appendNotice("Couldn’t add pull request #\(pull.number): \(explanation.message)")
+            }
+        }
     }
+
+    func cancelMergeWarning() { mergeWarning = nil }
 
     func throwAwayLastSave() async {
         guard let app, let github = app.github.client, var receipts = chat.saveReceipts,
@@ -269,10 +374,19 @@ final class ChatSession: Identifiable {
         tools.append(contentsOf: app.connectors.agentTools())
         tools.append(AddMemoryTool(store: app.memories.store))
         tools.append(EditMemoryTool(store: app.memories.store))
+        if let github = app.github.client {
+            tools.append(CreateRepositoryTool(github: github))
+            tools.append(ReadOtherRepositoryFileTool(github: github, repositories: app.github.repos))
+            tools.append(LiveStatusTool { [weak app] in
+                await MainActor.run { app?.liveStatusText() ?? "MAIPA-G is no longer open." }
+            })
+        }
         if !allAttachments.filter({ $0.kind == .text }).isEmpty {
             tools.append(ReadAttachmentTool(attachments: allAttachments, store: app.attachmentStore))
         }
         var repoContext: SystemPrompt.RepoContext?
+        var repoHooks: [RepoHook] = []
+        var hookProblems: [String] = []
         if let repo = chat.repo {
             guard let github = app.github.client else {
                 fail(.signInNeeded, "Connect GitHub so MAIPA-G can read \(repo.ref.fullName).")
@@ -294,10 +408,13 @@ final class ChatSession: Identifiable {
                 }
                 let service = GitHubChangeService(github: github)
                 let rules = await service.resolveRules(in: workspace, directSaveSetting: app.settings.savesDirectly(to: repo.ref))
+                let loadedHooks = await RepoHooks.load(from: workspace)
+                repoHooks = loadedHooks.hooks
+                hookProblems = loadedHooks.problems
                 let saves = changeSession ?? ChangeSession(receipts: chat.saveReceipts ?? [])
                 changeSession = saves
                 let repoTools: [any AgentTool] = [
-                    ListFilesTool(workspace: workspace), SearchCodeTool(workspace: workspace), ReadFileTool(workspace: workspace), ReadRepoFileTool(github: github),
+                    ListFilesTool(workspace: workspace), SearchCodeTool(workspace: workspace), ReadFileTool(workspace: workspace), ReadRepoFileTool(github: github), LoadRepoRulesTool(documents: rules.documents),
                     CreateFileTool(workspace: changes, authorization: changeAuthorization, rules: rules), EditFileTool(workspace: changes, authorization: changeAuthorization, rules: rules), DeleteFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
                     SaveChangesTool(workspace: changes, service: service, session: saves, selectedBranch: workingBranch, defaultBranch: repo.defaultBranch, rules: rules),
                 ]
@@ -315,7 +432,39 @@ final class ChatSession: Identifiable {
                 return
             }
         }
-        let computer = await computerContext(app: app, repo: repoContext)
+        let computerNote = await prepareComputer(app: app, repo: repoContext)
+        var canSyncStaged = false
+        if let repoContext, let workspace = changeWorkspace, let control = app.connectors.computerControl(), control.commandTool != nil, app.openRouter.supportsTools(chat.model) {
+            tools.append(SyncStagedToComputerTool(
+                control: control, workspace: workspace,
+                homePath: "repos/\(repoContext.ref.owner)/\(repoContext.ref.name)",
+                cloneURL: repoContext.isPrivate ? nil : "https://github.com/\(repoContext.ref.owner)/\(repoContext.ref.name).git",
+                commit: repoContext.commit
+            ))
+            canSyncStaged = true
+        }
+        // Hooks from the repo's .kiro/hooks run after the tools they listen to. Command hooks run
+        // on the chat computer, in the repo's copy, after the staged files are put there.
+        var hookRunner: HookedTool.CommandRunner?
+        if let repoContext, let workspace = changeWorkspace, let control = app.connectors.computerControl(), control.commandTool != nil {
+            let homePath = "repos/\(repoContext.ref.owner)/\(repoContext.ref.name)"
+            let cloneURL: String? = repoContext.isPrivate ? nil : "https://github.com/\(repoContext.ref.owner)/\(repoContext.ref.name).git"
+            let commit = repoContext.commit
+            hookRunner = { command in
+                _ = try await control.syncStagedChanges(homePath: homePath, cloneURL: cloneURL, commit: commit, changes: await workspace.stagedChanges())
+                return try await control.run("cd \"$HOME/\(homePath)\" && \(command)")
+            }
+        }
+        if let control = app.connectors.computerControl(), control.commandTool != nil, app.openRouter.supportsTools(chat.model) {
+            tools.append(ComputerTaskTool(control: control, homePath: repoContext.map { "repos/\($0.ref.owner)/\($0.ref.name)" }))
+        }
+        tools = HookedTool.wrap(tools, hooks: repoHooks, runCommand: hookRunner)
+        for problem in hookProblems {
+            _ = app.report(RepoHookProblem(message: problem), area: "hooks", operation: "read repo hooks")
+        }
+        var computer = await computerContext(app: app, repo: repoContext, stagedPatch: await changeWorkspace?.stagedDiff())
+        computer?.appNote = computerNote
+        computer?.canSyncStaged = canSyncStaged
 
         let hasRepo = chat.repo != nil
         var difficulty = TaskDifficulty.estimate(lastMessage, hasRepo: hasRepo)
@@ -338,24 +487,39 @@ final class ChatSession: Identifiable {
         if let imageModel = app.openRouter.models.first(where: \.generatesImages) {
             tools.append(GenerateImageTool(client: app.openRouter.client, store: app.attachmentStore, model: imageModel.id, maySpend: !imageModel.isFree))
         }
+        let fallbackModels = app.openRouter.models.filter { model in
+            model.id != route.model && model.isChatModel
+                && (!hasRepo || model.supportsTools)
+                && (!hasImageInput || model.acceptsImages)
+                && (!route.isFree || model.isFree)
+        }.prefix(3).map(\.id)
         let input = AgentTurnInput(
             chat: chat,
             route: route,
-            systemPrompt: SystemPrompt.make(userLogin: app.github.login, repo: repoContext, computer: computer, memories: chat.memoryContext),
+            systemPrompt: SystemPrompt.make(
+                userLogin: app.github.login,
+                repo: repoContext,
+                computer: computer,
+                memories: chat.memoryContext,
+                connectedRepositories: app.github.repos.map(\.fullName)
+            ),
             tools: tools,
             allowTools: app.openRouter.supportsTools(chat.model),
             spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil,
             attachmentData: attachmentData,
-            serverTools: webEnabled && app.openRouter.accountState.paidAllowed() ? OpenRouterWebTools.paid : []
+            serverTools: webEnabled && app.openRouter.accountState.paidAllowed() ? OpenRouterWebTools.paid : [],
+            fallbackModels: fallbackModels,
+            requiresInitialSpendApproval: !route.isFree
         )
         let account = app.openRouter
-        let environment = AgentEnvironment(
+        var environment = AgentEnvironment(
             openRouter: OpenRouterClient(transport: app.transport, apiKey: apiKey),
             freeRoute: {
                 ModelRouter.route(choice: .free, difficulty: judgedDifficulty, thinking: thinking, account: AccountState(), catalogue: catalogue, requiresImageInput: hasImageInput)
             },
             onOutOfCredits: { await account.markOutOfCredits() }
         )
+        environment.onModelRestricted = { model in await account.markRestricted(model) }
 
         let run = AgentLoop.start(input, environment: environment)
         self.run = run
@@ -448,22 +612,66 @@ final class ChatSession: Identifiable {
     /// the chosen one, or for Automatic the first one on sprites.dev. Only a connector that is
     /// connected right now counts, as only those give the AI their tools.
     private func computerConnector(_ app: AppModel) -> ConnectorConfiguration? {
-        guard !app.settings.chatComputerOff else { return nil }
-        let ready = app.connectors.connected.filter { app.connectors.states[$0.id] == .connected }
-        if let chosen = app.settings.chatComputerServer {
-            return ready.first { $0.serverID == chosen }
+        app.connectors.computerConnector()
+    }
+
+    /// Before the AI starts, MAIPA-G's own code checks the machine with a real command, creates
+    /// it again when it is missing, takes a provider checkpoint when the service has one, and puts
+    /// the phone-staged changes onto its copy of the repo. Returns what the AI is told.
+    private func prepareComputer(app: AppModel, repo: SystemPrompt.RepoContext?) async -> String? {
+        guard app.openRouter.supportsTools(chat.model), let control = app.connectors.computerControl(), control.commandTool != nil else { return nil }
+        var notes: [String] = []
+        if lastComputerCheck.map({ Date().timeIntervalSince($0) > 600 }) ?? true {
+            do {
+                switch try await control.ensureMachine(allowCreate: true) {
+                case .healthy(let output):
+                    notes.append("MAIPA-G checked `\(control.machine)` with a real command before this message; it answered.")
+                    if output.contains("maipa-g-tools-missing") {
+                        notes.append("MAIPA-G's verified tool setup hasn't finished on this machine (no ~/.maipa-g/ready). Use the tools that are there; if one is missing, say which, and suggest Settings → Check everything → Set up tools.")
+                    }
+                case .recreated:
+                    notes.append("`\(control.machine)` was missing, so MAIPA-G's own code created it again with that exact name and checked it with a real command.")
+                    let revision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
+                    do { notes.append(try await control.startVerifiedSetup(revision: revision)) }
+                    catch { notes.append("MAIPA-G couldn't start its verified tool setup: \(ErrorExplainer.explain(error).message)") }
+                }
+                lastComputerCheck = Date()
+            } catch {
+                lastComputerCheck = nil
+                return "MAIPA-G's own check of `\(control.machine)` failed before this message: \(ErrorExplainer.explain(error).message) Tell the person; don't pretend commands ran."
+            }
         }
-        return ready.first { connector in
-            guard let host = connector.endpoint?.host?.lowercased() else { return false }
-            return host == "sprites.dev" || host.hasSuffix(".sprites.dev")
+        if let repo, let workspace = changeWorkspace {
+            let changes = await workspace.stagedChanges()
+            let fingerprint = changes.map { "\($0.path):\($0.hashValue)" }.joined(separator: "|") + repo.commit
+            if !changes.isEmpty, fingerprint != lastComputerSync {
+                if control.checkpointTool != nil {
+                    do {
+                        _ = try await control.createCheckpoint(comment: "MAIPA-G before syncing staged changes for \(repo.ref.fullName)")
+                        notes.append("MAIPA-G took a provider checkpoint of `\(control.machine)` before changing its copy of the repo.")
+                    } catch {
+                        notes.append("A provider checkpoint couldn't be taken: \(ErrorExplainer.explain(error).message)")
+                    }
+                } else {
+                    notes.append("This computer service has no checkpoint tool, so no checkpoint was taken.")
+                }
+                do {
+                    let status = try await control.syncStagedChanges(homePath: "repos/\(repo.ref.owner)/\(repo.ref.name)", cloneURL: repo.isPrivate ? nil : "https://github.com/\(repo.ref.owner)/\(repo.ref.name).git", commit: repo.commit, changes: changes)
+                    lastComputerSync = fingerprint
+                    notes.append("MAIPA-G's own code already made ~/repos/\(repo.ref.owner)/\(repo.ref.name) match the phone-staged changes. git status:\n\(status.isEmpty ? "clean" : status)")
+                } catch {
+                    notes.append("MAIPA-G couldn't put the staged changes on the computer: \(ErrorExplainer.explain(error).message)")
+                }
+            }
         }
+        return notes.joined(separator: "\n")
     }
 
     /// What the AI is told about this chat's computer, or nil when the chat has none.
-    private func computerContext(app: AppModel, repo: SystemPrompt.RepoContext?) async -> SystemPrompt.ComputerContext? {
+    private func computerContext(app: AppModel, repo: SystemPrompt.RepoContext?, stagedPatch: String? = nil) async -> SystemPrompt.ComputerContext? {
         guard app.openRouter.supportsTools(chat.model), let connector = computerConnector(app) else { return nil }
         let machine = app.settings.chatComputerMachineName
-        guard let repo else { return SystemPrompt.ComputerContext(service: connector.displayName, machine: machine) }
+        guard let repo else { return SystemPrompt.ComputerContext(service: connector.displayName, machine: machine, approximateHourlyCost: app.settings.chatComputerHourlyCost) }
         let owner = repo.ref.owner
         let name = repo.ref.name
         let cloneURL = "https://github.com/\(owner)/\(name).git"
@@ -474,7 +682,9 @@ final class ChatSession: Identifiable {
             cloneURL: cloneURL,
             branch: repo.branch,
             commit: repo.commit,
-            repoPath: "$HOME/repos/\(owner)/\(name)"
+            repoPath: "$HOME/repos/\(owner)/\(name)",
+            stagedPatch: stagedPatch,
+            approximateHourlyCost: app.settings.chatComputerHourlyCost
         )
     }
 

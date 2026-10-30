@@ -1,4 +1,7 @@
 import Foundation
+#if os(Linux)
+import Glibc
+#endif
 
 public struct ProcessResult: Sendable, Hashable {
     public var exitCode: Int32
@@ -38,8 +41,19 @@ public enum BoundedProcess {
         defer { try? output.close(); try? errors.close() }
 
         let process = Process()
+        #if os(Linux)
+        let setsid = "/usr/bin/setsid"
+        if manager.isExecutableFile(atPath: setsid) {
+            process.executableURL = URL(fileURLWithPath: setsid)
+            process.arguments = [executable] + arguments
+        } else {
+            process.executableURL = URL(fileURLWithPath: executable)
+            process.arguments = arguments
+        }
+        #else
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        #endif
         process.currentDirectoryURL = directory
         if replacingEnvironment {
             process.environment = environment
@@ -73,9 +87,24 @@ public enum BoundedProcess {
         let wasCancelled = Task.isCancelled
         let timedOut = process.isRunning && !wasCancelled
         if process.isRunning {
+            #if os(Linux)
+            if manager.isExecutableFile(atPath: "/usr/bin/setsid") {
+                _ = Glibc.kill(-process.processIdentifier, SIGTERM)
+            } else {
+                process.terminate()
+            }
+            #else
             process.terminate()
+            #endif
             for _ in 0..<20 where process.isRunning { try? await Task.sleep(nanoseconds: 50_000_000) }
-            if process.isRunning { process.interrupt() }
+            if process.isRunning {
+                #if os(Linux)
+                if manager.isExecutableFile(atPath: "/usr/bin/setsid") { _ = Glibc.kill(-process.processIdentifier, SIGKILL) }
+                else { process.interrupt() }
+                #else
+                process.interrupt()
+                #endif
+            }
         }
         process.waitUntilExit()
         if wasCancelled { throw CancellationError() }
@@ -202,6 +231,9 @@ public struct ProcessTool: AgentTool {
             "properties": [
                 "command": ["type": "string"],
                 "timeout_seconds": ["type": "integer", "minimum": 1, "maximum": 900],
+                "background": ["type": "boolean", "description": "Keep a long command running and return a task id."],
+                "operation": ["type": "string", "enum": ["run", "status", "stop"]],
+                "task_id": ["type": "string"],
             ],
             "required": ["command"],
             "additionalProperties": false,
@@ -220,20 +252,42 @@ public struct ProcessTool: AgentTool {
     public func runningSummary(for arguments: JSONValue) -> String { "Running a command…" }
 
     public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
+        if let operation = arguments.optionalString("operation"), operation != "run" { return nil }
         guard let command = arguments.optionalString("command"), Self.needsApproval(command) else { return nil }
         return ToolApprovalRequest(question: "Allow MAIPA-G to run this command? It may execute code or change files.\n\(String(command.prefix(500)))")
     }
 
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        if let control = try await control(arguments) { return control }
         let command = try arguments.requiredString("command")
         if Self.needsApproval(command) {
             throw ToolApprovalRequired(ToolApprovalRequest(question: "Allow MAIPA-G to run this command? It may execute code or change files.\n\(String(command.prefix(500)))"))
         }
-        return try await execute(arguments: arguments, approved: false, progress: progress)
+        return try await runOrBackground(arguments: arguments, approved: false, progress: progress)
     }
 
     public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
-        try await execute(arguments: arguments, approved: true, progress: progress)
+        if let control = try await control(arguments) { return control }
+        return try await runOrBackground(arguments: arguments, approved: true, progress: progress)
+    }
+
+    private func control(_ arguments: JSONValue) async throws -> ToolOutput? {
+        switch arguments.optionalString("operation") ?? "run" {
+        case "run": return nil
+        case "status": return await BackgroundCommandRegistry.shared.status(try arguments.requiredString("task_id"))
+        case "stop": return await BackgroundCommandRegistry.shared.stop(try arguments.requiredString("task_id"))
+        default: throw ToolInputError("Unknown command operation.")
+        }
+    }
+
+    private func runOrBackground(arguments: JSONValue, approved: Bool, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        if arguments["background"]?.boolValue == true {
+            let id = await BackgroundCommandRegistry.shared.start {
+                try await execute(arguments: arguments, approved: approved, progress: { _ in })
+            }
+            return ToolOutput(forModel: "Background command started with task id \(id). Use run_shell operation status or stop with this task_id.", summary: "Started background command")
+        }
+        return try await execute(arguments: arguments, approved: approved, progress: progress)
     }
 
     static func needsApproval(_ command: String) -> Bool {
@@ -434,7 +488,30 @@ public struct StdioMCPTool: AgentTool {
 
     public func runningSummary(for arguments: JSONValue) -> String { "Using \(server.id)…" }
 
+    /// A raw JSON-RPC call gets the same typed approval as a named connector tool: `tools/call`
+    /// is judged by the tool it names and its arguments; reads pass; any other method asks.
+    public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
+        Self.approval(serverID: server.id, arguments: arguments)
+    }
+
+    static func approval(serverID: String, arguments: JSONValue) -> ToolApprovalRequest? {
+        let method = arguments["method"]?.stringValue ?? ""
+        let readMethods: Set<String> = ["initialize", "notifications/initialized", "ping", "tools/list", "resources/list", "resources/read", "resources/templates/list", "prompts/list", "prompts/get", "completion/complete"]
+        if readMethods.contains(method) { return nil }
+        if method == "tools/call" {
+            let toolName = arguments["params"]?["name"]?.stringValue ?? ""
+            let definition = ConnectorToolDefinition(serverID: serverID, serverName: serverID, originalName: toolName.isEmpty ? "unnamed" : toolName)
+            return ConnectorActionPolicy.approval(for: definition, arguments: arguments["params"]?["arguments"] ?? .object([:]))
+        }
+        return ToolApprovalRequest(question: "Allow \(String(serverID.prefix(60))) to handle the request “\(String(method.prefix(80)))”? MAIPA-G can't tell what it changes.")
+    }
+
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        if let approval = Self.approval(serverID: server.id, arguments: arguments) { throw ToolApprovalRequired(approval) }
+        return try await runApproved(arguments: arguments, progress: progress)
+    }
+
+    public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let method = try arguments.requiredString("method")
         let request: JSONValue = [
             "jsonrpc": "2.0", "id": 1, "method": .string(method),
@@ -453,11 +530,16 @@ public struct StdioMCPTool: AgentTool {
             let before = try await broker.snapshot()
             let result: ProcessResult
             do {
+                #if os(Linux)
+                let sandbox = try ConnectorSandbox.invocation(command: [server.executable] + server.arguments, directory: isolation)
                 result = try await BoundedProcess.run(
-                    executable: server.executable, arguments: server.arguments, directory: isolation,
+                    executable: sandbox.executable, arguments: sandbox.arguments, directory: isolation,
                     environment: BoundedProcess.minimalChildEnvironment(home: isolation, additions: server.environment),
                     replacingEnvironment: true, stdin: input, timeout: 120, outputLimit: 80_000
                 )
+                #else
+                throw ProcessFailure.unavailable
+                #endif
             } catch {
                 try? await broker.finish(before)
                 throw error

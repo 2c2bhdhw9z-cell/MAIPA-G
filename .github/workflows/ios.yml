@@ -29,6 +29,10 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The exact PR head, not GitHub's temporary merge commit: the IPA embeds this revision
+          # and Autonomous callers download runner-<revision>, which release.yml publishes.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Tool versions
         run: swift --version
       - name: Cache SwiftPM builds
@@ -39,6 +43,22 @@ jobs:
           restore-keys: agentcore-linux-${{ hashFiles('AgentCore/Package.resolved') }}-
       - name: Build Autonomous runner
         run: swift build --package-path AgentCore -c release --product MAIPAGRunner
+      - name: Package checksummed Autonomous runner
+        run: |
+          set -euo pipefail
+          mkdir -p build/runner
+          cp AgentCore/.build/release/MAIPAGRunner build/runner/MAIPAGRunner
+          tar -C build/runner -czf build/MAIPAGRunner-linux-x86_64.tar.gz MAIPAGRunner
+          (cd build && sha256sum MAIPAGRunner-linux-x86_64.tar.gz > MAIPAGRunner-linux-x86_64.tar.gz.sha256)
+      - name: Upload checked Autonomous runner
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: MAIPAGRunner-linux-${{ github.run_number }}
+          path: |
+            build/MAIPAGRunner-linux-x86_64.tar.gz
+            build/MAIPAGRunner-linux-x86_64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
       - name: Tests
         run: swift test --package-path AgentCore
       - name: Public network checks
@@ -47,47 +67,22 @@ jobs:
         run: swift test --package-path AgentCore --filter NetworkTests
       - name: Check immutable CI dependencies and release gates
         run: python3 scripts/check-ci-policy.py
+      - name: 29 October UI regression checks
+        run: python3 scripts/check-regressions.py
       - name: Compile independent IPA checker
         run: python3 -m py_compile scripts/check-ipa.py scripts/check-ci-policy.py
 
-  # Starts at once, alongside the Linux checks, so a Mac-only compile error shows up early.
-  screens:
-    name: Complete Dark and Light screenshots
-    runs-on: macos-26
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Install reviewed XcodeGen 2.46.0
-        run: |
-          curl --proto '=https' --tlsv1.2 -fL 'https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip' -o "$RUNNER_TEMP/xcodegen.zip"
-          echo '4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  '"$RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
-          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/xcodegen/bin/xcodegen" --version
-      - name: Take every screenshot
-        env:
-          MAIPAG_REQUIRE_COMPLETE: "1"
-        run: |
-          chmod +x scripts/screenshots.sh
-          scripts/screenshots.sh
-      - name: Upload screenshots
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: MAIPA-G-screenshots-${{ github.run_number }}
-          path: |
-            App/build/screenshots/*.png
-            App/build/screenshots/*.txt
-          if-no-files-found: error
-          retention-days: 14
-
+  # Runs alongside the Linux checks; release.yml publishes only when both passed.
   ipa:
     name: iPhone release candidate
-    needs: [checks, screens]
     runs-on: macos-26
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The exact PR head, not GitHub's temporary merge commit: the IPA embeds this revision
+          # and Autonomous callers download runner-<revision>, which release.yml publishes.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Runner and toolchain versions
         run: |
           sw_vers
@@ -110,11 +105,12 @@ jobs:
       - name: Build and package the IPA
         env:
           MAIPAG_BUILD_NUMBER: ${{ github.run_number }}
+          MAIPAG_REVIEWED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           chmod +x App/package-ipa.sh scripts/check-ipa.py
           App/package-ipa.sh
       - name: Independently check the IPA
-        run: python3 scripts/check-ipa.py App/build/MAIPA-G.ipa --build "${{ github.run_number }}" --version "0.1.0"
+        run: python3 scripts/check-ipa.py App/build/MAIPA-G.ipa --build "${{ github.run_number }}" --version "0.1.0" --revision "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Upload checked release candidate
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:

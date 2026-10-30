@@ -119,7 +119,7 @@ final class AutomationLibrary {
         var chat = Chat(title: "Workflow maker")
         chat.messages = [.user(prompt), ChatMessage(body: .assistant(AssistantTurn()))]
         let catalogue = app.openRouter.modelsByID
-        let route = ModelRouter.route(choice: .auto, difficulty: .hard, thinking: .medium, account: app.openRouter.accountState, catalogue: catalogue)
+        let route = ModelRouter.route(choice: .free, difficulty: .hard, thinking: .medium, account: app.openRouter.accountState, catalogue: catalogue)
         let input = AgentTurnInput(
             chat: chat, route: route,
             systemPrompt: SystemPrompt.make(userLogin: app.github.login, repo: nil, agent: maker),

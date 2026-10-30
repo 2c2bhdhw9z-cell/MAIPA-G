@@ -18,10 +18,13 @@ public struct AgentTurnInput: Sendable {
     public var attachmentData: [UUID: Data]
     /// OpenRouter-run paid tools, offered alongside local tools.
     public var serverTools: [ToolSpec]
+    public var fallbackModels: [String]
+    /// Paid model requests cannot begin until the person taps the app's spend approval.
+    public var requiresInitialSpendApproval: Bool
     /// Fixed role and tool policy when this turn belongs to a named agent.
     public var agent: AgentDefinition?
 
-    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 40, spendLimit: Double? = nil, attachmentData: [UUID: Data] = [:], serverTools: [ToolSpec] = [], agent: AgentDefinition? = nil) {
+    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 40, spendLimit: Double? = nil, attachmentData: [UUID: Data] = [:], serverTools: [ToolSpec] = [], fallbackModels: [String] = [], requiresInitialSpendApproval: Bool = false, agent: AgentDefinition? = nil) {
         self.chat = chat
         self.route = route
         self.systemPrompt = systemPrompt
@@ -31,6 +34,8 @@ public struct AgentTurnInput: Sendable {
         self.spendLimit = spendLimit
         self.attachmentData = attachmentData
         self.serverTools = serverTools
+        self.fallbackModels = fallbackModels
+        self.requiresInitialSpendApproval = requiresInitialSpendApproval
         self.agent = agent
     }
 }
@@ -41,6 +46,8 @@ public struct AgentEnvironment: Sendable {
     public var freeRoute: @Sendable () -> Route
     /// Told when a paid request is refused for lack of credit, so the app can remember it.
     public var onOutOfCredits: @Sendable () async -> Void
+    /// Called with a model OpenRouter refused to MAIPA-G as app-restricted, so it can be hidden.
+    public var onModelRestricted: @Sendable (String) async -> Void = { _ in }
 
     public init(openRouter: OpenRouterClient, freeRoute: @escaping @Sendable () -> Route, onOutOfCredits: @escaping @Sendable () async -> Void) {
         self.openRouter = openRouter
@@ -93,6 +100,9 @@ public enum AgentLoop {
     public static func run(_ input: AgentTurnInput, environment: AgentEnvironment) -> AsyncStream<AgentEvent> {
         start(input, environment: environment).events
     }
+
+    /// The plain words a failed turn shows for `error`.
+    static func describe(_ error: Error) -> TurnFailure { Runner.describe(error) }
 }
 
 private struct Runner {
@@ -105,6 +115,8 @@ private struct Runner {
     let maxSteps: Int
     let spendLimit: Double?
     let attachmentData: [UUID: Data]
+    let fallbackModels: [String]
+    let requiresInitialSpendApproval: Bool
     let environment: AgentEnvironment
     let continuation: AsyncStream<AgentEvent>.Continuation
     var switchedToFree = false
@@ -133,6 +145,8 @@ private struct Runner {
         maxSteps = input.maxSteps
         spendLimit = input.spendLimit.flatMap { $0 > 0 ? $0 : nil }
         attachmentData = input.attachmentData
+        fallbackModels = input.fallbackModels.filter { $0 != input.route.model }
+        requiresInitialSpendApproval = input.requiresInitialSpendApproval
         self.environment = environment
         self.continuation = continuation
     }
@@ -169,6 +183,12 @@ private struct Runner {
                     turn.failure = TurnFailure(kind: .stepLimit, message: "I stopped after \(maxSteps) steps so this doesn't run up a bill. Tap Keep going if you want more.")
                     break
                 }
+                // Every paid run needs an explicit, typed approval before its first network call.
+                if requiresInitialSpendApproval, turn.approvedSpendUpTo == nil, (turn.usage.cost ?? 0) == 0 {
+                    turn.status = .waitingForUser
+                    turn.spendCheck = 0
+                    break
+                }
                 // "Stop and ask when a job has cost $__": checked before every request to the AI,
                 // since that is where money is spent.
                 if let spendLimit {
@@ -189,6 +209,9 @@ private struct Runner {
             stopRunningTools(reason: "Didn't finish")
             turn.status = .failed
             turn.failure = Self.describe(error)
+            if let api = error as? OpenRouterAPIError, api.kind == .appRestricted {
+                await environment.onModelRestricted(route.model)
+            }
         }
         if Task.isCancelled, turn.status == .running { turn.status = .stopped }
         emit(milestone: true)
@@ -215,6 +238,7 @@ private struct Runner {
             let (messages, trimmed) = Transcript.fit(Transcript.messages(for: chat, systemPrompt: systemPrompt, attachmentData: attachmentData), budget: route.contextBudget)
             let request = ChatCompletionRequest(
                 model: route.model,
+                models: fallbackModels.isEmpty ? nil : [route.model] + fallbackModels,
                 messages: messages,
                 tools: specs,
                 reasoningEffort: route.effort,
@@ -292,6 +316,10 @@ private struct Runner {
         step.reasoning = accumulator.reasoning
         step.reasoningDetails = accumulator.reasoningDetails
         step.model = accumulator.model ?? step.model
+        if let actual = accumulator.model, actual != route.model,
+           !turn.notices.contains(where: { $0.contains("switched to fallback AI") }) {
+            turn.notices.append("OpenRouter switched to fallback AI \(actual) because the first AI was unavailable.")
+        }
         step.usage = accumulator.usage
         step.finishReason = accumulator.finishReason
         step.citations = accumulator.citations.isEmpty ? nil : accumulator.citations
@@ -388,6 +416,13 @@ private struct Runner {
                 continue
             }
             let wasApproved: Bool
+            var pendingApproval: ToolApprovalRequest?
+            if call.questions == nil {
+                pendingApproval = await tool.approvalRequest(for: arguments)
+                if pendingApproval == nil, outsideContentSeen() {
+                    pendingApproval = await tool.approvalAfterOutsideContent(for: arguments)
+                }
+            }
             if let questions = call.questions {
                 guard let answer = questions.answers?.first else {
                     waiting = true
@@ -402,7 +437,7 @@ private struct Runner {
                     continue
                 }
                 wasApproved = true
-            } else if let approval = await tool.approvalRequest(for: arguments) {
+            } else if let approval = pendingApproval {
                 turn.steps[stepIndex].toolCalls[callIndex].questions = QuestionSet(questions: [
                     .init(text: approval.question, options: [approval.allowLabel, "Don't allow"]),
                 ])
@@ -482,6 +517,25 @@ private struct Runner {
         return waiting
     }
 
+    /// Whether anything from outside the person's own words is in the conversation: OpenRouter's
+    /// own web tools (their citations), or a finished call to a tool that brings outside content,
+    /// in this turn or an earlier one the AI still sees.
+    func outsideContentSeen() -> Bool {
+        let earlier = chat.messages.dropLast().compactMap(\.assistantTurn)
+        for candidate in earlier + [turn] {
+            for step in candidate.steps {
+                if !(step.citations ?? []).isEmpty { return true }
+                for call in step.toolCalls where call.result != nil && call.status != .waitingForUser {
+                    if tools[call.name]?.bringsOutsideContent == true || call.name.hasPrefix("mcp_") || Self.outsideContentToolNames.contains(call.name) { return true }
+                }
+            }
+        }
+        return false
+    }
+
+    /// Outside-content tools by name, for earlier turns whose tools may not be loaded now.
+    static let outsideContentToolNames: Set<String> = ["web_search", "read_web_page", "read_file", "search_code", "read_repo_file", "read_other_repo_file"]
+
     mutating func apply(_ result: (Int, Result<ToolOutput, Error>), stepIndex: Int) {
         let callIndex = result.0
         switch result.1 {
@@ -492,6 +546,7 @@ private struct Runner {
             record.detail = output.detail
             record.result = Self.capped(output.forModel)
             record.finishedAt = Date()
+            if output.billedCost > 0 { record.billedCost = output.billedCost }
             turn.steps[stepIndex].toolCalls[callIndex] = record
             if !output.generatedImages.isEmpty {
                 turn.steps[stepIndex].generatedImages = (turn.steps[stepIndex].generatedImages ?? []) + output.generatedImages
@@ -511,7 +566,7 @@ private struct Runner {
             } else if let github = error as? GitHubAPIError {
                 message = github.isRateLimited ? "GitHub's hourly request limit was reached. Try again later." : github.description
             } else {
-                message = String(describing: error)
+                message = ErrorExplainer.explain(error).message
             }
             fail(stepIndex, callIndex, message: "Error: \(message)", summary: "\(base) · didn't work", detail: message)
         }
@@ -553,14 +608,19 @@ private struct Runner {
                 return TurnFailure(kind: .providerFailed, message: "The AI's service had a problem partway through. Try again.", detail: api.description)
             case .moderated:
                 return TurnFailure(kind: .other, message: "The AI's provider refused this request.", detail: api.description)
+            case .appRestricted:
+                return TurnFailure(kind: .other, message: "OpenRouter only lets certain listed apps use this AI, so MAIPA-G can't. It's now hidden from the AI picker. Pick another AI, or Auto, and try again.", detail: api.description)
             case .badRequest, .other:
-                return TurnFailure(kind: .other, message: "Something went wrong talking to OpenRouter.", detail: api.description)
+                let explanation = ErrorExplainer.explain(api)
+                return TurnFailure(kind: .other, message: explanation.message, detail: api.description)
             }
         }
         if let http = error as? HTTPError {
-            if http.isOffline { return TurnFailure(kind: .offline, message: "You're offline. Check your connection and try again.", detail: http.description) }
-            return TurnFailure(kind: .providerFailed, message: "The connection dropped. Try again.", detail: http.description)
+            let explanation = ErrorExplainer.explain(http)
+            if http.isOffline { return TurnFailure(kind: .offline, message: explanation.message, detail: http.description) }
+            return TurnFailure(kind: .providerFailed, message: explanation.message, detail: http.description)
         }
-        return TurnFailure(kind: .other, message: "Something went wrong.", detail: String(describing: error))
+        let explanation = ErrorExplainer.explain(error)
+        return TurnFailure(kind: .other, message: explanation.message, detail: explanation.technical)
     }
 }

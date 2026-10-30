@@ -10,7 +10,7 @@ import Foundation
 /// else moved the branch first; if someone did, the sync starts over with their changes included.
 public actor DataRepoSync {
     public static let repoName = "MAIPA-G-data"
-    static let managedJSONPrefixes = ["chats/", "memories/", "agents/", "workflows/", "groups/", "jobs/", "connectors/", "specs/", "receipts/", "drafts/", "trash/", "diagnostics/"]
+    static let managedJSONPrefixes = ["chats/", "memories/", "agents/", "workflows/", "groups/", "jobs/", "connectors/", "specs/", "receipts/", "drafts/", "trash/", "diagnostics/", "autonomous-installations/"]
     static let managedBlobPrefixes = ["attachments/", "media/"]
     static let managedFiles: Set<String> = ["settings.json"]
 

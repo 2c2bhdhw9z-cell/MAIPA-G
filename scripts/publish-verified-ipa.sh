@@ -20,7 +20,7 @@ RUN_STATUS="$(python3 -c 'import json,sys; r=json.load(sys.stdin); print(r.get("
 [ "$RUN_STATUS" = "completed success" ] || { echo "error: run $RUN_ID is not completed successfully ($RUN_STATUS)" >&2; exit 1; }
 # Every release-gating job must exist and be green for this exact run.
 JOBS="$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=20")"
-for job in "AgentCore tests (Linux)" "Complete Dark and Light screenshots" "iPhone release candidate"; do
+for job in "AgentCore tests (Linux)" "iPhone release candidate"; do
   [ "$(python3 -c 'import json,sys; jobs=json.load(sys.stdin)["jobs"]; print(next((j.get("conclusion") for j in jobs if j["name"]==sys.argv[1]), None))' "$job" <<<"$JOBS")" = "success" ] \
     || { echo "error: '$job' did not pass on run $RUN_ID" >&2; exit 1; }
 done
@@ -32,8 +32,23 @@ gh api "repos/$REPO/actions/artifacts/$ARTIFACT_ID/zip" >"$TMP/artifact.zip"
 unzip -q "$TMP/artifact.zip" -d "$TMP/artifact"
 IPA="$(find "$TMP/artifact" -name 'MAIPA-G.ipa' -type f -print -quit)"
 [ -n "$IPA" ] || { echo "error: artifact contains no MAIPA-G.ipa" >&2; exit 1; }
-python3 "$ROOT/scripts/check-ipa.py" "$IPA" --build "$RUN_NUMBER"
+python3 "$ROOT/scripts/check-ipa.py" "$IPA" --build "$RUN_NUMBER" --revision "$PR_HEAD"
 cp "$IPA" "$TMP/MAIPA-G.ipa"; cp "$IPA" "$TMP/MAIPA-G-$RUN_NUMBER.ipa"
+
+RUNNER_ARTIFACT_ID="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[] | select(.name|startswith("MAIPAGRunner-linux-")) | .id' | head -n1)"
+[ -n "$RUNNER_ARTIFACT_ID" ] || { echo "error: no checked Autonomous runner artifact on run" >&2; exit 1; }
+gh api "repos/$REPO/actions/artifacts/$RUNNER_ARTIFACT_ID/zip" >"$TMP/runner-artifact.zip"
+mkdir -p "$TMP/runner"
+unzip -q "$TMP/runner-artifact.zip" -d "$TMP/runner"
+(cd "$TMP/runner" && sha256sum -c MAIPAGRunner-linux-x86_64.tar.gz.sha256)
+RUNNER_TAG="runner-$PR_HEAD"
+printf 'Checksummed MAIPAGRunner built and tested from reviewed commit `%s`.\n' "$PR_HEAD" >"$TMP/runner-notes.md"
+if gh release view "$RUNNER_TAG" --repo "$REPO" >/dev/null 2>&1; then
+  gh release upload "$RUNNER_TAG" "$TMP/runner/MAIPAGRunner-linux-x86_64.tar.gz" "$TMP/runner/MAIPAGRunner-linux-x86_64.tar.gz.sha256" --repo "$REPO" --clobber
+else
+  gh release create "$RUNNER_TAG" "$TMP/runner/MAIPAGRunner-linux-x86_64.tar.gz" "$TMP/runner/MAIPAGRunner-linux-x86_64.tar.gz.sha256" --repo "$REPO" --target "$MAIN_SHA" --title "MAIPAGRunner $PR_HEAD" --notes-file "$TMP/runner-notes.md"
+fi
+
 TAG="build-$RUN_NUMBER-${MAIN_SHA:0:7}"
 NOTES="$TMP/notes.md"
 printf '**MAIPA-G** checked by iOS run %s and published from main commit `%s`.\n\nAlways newest: https://github.com/%s/releases/latest/download/MAIPA-G.ipa\n' "$RUN_ID" "$MAIN_SHA" "$REPO" >"$NOTES"

@@ -130,7 +130,7 @@ public actor GitHubChangeService {
         guard selectedHead == workspace.base.commit else { throw ChangeWorkspaceError.staleHead(expected: workspace.base.commit, actual: selectedHead) }
 
         let usePR = continuing != nil || !rules.directSave
-        let targetBranch: String
+        var targetBranch: String
         if let continuing {
             targetBranch = continuing.branch
         } else if usePR && selectedBranch == defaultBranch {
@@ -158,12 +158,22 @@ public actor GitHubChangeService {
         }
         let tree = try await github.createTree(repo, base: baseTree, changes: treeChanges)
         let commit = try await github.createCommit(repo, message: title, tree: tree, parents: [selectedHead])
-        try await github.updateBranch(repo, branch: targetBranch, to: commit)
+        var openPR = usePR
+        do {
+            try await github.updateBranch(repo, branch: targetBranch, to: commit)
+        } catch let error as GitHubAPIError where !usePR && (error.status == 403 || error.status == 422) {
+            // A direct-save setting cannot bypass branch protection. Put the exact commit on a
+            // MAIPA-G side branch and open a review request instead.
+            targetBranch = Self.branchName(title)
+            try await github.createBranch(repo, branch: targetBranch, from: selectedHead)
+            try await github.updateBranch(repo, branch: targetBranch, to: commit)
+            openPR = true
+        }
 
         var pullRequest: GitHubPullRequest?
         if let continuing {
             pullRequest = continuing.pullRequest
-        } else if usePR {
+        } else if openPR {
             pullRequest = try await github.openOrReusePullRequest(repo, title: title, body: body, head: targetBranch, base: defaultBranch)
         }
         await workspace.discardAll()
@@ -185,16 +195,28 @@ public actor GitHubChangeService {
         try await github.deleteBranchIfMAIPAG(receipt.repo, branch: receipt.branch)
     }
 
-    /// Reverses the receipt only while its save is still the branch head.
+    /// Reverses only this receipt's file changes. Newer commits may exist as long as none of them
+    /// touched the same paths.
     public func undo(_ receipt: SaveReceipt) async throws -> SaveReceipt {
-        let head = try await github.branchHead(receipt.repo, branch: receipt.branch)
-        guard head == receipt.savedCommit else { throw ChangeWorkspaceError.staleHead(expected: receipt.savedCommit, actual: head) }
-        let baseTree = try await github.commitTree(receipt.repo, commit: receipt.savedCommit)
+        guard let head = try await github.branchHead(receipt.repo, branch: receipt.branch) else {
+            throw ChangeWorkspaceError.staleHead(expected: receipt.savedCommit, actual: nil)
+        }
+        let baseTree = try await github.commitTree(receipt.repo, commit: head)
+        if head != receipt.savedCommit {
+            let current = try await github.tree(receipt.repo, sha: baseTree, recursive: true)
+            let blobs = Dictionary(uniqueKeysWithValues: current.entries.filter(\.isFile).map { ($0.path, Optional($0.sha)) })
+            for file in receipt.files {
+                let currentBlob = blobs[file.path] ?? nil
+                guard currentBlob == file.afterBlob else {
+                    throw ChangeWorkspaceError.staleHead(expected: receipt.savedCommit, actual: head)
+                }
+            }
+        }
         let inverse = receipt.files.map { GitHubClient.TreeChange(path: $0.path, blobSHA: $0.beforeBlob) }
         let tree = try await github.createTree(receipt.repo, base: baseTree, changes: inverse)
-        let commit = try await github.createCommit(receipt.repo, message: "Undo MAIPA-G save", tree: tree, parents: [receipt.savedCommit])
+        let commit = try await github.createCommit(receipt.repo, message: "Undo MAIPA-G save", tree: tree, parents: [head])
         try await github.updateBranch(receipt.repo, branch: receipt.branch, to: commit)
-        return SaveReceipt(repo: receipt.repo, branch: receipt.branch, baseCommit: receipt.savedCommit, savedCommit: commit, files: receipt.files.map { .init(path: $0.path, beforeBlob: $0.afterBlob, afterBlob: $0.beforeBlob) }, pullRequest: receipt.pullRequest)
+        return SaveReceipt(repo: receipt.repo, branch: receipt.branch, baseCommit: head, savedCommit: commit, files: receipt.files.map { .init(path: $0.path, beforeBlob: $0.afterBlob, afterBlob: $0.beforeBlob) }, pullRequest: receipt.pullRequest)
     }
 
     static func branchName(_ title: String) -> String {

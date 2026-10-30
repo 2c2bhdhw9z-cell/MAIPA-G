@@ -198,7 +198,7 @@ struct FilesScreen: View {
             case .text(let value, _): text = value
             case .binary where imagePath(path):
                 if let github = app.github.client,
-                   let decoded = UIImage(data: try await github.fileContents(repo.ref, path: path, ref: workspace.commit)) {
+                   let decoded = ImageDownsampler.image(from: try await github.fileContents(repo.ref, path: path, ref: workspace.commit), maxPixelSize: 2_048) {
                     image = decoded
                 } else {
                     text = "This picture can’t be read."

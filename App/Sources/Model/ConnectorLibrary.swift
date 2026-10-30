@@ -231,6 +231,11 @@ final class ConnectorLibrary {
         await authorize(configuration, scopes: configuration.scopes.union(scopes).union(available))
     }
 
+    func recheck(_ configuration: ConnectorConfiguration) async {
+        if configuration.kind == .remote { await restore(configuration) }
+        else { states[configuration.id] = .disconnected }
+    }
+
     func disconnect(_ configuration: ConnectorConfiguration) async {
         await sessions[configuration.id]?.disconnect(); sessions[configuration.id] = nil
         Keychain.remove(account: credentialKey(configuration.id)); toolDefinitions[configuration.id] = nil
@@ -257,10 +262,45 @@ final class ConnectorLibrary {
         return String(decoding: data, as: UTF8.self)
     }
 
+    func setTool(_ name: String, enabled: Bool, for configuration: ConnectorConfiguration) async {
+        var copy = configuration
+        if enabled { copy.disabledTools.remove(name) }
+        else { copy.disabledTools.insert(name) }
+        await save(copy)
+    }
+
     func agentTools() -> [any AgentTool] {
-        connected.flatMap { configuration -> [any AgentTool] in
+        let computerID = computerConnector()?.id
+        let rate = app?.settings.chatComputerHourlyCost
+        return connected.flatMap { configuration -> [any AgentTool] in
             guard states[configuration.id] == .connected, let session = sessions[configuration.id] else { return [] }
-            return (toolDefinitions[configuration.id] ?? []).map { MCPTool(definition: $0, session: session) }
+            return (toolDefinitions[configuration.id] ?? [])
+                .filter { !configuration.disabledTools.contains($0.originalName) }
+                .map { MCPTool(definition: $0, session: session, computerHourlyRate: configuration.id == computerID ? rate : nil) }
+        }
+    }
+
+    /// The connector that gives chats a Linux computer, as chosen in Settings: none when it's off,
+    /// the chosen one, or for Automatic the first one on sprites.dev. Only a connector that is
+    /// connected right now counts, as only those give the AI their tools.
+    func computerConnector() -> ConnectorConfiguration? {
+        guard let settings = app?.settings, !settings.chatComputerOff else { return nil }
+        let ready = connected.filter { states[$0.id] == .connected }
+        if let chosen = settings.chatComputerServer {
+            return ready.first { $0.serverID == chosen }
+        }
+        return ready.first { connector in
+            guard let host = connector.endpoint?.host?.lowercased() else { return false }
+            return host == "sprites.dev" || host.hasSuffix(".sprites.dev")
+        }
+    }
+
+    /// App-driven control of the chat computer: health checks, recreating a missing machine,
+    /// syncing staged changes and checkpoints run from MAIPA-G's own code.
+    func computerControl() -> ComputerControl? {
+        guard let configuration = computerConnector(), let session = sessions[configuration.id], let machine = app?.settings.chatComputerMachineName else { return nil }
+        return ComputerControl(tools: toolDefinitions[configuration.id] ?? [], machine: machine) { name, arguments in
+            try await session.call(tool: name, arguments: arguments)
         }
     }
 

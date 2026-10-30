@@ -14,19 +14,21 @@ public struct ConnectorConfiguration: Codable, Sendable, Hashable, Identifiable 
     public var launchValues: [String: String]
     public var secretNames: Set<String>
     public var scopes: Set<String>
+    /// Tool names the owner turned off. Missing in older records means every discovered tool is enabled.
+    public var disabledTools: Set<String>
     public var createdAt: Date
 
     public init(id: UUID = UUID(), serverID: String, displayName: String, endpoint: URL) {
         self.id = id; self.serverID = serverID; self.displayName = displayName; kind = .remote
-        self.endpoint = endpoint; package = nil; launchValues = [:]; secretNames = []; scopes = []; createdAt = Date()
+        self.endpoint = endpoint; package = nil; launchValues = [:]; secretNames = []; scopes = []; disabledTools = []; createdAt = Date()
     }
 
     public init(id: UUID = UUID(), serverID: String, displayName: String, package: RegistryServer.Package, launchValues: [String: String] = [:], secretNames: Set<String> = []) {
         self.id = id; self.serverID = serverID; self.displayName = displayName; kind = .stdio
-        endpoint = nil; self.package = package; self.launchValues = launchValues; self.secretNames = secretNames; scopes = []; createdAt = Date()
+        endpoint = nil; self.package = package; self.launchValues = launchValues; self.secretNames = secretNames; scopes = []; disabledTools = []; createdAt = Date()
     }
 
-    enum CodingKeys: String, CodingKey { case id, serverID, displayName, kind, endpoint, package, launchValues, secretNames, scopes, createdAt }
+    enum CodingKeys: String, CodingKey { case id, serverID, displayName, kind, endpoint, package, launchValues, secretNames, scopes, disabledTools, createdAt }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id); serverID = try c.decode(String.self, forKey: .serverID)
@@ -34,7 +36,9 @@ public struct ConnectorConfiguration: Codable, Sendable, Hashable, Identifiable 
         endpoint = try c.decodeIfPresent(URL.self, forKey: .endpoint); package = try c.decodeIfPresent(RegistryServer.Package.self, forKey: .package)
         launchValues = try c.decodeIfPresent([String: String].self, forKey: .launchValues) ?? [:]
         secretNames = try c.decodeIfPresent(Set<String>.self, forKey: .secretNames) ?? []
-        scopes = try c.decodeIfPresent(Set<String>.self, forKey: .scopes) ?? []; createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        scopes = try c.decodeIfPresent(Set<String>.self, forKey: .scopes) ?? []
+        disabledTools = try c.decodeIfPresent(Set<String>.self, forKey: .disabledTools) ?? []
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
     }
 }
 
@@ -65,11 +69,15 @@ public struct ConnectorToolDefinition: Codable, Sendable, Hashable, Identifiable
     public var title: String
     public var description: String
     public var inputSchema: JSONValue
+    /// The server's own MCP hints. They can only add an approval, never remove one.
+    public var readOnlyHint: Bool?
+    public var destructiveHint: Bool?
 
-    public init(serverID: String, serverName: String, originalName: String, title: String? = nil, description: String = "", inputSchema: JSONValue = ["type": "object"]) {
+    public init(serverID: String, serverName: String, originalName: String, title: String? = nil, description: String = "", inputSchema: JSONValue = ["type": "object"], readOnlyHint: Bool? = nil, destructiveHint: Bool? = nil) {
         self.serverID = serverID; self.serverName = serverName; self.originalName = originalName
         self.namespacedName = Self.namespace(server: serverName, tool: originalName)
         self.title = title ?? originalName; self.description = description; self.inputSchema = inputSchema
+        self.readOnlyHint = readOnlyHint; self.destructiveHint = destructiveHint
     }
 
     public static func namespace(server: String, tool: String) -> String {

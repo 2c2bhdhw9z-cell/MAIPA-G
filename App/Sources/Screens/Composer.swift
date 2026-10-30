@@ -102,6 +102,7 @@ struct Composer: View {
                 Button(action: onSpec) { Label("Spec", systemImage: "list.clipboard").font(.caption.weight(.semibold)) }
                 Button(action: onPickGroup) { Label(groupName ?? "Group", systemImage: "folder.badge.plus").font(.caption.weight(.semibold)) }
                 Toggle("Autonomous", isOn: $autonomous)
+                    .disabled(!app.settings.autonomousEnabled)
                     .toggleStyle(.button)
                     .buttonStyle(.bordered)
                     .buttonBorderShape(.capsule)

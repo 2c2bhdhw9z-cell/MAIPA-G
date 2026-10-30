@@ -1,0 +1,95 @@
+{
+  "date": "2026-10-29",
+  "reports": [
+    {
+      "id": "OCT29-01",
+      "status": "covered",
+      "evidence": "check_oct29_01_real_connector_logos"
+    },
+    {
+      "id": "OCT29-02",
+      "status": "covered",
+      "evidence": "registryPaginationOAuthAndConnectorNamesAreExact"
+    },
+    {
+      "id": "OCT29-03",
+      "status": "covered",
+      "evidence": "computerSectionTellsTheAIToUseItsComputerAndKeepTokensOff"
+    },
+    {
+      "id": "OCT29-04",
+      "status": "covered",
+      "evidence": "check_oct29_04_tool_bars_hug_their_content"
+    },
+    {
+      "id": "OCT29-05",
+      "status": "covered",
+      "evidence": "cloudShellIsBoundedAndLoggerRedacts"
+    },
+    {
+      "id": "OCT29-06",
+      "status": "covered",
+      "evidence": "destructiveToolsPauseForRealApproval"
+    },
+    {
+      "id": "OCT29-07",
+      "status": "covered",
+      "evidence": "imageDataUsesBoundedTokenEstimateAndNoFalseTrimNotice"
+    },
+    {
+      "id": "OCT29-08",
+      "status": "covered",
+      "evidence": "OCT29_08_appRestrictedModelsAreRecognisedAndHidden"
+    },
+    {
+      "id": "OCT29-09",
+      "status": "covered",
+      "evidence": "OCT29_09_createRepositoryAlwaysRequiresApproval"
+    },
+    {
+      "id": "OCT29-10",
+      "status": "covered",
+      "evidence": "midStreamErrorsAreKept"
+    },
+    {
+      "id": "OCT29-11",
+      "status": "covered",
+      "evidence": "oneBadUploadDoesNotAbortOtherFiles"
+    },
+    {
+      "id": "OCT29-12",
+      "status": "covered",
+      "evidence": "OCT29_12_liveStatusNeverReturnsTokens"
+    },
+    {
+      "id": "OCT29-13",
+      "status": "covered",
+      "evidence": "scopedDirectSaveSentenceDoesNotChangeTheWholeRepository"
+    },
+    {
+      "id": "OCT29-14",
+      "status": "covered",
+      "evidence": "OCT29_14_webProjectsInsideFoldersAreFoundAndBuiltThere"
+    },
+    {
+      "id": "OCT29-15",
+      "status": "owner-waived",
+      "evidence": "Just forget about it."
+    },
+    {
+      "id": "OCT29-16",
+      "status": "covered",
+      "evidence": "stagedSaveAndUndoProtectAgainstInterveningChanges"
+    },
+    {
+      "id": "OCT29-17",
+      "status": "covered",
+      "evidence": "OCT29_17_http500IsRetriable"
+    },
+    {
+      "id": "OCT29-18",
+      "status": "covered",
+      "evidence": "OCT29_18_otherRepoNamesOfferExactCloseMatches"
+    }
+  ]
+}

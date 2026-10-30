@@ -80,6 +80,10 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
     public var specID: UUID?
     /// Enabled memories captured when this chat began. Existing chats do not change underneath the user.
     public var memoryContext: [String]
+    /// Optional Kiro-style compact summary; older messages remain visible but are replaced by this
+    /// summary in later model requests.
+    public var compactedSummary: String?
+    public var compactedThroughMessageID: UUID?
 
     public init(
         id: UUID = UUID(),
@@ -108,11 +112,14 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         self.workflowID = nil
         self.specID = nil
         self.memoryContext = memoryContext
+        self.compactedSummary = nil
+        self.compactedThroughMessageID = nil
     }
 
     enum CodingKeys: String, CodingKey {
         case format, id, title, titleIsCustom, createdAt, updatedAt, repo, model, thinking, messages
         case groupID, saveReceipts, activeJobID, workflowID, specID, memoryContext
+        case compactedSummary, compactedThroughMessageID
     }
 
     public init(from decoder: Decoder) throws {
@@ -133,13 +140,16 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         workflowID = try c.decodeIfPresent(UUID.self, forKey: .workflowID)
         specID = try c.decodeIfPresent(UUID.self, forKey: .specID)
         memoryContext = try c.decodeIfPresent([String].self, forKey: .memoryContext) ?? []
+        compactedSummary = try c.decodeIfPresent(String.self, forKey: .compactedSummary)
+        compactedThroughMessageID = try c.decodeIfPresent(UUID.self, forKey: .compactedThroughMessageID)
     }
 
     /// Everything the chat has cost so far, in dollars, as OpenRouter reported it.
     public var totalUsage: Usage {
         var usage = messages.compactMap(\.assistantTurn).flatMap(\.steps).compactMap(\.usage).reduce(Usage(), +)
-        let imageCosts = messages.compactMap(\.assistantTurn).flatMap(\.steps).flatMap { $0.generatedImages ?? [] }.compactMap(\.cost)
-        if !imageCosts.isEmpty { usage.cost = (usage.cost ?? 0) + imageCosts.reduce(0, +) }
+        let steps = messages.compactMap(\.assistantTurn).flatMap(\.steps)
+        let extraCosts = steps.flatMap { $0.generatedImages ?? [] }.compactMap(\.cost) + steps.flatMap(\.toolCalls).compactMap(\.billedCost)
+        if !extraCosts.isEmpty { usage.cost = (usage.cost ?? 0) + extraCosts.reduce(0, +) }
         return usage
     }
 
@@ -298,8 +308,8 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
 
     public var usage: Usage {
         var usage = steps.compactMap(\.usage).reduce(Usage(), +)
-        let imageCosts = steps.flatMap { $0.generatedImages ?? [] }.compactMap(\.cost)
-        if !imageCosts.isEmpty { usage.cost = (usage.cost ?? 0) + imageCosts.reduce(0, +) }
+        let extraCosts = steps.flatMap { $0.generatedImages ?? [] }.compactMap(\.cost) + steps.flatMap(\.toolCalls).compactMap(\.billedCost)
+        if !extraCosts.isEmpty { usage.cost = (usage.cost ?? 0) + extraCosts.reduce(0, +) }
         return usage
     }
 
@@ -420,6 +430,8 @@ public struct ToolCallRecord: Codable, Sendable, Hashable, Identifiable {
     public var questions: QuestionSet?
     public var startedAt: Date
     public var finishedAt: Date?
+    /// Dollars a tool cost outside the AI request, such as measured chat-computer time.
+    public var billedCost: Double?
 
     public init(id: String, name: String, arguments: String, summary: String, status: Status = .running, startedAt: Date = Date()) {
         self.id = id

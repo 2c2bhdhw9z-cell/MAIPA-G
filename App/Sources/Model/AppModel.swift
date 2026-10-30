@@ -26,6 +26,7 @@ enum AppSheet: Identifiable, Hashable {
     case workflowMaker
     case memories
     case recentlyDeleted
+    case unreadableFiles
     case memoryEditor(UUID?)
     case groups(ComposerTarget)
     case specs(ChatRepo?)
@@ -55,6 +56,7 @@ enum AppSheet: Identifiable, Hashable {
         case .workflowMaker: return "workflow-maker"
         case .memories: return "memories"
         case .recentlyDeleted: return "recently-deleted"
+        case .unreadableFiles: return "unreadable-files"
         case .memoryEditor(let id): return "memory-editor-\(id?.uuidString ?? "new")"
         case .groups(let target): return "groups-\(target)"
         case .specs(let repo): return "specs-\(repo?.ref.fullName ?? "all")"
@@ -108,7 +110,7 @@ final class HomeDraft {
                 if value.isEmpty { try await store.deleteItem(at: ComposerDraft.path(for: "home")) }
                 else { try await store.saveDocument(value, at: ComposerDraft.path(for: "home")) }
             } catch {
-                // A later edit or background save retries without discarding the in-memory draft.
+                _ = app?.report(error, area: "draft", operation: "save home draft", path: ComposerDraft.path(for: "home"))
             }
         }
     }
@@ -161,6 +163,12 @@ final class AppModel {
         trash = TrashStore(dataDirectory: paths.data)
         let diagnostics = DiagnosticsLog(dataDirectory: paths.data, installIDURL: paths.support.appendingPathComponent("install-id.txt"))
         self.diagnostics = diagnostics
+        // Every error explained anywhere in the app also lands in the redacted diagnostics log.
+        if !PreviewScenes.isActive {
+            ErrorExplainer.recorder.set { error, area, operation in
+                Task { await diagnostics.record(error: error, area: area, operation: operation) }
+            }
+        }
         metricKit = MetricKitCollector(diagnostics: diagnostics)
         jobs = JobCoordinator(dataDirectory: paths.data)
         automations = AutomationLibrary(dataDirectory: paths.data)
@@ -186,6 +194,32 @@ final class AppModel {
         home.repo = settings.lastRepo
     }
 
+    func liveStatusText() -> String {
+        var lines = [
+            "GitHub: " + (github.isConnected ? "connected as \(github.login ?? "unknown")" : "not connected"),
+            "OpenRouter: " + (openRouter.isSignedIn ? "signed in" : "not signed in"),
+            "Chosen AI: \(openRouter.label(for: home.model))",
+            "Chat computer: \(settings.chatComputerOff ? "off" : (settings.chatComputerServer ?? "automatic"))",
+            "Saving: \(String(describing: sync.status))",
+        ]
+        if let balance = openRouter.balance { lines.append("OpenRouter credit: \(balance.dollars)") }
+        for connector in connectors.connected {
+            lines.append("Connector \(connector.displayName): \(connectors.states[connector.id]?.rawValue ?? "unknown")")
+        }
+        for job in jobs.jobs.prefix(50) {
+            let step = job.steps.last(where: { $0.status == .running || $0.status == .failed })?.title ?? job.steps.last?.title ?? "no step"
+            lines.append("Job \(job.title): \(job.status.rawValue); step: \(step); run: \(job.workflowRunURL ?? "none"); result: \(job.result?.summary ?? "none")")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    @discardableResult
+    func report(_ error: Error, area: String, operation: String, path: String? = nil) -> ErrorExplanation {
+        let explanation = ErrorExplainer.describe(error)
+        Task { await diagnostics.record(error: error, area: area, operation: operation, path: path) }
+        return explanation
+    }
+
     // MARK: Starting up
 
     func start() async {
@@ -206,10 +240,19 @@ final class AppModel {
         await groups.load()
         await specs.load()
         await connectors.load()
+        let housekeeping = await DataHousekeeping(dataDirectory: paths.data).run()
+        if housekeeping.removedOrphanBlobs + housekeeping.purgedTrashItems + housekeeping.compactedJobs > 0 {
+            sync.request(after: 0)
+        }
         async let models: Void = openRouter.loadModels()
         async let key: Void = openRouter.refreshKeyInfo()
         await github.refresh()
         await startSaving()
+        await jobs.updateAutonomousWorkflows()
+        // Builds before the secret record existed: find the repos they set up, once.
+        if github.isConnected, !UserDefaults.standard.bool(forKey: JobCoordinator.ledgerMigratedKey) {
+            await jobs.migrateAutonomousLedger()
+        }
         await updates.check(using: github.publicClient)
         _ = await (models, key)
     }
@@ -218,6 +261,9 @@ final class AppModel {
     func githubDidConnect() async {
         await github.refresh()
         await startSaving()
+        // A new or reconnected GitHub app has a new key: repos holding the old one get the new one.
+        await jobs.migrateAutonomousLedger()
+        await jobs.rotateAutonomousSecrets()
     }
 
     private func startSaving() async {
@@ -448,6 +494,20 @@ final class AppModel {
         case .chat(let id):
             if let session = library.session(id), !session.draftAttachments.contains(where: { $0.id == attachment.id }) { session.draftAttachments.append(attachment) }
         }
+    }
+
+    func allowPreviewHost(_ host: String, for repo: RepoRef) throws {
+        let candidate = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let url = URL(string: "https://\(candidate)"),
+              let checked = try? OAuthURLPolicy.validate(url),
+              checked.host?.lowercased() == candidate,
+              checked.path.isEmpty || checked.path == "/"
+        else { throw ToolInputError("Enter one public host, such as api.example.com.") }
+        updateSettings { $0.previewAllowedHosts[repo.fullName, default: []].insert(candidate) }
+    }
+
+    func removePreviewHost(_ host: String, for repo: RepoRef) {
+        updateSettings { $0.previewAllowedHosts[repo.fullName]?.remove(host.lowercased()) }
     }
 
     // MARK: Screenshots

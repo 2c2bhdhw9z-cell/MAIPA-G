@@ -11,6 +11,9 @@ struct ChatScreen: View {
     @State private var followsBottom = true
     @State private var renaming = false
     @State private var newTitle = ""
+    @State private var editingMessageID: UUID?
+    @State private var editedMessageText = ""
+    @State private var showingDiff = false
 
     private let bottomID = "bottom"
 
@@ -73,6 +76,9 @@ struct ChatScreen: View {
                             }
                             if receipt.undoneAt == nil, receipt.resolution == nil {
                                 Button("Undo") { Task { await session.undoLastSave() } }.buttonStyle(.bordered)
+                            }
+                            if let status = session.mergeCheckStatus {
+                                Text(status).font(.caption).foregroundStyle(status == "Checks passed" || status == "No automatic checks" ? .green : .orange)
                             }
                             Spacer()
                         }
@@ -153,10 +159,30 @@ struct ChatScreen: View {
                         Button { app.sheet = .files(repo, .chat(session.id)) } label: { Image(systemName: "folder") }
                             .accessibilityLabel("Files")
                     }
+                    if session.chat.repo != nil {
+                        Button { showingDiff = true } label: { Image(systemName: "doc.text.magnifyingglass") }
+                            .accessibilityLabel("View changes")
+                    }
+                    Button { session.compact() } label: { Image(systemName: "rectangle.compress.vertical") }
+                        .accessibilityLabel("Compact older messages")
                     Button { app.newChat() } label: { Image(systemName: "square.and.pencil") }
                         .accessibilityLabel("New chat")
                 }
             }
+        }
+        .confirmationDialog("Checks did not pass", isPresented: Binding(get: { session.mergeWarning != nil }, set: { if !$0 { session.cancelMergeWarning() } }), titleVisibility: .visible) {
+            Button("Add it anyway", role: .destructive) { Task { await session.addLastSave(force: true) } }
+            Button("Cancel", role: .cancel) { session.cancelMergeWarning() }
+        } message: { Text(session.mergeWarning ?? "") }
+        .sheet(isPresented: $showingDiff) { ChangesDiffScreen(session: session) }
+        .alert("Edit and resend", isPresented: Binding(get: { editingMessageID != nil }, set: { if !$0 { editingMessageID = nil } })) {
+            TextField("Message", text: $editedMessageText, axis: .vertical)
+            Button("Resend") {
+                guard let id = editingMessageID else { return }
+                editingMessageID = nil
+                session.editAndResend(id, text: editedMessageText)
+            }
+            Button("Cancel", role: .cancel) { editingMessageID = nil }
         }
         .alert("Rename chat", isPresented: $renaming) {
             TextField("Name", text: $newTitle)
@@ -200,6 +226,11 @@ struct ChatScreen: View {
         TurnActions(
             answer: { session.answer($0) },
             retry: { session.retry() },
+            retryAnswer: { session.retryAnswer($0) },
+            editMessage: { id, text in
+                editingMessageID = id
+                editedMessageText = text
+            },
             keepGoing: { session.send("Please keep going.") },
             approveSpending: { session.approveMoreSpending() },
             switchToFree: { session.switchToFreeAIs() },
