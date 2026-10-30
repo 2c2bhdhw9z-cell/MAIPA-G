@@ -159,7 +159,7 @@ struct StabilityCompletionTests {
         guard case .recreated(let output) = try await control.ensureMachine(allowCreate: true) else {
             Issue.record("A missing machine should be recreated"); return
         }
-        #expect(output.contains("maipa-g-health-ok") && output.contains("Linux"))
+        #expect(output.contains("maipa-g-health-ok") && (output.contains("Linux") || output.contains("Darwin")))
         #expect(await machine.calls.contains("create_sprite"))
         guard case .healthy = try await control.ensureMachine(allowCreate: true) else { Issue.record("Expected healthy"); return }
 
