@@ -220,9 +220,9 @@ final class AppModel {
         }
         for provider in openRouter.readyExternalProviders {
             if let usd = openRouter.externalBalances[provider.id] {
-                lines.append("\(provider.displayName) credit: $\(String(format: "%.2f", usd))")
+                lines.append("\(provider.name) credit: $\(String(format: "%.2f", usd))")
             } else {
-                lines.append("\(provider.displayName): connected (\(openRouter.externalModelCounts[provider.id] ?? 0) models)")
+                lines.append("\(provider.name): connected (\(openRouter.externalModelCounts[provider.id] ?? 0) models)")
             }
         }
         lines.append("Chat computer: \(settings.chatComputerOff ? "off" : (settings.chatComputerServer ?? "automatic (\(settings.chatComputerMachineName))"))")

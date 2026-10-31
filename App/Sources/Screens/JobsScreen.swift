@@ -259,17 +259,26 @@ struct JobDetailScreen: View {
                let zipData = try? Data(contentsOf: downloadedURL, options: .mappedIfSafe) {
                 let unpackDir = workDir.appendingPathComponent("unpacked", isDirectory: true)
                 if (try? PreviewArtifactExtractor.extract(zipData, to: unpackDir)) != nil,
-                   let enumerator = FileManager.default.enumerator(at: unpackDir, includingPropertiesForKeys: [.isRegularFileKey]) {
-                    for case let fileURL as URL in enumerator where fileURL.pathExtension.lowercased() == "ipa" {
-                        shareTarget = fileURL
-                        break
-                    }
+                   let foundIPA = Self.firstIPAFile(in: unpackDir) {
+                    shareTarget = foundIPA
                 }
             }
             SharePresenter.present(items: [shareTarget])
         } catch {
             downloadError = app.github.describe(error)
         }
+    }
+
+    private nonisolated static func firstIPAFile(in root: URL) -> URL? {
+        guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else {
+            return nil
+        }
+        while let next = enumerator.nextObject() {
+            if let fileURL = next as? URL, fileURL.pathExtension.lowercased() == "ipa" {
+                return fileURL
+            }
+        }
+        return nil
     }
 
     private var progress: Double {

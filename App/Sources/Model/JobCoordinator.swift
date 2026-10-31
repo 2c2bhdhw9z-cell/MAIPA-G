@@ -207,13 +207,14 @@ final class JobCoordinator {
             await repoWorkspace.prefetch()
             let readChanges = ChangeWorkspace(base: repoWorkspace)
             let rules = await GitHubChangeService(github: github).resolveRules(in: repoWorkspace, directSaveSetting: false)
-            readOnlyTools.append(contentsOf: [
+            let specRepoTools: [any AgentTool] = [
                 ListFilesTool(workspace: repoWorkspace, changes: readChanges),
                 SearchCodeTool(workspace: repoWorkspace, changes: readChanges),
                 ReadFileTool(workspace: repoWorkspace, changes: readChanges),
                 ReadRepoFileTool(github: github),
                 LoadRepoRulesTool(documents: rules.documents),
-            ])
+            ]
+            readOnlyTools.append(contentsOf: specRepoTools)
             specRepoContext = SystemPrompt.RepoContext(
                 ref: specRepo.ref,
                 branch: specRepo.branch,

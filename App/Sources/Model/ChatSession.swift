@@ -615,11 +615,11 @@ final class ChatSession: Identifiable {
         guard let app, let github = app.github.client, var receipts = chat.saveReceipts,
               let index = receipts.lastIndex(where: { $0.undoneAt == nil }) else { return }
         do {
-            let newCommit = try await GitHubChangeService(github: github).undo(receipts[index])
+            let undoReceipt = try await GitHubChangeService(github: github).undo(receipts[index])
             receipts[index].undoneAt = Date()
             chat.saveReceipts = receipts
             if let existingWorkspace = workspace {
-                let advanced = existingWorkspace.advancing(toCommit: newCommit)
+                let advanced = existingWorkspace.advancing(toCommit: undoReceipt.savedCommit)
                 workspace = advanced
                 if let existingChanges = changeWorkspace {
                     changeWorkspace = await existingChanges.rebased(onto: advanced)
@@ -725,7 +725,7 @@ final class ChatSession: Identifiable {
             guard let cw = await MainActor.run(body: { self?.changeWorkspace }) else { return nil }
             let staged = await cw.stagedChanges()
             guard case .write(_, let data, _) = staged.first(where: { $0.path == stagedPath }) else { return nil }
-            return TextFileCodec.decode(data)?.text ?? String(data: data, encoding: .utf8)
+            return String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
         }
         let listWorkstationTool = ListWorkstationFilesTool(listProvider: listWorkstationProvider)
         let readWorkstationTool = ReadWorkstationFileTool(
@@ -740,9 +740,11 @@ final class ChatSession: Identifiable {
                 self.workstationFiles.insert(reference, at: 0)
             }
         }
-        tools.append(contentsOf: [listWorkstationTool, readWorkstationTool, writeWorkstationTool])
+        let workstationTools: [any AgentTool] = [listWorkstationTool, readWorkstationTool, writeWorkstationTool]
+        tools.append(contentsOf: workstationTools)
         var readOnlyHelperTools: [any AgentTool] = webEnabled ? [WebSearchTool(transport: app.transport), ReadWebPageTool(transport: app.transport)] : []
-        readOnlyHelperTools.append(contentsOf: [listWorkstationTool, readWorkstationTool])
+        let readOnlyWorkstationTools: [any AgentTool] = [listWorkstationTool, readWorkstationTool]
+        readOnlyHelperTools.append(contentsOf: readOnlyWorkstationTools)
         readOnlyHelperTools.append(LiveStatusTool { [weak self, weak app] in
             await MainActor.run { app?.liveStatusText(for: self) ?? "MAIPA-G is no longer open." }
         })
@@ -942,12 +944,13 @@ final class ChatSession: Identifiable {
                 ["planner", "designer", "design-checker", "code-checker", "second-opinion", "review-combiner", "investigator"].contains($0.id)
             }
             var seenHelperIDs = Set<String>()
-            var helperDefinitions: [AgentDefinition] = []
+            var builtHelpers: [AgentDefinition] = []
             for candidate in builtInHelpers + repoLocalAgents + app.automations.customAgents.map(\.definition) {
                 if seenHelperIDs.insert(candidate.id).inserted {
-                    helperDefinitions.append(candidate)
+                    builtHelpers.append(candidate)
                 }
             }
+            let helperDefinitions = builtHelpers
             if let baseLead = BuiltInAgents.named("coder"), !helperDefinitions.isEmpty {
                 var lead = baseLead
                 lead.maximumHelpers = max(lead.maximumHelpers, 8)
@@ -990,7 +993,7 @@ final class ChatSession: Identifiable {
                         connectedRepositories: connectedRepoNames
                     )
                     let basePool = invocation.definition.behavior == .changesAllowed ? fullToolsSnapshot : helperToolsSnapshot
-                    let allowedPool = basePool.filter { invocation.definition.permits(toolName: $0.name) }
+                    let allowedPool = basePool.filter { invocation.definition.permits(tool: $0.name) }
                     let helperInput = AgentTurnInput(
                         chat: helperChat,
                         route: helperRoute,
@@ -1183,7 +1186,7 @@ final class ChatSession: Identifiable {
                 if let cwBase = changeWorkspace?.base {
                     workspace = cwBase
                 } else if let existingWorkspace = workspace {
-                    workspace = existingWorkspace.advancing(toCommit: newest.commit, branch: newest.branch)
+                    workspace = existingWorkspace.advancing(toCommit: newest.savedCommit, branch: newest.branch)
                 }
             }
         }
@@ -1482,7 +1485,6 @@ final class ChatSession: Identifiable {
                 prompt: cleanPrompt,
                 model: model.id,
                 options: ImageGenerationOptions(aspectRatio: .square, quality: .standard),
-                catalogueByID: app.openRouter.modelsByID,
                 progress: { _ in }
             )
             var savedResults: [GeneratedImageResult] = []
@@ -1680,7 +1682,7 @@ final class ChatSession: Identifiable {
                     connectedRepositories: connectedRepoNames
                 )
                 let extraTools = invocation.tools
-                let mergedPool = (toolPool + extraTools).filter { invocation.definition.permits(toolName: $0.name) || $0.name == "send_message" }
+                let mergedPool = (toolPool + extraTools).filter { invocation.definition.permits(tool: $0.name) || $0.name == "send_message" }
                 let stepInput = AgentTurnInput(
                     chat: stepChat,
                     route: stepRoute,

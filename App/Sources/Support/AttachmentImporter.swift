@@ -104,7 +104,7 @@ enum AttachmentImporter {
     }
 
     private static func shrinkImage(_ data: Data) throws -> (data: Data, mimeType: String, extension: String) {
-        if let downsampled = ImageDownsampler.image(from: data, maxPixelSize: maximumImageDimension) {
+        if let downsampled = ImageDownsampler.image(from: data, maxPixelSize: Int(maximumImageDimension)) {
             return try encodeUIImage(downsampled)
         }
         guard let image = UIImage(data: data) else {

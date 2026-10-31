@@ -79,7 +79,7 @@ private struct WorkflowStepEditor: View {
                 Stepper("Maximum \(node.maximumIterations ?? 3) rounds", value: Binding(get: { node.maximumIterations ?? 3 }, set: { node.maximumIterations = $0 }), in: 1...50)
                 Picker("When max rounds reached", selection: Binding(get: { node.onMaxIterations ?? .pause }, set: { node.onMaxIterations = $0 })) {
                     Text("Pause & ask").tag(RepeatLimitBehavior.pause)
-                    Text("Continue").tag(RepeatLimitBehavior.continue)
+                    Text("Continue").tag(RepeatLimitBehavior.continueWorkflow)
                     Text("Fail").tag(RepeatLimitBehavior.fail)
                 }
                 TextField("Goal condition", text: optional($node.successCondition), axis: .vertical)

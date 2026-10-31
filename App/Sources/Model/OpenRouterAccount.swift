@@ -521,7 +521,7 @@ final class OpenRouterAccount {
     func providerName(forModelID id: String) -> String {
         if let decoded = AIProviderModelID.decode(id),
            let ep = externalProviders.first(where: { $0.id == decoded.providerID }) {
-            return ep.displayName
+            return ep.name
         }
         return "OpenRouter"
     }
