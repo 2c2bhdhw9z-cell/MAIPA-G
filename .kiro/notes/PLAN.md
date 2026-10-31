@@ -1,8 +1,8 @@
 # MAIPA-G plan
 
-**Status (31 October 2026, 12:06 AM ET): Build 66 (`build-66-165e7cf`, 6.95 MB, PR #19) is the latest
-installable build: 0.1.0 (66), iPhone arm64, built from commit `165e7cf`, checked by the AgentCore
-tests on Linux and macOS and an independent IPA inspection.
+**Status (31 October 2026, 2:39 AM ET): Build 69 (`build-69-f41ce25`, 7.22 MB, PR #20) is the latest
+installable build: 0.1.0 (69), iPhone arm64, built from commit `af0bb40` (merged to `main` as `f41ce25`),
+checked by the AgentCore tests on Linux and macOS and an independent IPA inspection.
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
 saving works (Settings and the side menu showed "Saved just now", and the 173 MB Continuum .ipa is
@@ -77,6 +77,20 @@ Built since then:
   fallback in `IntegrationIcon`; added automated checks in `scripts/check-regressions.py` and
   `TrustBoundaryTests` requiring a real bundled logo on every catalog entry; and fixed `Custom MCP`
   falsely showing `Connected · 6 tools ready` when `Hugging Face` MCP was connected.
+- Build 69 (PR #20): added the unified `Workstation` (`Canvas | Files | Changes`) in the top bar
+  and `+` menu with an infinite pan & pinch-to-zoom `Canvas` (`1%–300%`) rendering every file type
+  (photos, `PDFKit` page-1 previews, Markdown/code/log snippets, Mermaid charts, `.zip`/`.ipa`/`.p12`/
+  `.ips`/Office badges, repo files, and computer files), an Arena-style expandable `Files` folder
+  tree, and a Kiro-style `Changes` diff/PR review screen; replaced the AI model picker with a
+  card-based selector searching all OpenRouter models (including `openrouter/*`, image-capable, and
+  empty-modality entries, plus custom `maker/model` slugs, `★` pins, recents, Sort, and Maker
+  filters); added Arena-style 2-column message-bar attachment chips and Grok-style swipeable fanned
+  photo stacks in chat without naming photo chats `Photo 1.png`; added the `[ 🌐 N sources ]` pill +
+  `Sources` sheet and chat/turn timestamps; trimmed `Connectors` to the 81 working mobile-ready
+  integrations (`72` direct iPhone + `9` Sprite computer) and removed the uncurated `Open MCP
+  Registry` tab; lowered top bar pills slightly and fixed Light Mode icon contrast; fixed the `↓`
+  scroll-to-bottom button, `Add it / Throw away` bottom-bar overlap, closed `SideMenu` landscape
+  bleed, direct computer wake commands, and streaming/thumbnail/scroll performance.
 
 Still not done: Stability 11 (about 250 silent `try?` failures remain), necessary item 4 (sandbox
 for downloaded connectors blocks all network, so npx/uvx connectors can't install), and necessary
