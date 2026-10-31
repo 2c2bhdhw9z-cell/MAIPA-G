@@ -45,7 +45,15 @@ public struct WebPageReader: Sendable {
         guard Self.isSafe(finalURL) else { throw WebPageError.unsafeURL }
         guard response.body.count <= Self.maxBytes else { throw WebPageError.tooLarge }
         let type = response.header("content-type")?.lowercased() ?? "text/html"
-        guard type.contains("text/") || type.contains("html") || type.contains("xhtml") else { throw WebPageError.unsupportedType(type) }
+        let isReadableType = type.contains("text/")
+            || type.contains("html")
+            || type.contains("xhtml")
+            || type.contains("json")
+            || type.contains("xml")
+            || type.contains("yaml")
+            || type.contains("javascript")
+            || type.contains("markdown")
+        guard isReadableType else { throw WebPageError.unsupportedType(type) }
         let raw = String(decoding: response.body, as: UTF8.self)
         if type.contains("html") {
             return WebPage(url: finalURL, title: Self.firstMatch(#"<title[^>]*>(.*?)</title>"#, in: raw).map(Self.clean), text: Self.readableText(raw))
@@ -53,7 +61,10 @@ public struct WebPageReader: Sendable {
         return WebPage(url: finalURL, title: nil, text: String(raw.prefix(200_000)))
     }
 
-    fileprivate static let headers = ["Accept": "text/html,text/plain,application/xhtml+xml;q=0.9", "User-Agent": "MAIPA-G/1.0"]
+    fileprivate static let headers = [
+        "Accept": "text/markdown,text/html,text/plain,application/json,application/xml,application/xhtml+xml;q=0.9,*/*;q=0.5",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15 MAIPA-G/1.0",
+    ]
 
     public static func isSafe(_ url: URL) -> Bool {
         guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let host = url.host?.lowercased(), !host.isEmpty,

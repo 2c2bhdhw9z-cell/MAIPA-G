@@ -1075,6 +1075,11 @@ public enum AIProviderGateway {
             let sanitized = parts.map { part -> JSONValue in
                 if part["type"]?.stringValue == "file" {
                     let name = part["file"]?["filename"]?.stringValue ?? "document.pdf"
+                    if let fileData = part["file"]?["file_data"]?.stringValue,
+                       let (_, b64) = splitDataURL(fileData),
+                       let pdfBytes = Data(base64Encoded: b64, options: .ignoreUnknownCharacters) {
+                        return ["type": "text", "text": .string(PDFTextExtractor.formattedAttachmentBlock(name: name, data: pdfBytes))]
+                    }
                     return ["type": "text", "text": .string("[Attached PDF: \(name)]")]
                 }
                 return part
@@ -1534,6 +1539,15 @@ public enum AIProviderGateway {
                         if p["type"]?.stringValue == "image_url", let u = p["image_url"]?["url"]?.stringValue {
                             return ["type": "input_image", "image_url": .string(u)]
                         }
+                        if p["type"]?.stringValue == "file" {
+                            let name = p["file"]?["filename"]?.stringValue ?? "document.pdf"
+                            if let fileData = p["file"]?["file_data"]?.stringValue,
+                               let (_, b64) = splitDataURL(fileData),
+                               let pdfBytes = Data(base64Encoded: b64, options: .ignoreUnknownCharacters) {
+                                return ["type": "input_text", "text": .string(PDFTextExtractor.formattedAttachmentBlock(name: name, data: pdfBytes))]
+                            }
+                            return ["type": "input_text", "text": .string("[Attached PDF: \(name)]")]
+                        }
                         return nil
                     }
                     inputItems.append(["role": "user", "content": .array(converted)])
@@ -1690,6 +1704,10 @@ public enum AIProviderGateway {
                         } else if p["type"]?.stringValue == "image_url",
                                   let u = p["image_url"]?["url"]?.stringValue,
                                   let (mime, b64) = splitDataURL(u) {
+                            parts.append(["inlineData": ["mimeType": .string(mime), "data": .string(b64)]])
+                        } else if p["type"]?.stringValue == "file",
+                                  let fileData = p["file"]?["file_data"]?.stringValue,
+                                  let (mime, b64) = splitDataURL(fileData) {
                             parts.append(["inlineData": ["mimeType": .string(mime), "data": .string(b64)]])
                         }
                     }

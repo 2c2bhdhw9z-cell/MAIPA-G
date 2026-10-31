@@ -387,7 +387,7 @@ public struct CloudRunner: Sendable {
                 if let server = try? decode(StdioMCPServer.self, from: value) { tools.append(StdioMCPTool(server: server, directory: configuration.workspace)) }
             }
         }
-        var definitions = BuiltInAgents.all
+        var definitions = BuiltInAgents.allIncludingKiroSubagents
         if let values = job.state["customAgents"]?.arrayValue {
             definitions += values.compactMap { try? decode(CustomAgentRecord.self, from: $0) }.map(\.definition)
         }
@@ -411,6 +411,7 @@ public struct CloudRunner: Sendable {
         )
         let workflowTools = tools
         let spendLimit = job.state["spendLimit"]?.doubleValue
+        let jobModelChoice: ModelChoice = job.state["modelChoice"].flatMap { try? decode(ModelChoice.self, from: $0) } ?? .auto
         let runner: AgentExecutor.Runner = { invocation in
             var chat: Chat
             if let value = invocation.resumeState,
@@ -430,14 +431,18 @@ public struct CloudRunner: Sendable {
                 let prompt = [invocation.definition.prompt(task: invocation.task), invocation.context].filter { !$0.isEmpty }.joined(separator: "\n\nContext:\n")
                 chat.messages = [.user(prompt), ChatMessage(body: .assistant(AssistantTurn()))]
             }
+            let stepThinking = invocation.preferredEffort ?? .max
             let route: Route
-            if invocation.definition.modelPolicy == .differentFromPrimary {
-                guard let distinct = ModelRouter.distinctRoute(avoiding: invocation.avoidModel, difficulty: invocation.definition.difficulty, thinking: .medium, account: accountState, catalogue: catalogue, openRouterAvailable: hasOpenRouter) else {
+            if let explicitID = invocation.preferredModelID, !explicitID.isEmpty, explicitID != ModelChoice.freeID {
+                route = ModelRouter.route(choice: .model(explicitID), difficulty: invocation.definition.difficulty, thinking: stepThinking, account: accountState, catalogue: catalogue, openRouterAvailable: hasOpenRouter)
+            } else if invocation.definition.modelPolicy == .differentFromPrimary {
+                guard let distinct = ModelRouter.distinctRoute(avoiding: invocation.avoidModel, difficulty: invocation.definition.difficulty, thinking: stepThinking, account: accountState, catalogue: catalogue, openRouterAvailable: hasOpenRouter) else {
                     throw CloudRunnerError.noDifferentModel
                 }
                 route = distinct
             } else {
-                route = ModelRouter.route(choice: .auto, difficulty: invocation.definition.difficulty, thinking: .medium, account: accountState, catalogue: catalogue, openRouterAvailable: hasOpenRouter)
+                let effectiveChoice: ModelChoice = jobModelChoice == .free ? .auto : jobModelChoice
+                route = ModelRouter.route(choice: effectiveChoice, difficulty: invocation.definition.difficulty, thinking: stepThinking, account: accountState, catalogue: catalogue, openRouterAvailable: hasOpenRouter)
             }
             let input = AgentTurnInput(
                 chat: chat, route: route,
@@ -745,22 +750,23 @@ public struct CloudRunner: Sendable {
         spendLimit: Double?,
         avoidModel: String?
     ) async throws -> AgentExecutionResult {
-        let openRouter = OpenRouterClient(transport: transport, apiKey: configuration.openRouterKey)
-        let models = (try? await openRouter.models()) ?? []
-        let catalogue = Dictionary(uniqueKeysWithValues: models.map { ($0.id, $0) })
-        let account = (try? await openRouter.keyInfo()).map { AccountState(isFreeTier: $0.isFreeTier) } ?? AccountState()
+        let ai = await makeAIContext()
+        let openRouter = ai.client
+        let catalogue = ai.catalogue
+        let account = ai.accountState
+        let hasOpenRouter = ai.hasOpenRouter
         let route: Route
         if definition.modelPolicy == .differentFromPrimary {
-            guard let selected = ModelRouter.distinctRoute(avoiding: avoidModel, difficulty: definition.difficulty, thinking: .medium, account: account, catalogue: catalogue) else { throw CloudRunnerError.noDifferentModel }
+            guard let selected = ModelRouter.distinctRoute(avoiding: avoidModel, difficulty: definition.difficulty, thinking: .medium, account: account, catalogue: catalogue, openRouterAvailable: hasOpenRouter) else { throw CloudRunnerError.noDifferentModel }
             route = selected
         } else {
-            route = ModelRouter.route(choice: .auto, difficulty: definition.difficulty, thinking: .medium, account: account, catalogue: catalogue)
+            route = ModelRouter.route(choice: .auto, difficulty: definition.difficulty, thinking: .medium, account: account, catalogue: catalogue, openRouterAvailable: hasOpenRouter)
         }
         var chat = Chat(title: definition.name)
         chat.messages = [.user([definition.prompt(task: task), context].filter { !$0.isEmpty }.joined(separator: "\n\nContext:\n")), ChatMessage(body: .assistant(AssistantTurn()))]
         let repo = SystemPrompt.RepoContext(ref: configuration.targetRepository, branch: "checked workspace", commit: try await git(["rev-parse", "HEAD"]).stdout.trimmingCharacters(in: .whitespacesAndNewlines), isPrivate: true, summary: nil, ruleDocuments: rules.documents)
         let input = AgentTurnInput(chat: chat, route: route, systemPrompt: SystemPrompt.make(userLogin: nil, repo: repo, agent: definition, workflowContext: context), tools: tools, spendLimit: spendLimit, requiresInitialSpendApproval: !route.isFree, agent: definition)
-        let environment = AgentEnvironment(openRouter: openRouter, freeRoute: { ModelRouter.route(choice: .free, difficulty: definition.difficulty, thinking: .medium, account: AccountState(), catalogue: catalogue) }, onOutOfCredits: {})
+        let environment = AgentEnvironment(openRouter: openRouter, freeRoute: { ModelRouter.route(choice: .free, difficulty: definition.difficulty, thinking: .medium, account: AccountState(), catalogue: catalogue, openRouterAvailable: hasOpenRouter) }, onOutOfCredits: {})
         var final: AssistantTurn?
         for await event in AgentLoop.run(input, environment: environment) { if case .updated(let turn, _) = event { final = turn } }
         guard let turn = final, turn.status == .done else { throw CloudRunnerError.commandFailed }

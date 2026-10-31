@@ -46,6 +46,10 @@ public actor RepoWorkspace {
         self.store = store
     }
 
+    public nonisolated func advancing(toCommit newCommit: String, branch newBranch: String? = nil) -> RepoWorkspace {
+        RepoWorkspace(repo: repo, branch: newBranch ?? branch, commit: newCommit, github: github, store: store)
+    }
+
     public var shortCommit: String { String(commit.prefix(7)) }
 
     /// Every file and folder at this commit.
@@ -210,6 +214,37 @@ public actor RepoWorkspace {
         if let lfs = try await resolvingLFS(data, path: path) { return lfs }
         guard let document = TextFileCodec.decode(data) else { return .binary(bytes: data.count) }
         return .text(document, bytes: data.count)
+    }
+
+    /// Reads raw bytes for binary image inspection (up to `maxBytes`), fetching the blob from GitHub
+    /// when a local text-only snapshot skipped binary entries.
+    public func readRawBytes(_ rawPath: String, maxBytes: Int = 5 * 1024 * 1024) async throws -> Data? {
+        let path = Self.normalize(rawPath)
+        guard !path.isEmpty else { return nil }
+        if let cached = fileCache[path], cached.count <= maxBytes {
+            return cached
+        }
+        if let snapshot, let data = snapshot.contents(of: path), data.count <= maxBytes {
+            return data
+        }
+        let tree = try await tree()
+        guard let entry = tree.entries.first(where: { $0.path == path && $0.isFile }) else {
+            return nil
+        }
+        if let size = entry.size, size > maxBytes {
+            return nil
+        }
+        let raw = try await github.blob(repo, sha: entry.sha)
+        guard raw.count <= maxBytes else { return nil }
+        fileCache[path] = raw
+        if let pointer = GitLFSPointer.parse(raw) {
+            guard pointer.size <= maxBytes else { return nil }
+            if let lfsCached = fileCache["lfs:" + pointer.oid] { return lfsCached }
+            let real = try await github.lfsObject(repo, pointer: pointer)
+            fileCache["lfs:" + pointer.oid] = real
+            return real
+        }
+        return raw
     }
 
     static func normalize(_ path: String) -> String {
@@ -492,6 +527,16 @@ public struct ReadFileTool: AgentTool {
         case .folder:
             throw ToolInputError("\(path.isEmpty ? "That" : path) is a folder. Use list_files to see what is in it.")
         case .binary(let bytes):
+            let rawData = try? await (changes != nil ? changes!.readRawBytes(path) : workspace.readRawBytes(path))
+            if let data = rawData, let imageInfo = BinaryImageInspector.inspect(data, path: path) {
+                let dimText = imageInfo.dimensions.map { "\($0.width)×\($0.height), " } ?? ""
+                return ToolOutput(
+                    forModel: "Repository image \(path) (\(imageInfo.formatName), \(dimText)\(Format.bytes(data.count))). Vision-capable AIs receive the visual image directly; text-only AIs receive its format and dimensions.",
+                    summary: "Viewed image \(path)",
+                    detail: "\(imageInfo.formatName) · \(dimText)\(Format.bytes(data.count))",
+                    inlineImages: [ToolInlineImage(name: path, mimeType: imageInfo.mimeType, data: data)]
+                )
+            }
             return ToolOutput(forModel: "\(path) is a binary file (\(Format.bytes(bytes))), such as a picture or an archive. It can't be shown as text.", summary: "Looked at \(path) · not text")
         case .tooLarge(let bytes):
             return ToolOutput(forModel: "\(path) is too large to read (\(Format.bytes(bytes))). Use search_code to find the part you need.", summary: "Looked at \(path) · too large")
@@ -585,7 +630,8 @@ public struct SearchCodeTool: AgentTool {
             pathGlob: arguments.optionalString("path_glob"),
             maxResults: min(max(arguments.optionalInt("max_results") ?? 120, 1), 500)
         )
-        let copy = try await workspace.localCopy { update in
+        let activeWorkspace = changes?.base ?? workspace
+        let copy = try await activeWorkspace.localCopy { update in
             switch update {
             case .downloading(let bytes): progress("Getting a copy of the repo to search · \(Format.bytes(Int(bytes)))")
             case .unpacking(let files): progress("Unpacking the copy · \(files) files")
@@ -624,5 +670,95 @@ public struct SearchCodeTool: AgentTool {
             summary: "Searched for \(described) · \(result.matches.count)\(result.truncated ? "+" : "") match\(result.matches.count == 1 && !result.truncated ? "" : "es")",
             detail: lines.dropFirst().prefix(60).joined(separator: "\n")
         )
+    }
+}
+
+enum BinaryImageInspector {
+    struct Info: Sendable, Hashable {
+        var mimeType: String
+        var formatName: String
+        var dimensions: (width: Int, height: Int)?
+
+        static func == (lhs: Info, rhs: Info) -> Bool {
+            lhs.mimeType == rhs.mimeType
+                && lhs.formatName == rhs.formatName
+                && lhs.dimensions?.width == rhs.dimensions?.width
+                && lhs.dimensions?.height == rhs.dimensions?.height
+        }
+
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(mimeType)
+            hasher.combine(formatName)
+            hasher.combine(dimensions?.width)
+            hasher.combine(dimensions?.height)
+        }
+    }
+
+    static func inspect(_ data: Data, path: String) -> Info? {
+        let bytes = [UInt8](data.prefix(64))
+        // PNG: 89 50 4E 47 0D 0A 1A 0A + IHDR width(16..19) height(20..23)
+        if bytes.count >= 24,
+           bytes[0] == 0x89, bytes[1] == 0x50, bytes[2] == 0x4E, bytes[3] == 0x47,
+           bytes[4] == 0x0D, bytes[5] == 0x0A, bytes[6] == 0x1A, bytes[7] == 0x0A {
+            let w = Int(UInt32(bytes[16]) << 24 | UInt32(bytes[17]) << 16 | UInt32(bytes[18]) << 8 | UInt32(bytes[19]))
+            let h = Int(UInt32(bytes[20]) << 24 | UInt32(bytes[21]) << 16 | UInt32(bytes[22]) << 8 | UInt32(bytes[23]))
+            return Info(mimeType: "image/png", formatName: "PNG", dimensions: (w > 0 && h > 0) ? (w, h) : nil)
+        }
+        // GIF: GIF87a / GIF89a + little-endian width(6..7) height(8..9)
+        if bytes.count >= 10,
+           bytes[0] == 0x47, bytes[1] == 0x49, bytes[2] == 0x46, bytes[3] == 0x38 {
+            let w = Int(UInt16(bytes[6]) | (UInt16(bytes[7]) << 8))
+            let h = Int(UInt16(bytes[8]) | (UInt16(bytes[9]) << 8))
+            return Info(mimeType: "image/gif", formatName: "GIF", dimensions: (w > 0 && h > 0) ? (w, h) : nil)
+        }
+        // WebP: RIFF....WEBP
+        if bytes.count >= 16,
+           bytes[0] == 0x52, bytes[1] == 0x49, bytes[2] == 0x46, bytes[3] == 0x46,
+           bytes[8] == 0x57, bytes[9] == 0x45, bytes[10] == 0x42, bytes[11] == 0x50 {
+            var dims: (Int, Int)?
+            if bytes.count >= 30, bytes[12] == 0x56, bytes[13] == 0x50, bytes[14] == 0x38, bytes[15] == 0x58 {
+                let w = 1 + Int(UInt32(bytes[24]) | (UInt32(bytes[25]) << 8) | (UInt32(bytes[26]) << 16))
+                let h = 1 + Int(UInt32(bytes[27]) | (UInt32(bytes[28]) << 8) | (UInt32(bytes[29]) << 16))
+                if w > 0, h > 0 { dims = (w, h) }
+            }
+            return Info(mimeType: "image/webp", formatName: "WebP", dimensions: dims)
+        }
+        // JPEG: FF D8 FF ... scan SOF markers for height/width
+        if bytes.count >= 4, bytes[0] == 0xFF, bytes[1] == 0xD8, bytes[2] == 0xFF {
+            let dims = parseJPEGDimensions(data)
+            return Info(mimeType: "image/jpeg", formatName: "JPEG", dimensions: dims)
+        }
+        return nil
+    }
+
+    private static func parseJPEGDimensions(_ data: Data) -> (width: Int, height: Int)? {
+        let count = min(data.count, 256 * 1024)
+        guard count >= 11 else { return nil }
+        return data.withUnsafeBytes { raw -> (width: Int, height: Int)? in
+            guard let ptr = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return nil }
+            var i = 2
+            while i + 8 < count {
+                if ptr[i] != 0xFF { i += 1; continue }
+                while i < count && ptr[i] == 0xFF { i += 1 }
+                guard i < count else { break }
+                let marker = ptr[i]
+                i += 1
+                if marker == 0xD8 || marker == 0xD9 || (marker >= 0xD0 && marker <= 0xD7) || marker == 0x01 {
+                    continue
+                }
+                guard i + 1 < count else { break }
+                let segLen = Int(ptr[i]) << 8 | Int(ptr[i + 1])
+                guard segLen >= 2 else { break }
+                // SOF0..SOF3, SOF5..SOF7, SOF9..SOF11, SOF13..SOF15
+                let isSOF = (marker >= 0xC0 && marker <= 0xCF) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC
+                if isSOF, i + 6 < count {
+                    let h = Int(ptr[i + 3]) << 8 | Int(ptr[i + 4])
+                    let w = Int(ptr[i + 5]) << 8 | Int(ptr[i + 6])
+                    if w > 0, h > 0 { return (w, h) }
+                }
+                i += segLen
+            }
+            return nil
+        }
     }
 }

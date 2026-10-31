@@ -109,10 +109,20 @@ public enum IntegrationCatalog {
     }
 
     public static func byServerID(_ serverID: String) -> IntegrationProviderSpec? {
-        if let exact = all.first(where: { $0.id == serverID || "builtin:\($0.id)" == serverID || "apple:\($0.id)" == serverID }) {
+        let stripped: String = {
+            for prefix in ["builtin:", "apple:", "mcp:", "stdio:", "webhook:"] where serverID.lowercased().hasPrefix(prefix) {
+                return String(serverID.dropFirst(prefix.count))
+            }
+            return serverID
+        }()
+        if let exact = all.first(where: {
+            $0.id.caseInsensitiveCompare(stripped) == .orderedSame
+                || $0.id.caseInsensitiveCompare(serverID) == .orderedSame
+                || $0.aliases.contains(where: { $0.caseInsensitiveCompare(stripped) == .orderedSame })
+        }) {
             return exact
         }
-        return matching(serverID)
+        return matching(stripped) ?? matching(serverID)
     }
 
     public static let all: [IntegrationProviderSpec] = [
@@ -251,7 +261,8 @@ public enum BuiltinIntegrationFactory {
         secret: String?,
         transport: any HTTPTransport,
         computer: ComputerControl?,
-        stdioEnvSecrets: [String: String] = [:]
+        stdioEnvSecrets: [String: String] = [:],
+        githubTokenProvider: (@Sendable () async -> String?)? = nil
     ) -> [any AgentTool] {
         let disabled = configuration.disabledTools
         switch configuration.kind {
@@ -259,7 +270,7 @@ public enum BuiltinIntegrationFactory {
             let tool = WebhookConnectorTool(configuration: configuration, secretValue: secret, transport: transport)
             return disabled.contains(tool.definition.originalName) ? [] : [tool]
         case .builtin:
-            return makeBuiltinTools(configuration: configuration, secret: secret, transport: transport)
+            return makeBuiltinTools(configuration: configuration, secret: secret, transport: transport, githubTokenProvider: githubTokenProvider)
                 .filter { !disabled.contains($0.definition.originalName) }
         case .stdio:
             guard let computer, let pkg = configuration.package, !disabled.contains("call") else { return [] }
@@ -272,7 +283,8 @@ public enum BuiltinIntegrationFactory {
     private static func makeBuiltinTools(
         configuration: ConnectorConfiguration,
         secret: String?,
-        transport: any HTTPTransport
+        transport: any HTTPTransport,
+        githubTokenProvider: (@Sendable () async -> String?)? = nil
     ) -> [any BuiltinDescribedTool] {
         let provider = configuration.launchValues["provider"] ?? configuration.serverID.replacingOccurrences(of: "builtin:", with: "")
         switch provider {
@@ -290,8 +302,8 @@ public enum BuiltinIntegrationFactory {
             return [AppleMusicSearchTool(configuration: configuration, transport: transport)]
         case "github":
             return [
-                GitHubSearchConnectorTool(configuration: configuration, secret: secret, transport: transport),
-                ScopedRESTRequestTool(configuration: configuration, secret: secret, transport: transport)
+                GitHubSearchConnectorTool(configuration: configuration, secret: secret, transport: transport, githubTokenProvider: githubTokenProvider),
+                ScopedRESTRequestTool(configuration: configuration, secret: secret, transport: transport, githubTokenProvider: githubTokenProvider)
             ]
         case "brave", "brave_search":
             return [
@@ -363,6 +375,7 @@ private struct WikipediaSearchTool: BuiltinDescribedTool {
         var comp = URLComponents(string: "https://en.wikipedia.org/w/rest.php/v1/search/page")!
         comp.queryItems = [URLQueryItem(name: "q", value: query), URLQueryItem(name: "limit", value: String(limit))]
         let res = try await transport.send(HTTPRequest(url: comp.url!, headers: ["Accept": "application/json", "User-Agent": "MAIPA-G/1.0"]))
+        guard res.isSuccess else { throw ToolInputError("Wikipedia returned HTTP \(res.status): \(res.text.prefix(240))") }
         let text = String(res.text.prefix(12_000))
         return ToolOutput(forModel: text, summary: "Searched Wikipedia", detail: text)
     }
@@ -388,6 +401,7 @@ private struct WikipediaSummaryTool: BuiltinDescribedTool {
         let encoded = title.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? title
         let url = URL(string: "https://en.wikipedia.org/api/rest_v1/page/summary/\(encoded)")!
         let res = try await transport.send(HTTPRequest(url: url, headers: ["Accept": "application/json", "User-Agent": "MAIPA-G/1.0"]))
+        guard res.isSuccess else { throw ToolInputError("Wikipedia returned HTTP \(res.status): \(res.text.prefix(240))") }
         let text = String(res.text.prefix(12_000))
         return ToolOutput(forModel: text, summary: "Read Wikipedia summary", detail: text)
     }
@@ -414,6 +428,7 @@ private struct ArXivSearchTool: BuiltinDescribedTool {
         var comp = URLComponents(string: "https://export.arxiv.org/api/query")!
         comp.queryItems = [URLQueryItem(name: "search_query", value: "all:\(query)"), URLQueryItem(name: "start", value: "0"), URLQueryItem(name: "max_results", value: String(maxResults))]
         let res = try await transport.send(HTTPRequest(url: comp.url!, headers: ["User-Agent": "MAIPA-G/1.0"]))
+        guard res.isSuccess else { throw ToolInputError("arXiv returned HTTP \(res.status): \(res.text.prefix(240))") }
         let text = String(res.text.prefix(16_000))
         return ToolOutput(forModel: text, summary: "Searched arXiv", detail: text)
     }
@@ -441,6 +456,7 @@ private struct HackerNewsSearchTool: BuiltinDescribedTool {
             ? [URLQueryItem(name: "tags", value: "front_page"), URLQueryItem(name: "hitsPerPage", value: "15")]
             : [URLQueryItem(name: "query", value: q), URLQueryItem(name: "tags", value: "story"), URLQueryItem(name: "hitsPerPage", value: "12")]
         let res = try await transport.send(HTTPRequest(url: comp.url!, headers: ["Accept": "application/json"]))
+        guard res.isSuccess else { throw ToolInputError("Hacker News returned HTTP \(res.status): \(res.text.prefix(240))") }
         let text = String(res.text.prefix(14_000))
         return ToolOutput(forModel: text, summary: q.isEmpty ? "Loaded Hacker News front page" : "Searched Hacker News", detail: text)
     }
@@ -472,6 +488,7 @@ private struct RedditSearchTool: BuiltinDescribedTool {
             URLQueryItem(name: "restrict_sr", value: sub.isEmpty ? "0" : "1")
         ]
         let res = try await transport.send(HTTPRequest(url: comp.url!, headers: ["Accept": "application/json", "User-Agent": "ios:dev.maipag.app:v1.0"]))
+        guard res.isSuccess else { throw ToolInputError("Reddit returned HTTP \(res.status): \(res.text.prefix(240))") }
         let text = String(res.text.prefix(15_000))
         return ToolOutput(forModel: text, summary: "Searched Reddit", detail: text)
     }
@@ -503,7 +520,8 @@ private struct JinaReaderTool: BuiltinDescribedTool {
         }
         var headers = ["Accept": "text/plain"]
         if let secret, !secret.isEmpty { headers["Authorization"] = "Bearer \(secret)" }
-        let res = try await transport.send(HTTPRequest(url: readerURL, headers: headers))
+        let res = try await transport.send(HTTPRequest(url: readerURL, headers: headers, followsRedirects: secret == nil || secret?.isEmpty == true))
+        guard res.isSuccess else { throw ToolInputError("Jina Reader returned HTTP \(res.status): \(res.text.prefix(240))") }
         let text = String(res.text.prefix(24_000))
         return ToolOutput(forModel: text, summary: "Extracted Markdown via Jina Reader", detail: String(text.prefix(1_200)))
     }
@@ -530,6 +548,7 @@ private struct AppleMusicSearchTool: BuiltinDescribedTool {
         var comp = URLComponents(string: "https://itunes.apple.com/search")!
         comp.queryItems = [URLQueryItem(name: "term", value: query), URLQueryItem(name: "media", value: "music"), URLQueryItem(name: "entity", value: entity), URLQueryItem(name: "limit", value: "10")]
         let res = try await transport.send(HTTPRequest(url: comp.url!, headers: ["Accept": "application/json"]))
+        guard res.isSuccess else { throw ToolInputError("Apple Music returned HTTP \(res.status): \(res.text.prefix(240))") }
         let text = String(res.text.prefix(14_000))
         return ToolOutput(forModel: text, summary: "Searched Apple Music", detail: text)
     }
@@ -718,6 +737,7 @@ private struct ScopedRESTRequestTool: BuiltinDescribedTool {
     let configuration: ConnectorConfiguration
     let secret: String?
     let transport: any HTTPTransport
+    var githubTokenProvider: (@Sendable () async -> String?)? = nil
 
     var definition: ConnectorToolDefinition {
         let baseHint = effectiveBaseURLString
@@ -843,14 +863,20 @@ private struct ScopedRESTRequestTool: BuiltinDescribedTool {
             headers["Accept"] = "application/vnd.github+json"
             headers["X-GitHub-Api-Version"] = "2022-11-28"
         }
-        if let secret, !secret.isEmpty {
+        let resolvedSecret: String? = await {
+            if secret == "__maipag_github_app__", let githubTokenProvider {
+                return await githubTokenProvider()
+            }
+            return secret
+        }()
+        if let resolvedSecret, !resolvedSecret.isEmpty, resolvedSecret != "__maipag_github_app__" {
             switch authStyle {
             case .bearer:
-                headers["Authorization"] = secret.lowercased().hasPrefix("bearer ") ? secret : "Bearer \(secret)"
+                headers["Authorization"] = resolvedSecret.lowercased().hasPrefix("bearer ") ? resolvedSecret : "Bearer \(resolvedSecret)"
             case .header:
-                headers[authName] = secret
+                headers[authName] = resolvedSecret
             case .basicToken:
-                headers["Authorization"] = "Basic \(Data(secret.utf8).base64EncodedString())"
+                headers["Authorization"] = "Basic \(Data(resolvedSecret.utf8).base64EncodedString())"
             case .none, .queryParam, .telegramBotPath:
                 break
             }
@@ -1070,6 +1096,7 @@ private struct GitHubSearchConnectorTool: BuiltinDescribedTool {
     let configuration: ConnectorConfiguration
     let secret: String?
     let transport: any HTTPTransport
+    var githubTokenProvider: (@Sendable () async -> String?)? = nil
 
     var definition: ConnectorToolDefinition {
         ConnectorToolDefinition(
@@ -1120,8 +1147,14 @@ private struct GitHubSearchConnectorTool: BuiltinDescribedTool {
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "MAIPA-G/1.0",
         ]
-        if let secret, !secret.isEmpty, secret != "__maipag_github_app__" {
-            headers["Authorization"] = secret.lowercased().hasPrefix("bearer ") ? secret : "Bearer \(secret)"
+        let resolvedSecret: String? = await {
+            if secret == "__maipag_github_app__", let githubTokenProvider {
+                return await githubTokenProvider()
+            }
+            return secret
+        }()
+        if let resolvedSecret, !resolvedSecret.isEmpty, resolvedSecret != "__maipag_github_app__" {
+            headers["Authorization"] = resolvedSecret.lowercased().hasPrefix("bearer ") ? resolvedSecret : "Bearer \(resolvedSecret)"
         }
         let resp = try await transport.send(HTTPRequest(url: comp.url!, headers: headers, idleTimeout: 25, followsRedirects: false))
         guard resp.isSuccess else {

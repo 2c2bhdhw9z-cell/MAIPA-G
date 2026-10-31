@@ -34,11 +34,15 @@ public enum DataExport {
                 let relative = String(path.dropFirst(root.count))
                 guard SnapshotStore.isSafeRelativePath(relative) else { continue }
                 let ext = url.pathExtension.lowercased()
-                let alreadyCompressed = ["jpg", "jpeg", "png", "gif", "webp", "heic", "pdf", "zip", "mp4", "mov"].contains(ext)
+                let alreadyCompressed: Set<String> = [
+                    "jpg", "jpeg", "png", "gif", "webp", "heic", "pdf",
+                    "zip", "ipa", "gz", "tgz", "bz2", "xz", "7z", "rar",
+                    "mp4", "mov", "mp3", "m4a", "aac", "ogg", "flac", "opus", "bin",
+                ]
                 try archive.addEntry(
                     with: "\(rootName)/\(archiveFolder)/\(relative)",
                     fileURL: url,
-                    compressionMethod: alreadyCompressed ? .none : .deflate
+                    compressionMethod: alreadyCompressed.contains(ext) ? .none : .deflate
                 )
             }
         }

@@ -353,8 +353,12 @@ final class OpenRouterAccount {
     private(set) var restrictedModelIDs: Set<String> = []
 
     func markRestricted(_ modelID: String) {
-        guard !modelID.isEmpty, modelID != "openrouter/auto", !restrictedModelIDs.contains(modelID) else { return }
+        guard !modelID.isEmpty,
+              modelID != "openrouter/auto",
+              !OpenRouterClient.requiresAllowlistedHarnessHeaders(modelID),
+              !restrictedModelIDs.contains(modelID) else { return }
         restrictedModelIDs.insert(modelID)
+        rebuildMergedModels()
     }
 
     func togglePin(_ modelID: String) {
@@ -394,7 +398,8 @@ final class OpenRouterAccount {
 
     /// Loads OpenRouter's catalogue AND all connected external AI gateways, at most every hour unless `force`.
     func loadModels(force: Bool = false) async {
-        if !force, let loaded = catalogueLoadedAt, Date().timeIntervalSince(loaded) < 3600, !allSelectableModels.isEmpty { return }
+        let missingImageCatalogue = hasOpenRouterKey && !openRouterCatalogCache.contains(where: \.isPureImageModel)
+        if !force, !missingImageCatalogue, let loaded = catalogueLoadedAt, Date().timeIntervalSince(loaded) < 3600, !allSelectableModels.isEmpty { return }
         isLoadingModels = true
         defer { isLoadingModels = false }
 
@@ -447,7 +452,7 @@ final class OpenRouterAccount {
         }
         modelsByID = Dictionary(combined.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         models = combined.filter { $0.isChatModel && !restrictedModelIDs.contains($0.id) }
-        allSelectableModels = combined.filter(\.isSelectableModel)
+        allSelectableModels = combined.filter { $0.isSelectableModel && !restrictedModelIDs.contains($0.id) }
     }
 
     private func persistMergedCatalog() {
@@ -500,15 +505,32 @@ final class OpenRouterAccount {
     func supportsTools(_ choice: ModelChoice) -> Bool {
         switch choice {
         case .auto, .free: return true
-        case .model(let id): return modelsByID[id]?.supportsTools ?? true
+        case .model(let id):
+            guard let info = modelsByID[id] else { return true }
+            if info.isPureImageModel { return false }
+            return info.supportsTools
         }
+    }
+
+    /// True when the picked model is a pure image-generation model (`/api/v1/images`), not a chat model.
+    func isImageOnlyModel(_ choice: ModelChoice) -> Bool {
+        guard case .model(let id) = choice, let info = modelsByID[id] else { return false }
+        return info.isPureImageModel
+    }
+
+    func providerName(forModelID id: String) -> String {
+        if let decoded = AIProviderModelID.decode(id),
+           let ep = externalProviders.first(where: { $0.id == decoded.providerID }) {
+            return ep.name
+        }
+        return "OpenRouter"
     }
 
     func describe(_ error: Error, file: String = #fileID, function: String = #function) -> String {
         if let error = error as? OpenRouterAPIError {
             _ = ErrorExplainer.explain(error, file: file, function: function)
             switch error.kind {
-            case .invalidKey: return "That API key wasn't accepted. Double-check it and try again."
+            case .invalidKey: return "That \(error.providerName) API key wasn't accepted. Double-check it and try again."
             default: return error.message
             }
         }

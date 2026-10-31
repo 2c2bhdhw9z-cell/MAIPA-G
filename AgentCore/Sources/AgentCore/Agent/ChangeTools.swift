@@ -133,7 +133,27 @@ public struct EditFileTool: AgentTool {
     public let rules: RepoWriteRules
     public let name = "edit_file"
     public init(workspace: ChangeWorkspace, authorization: ChangeAuthorization = ChangeAuthorization(request: ""), rules: RepoWriteRules = RepoWriteRules()) { self.workspace = workspace; self.authorization = authorization; self.rules = rules }
-    public var spec: ToolSpec { ToolSpec(name: name, description: "Replace a text file with complete new UTF-8 content, staged until save_changes.", parameters: ["type": "object", "properties": ["path": ["type": "string"], "content": ["type": "string"]], "required": ["path", "content"]]) }
+    public var spec: ToolSpec {
+        ToolSpec(
+            name: name,
+            description: """
+            Stage an edit to an existing UTF-8 text file (not saved to GitHub until save_changes). \
+            Prefer surgical edits with old_text and new_text so large files are never truncated or rewritten from scratch; \
+            only pass content when intentionally replacing an entire small file.
+            """,
+            parameters: [
+                "type": "object",
+                "properties": [
+                    "path": ["type": "string", "description": "Repository path of the file to edit."],
+                    "old_text": ["type": "string", "description": "Exact existing lines to find in the file (include enough surrounding lines to be unique)."],
+                    "new_text": ["type": "string", "description": "Replacement text for old_text (use \"\" to delete the matched lines)."],
+                    "replace_all": ["type": "boolean", "description": "Replace every occurrence of old_text instead of requiring a single match. Default false."],
+                    "content": ["type": "string", "description": "Complete new file content when replacing an entire small file instead of using old_text/new_text."],
+                ],
+                "required": ["path"],
+            ]
+        )
+    }
     public func runningSummary(for arguments: JSONValue) -> String { "Editing \(arguments.optionalString("path") ?? "a file")…" }
     public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
         guard let path = arguments.optionalString("path"), ChangeWorkspace.isBuildSetup(RepoWorkspace.normalize(path)),
@@ -142,10 +162,76 @@ public struct EditFileTool: AgentTool {
     }
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let path = try arguments.requiredString("path")
-        if ChangeWorkspace.isBuildSetup(RepoWorkspace.normalize(path)), !rules.permitsBuildSetup(at: path) { throw ToolInputError("Repository rules do not allow changing build setup at \(path).") }
+        if ChangeWorkspace.isBuildSetup(RepoWorkspace.normalize(path)), !rules.permitsBuildSetup(at: path) {
+            throw ToolInputError("Repository rules do not allow changing build setup at \(path).")
+        }
+        if let oldText = arguments["old_text"]?.stringValue {
+            guard let newText = arguments["new_text"]?.stringValue else {
+                throw ToolInputError("Missing \"new_text\" when using \"old_text\" in edit_file.")
+            }
+            let replaceAll = arguments.optionalBool("replace_all") ?? false
+            let result = try await workspace.replace(
+                path: path,
+                oldText: oldText,
+                newText: newText,
+                replaceAll: replaceAll,
+                buildSetupApproved: true
+            )
+            let noun = result.count == 1 ? "1 block" : "\(result.count) blocks"
+            return ToolOutput(
+                forModel: "Staged surgical edit to \(path) (\(noun) replaced).",
+                summary: "Edited \(path)",
+                detail: result.diffPreview
+            )
+        }
+        if let content = arguments["content"]?.stringValue {
+            try await workspace.edit(path: path, text: content, buildSetupApproved: true)
+            return ToolOutput(forModel: "Staged changes to \(path).", summary: "Edited \(path)", detail: content)
+        }
+        throw ToolInputError("Pass \"old_text\" and \"new_text\" for a surgical edit, or \"content\" to replace the entire file.")
+    }
+}
+
+public struct AppendFileTool: AgentTool {
+    public let workspace: ChangeWorkspace
+    public let authorization: ChangeAuthorization
+    public let rules: RepoWriteRules
+    public let name = "append_file"
+    public init(workspace: ChangeWorkspace, authorization: ChangeAuthorization = ChangeAuthorization(request: ""), rules: RepoWriteRules = RepoWriteRules()) { self.workspace = workspace; self.authorization = authorization; self.rules = rules }
+    public var spec: ToolSpec {
+        ToolSpec(
+            name: name,
+            description: "Stage UTF-8 text appended to the end of a repository file (or create it if create_if_missing is true) without rewriting existing lines.",
+            parameters: [
+                "type": "object",
+                "properties": [
+                    "path": ["type": "string", "description": "Repository path of the file."],
+                    "content": ["type": "string", "description": "Text to append at the end of the file."],
+                    "create_if_missing": ["type": "boolean", "description": "Create the file if it does not exist yet. Default false."],
+                ],
+                "required": ["path", "content"],
+            ]
+        )
+    }
+    public func runningSummary(for arguments: JSONValue) -> String { "Appending to \(arguments.optionalString("path") ?? "a file")…" }
+    public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
+        guard let path = arguments.optionalString("path"), ChangeWorkspace.isBuildSetup(RepoWorkspace.normalize(path)),
+              !authorization.allows(.buildSetup, path: path) else { return nil }
+        return ToolApprovalRequest(question: "Allow MAIPA-G to change the build setup in \(path)?")
+    }
+    public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        let path = try arguments.requiredString("path")
+        if ChangeWorkspace.isBuildSetup(RepoWorkspace.normalize(path)), !rules.permitsBuildSetup(at: path) {
+            throw ToolInputError("Repository rules do not allow changing build setup at \(path).")
+        }
         guard let content = arguments["content"]?.stringValue else { throw ToolInputError("Missing \"content\".") }
-        try await workspace.edit(path: path, text: content, buildSetupApproved: true)
-        return ToolOutput(forModel: "Staged changes to \(path).", summary: "Edited \(path)", detail: content)
+        let createIfMissing = arguments.optionalBool("create_if_missing") ?? false
+        let created = try await workspace.append(path: path, text: content, createIfMissing: createIfMissing, buildSetupApproved: true)
+        return ToolOutput(
+            forModel: created ? "Created \(path) and staged content (\(content.utf8.count) bytes)." : "Staged \(content.utf8.count) bytes appended to \(path).",
+            summary: created ? "Created \(path)" : "Appended to \(path)",
+            detail: String(content.prefix(10_000))
+        )
     }
 }
 

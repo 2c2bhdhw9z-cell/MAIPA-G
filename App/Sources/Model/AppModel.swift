@@ -201,15 +201,32 @@ final class AppModel {
         home.repo = settings.lastRepo
     }
 
-    func liveStatusText() -> String {
+    func liveStatusText(for session: ChatSession? = nil) -> String {
+        let targetSession = session ?? library.openSession
+        let activeChoice = targetSession?.chat.model ?? home.model
+        let activeThinking = targetSession?.chat.thinking ?? home.thinking
         var lines = [
-            "GitHub: " + (github.isConnected ? "connected as \(github.login ?? "unknown")" : "not connected"),
+            "GitHub: " + (github.isConnected ? "connected as \(github.login ?? "unknown") (\(github.repos.count) accessible repos)" : "not connected"),
             "AI providers: \(openRouter.activeProviderSummary)",
-            "Chosen AI: \(openRouter.label(for: home.model))",
-            "Chat computer: \(settings.chatComputerOff ? "off" : (settings.chatComputerServer ?? "automatic"))",
-            "Saving: \(String(describing: sync.status))",
+            "Chosen AI (active chat): \(openRouter.label(for: activeChoice))",
         ]
-        if let balance = openRouter.balance { lines.append("OpenRouter credit: \(balance.dollars)") }
+        if let session = targetSession {
+            lines.append(contentsOf: session.liveModelAndRepoLines())
+        } else {
+            lines.append("Thinking effort: \(activeThinking.rawValue)")
+        }
+        if let balance = openRouter.balance {
+            lines.append("OpenRouter credit: \(balance.dollars)")
+        }
+        for provider in openRouter.readyExternalProviders {
+            if let usd = openRouter.externalBalances[provider.id] {
+                lines.append("\(provider.name) credit: $\(String(format: "%.2f", usd))")
+            } else {
+                lines.append("\(provider.name): connected (\(openRouter.externalModelCounts[provider.id] ?? 0) models)")
+            }
+        }
+        lines.append("Chat computer: \(settings.chatComputerOff ? "off" : (settings.chatComputerServer ?? "automatic (\(settings.chatComputerMachineName))"))")
+        lines.append("Saving: \(String(describing: sync.status))")
         for connector in connectors.connected {
             lines.append("Connector \(connector.displayName): \(connectors.states[connector.id]?.rawValue ?? "unknown")")
         }

@@ -208,7 +208,20 @@ struct WorkflowStepSummary: View {
             Image(systemName: node.kind.icon).frame(width: 22).foregroundStyle(Theme.secondaryText)
             VStack(alignment: .leading, spacing: 3) {
                 Text(node.title)
-                Text(node.kind.label).font(.caption).foregroundStyle(Theme.secondaryText)
+                HStack(spacing: 6) {
+                    Text(node.kind.label).font(.caption).foregroundStyle(Theme.secondaryText)
+                    if let model = node.modelID {
+                        Text("· \(AIProviderModelID.rawModelID(model))")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(Theme.secondaryText)
+                            .lineLimit(1)
+                    }
+                    if let effort = node.effortLevel {
+                        Text("· \(effort.rawValue)")
+                            .font(.caption2)
+                            .foregroundStyle(Theme.secondaryText)
+                    }
+                }
                 ForEach(node.children) { child in Text("• \(child.title)").font(.caption).foregroundStyle(Theme.secondaryText) }
             }
         }
@@ -217,9 +230,23 @@ struct WorkflowStepSummary: View {
 
 extension WorkflowNode.Kind {
     var label: String {
-        switch self { case .agent: return "Agent"; case .sequence: return "Sequence"; case .repeatUntil: return "Repeat"; case .stopAndAsk: return "Stop and ask"; case .parallel: return "Parallel helpers" }
+        switch self {
+        case .agent: return "Agent step"
+        case .sequence: return "Sequence"
+        case .repeatUntil: return "Repeat loop"
+        case .stopAndAsk: return "Stop and ask"
+        case .parallel: return "Parallel branches"
+        case .watch: return "Watch condition"
+        }
     }
     var icon: String {
-        switch self { case .agent: return "person.crop.circle"; case .sequence: return "list.number"; case .repeatUntil: return "repeat"; case .stopAndAsk: return "person.crop.circle.badge.questionmark"; case .parallel: return "person.2" }
+        switch self {
+        case .agent: return "person.crop.circle"
+        case .sequence: return "list.number"
+        case .repeatUntil: return "repeat"
+        case .stopAndAsk: return "person.crop.circle.badge.questionmark"
+        case .parallel: return "person.2"
+        case .watch: return "eye.circle"
+        }
     }
 }

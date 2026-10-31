@@ -26,9 +26,13 @@ public enum StarMemoryService {
 /// AI-facing memory operations use the same durable store as the Memories screen.
 public struct AddMemoryTool: AgentTool {
     public let store: ProductStore<MemoryRecord>
+    public let onChanged: (@Sendable () async -> Void)?
     public let name = "add_memory"
 
-    public init(store: ProductStore<MemoryRecord>) { self.store = store }
+    public init(store: ProductStore<MemoryRecord>, onChanged: (@Sendable () async -> Void)? = nil) {
+        self.store = store
+        self.onChanged = onChanged
+    }
 
     public var spec: ToolSpec {
         ToolSpec(name: name, description: "Save a useful fact or preference for future new chats. Do not save temporary task details.", parameters: [
@@ -53,15 +57,20 @@ public struct AddMemoryTool: AgentTool {
         }
         let record = MemoryRecord(text: text, source: .ai)
         try await store.save(record)
+        await onChanged?()
         return ToolOutput(forModel: "Saved memory \(record.id.uuidString): \(text)", summary: "Saved a memory", detail: text)
     }
 }
 
 public struct EditMemoryTool: AgentTool {
     public let store: ProductStore<MemoryRecord>
+    public let onChanged: (@Sendable () async -> Void)?
     public let name = "edit_memory"
 
-    public init(store: ProductStore<MemoryRecord>) { self.store = store }
+    public init(store: ProductStore<MemoryRecord>, onChanged: (@Sendable () async -> Void)? = nil) {
+        self.store = store
+        self.onChanged = onChanged
+    }
 
     public var spec: ToolSpec {
         ToolSpec(name: name, description: "Edit one existing memory when it is outdated or needs correction.", parameters: [
@@ -93,6 +102,7 @@ public struct EditMemoryTool: AgentTool {
         record.source = .ai
         record.updatedAt = Date()
         try await store.save(record)
+        await onChanged?()
         return ToolOutput(forModel: "Updated memory \(record.id.uuidString): \(text)", summary: "Updated a memory", detail: text)
     }
 }

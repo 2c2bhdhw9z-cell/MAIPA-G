@@ -1,5 +1,19 @@
 import Foundation
 
+/// Transient visual image returned by a tool (such as `read_file` on a repository PNG/JPEG/WebP/GIF)
+/// so vision-capable models can inspect pixels directly during the active turn without bloating `Chat.json`.
+public struct ToolInlineImage: Sendable, Hashable {
+    public var name: String
+    public var mimeType: String
+    public var data: Data
+
+    public init(name: String, mimeType: String, data: Data) {
+        self.name = name
+        self.mimeType = mimeType
+        self.data = data
+    }
+}
+
 /// What a tool hands back: text for the model, and short words for the chat.
 public struct ToolOutput: Sendable, Hashable {
     public var forModel: String
@@ -9,15 +23,26 @@ public struct ToolOutput: Sendable, Hashable {
     public var detail: String?
     public var isError: Bool
     public var generatedImages: [GeneratedImageResult]
+    /// Transient visual inputs (such as repository images read via `read_file`) shown to vision models.
+    public var inlineImages: [ToolInlineImage]
     /// Cost incurred by a tool outside the chat-completion request, such as image generation.
     public var billedCost: Double
 
-    public init(forModel: String, summary: String, detail: String? = nil, isError: Bool = false, generatedImages: [GeneratedImageResult] = [], billedCost: Double = 0) {
+    public init(
+        forModel: String,
+        summary: String,
+        detail: String? = nil,
+        isError: Bool = false,
+        generatedImages: [GeneratedImageResult] = [],
+        inlineImages: [ToolInlineImage] = [],
+        billedCost: Double = 0
+    ) {
         self.forModel = forModel
         self.summary = summary
         self.detail = detail
         self.isError = isError
         self.generatedImages = generatedImages
+        self.inlineImages = inlineImages
         self.billedCost = billedCost
     }
 }

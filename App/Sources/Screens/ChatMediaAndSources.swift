@@ -21,7 +21,7 @@ struct GrokPhotoStackView: View {
             Button {
                 showingGallery = true
             } label: {
-                GrokStackPhotoCard(attachment: single, width: 204, height: 244, maxPixels: 900)
+                GrokStackPhotoCard(attachment: single, width: 204, height: 264, maxPixels: 960, fitTallPortrait: true)
             }
             .buttonStyle(.plain)
             .fullScreenCover(isPresented: $showingGallery) {
@@ -111,6 +111,7 @@ private struct GrokStackPhotoCard: View {
     let width: CGFloat
     let height: CGFloat
     let maxPixels: Int
+    var fitTallPortrait: Bool = false
     @Environment(AppModel.self) private var app
     @State private var image: UIImage?
 
@@ -119,11 +120,29 @@ private struct GrokStackPhotoCard: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(Theme.raised)
             if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: width, height: height)
-                    .clipped()
+                let isTallPortrait = image.size.height > image.size.width * 1.32
+                if fitTallPortrait && isTallPortrait {
+                    ZStack {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: width, height: height)
+                            .blur(radius: 16)
+                            .opacity(0.42)
+                            .clipped()
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: width - 8, height: height - 8)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                } else {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: width, height: height, alignment: isTallPortrait ? .top : .center)
+                        .clipped()
+                }
             } else {
                 ProgressView().controlSize(.small)
             }
@@ -211,11 +230,30 @@ struct PhotoStackGallerySheet: View {
         guard images.indices.contains(index) else { return }
         let att = images[index]
         Task {
-            guard let data = try? await app.attachmentStore.data(for: att) else { return }
-            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(att.name)
-            try? data.write(to: tempURL, options: .atomic)
-            SharePresenter.present(items: [tempURL])
+            if let shareURL = await ShareableAttachmentURL.prepare(attachment: att, store: app.attachmentStore) {
+                SharePresenter.present(items: [shareURL])
+            }
         }
+    }
+}
+
+enum ShareableAttachmentURL {
+    static func prepare(attachment: AttachmentReference, store: AttachmentStore) async -> URL? {
+        guard let sourceURL = try? store.fileURL(for: attachment),
+              FileManager.default.fileExists(atPath: sourceURL.path) else { return nil }
+        let cleanName = URL(fileURLWithPath: attachment.name).lastPathComponent
+        guard !cleanName.isEmpty else { return sourceURL }
+        let shareDir = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-share", isDirectory: true)
+        try? FileManager.default.createDirectory(at: shareDir, withIntermediateDirectories: true)
+        let targetURL = shareDir.appendingPathComponent(cleanName)
+        try? FileManager.default.removeItem(at: targetURL)
+        if (try? FileManager.default.linkItem(at: sourceURL, to: targetURL)) != nil {
+            return targetURL
+        }
+        if (try? FileManager.default.copyItem(at: sourceURL, to: targetURL)) != nil {
+            return targetURL
+        }
+        return sourceURL
     }
 }
 
@@ -326,7 +364,9 @@ struct AttachmentQuickPreviewSheet: View {
     let attachment: AttachmentReference
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
-    @State private var data: Data?
+    @State private var fileURL: URL?
+    @State private var previewSlice: Data?
+    @State private var downsampledImage: UIImage?
     @State private var loaded = false
 
     var body: some View {
@@ -335,8 +375,19 @@ struct AttachmentQuickPreviewSheet: View {
                 if !loaded {
                     ProgressView("Opening \(attachment.name)…")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if let data {
-                    AttachmentDataPreviewBody(name: attachment.name, kind: attachment.kind, bytes: attachment.bytes, data: data)
+                } else if let downsampledImage {
+                    ZoomableImageCanvas(image: downsampledImage)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if (attachment.kind == .pdf || attachment.name.lowercased().hasSuffix(".pdf")), let fileURL {
+                    PDFInlineReaderView(url: fileURL)
+                } else if let previewSlice {
+                    AttachmentDataPreviewBody(
+                        name: attachment.name,
+                        kind: attachment.kind,
+                        bytes: attachment.bytes,
+                        data: previewSlice,
+                        shareURL: fileURL
+                    )
                 } else {
                     ContentUnavailableView("File unavailable", systemImage: "doc.badge.exclamationmark")
                 }
@@ -350,18 +401,27 @@ struct AttachmentQuickPreviewSheet: View {
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
-                        guard let data else { return }
-                        let url = FileManager.default.temporaryDirectory.appendingPathComponent(attachment.name)
-                        try? data.write(to: url, options: .atomic)
-                        SharePresenter.present(items: [url])
+                        Task {
+                            if let url = await ShareableAttachmentURL.prepare(attachment: attachment, store: app.attachmentStore) {
+                                SharePresenter.present(items: [url])
+                            }
+                        }
                     } label: {
                         Image(systemName: "square.and.arrow.up")
                     }
-                    .disabled(data == nil)
+                    .disabled(fileURL == nil)
                 }
             }
             .task {
-                data = try? await app.attachmentStore.data(for: attachment)
+                if let resolvedURL = try? app.attachmentStore.fileURL(for: attachment),
+                   FileManager.default.fileExists(atPath: resolvedURL.path) {
+                    fileURL = resolvedURL
+                    if attachment.kind == .image {
+                        downsampledImage = await ImageDownsampler.attachmentThumbnail(attachment, store: app.attachmentStore, maxPixelSize: 2_400)
+                    } else if attachment.kind != .pdf && !attachment.name.lowercased().hasSuffix(".pdf") {
+                        previewSlice = (try? await app.attachmentStore.readSlice(for: attachment, offsetBytes: 0, maxBytes: 256_000))?.data
+                    }
+                }
                 loaded = true
             }
         }
@@ -374,13 +434,18 @@ struct AttachmentDataPreviewBody: View {
     let kind: AttachmentKind
     let bytes: Int
     let data: Data
+    var shareURL: URL? = nil
 
     var body: some View {
         if kind == .image, let image = ImageDownsampler.image(from: data, maxPixelSize: 2_400) {
             ZoomableImageCanvas(image: image)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if kind == .pdf || name.lowercased().hasSuffix(".pdf") {
-            PDFInlineReaderView(data: data)
+            if let shareURL {
+                PDFInlineReaderView(url: shareURL)
+            } else {
+                PDFInlineReaderView(data: data)
+            }
         } else if let text = Self.readableText(from: data, name: name) {
             ScrollView {
                 let lowerName = name.lowercased()
@@ -406,9 +471,13 @@ struct AttachmentDataPreviewBody: View {
                     .font(.subheadline)
                     .foregroundStyle(Theme.secondaryText)
                 Button {
-                    let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
-                    try? data.write(to: url, options: .atomic)
-                    SharePresenter.present(items: [url])
+                    if let shareURL {
+                        SharePresenter.present(items: [shareURL])
+                    } else {
+                        let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+                        try? data.write(to: url, options: .atomic)
+                        SharePresenter.present(items: [url])
+                    }
                 } label: {
                     Label("Save or Share File", systemImage: "square.and.arrow.up")
                         .fontWeight(.semibold)
@@ -530,14 +599,29 @@ struct ZoomableImageCanvas: UIViewRepresentable {
 }
 
 struct PDFInlineReaderView: UIViewRepresentable {
-    let data: Data
+    private let data: Data?
+    private let url: URL?
+
+    init(data: Data) {
+        self.data = data
+        self.url = nil
+    }
+
+    init(url: URL) {
+        self.data = nil
+        self.url = url
+    }
 
     func makeUIView(context: Context) -> PDFView {
         let view = PDFView()
         view.autoScales = true
         view.displayMode = .singlePageContinuous
         view.displayDirection = .vertical
-        view.document = PDFDocument(data: data)
+        if let url {
+            view.document = PDFDocument(url: url)
+        } else if let data {
+            view.document = PDFDocument(data: data)
+        }
         return view
     }
 

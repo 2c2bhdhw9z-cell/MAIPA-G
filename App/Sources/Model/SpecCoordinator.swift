@@ -38,7 +38,13 @@ final class SpecCoordinator {
         guard let app else { return }
         let context = context(for: record)
         let workflow = SpecWorkflows.draft(record.stage, context: context)
-        guard let job = await app.jobs.start(workflow: workflow, request: record.request, repo: nil) else {
+        let specRepo = ChatRepo(
+            ref: record.repo,
+            branch: record.branch,
+            defaultBranch: record.defaultBranch,
+            isPrivate: app.github.repo(named: record.repo.fullName)?.isPrivate ?? false
+        )
+        guard let job = await app.jobs.start(workflow: workflow, request: record.request, repo: nil, readOnlyRepo: specRepo, openJobsSheet: false) else {
             lastError = "Couldn't start the \(record.stage.title.lowercased())."
             return
         }

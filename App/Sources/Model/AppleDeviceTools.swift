@@ -145,9 +145,9 @@ private struct AppleCalendarCreateTool: AppleDescribedTool {
         let title = try arguments.requiredString("title")
         let startStr = try arguments.requiredString("start_iso")
         let endStr = try arguments.requiredString("end_iso")
-        let iso = ISO8601DateFormatter()
-        guard let startDate = iso.date(from: startStr), let endDate = iso.date(from: endStr) else {
-            throw ToolInputError("Use full ISO-8601 dates with timezone offset, such as 2026-10-31T14:00:00-04:00.")
+        guard let startDate = FlexibleISODateParser.parse(startStr),
+              let endDate = FlexibleISODateParser.parse(endStr) else {
+            throw ToolInputError("Use ISO-8601 dates such as 2026-10-31T14:00:00-04:00 or 2026-10-31T14:00:00.")
         }
         let store = EKEventStore()
         let event = EKEvent(eventStore: store)
@@ -273,7 +273,7 @@ private struct AppleRemindersCreateTool: AppleDescribedTool {
         rem.title = title
         rem.notes = arguments["notes"]?.stringValue
         rem.calendar = store.defaultCalendarForNewReminders()
-        if let dueStr = arguments["due_iso"]?.stringValue, let dueDate = ISO8601DateFormatter().date(from: dueStr) {
+        if let dueStr = arguments["due_iso"]?.stringValue, let dueDate = FlexibleISODateParser.parse(dueStr) {
             rem.dueDateComponents = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: dueDate)
         }
         try store.save(rem, commit: true)
@@ -524,10 +524,11 @@ private struct AppleMessagesComposeTool: AppleDescribedTool {
         ToolApprovalRequest(question: "Open a message draft in Apple Messages?", allowLabel: "Open Messages")
     }
     func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
-        let recipient = (arguments["recipient"]?.stringValue ?? "").addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? ""
+        let recipient = (arguments["recipient"]?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            .addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? ""
         let body = try arguments.requiredString("body")
         let encodedBody = body.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        let urlString = recipient.isEmpty ? "sms:?&body=\(encodedBody)" : "sms:\(recipient)&body=\(encodedBody)"
+        let urlString = recipient.isEmpty ? "sms:?body=\(encodedBody)" : "sms:\(recipient)?body=\(encodedBody)"
         guard let url = URL(string: urlString) else { throw ToolInputError("Invalid message URL.") }
         let opened = await MainActor.run { () -> Bool in
             guard UIApplication.shared.canOpenURL(url) else { return false }
@@ -668,5 +669,36 @@ private enum PresentShareSheet {
         while let presented = top.presentedViewController { top = presented }
         let activity = UIActivityViewController(activityItems: [text], applicationActivities: nil)
         top.present(activity, animated: true)
+    }
+}
+
+private enum FlexibleISODateParser {
+    static func parse(_ raw: String) -> Date? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let standard = ISO8601DateFormatter()
+        standard.formatOptions = [.withInternetDateTime]
+        if let d = standard.date(from: trimmed) { return d }
+
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = fractional.date(from: trimmed) { return d }
+
+        let localFormats = [
+            "yyyy-MM-dd'T'HH:mm:ss",
+            "yyyy-MM-dd'T'HH:mm",
+            "yyyy-MM-dd HH:mm:ss",
+            "yyyy-MM-dd HH:mm",
+            "yyyy-MM-dd",
+        ]
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        for pattern in localFormats {
+            formatter.dateFormat = pattern
+            if let d = formatter.date(from: trimmed) { return d }
+        }
+        return nil
     }
 }

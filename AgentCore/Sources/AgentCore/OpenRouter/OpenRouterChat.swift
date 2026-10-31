@@ -126,6 +126,8 @@ public struct ChatCompletionRequest: Encodable, Sendable {
     /// Turns on automatic prompt caching for the models that need asking (Anthropic's).
     public var automaticCaching: Bool
     public var maxTokens: Int?
+    /// Optional output modalities, such as `["image", "text"]` for Gemini/GPT chat-image models.
+    public var modalities: [String]?
 
     public init(
         model: String,
@@ -136,7 +138,8 @@ public struct ChatCompletionRequest: Encodable, Sendable {
         plugins: [JSONValue]? = nil,
         sessionID: String? = nil,
         automaticCaching: Bool = false,
-        maxTokens: Int? = nil
+        maxTokens: Int? = nil,
+        modalities: [String]? = nil
     ) {
         self.model = model
         self.models = models
@@ -147,10 +150,11 @@ public struct ChatCompletionRequest: Encodable, Sendable {
         self.sessionID = sessionID
         self.automaticCaching = automaticCaching
         self.maxTokens = maxTokens
+        self.modalities = modalities
     }
 
     enum CodingKeys: String, CodingKey {
-        case model, models, messages, tools, stream, reasoning, plugins
+        case model, models, messages, tools, stream, reasoning, plugins, modalities
         case toolChoice = "tool_choice"
         case sessionID = "session_id"
         case cacheControl = "cache_control"
@@ -178,6 +182,9 @@ public struct ChatCompletionRequest: Encodable, Sendable {
             try container.encode(cache, forKey: .cacheControl)
         }
         try container.encodeIfPresent(maxTokens, forKey: .maxTokens)
+        if let modalities, !modalities.isEmpty {
+            try container.encode(modalities, forKey: .modalities)
+        }
     }
 }
 
@@ -244,6 +251,8 @@ public struct StreamChunk: Sendable {
     public var usage: Usage?
     public var error: OpenRouterAPIError?
     public var citations: [SourceCitation]
+    /// Inline image data-URLs or image URLs emitted by `/chat/completions` multimodal image models (`choices[0].delta.images` / `message.images`).
+    public var imageDataURLs: [String]
 
     public struct ToolCallDelta: Sendable, Hashable {
         public var index: Int?
@@ -270,7 +279,8 @@ public struct StreamChunk: Sendable {
         finishReason: String? = nil,
         usage: Usage? = nil,
         error: OpenRouterAPIError? = nil,
-        citations: [SourceCitation] = []
+        citations: [SourceCitation] = [],
+        imageDataURLs: [String] = []
     ) {
         self.id = id
         self.model = model
@@ -283,6 +293,7 @@ public struct StreamChunk: Sendable {
         self.usage = usage
         self.error = error
         self.citations = citations
+        self.imageDataURLs = imageDataURLs
     }
 
     public init(json: JSONValue) {
@@ -310,6 +321,10 @@ public struct StreamChunk: Sendable {
             guard let url = citation["url"]?.stringValue else { return nil }
             return SourceCitation(url: url, title: citation["title"]?.stringValue)
         }
+        let rawImages = delta?["images"]?.arrayValue ?? choice?["message"]?["images"]?.arrayValue ?? []
+        imageDataURLs = rawImages.compactMap { item in
+            item["image_url"]?["url"]?.stringValue ?? item["url"]?.stringValue
+        }
     }
 }
 
@@ -324,6 +339,7 @@ public struct StreamAccumulator: Sendable {
     public private(set) var usage: Usage?
     public private(set) var error: OpenRouterAPIError?
     public private(set) var citations: [SourceCitation] = []
+    public private(set) var imageDataURLs: [String] = []
 
     private var detailOrder: [Int] = []
     private var details: [Int: [String: JSONValue]] = [:]
@@ -344,6 +360,9 @@ public struct StreamAccumulator: Sendable {
         if let usage = chunk.usage { self.usage = usage }
         if let error = chunk.error { self.error = error }
         for citation in chunk.citations where !citations.contains(where: { $0.url == citation.url }) { citations.append(citation) }
+        for imgURL in chunk.imageDataURLs where !imgURL.isEmpty && !imageDataURLs.contains(imgURL) {
+            imageDataURLs.append(imgURL)
+        }
     }
 
     /// Reasoning blocks arrive in pieces that share an `index`. Text-like fields are joined;
@@ -390,7 +409,17 @@ public struct StreamAccumulator: Sendable {
             calls[index] = (id: nil, name: "", arguments: "")
         }
         if let id = delta.id, !id.isEmpty { calls[index]?.id = id }
-        if let name = delta.name { calls[index]?.name += name }
+        if let name = delta.name, !name.isEmpty {
+            let existing = calls[index]?.name ?? ""
+            if existing.isEmpty {
+                calls[index]?.name = name
+            } else if existing != name && !existing.hasSuffix(name) {
+                // Token-chunked function names append cleanly, while providers (vLLM/Qwen/adapters)
+                // that repeat the full function name on every argument chunk never corrupt `read_file`
+                // into `read_fileread_file`.
+                calls[index]?.name = existing + name
+            }
+        }
         if let arguments = delta.arguments { calls[index]?.arguments += arguments }
     }
 
@@ -409,5 +438,5 @@ public struct StreamAccumulator: Sendable {
         }
     }
 
-    public var hasOutput: Bool { !text.isEmpty || !toolCalls.isEmpty }
+    public var hasOutput: Bool { !text.isEmpty || !toolCalls.isEmpty || !imageDataURLs.isEmpty }
 }

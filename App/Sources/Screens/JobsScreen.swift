@@ -110,6 +110,8 @@ struct JobDetailScreen: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.dismiss) private var dismiss
     @State private var showsDelete = false
+    @State private var isDownloadingIPA = false
+    @State private var downloadError: String?
     var job: JobRecord
 
     private var current: JobRecord { app.jobs.jobs.first(where: { $0.id == job.id }) ?? job }
@@ -174,7 +176,17 @@ struct JobDetailScreen: View {
                     }
                     link("Pull request", result.pullRequest?.htmlURL)
                     link("Build", result.buildURL)
-                    link("IPA", result.artifactURL)
+                    if let artifactURL = result.artifactURL, !artifactURL.isEmpty {
+                        Button {
+                            Task { await downloadArtifact(artifactURL) }
+                        } label: {
+                            HStack(spacing: 8) {
+                                if isDownloadingIPA { ProgressView().controlSize(.small) }
+                                Label(isDownloadingIPA ? "Downloading IPA…" : "Download IPA", systemImage: "arrow.down.circle.fill")
+                            }
+                        }
+                        .disabled(isDownloadingIPA)
+                    }
                 }
             }
 
@@ -218,6 +230,55 @@ struct JobDetailScreen: View {
                  ? "This removes the saved job from this phone and MAIPA-G-data."
                  : "This stops the GitHub run, then removes the saved job from this phone and MAIPA-G-data.")
         }
+        .alert("Couldn't download IPA", isPresented: Binding(get: { downloadError != nil }, set: { if !$0 { downloadError = nil } })) {
+            Button("OK") { downloadError = nil }
+        } message: {
+            Text(downloadError ?? "")
+        }
+    }
+
+    private func downloadArtifact(_ rawURL: String) async {
+        guard !isDownloadingIPA else { return }
+        guard let github = app.github.client else {
+            if let url = URL(string: rawURL) { openURL(url) }
+            return
+        }
+        isDownloadingIPA = true
+        defer { isDownloadingIPA = false }
+        let workDir = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-artifact-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try? FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        let isZipEndpoint = rawURL.lowercased().hasSuffix("/zip") || rawURL.lowercased().hasSuffix(".zip")
+        let downloadedURL = workDir.appendingPathComponent(isZipEndpoint ? "MAIPA-G-Artifact.zip" : "MAIPA-G.ipa")
+        do {
+            try await github.downloadAuthenticatedArtifact(at: rawURL, to: downloadedURL)
+            var shareTarget = downloadedURL
+            if isZipEndpoint,
+               let attrs = try? FileManager.default.attributesOfItem(atPath: downloadedURL.path),
+               let size = attrs[.size] as? Int,
+               size > 0, size <= 128 * 1_048_576,
+               let zipData = try? Data(contentsOf: downloadedURL, options: .mappedIfSafe) {
+                let unpackDir = workDir.appendingPathComponent("unpacked", isDirectory: true)
+                if (try? PreviewArtifactExtractor.extract(zipData, to: unpackDir)) != nil,
+                   let foundIPA = Self.firstIPAFile(in: unpackDir) {
+                    shareTarget = foundIPA
+                }
+            }
+            SharePresenter.present(items: [shareTarget])
+        } catch {
+            downloadError = app.github.describe(error)
+        }
+    }
+
+    private nonisolated static func firstIPAFile(in root: URL) -> URL? {
+        guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else {
+            return nil
+        }
+        while let next = enumerator.nextObject() {
+            if let fileURL = next as? URL, fileURL.pathExtension.lowercased() == "ipa" {
+                return fileURL
+            }
+        }
+        return nil
     }
 
     private var progress: Double {

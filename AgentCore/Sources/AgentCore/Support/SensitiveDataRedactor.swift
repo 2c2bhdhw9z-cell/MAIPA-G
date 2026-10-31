@@ -19,7 +19,7 @@ public struct SensitiveDataRedactor: Sendable {
         text = exactSecrets.reduce(text) { value, secret in
             value.replacingOccurrences(of: secret, with: Self.marker)
         }
-        text = replacing(#"\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|sk-or-v1-[A-Za-z0-9_-]{16,})\b"#, in: text)
+        text = replacing(#"\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|sk-or-v1-[A-Za-z0-9_-]{16,}|sk-ant-[A-Za-z0-9_-]{16,}|sk-proj-[A-Za-z0-9_-]{16,}|sk-(?:live|test)_[A-Za-z0-9]{16,}|rk_(?:live|test)_[A-Za-z0-9]{16,}|sk-[A-Za-z0-9]{24,}|xox[baprs]-[A-Za-z0-9-]{16,}|ntn_[A-Za-z0-9]{16,}|secret_[A-Za-z0-9]{20,}|figd_[A-Za-z0-9_-]{16,}|sbp_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{16,}|shpat_[A-Za-z0-9]{16,}|pplx-[A-Za-z0-9]{20,}|tvly-[A-Za-z0-9_-]{16,}|BSA[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_-]{30,})\b"#, in: text)
         text = replacing(#"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}"#, in: text)
         text = replacing(#"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"#, in: text)
         text = replacing(#"(?i)(access_token|refresh_token|client_secret|code|state)=([^&\s]{8,})"#, in: text, template: "$1=" + Self.marker)

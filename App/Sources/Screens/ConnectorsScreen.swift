@@ -31,6 +31,8 @@ struct ConnectorsScreen: View {
     @State private var tab: Tab = .discover
     @State private var filter: DiscoverFilter = .popular
     @State private var customSheetMode: CustomConnectorMode?
+    @State private var detailConnectorID: UUID?
+    @State private var detailServerID: String?
     @State private var connecting: String?
     @State private var notice: String?
 
@@ -77,6 +79,14 @@ struct ConnectorsScreen: View {
                 }
             }
             .sheet(item: $customSheetMode) { mode in CustomConnectorSheet(initialMode: mode) }
+            .sheet(
+                isPresented: Binding(
+                    get: { detailConnectorID != nil || detailServerID != nil },
+                    set: { if !$0 { detailConnectorID = nil; detailServerID = nil } }
+                )
+            ) {
+                ConnectorDetailScreen(connectorID: detailConnectorID, serverID: detailServerID)
+            }
         }
         .presentationDragIndicator(.visible)
     }
@@ -90,7 +100,7 @@ struct ConnectorsScreen: View {
                     .connectorRow()
             } else {
                 ForEach(app.connectors.connected) { connector in
-                    Button { app.sheet = .connectorDetail(connector.id) } label: {
+                    Button { detailConnectorID = connector.id } label: {
                         ConnectorCard(
                             service: IntegrationService.forConnector(connector),
                             name: connector.displayName,
@@ -195,7 +205,7 @@ struct ConnectorsScreen: View {
         let isReady = existing.map { app.connectors.states[$0.id] == .connected } ?? false
         Button {
             if let existing {
-                app.sheet = .connectorDetail(existing.id)
+                detailConnectorID = existing.id
             } else {
                 connectCurated(service)
             }
@@ -252,7 +262,7 @@ struct ConnectorsScreen: View {
                     if let added {
                         // Open setup/detail sheet whenever sign-in or an API key is needed, or let zero-key/Apple show ✓ immediately.
                         if app.connectors.states[added.id] != .connected {
-                            app.sheet = .connectorDetail(added.id)
+                            detailConnectorID = added.id
                         } else {
                             Haptics.selection()
                         }
@@ -283,7 +293,7 @@ struct ConnectorsScreen: View {
     private func connect(_ server: RegistryServer) {
         if let existing = app.connectors.connected.first(where: { $0.serverID == server.name }) {
             connecting = nil
-            app.sheet = .connectorDetail(existing.id)
+            detailConnectorID = existing.id
             return
         }
         connecting = server.name
@@ -295,12 +305,12 @@ struct ConnectorsScreen: View {
                         await app.connectors.authorize(connector)
                     }
                     connecting = nil
-                    app.sheet = .connectorDetail(connector.id)
+                    detailConnectorID = connector.id
                     return
                 }
             }
             connecting = nil
-            app.sheet = .connectorCatalogDetail(server.name)
+            detailServerID = server.name
         }
     }
 

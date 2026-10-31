@@ -198,6 +198,8 @@ public final class URLSessionTransport: HTTPTransport, @unchecked Sendable {
     private let noRedirectSession: URLSession
     private let streamSession: URLSession
     private let streamDelegate: StreamingDelegate
+    private let noRedirectStreamSession: URLSession
+    private let noRedirectStreamDelegate: StreamingDelegate
 
     public init() {
         let configuration = URLSessionConfiguration.default
@@ -209,15 +211,20 @@ public final class URLSessionTransport: HTTPTransport, @unchecked Sendable {
         plainSession = URLSession(configuration: configuration)
         noRedirectSession = URLSession(configuration: configuration, delegate: NoRedirectDelegate(), delegateQueue: nil)
 
-        let delegate = StreamingDelegate()
+        let delegate = StreamingDelegate(allowsRedirects: true)
         streamDelegate = delegate
         streamSession = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+
+        let strictDelegate = StreamingDelegate(allowsRedirects: false)
+        noRedirectStreamDelegate = strictDelegate
+        noRedirectStreamSession = URLSession(configuration: configuration, delegate: strictDelegate, delegateQueue: nil)
     }
 
     deinit {
         plainSession.finishTasksAndInvalidate()
         noRedirectSession.finishTasksAndInvalidate()
         streamSession.finishTasksAndInvalidate()
+        noRedirectStreamSession.finishTasksAndInvalidate()
     }
 
     public func send(_ request: HTTPRequest) async throws -> HTTPResponse {
@@ -264,13 +271,15 @@ public final class URLSessionTransport: HTTPTransport, @unchecked Sendable {
     public func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse {
         let urlRequest = Self.makeURLRequest(request)
         let (body, bodyContinuation) = AsyncThrowingStream<Data, Error>.makeStream()
-        let task = streamSession.dataTask(with: urlRequest)
+        let activeSession = request.followsRedirects ? streamSession : noRedirectStreamSession
+        let activeDelegate = request.followsRedirects ? streamDelegate : noRedirectStreamDelegate
+        let task = activeSession.dataTask(with: urlRequest)
         let taskBox = SendableTask(task)
         bodyContinuation.onTermination = { _ in taskBox.task.cancel() }
         do {
             let response: HTTPURLResponse = try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { continuation in
-                    streamDelegate.register(task.taskIdentifier, head: continuation, body: bodyContinuation)
+                    activeDelegate.register(task.taskIdentifier, head: continuation, body: bodyContinuation)
                     task.resume()
                 }
             } onCancel: {
@@ -328,8 +337,27 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate, @unchec
         let body: AsyncThrowingStream<Data, Error>.Continuation
     }
 
+    private let allowsRedirects: Bool
     private let lock = NSLock()
     private var entries: [Int: Entry] = [:]
+
+    init(allowsRedirects: Bool = true) {
+        self.allowsRedirects = allowsRedirects
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        if allowsRedirects {
+            completionHandler(request)
+        } else {
+            completionHandler(nil)
+        }
+    }
 
     func register(
         _ id: Int,
