@@ -155,7 +155,7 @@ struct AIProviderAndPayloadTests {
                 ["type": "image_url", "image_url": ["url": .string("data:image/png;base64,\(bigFakePNG)")]],
             ]
         )
-        let assistantMsg = APIMessage.assistant("Got them!")
+        let assistantMsg = APIMessage(role: .assistant, content: "Got them!")
         let latestMsg = APIMessage.user("Now fix the top button")
 
         let input: [APIMessage] = [.system("System"), oldImageMsg, assistantMsg, latestMsg]
