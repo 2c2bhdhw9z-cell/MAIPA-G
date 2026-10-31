@@ -77,7 +77,7 @@ public struct ToolInputError: Error, Sendable, CustomStringConvertible {
     public var description: String { message }
 }
 
-extension JSONValue {
+public extension JSONValue {
     func requiredString(_ key: String) throws -> String {
         guard let value = self[key]?.stringValue, !value.isEmpty else { throw ToolInputError("Missing \"\(key)\".") }
         return value

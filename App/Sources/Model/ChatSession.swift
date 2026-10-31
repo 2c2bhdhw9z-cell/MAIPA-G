@@ -437,7 +437,8 @@ final class ChatSession: Identifiable {
                 let readTool = ReadFileTool(workspace: workspace, changes: changes)
                 let readRefTool = ReadRepoFileTool(github: github)
                 let loadRulesTool = LoadRepoRulesTool(documents: rules.documents)
-                readOnlyHelperTools.append(contentsOf: [listTool, searchTool, readTool, readRefTool, loadRulesTool])
+                let helperRepoTools: [any AgentTool] = [listTool, searchTool, readTool, readRefTool, loadRulesTool]
+                readOnlyHelperTools.append(contentsOf: helperRepoTools)
                 let repoTools: [any AgentTool] = [
                     listTool, searchTool, readTool, readRefTool, loadRulesTool,
                     CreateFileTool(workspace: changes, authorization: changeAuthorization, rules: rules), EditFileTool(workspace: changes, authorization: changeAuthorization, rules: rules), DeleteFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
