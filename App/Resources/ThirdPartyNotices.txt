@@ -2,23 +2,18 @@ Integration logos
 
 The logos shown for integrations are trademarks of their respective owners. MAIPA-G shows them only to identify the service a person chooses to connect; this does not mean the owners endorse MAIPA-G.
 
-Each logo comes from the company's own published files:
+Each logo comes from the respective owner's published brand artwork or official app icon:
 
-- Google (Gmail, Google Calendar, Google Drive, Google Docs, Google Sheets, Google Slides): gstatic.com
-- GitHub: brand.github.com
-- Figma: figma.com
-- Atlassian: atlassian.design
-- Linear: static.linear.app
-- Microsoft: learn.microsoft.com
-- Slack: slack.com
-- Notion: notion.com
-- Dropbox: dropbox.com
-- Box: box.com
-- Asana: asana.com
-- Canva: static.canva.com
-- YouTube: gstatic.com
-- Hugging Face: huggingface.co
+- Apple (Apple Calendar, Apple Reminders, Apple Contacts, iCloud Drive / Files, Apple Mail, Messages / iMessage, Apple Notes, Apple Music): Apple Inc.
+- Google (Gmail, Google Calendar, Google Drive, Google Docs, Google Sheets, Google Slides, Google Tasks, Google Contacts, Google Meet, Google Search, YouTube, Firebase): Google LLC (gstatic.com / google.com)
+- Microsoft & GitHub (Microsoft 365, Outlook, OneDrive, SharePoint, Microsoft Word, Microsoft Excel, Microsoft OneNote, Microsoft Teams, Playwright, GitHub): Microsoft Corporation & GitHub, Inc.
+- Atlassian (Jira, Confluence, Bitbucket, Trello): Atlassian Pty Ltd
+- Developer & Cloud (GitLab, Linear, Vercel, Cloudflare, Supabase, AWS, Amazon S3, Netlify, Render, Sentry, Datadog, PagerDuty, Fly.io Sprites, Puppeteer, Model Context Protocol): respective trademark owners
+- Databases & Storage (PostgreSQL, MongoDB, Redis, Airtable, Snowflake, Dropbox, Box, MEGA): respective trademark owners
+- Productivity & Design (Notion, Obsidian, Coda, Evernote, Capacities, Asana, Monday.com, ClickUp, Todoist, Basecamp, Smartsheet, Figma, Canva, Miro): respective trademark owners
+- Messaging & Meetings (Slack, Discord, Telegram, WhatsApp, Zoom, Loom, Fireflies.ai, Otter.ai): respective trademark owners
+- Search, Web, AI & Media (Wikipedia, arXiv, Hacker News / Y Combinator, Reddit, Jina AI, Brave, Perplexity, Tavily, Exa, NewsAPI, Firecrawl, X, Hugging Face, Spotify, ElevenLabs): respective trademark owners
+- Business, Commerce & Automation (Stripe, HubSpot, Intercom, PayPal, Salesforce, Zendesk, Shopify, Intuit QuickBooks, Zapier, Pipedream, Make, n8n, Webhooks): respective trademark owners
 
 Mermaid (mermaid.min.js)
 Copyright (c) 2014 - 2024 Knut Sveidqvist. Licensed under the MIT License.
-

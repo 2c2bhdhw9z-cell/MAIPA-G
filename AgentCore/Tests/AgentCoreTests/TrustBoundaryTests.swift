@@ -165,9 +165,14 @@ extension AgentLoopTests {
             "Zapier", "Make", "n8n", "Pipedream", "Custom Webhooks", "Custom MCP", "Hugging Face"
         ]
         #expect(IntegrationCatalog.all.count >= 100)
+        for spec in IntegrationCatalog.all {
+            #expect(spec.assetName?.hasPrefix("Integration") == true, "Missing bundled logo asset for \(spec.name)")
+        }
         for name in requiredServices {
             #expect(IntegrationCatalog.matching(name) != nil, "Missing catalog entry for \(name)")
         }
+        let customMCP = try #require(IntegrationCatalog.byServerID("custom_mcp"))
+        #expect(customMCP.matches("Hugging Face co.huggingface/hf-mcp-server") == false)
 
         let webhookConfig = ConnectorConfiguration(
             serverID: "webhook:test",
