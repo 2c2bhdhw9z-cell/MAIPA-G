@@ -1,7 +1,7 @@
 # MAIPA-G plan
 
-**Status (30 October 2026, 7:45 PM ET): Build 61 (`build-61-f874a6b`, 5.1 MB, PR #17) is the latest
-installable build: 0.1.0 (61), iPhone arm64, built from commit `5d3a5c5`, checked by the AgentCore
+**Status (30 October 2026, 11:33 PM ET): Build 65 (`build-65-1f5c133`, 6.29 MB, PR #18) is the latest
+installable build: 0.1.0 (65), iPhone arm64, built from commit `1f5c133`, checked by the AgentCore
 tests on Linux and macOS and an independent IPA inspection.
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
@@ -42,6 +42,30 @@ Built since then:
   swipe-to-delete buttons to be red (`Theme.danger`, `allowsFullSwipe: false`) and replaced broken
   iOS 26 floating speech-bubble confirmation popovers with centered alerts that always include a
   `Cancel` button.
+- Build 65 (PR #18): added 107 first-class app connectors and Apple iPhone integrations (`Apple
+  Calendar`, `Apple Reminders`, `Apple Contacts`, `iCloud Drive`, `Apple Mail`, `iMessage`, `Apple
+  Notes`, `Apple Music`, `GitHub`, `GitLab`, `Bitbucket`, `Linear`, `Jira`, `Confluence`, `Vercel`,
+  `Cloudflare`, `Supabase`, `Firebase`, `AWS`, `Netlify`, `Render`, `Sentry`, `Datadog`,
+  `PagerDuty`, `PostgreSQL`, `MongoDB`, `Redis`, `Airtable`, `Snowflake`, `Gmail`, `Google
+  Calendar`, `Google Drive`, `Google Docs`, `Google Sheets`, `Google Slides`, `Google Tasks`,
+  `Google Contacts`, `Google Meet`, `Microsoft 365`, `Outlook`, `OneDrive`, `SharePoint`, `Word`,
+  `Excel`, `OneNote`, `Teams`, `Notion`, `Obsidian`, `Coda`, `Evernote`, `Capacities`, `Slack`,
+  `Discord`, `Telegram`, `WhatsApp`, `Zoom`, `Loom`, `Fireflies.ai`, `Otter.ai`, `Trello`, `Asana`,
+  `Monday.com`, `ClickUp`, `Todoist`, `Basecamp`, `Smartsheet`, `Dropbox`, `Box`, `Mega`, `Amazon
+  S3`, `Figma`, `Canva`, `Miro`, `Spotify`, `YouTube`, `ElevenLabs`, `Brave Search`, `Google
+  Search`, `Perplexity`, `Tavily`, `Exa`, `Wikipedia`, `ArXiv`, `Reddit`, `X`, `Hacker News`,
+  `NewsAPI`, `Puppeteer`, `Playwright`, `Firecrawl`, `Jina Reader`, `Salesforce`, `HubSpot`,
+  `Zendesk`, `Intercom`, `Stripe`, `Shopify`, `PayPal`, `QuickBooks`, `Zapier`, `Make`, `n8n`,
+  `Pipedream`, `Hugging Face`, `Custom Webhooks`, and `Custom MCP`) with Keychain-only token/header
+  support and live-chat package execution over `mcp-maipa-g`; grouped consecutive thinking blocks
+  and tool calls into one Arena + Kiro collapsible activity card; added offline visual `mermaid`
+  diagram rendering with `Chart | Code` toggle and full-screen pinch-to-zoom; fixed the side-menu
+  chat switch scroll fling into blank space; removed the workflow auto-detector and enabled
+  `+ -> Autonomous` inside chats with `Auto` or any chosen model plus read-only helper agents and
+  background suspension/auto-resume; fixed closed/merged PR `save_changes` errors; added staged
+  file overlays across `read_file`/`list_files`/`search_code`, 7–40 char SHAs in `read_repo_file`,
+  OpenRouter HTTP 400 retry recovery, and 5 hard-coded prompt-injection security locks verified by
+  `TrustBoundaryTests`.
 
 Still not done: Stability 11 (about 250 silent `try?` failures remain), necessary item 4 (sandbox
 for downloaded connectors blocks all network, so npx/uvx connectors can't install), and necessary
