@@ -1,7 +1,9 @@
 import AgentCore
 import SwiftUI
 
-/// Choose the AI: Auto, the free AIs, or any of OpenRouter's models.
+/// Modern AI Model Selector: searches all OpenRouter models (multi-word smart search across name,
+/// maker, exact model ID, description, and capabilities), pins favourites, tracks recents, refreshes
+/// live from OpenRouter, and supports entering any exact `provider/model` slug directly.
 struct ModelPicker: View {
     var target: ComposerTarget
     @Environment(AppModel.self) private var app
@@ -9,148 +11,633 @@ struct ModelPicker: View {
     @Environment(\.theme) private var theme
     @State private var query = ""
     @State private var filter: Filter = .all
+    @State private var sort: SortOrder = .newest
+    @State private var selectedMaker: String?
 
     enum Filter: String, CaseIterable, Identifiable {
-        case all = "All", free = "Free", thinks = "Thinks", readsRepos = "Reads repos"
+        case all = "All"
+        case pinned = "Pinned"
+        case free = "Free"
+        case thinks = "Thinking"
+        case tools = "Tools"
+        case vision = "Vision"
+        case images = "Images"
         var id: String { rawValue }
+
+        var icon: String {
+            switch self {
+            case .all: return "sparkles"
+            case .pinned: return "star.fill"
+            case .free: return "gift.fill"
+            case .thinks: return "brain"
+            case .tools: return "wrench.and.screwdriver.fill"
+            case .vision: return "eye.fill"
+            case .images: return "photo.fill"
+            }
+        }
+    }
+
+    enum SortOrder: String, CaseIterable, Identifiable {
+        case newest = "Newest"
+        case cheapest = "Cheapest"
+        case context = "Largest context"
+        case name = "Name (A–Z)"
+        var id: String { rawValue }
+    }
+
+    private var trimmedQuery: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var catalog: [ModelInfo] {
+        app.openRouter.allSelectableModels.isEmpty ? app.openRouter.models : app.openRouter.allSelectableModels
     }
 
     var body: some View {
         let current = app.model(for: target)
-        NavigationStack {
-            List {
-                if query.isEmpty {
-                    Section {
-                        choiceRow(.auto, title: "Auto", detail: autoDetail, icon: "wand.and.stars", current: current)
-                        choiceRow(.free, title: "Free AIs", detail: freeDetail, icon: "gift", current: current)
-                    } footer: {
-                        if let left = app.openRouter.freeRequestsLeft {
-                            Text("Free AI requests left today: \(left). Each step of an answer is one request.")
-                        }
+        VStack(spacing: 0) {
+            headerBar
+            searchAndFiltersBar
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    if trimmedQuery.isEmpty && filter == .all && selectedMaker == nil {
+                        smartModesSection(current: current)
+                        pinnedAndRecentSection(current: current)
                     }
-                }
-                Section {
-                    Picker("Show", selection: $filter) {
-                        ForEach(Filter.allCases) { Text($0.rawValue).tag($0) }
+
+                    if let customSlug = directSlugCandidate {
+                        customSlugCard(slug: customSlug, current: current)
                     }
-                    .pickerStyle(.segmented)
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
-                } footer: {
-                    Text("Prices are dollars for reading / writing a million tokens (about 750,000 words). \"Reads\" is how much it can take in at once.")
+
+                    resultsSection(current: current)
                 }
-                ForEach(groups, id: \.maker) { group in
-                    Section(group.maker) {
-                        ForEach(group.models) { model in
-                            modelRow(model, current: current)
-                        }
-                    }
-                }
-                if app.openRouter.models.isEmpty {
-                    Section {
-                        HStack {
-                            ProgressView()
-                            Text("Getting the list of AIs…").foregroundStyle(Theme.secondaryText)
-                        }
-                    }
-                }
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                .padding(.bottom, 28)
             }
-            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search AIs")
-            .navigationTitle("Choose an AI")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
-            }
-            .task { await app.openRouter.loadModels() }
+            .scrollDismissesKeyboard(.interactively)
         }
+        .background(Theme.background.ignoresSafeArea())
         .presentationDragIndicator(.visible)
-    }
-
-    private var autoDetail: String {
-        if !app.openRouter.accountState.paidAllowed() { return "Picks for each job. Using free AIs while there's no credit." }
-        return "Picks the AI for each job: cheaper ones for easy things, smarter ones for hard work."
-    }
-
-    private var freeDetail: String { "Costs nothing. OpenRouter picks a free AI each time." }
-
-    private struct Group {
-        var maker: String
-        var models: [ModelInfo]
-    }
-
-    private var groups: [Group] {
-        let filtered = app.openRouter.models.filter { model in
-            guard !model.isRouter else { return false }
-            switch filter {
-            case .all: break
-            case .free: if !model.isFree { return false }
-            case .thinks: if model.thinkingLevels.isEmpty { return false }
-            case .readsRepos: if !model.supportsTools { return false }
-            }
-            guard !query.isEmpty else { return true }
-            return model.name.localizedCaseInsensitiveContains(query) || model.id.localizedCaseInsensitiveContains(query)
+        .task {
+            await app.openRouter.loadModels()
         }
-        var order: [String] = []
-        var buckets: [String: [ModelInfo]] = [:]
-        for model in filtered.sorted(by: { ($0.created ?? .distantPast) > ($1.created ?? .distantPast) }) {
-            if buckets[model.maker] == nil { order.append(model.maker) }
-            buckets[model.maker, default: []].append(model)
-        }
-        // Makers with the newest models first; within each, newest first.
-        return order.map { Group(maker: $0, models: buckets[$0] ?? []) }
     }
 
-    private func choiceRow(_ choice: ModelChoice, title: String, detail: String, icon: String, current: ModelChoice) -> some View {
-        Button {
-            app.choose(model: choice, for: target)
-            dismiss()
-        } label: {
-            HStack(spacing: 12) {
-                Image(systemName: icon)
-                    .font(.title3)
-                    .foregroundStyle(theme.accent)
-                    .frame(width: 30)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.body.weight(.semibold))
-                    Text(detail).font(.footnote).foregroundStyle(Theme.secondaryText)
-                }
-                Spacer()
-                if current == choice { Image(systemName: "checkmark").foregroundStyle(theme.accent) }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func modelRow(_ model: ModelInfo, current: ModelChoice) -> some View {
-        let cantReadRepo = app.repo(for: target) != nil && !model.supportsTools
-        return Button {
-            app.choose(model: .model(model.id), for: target)
-            dismiss()
-        } label: {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(model.shortName).font(.body)
-                    HStack(spacing: 4) {
-                        Text(price(model))
-                        if !model.thinkingLevels.isEmpty { Text("· thinks") }
-                        if let context = model.contextLength { Text("· reads \(Self.tokens(context))") }
+    private var headerBar: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Choose an AI")
+                    .font(.rounded(.title3, weight: .bold))
+                HStack(spacing: 6) {
+                    Text(catalog.isEmpty ? "Loading OpenRouter catalog…" : "\(catalog.count) OpenRouter models")
+                    if let left = app.openRouter.freeRequestsLeft {
+                        Text("· \(left) free left today")
                     }
+                }
+                .font(.caption)
+                .foregroundStyle(Theme.secondaryText)
+            }
+            Spacer()
+            Button {
+                Haptics.selection()
+                Task { await app.openRouter.loadModels(force: true) }
+            } label: {
+                Group {
+                    if app.openRouter.isLoadingModels {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                }
+                .frame(width: 34, height: 34)
+                .background(Theme.surface, in: Circle())
+                .overlay(Circle().strokeBorder(Theme.stroke))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Refresh OpenRouter models")
+
+            Menu {
+                Picker("Sort models", selection: $sort) {
+                    ForEach(SortOrder.allCases) { option in
+                        Text(option.rawValue).tag(option)
+                    }
+                }
+                if !makers.isEmpty {
+                    Divider()
+                    Button(selectedMaker == nil ? "✓ All makers" : "All makers") {
+                        selectedMaker = nil
+                    }
+                    ForEach(makers.prefix(24), id: \.self) { maker in
+                        Button(selectedMaker == maker ? "✓ \(maker)" : maker) {
+                            selectedMaker = selectedMaker == maker ? nil : maker
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: "arrow.up.arrow.down")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(selectedMaker != nil ? theme.accent : .primary)
+                    .frame(width: 34, height: 34)
+                    .background(Theme.surface, in: Circle())
+                    .overlay(Circle().strokeBorder(Theme.stroke))
+            }
+            .accessibilityLabel("Sort and filter by maker")
+
+            Button { dismiss() } label: {
+                Image(systemName: "xmark")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(Theme.secondaryText)
+                    .frame(width: 34, height: 34)
+                    .background(Theme.surface, in: Circle())
+                    .overlay(Circle().strokeBorder(Theme.stroke))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close")
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 16)
+        .padding(.bottom, 10)
+    }
+
+    private var searchAndFiltersBar: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(Theme.secondaryText)
+                TextField("Search all models, makers, or exact IDs…", text: $query)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                if !query.isEmpty {
+                    Button {
+                        query = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(Theme.secondaryText)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.stroke))
+            .padding(.horizontal, 16)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 7) {
+                    if let maker = selectedMaker {
+                        Button {
+                            selectedMaker = nil
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(maker)
+                                Image(systemName: "xmark")
+                                    .font(.caption2.weight(.bold))
+                            }
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 7)
+                            .background(theme.accent, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    ForEach(Filter.allCases) { chip in
+                        let isSelected = filter == chip
+                        Button {
+                            filter = (filter == chip && chip != .all) ? .all : chip
+                            Haptics.selection()
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: chip.icon)
+                                    .font(.caption2)
+                                Text(chip.rawValue)
+                                    .font(.caption.weight(.semibold))
+                            }
+                            .foregroundStyle(isSelected ? .white : .primary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(isSelected ? theme.accent : Theme.surface, in: Capsule())
+                            .overlay(Capsule().strokeBorder(isSelected ? Color.clear : Theme.stroke))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 16)
+            }
+            Divider().opacity(0.5)
+        }
+    }
+
+    private func smartModesSection(current: ModelChoice) -> some View {
+        HStack(spacing: 10) {
+            smartModeTile(
+                choice: .auto,
+                title: "Auto",
+                subtitle: app.openRouter.accountState.paidAllowed() ? "Best AI per task" : "Auto (free tier)",
+                icon: "wand.and.stars",
+                current: current
+            )
+            smartModeTile(
+                choice: .free,
+                title: "Free AIs",
+                subtitle: "$0 · OpenRouter router",
+                icon: "gift.fill",
+                current: current
+            )
+        }
+    }
+
+    private func smartModeTile(choice: ModelChoice, title: String, subtitle: String, icon: String, current: ModelChoice) -> some View {
+        let selected = current == choice
+        return Button {
+            select(choice)
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Image(systemName: icon)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(theme.accent)
+                    Spacer()
+                    if selected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(theme.accent)
+                    }
+                }
+                Text(title)
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.primary)
+                Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(Theme.secondaryText)
                     .lineLimit(1)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(selected ? theme.accent : Theme.stroke, lineWidth: selected ? 1.6 : 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func pinnedAndRecentSection(current: ModelChoice) -> some View {
+        let pinned = app.openRouter.pinnedModelIDs.compactMap { app.openRouter.modelsByID[$0] }
+        let recents = app.openRouter.recentModelIDs
+            .filter { !app.openRouter.pinnedModelIDs.contains($0) }
+            .compactMap { app.openRouter.modelsByID[$0] }
+            .prefix(4)
+
+        if !pinned.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                sectionHeader("Pinned", count: pinned.count, icon: "star.fill")
+                ForEach(pinned) { model in
+                    modelCard(model, current: current)
+                }
+            }
+        }
+        if !recents.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                sectionHeader("Recent", count: recents.count, icon: "clock")
+                ForEach(Array(recents)) { model in
+                    modelCard(model, current: current)
+                }
+            }
+        }
+    }
+
+    private var directSlugCandidate: String? {
+        let q = trimmedQuery
+        guard q.contains("/"), !q.contains(" "), q.count >= 4 else { return nil }
+        if catalog.contains(where: { $0.id.caseInsensitiveCompare(q) == .orderedSame }) {
+            return nil
+        }
+        return q
+    }
+
+    private func customSlugCard(slug: String, current: ModelChoice) -> some View {
+        Button {
+            select(.model(slug))
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "bolt.horizontal.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(theme.accent)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Use exact OpenRouter ID")
+                        .font(.subheadline.weight(.semibold))
+                    Text(slug)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(Theme.secondaryText)
+                }
+                Spacer()
+                if current == .model(slug) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(theme.accent)
+                } else {
+                    Image(systemName: "arrow.right.circle").foregroundStyle(Theme.secondaryText)
+                }
+            }
+            .padding(12)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(theme.accent.opacity(0.5)))
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func resultsSection(current: ModelChoice) -> some View {
+        let matches = matchingModels
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                sectionHeader(resultsTitle, count: matches.count, icon: nil)
+                Spacer()
+                Text(sort.rawValue)
+                    .font(.caption2)
+                    .foregroundStyle(Theme.secondaryText)
+            }
+
+            if catalog.isEmpty && app.openRouter.isLoadingModels {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Loading full OpenRouter model catalog…")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.secondaryText)
+                }
+                .padding(18)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            } else if matches.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("No models matched \"\(trimmedQuery.isEmpty ? filter.rawValue : trimmedQuery)\".")
+                        .font(.subheadline.weight(.semibold))
+                    HStack(spacing: 10) {
+                        if filter != .all || selectedMaker != nil {
+                            Button("Show all \(catalog.count) models") {
+                                filter = .all
+                                selectedMaker = nil
+                            }
+                            .font(.caption.weight(.semibold))
+                            .buttonStyle(.borderedProminent)
+                        }
+                        Button("Refresh from OpenRouter") {
+                            Task { await app.openRouter.loadModels(force: true) }
+                        }
+                        .font(.caption.weight(.semibold))
+                        .buttonStyle(.bordered)
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Theme.stroke))
+            } else {
+                ForEach(matches) { model in
+                    modelCard(model, current: current)
+                }
+            }
+        }
+    }
+
+    private var resultsTitle: String {
+        if !trimmedQuery.isEmpty { return "Search results" }
+        if let maker = selectedMaker { return maker }
+        switch filter {
+        case .all: return "All OpenRouter models"
+        case .pinned: return "Pinned models"
+        case .free: return "Free models"
+        case .thinks: return "Thinking / reasoning models"
+        case .tools: return "Tool & repo-capable models"
+        case .vision: return "Vision / image-reading models"
+        case .images: return "Image-generating models"
+        }
+    }
+
+    private func sectionHeader(_ title: String, count: Int, icon: String?) -> some View {
+        HStack(spacing: 5) {
+            if let icon {
+                Image(systemName: icon)
+                    .font(.caption2)
+                    .foregroundStyle(theme.accent)
+            }
+            Text("\(title) (\(count))")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.secondaryText)
+        }
+    }
+
+    private var makers: [String] {
+        var counts: [String: Int] = [:]
+        for model in catalog {
+            counts[model.maker, default: 0] += 1
+        }
+        return counts.keys.sorted { (counts[$0] ?? 0) != (counts[$1] ?? 0) ? (counts[$0] ?? 0) > (counts[$1] ?? 0) : $0 < $1 }
+    }
+
+    private var matchingModels: [ModelInfo] {
+        let q = trimmedQuery.lowercased()
+        let tokens = q.split(whereSeparator: \.isWhitespace).map(String.init)
+        var scored: [(score: Int, model: ModelInfo)] = []
+        scored.reserveCapacity(catalog.count)
+
+        for model in catalog {
+            if let selectedMaker, model.maker != selectedMaker { continue }
+            // When actively typing a search query and filter == .pinned, don't trap the user in an empty pinned view.
+            let activeFilter = (!tokens.isEmpty && filter == .pinned) ? .all : filter
+            switch activeFilter {
+            case .all: break
+            case .pinned: if !app.openRouter.isPinned(model.id) { continue }
+            case .free: if !model.isFree { continue }
+            case .thinks: if model.thinkingLevels.isEmpty { continue }
+            case .tools: if !model.supportsTools { continue }
+            case .vision: if !model.acceptsImages { continue }
+            case .images: if !model.generatesImages { continue }
+            }
+
+            if tokens.isEmpty {
+                scored.append((0, model))
+                continue
+            }
+
+            let idLower = model.id.lowercased()
+            let nameLower = model.name.lowercased()
+            let shortLower = model.shortName.lowercased()
+            let makerLower = model.maker.lowercased()
+            let summaryLower = model.summary?.lowercased() ?? ""
+            let capabilityTags = [
+                model.isFree ? "free" : "",
+                !model.thinkingLevels.isEmpty ? "thinking reasoning" : "",
+                model.supportsTools ? "tools agent" : "",
+                model.acceptsImages ? "vision image multimodal" : "",
+                model.generatesImages ? "image generation draw" : ""
+            ].joined(separator: " ")
+            let haystack = "\(nameLower) \(idLower) \(makerLower) \(capabilityTags) \(summaryLower)"
+            let compactHaystack = haystack.filter { $0.isLetter || $0.isNumber }
+
+            var matchedAll = true
+            var score = 0
+            for token in tokens {
+                let compactToken = token.filter { $0.isLetter || $0.isNumber }
+                if shortLower == token || idLower == token {
+                    score += 120
+                } else if shortLower.hasPrefix(token) || idLower.hasPrefix(token) {
+                    score += 70
+                } else if nameLower.contains(token) || idLower.contains(token) {
+                    score += 45
+                } else if makerLower.contains(token) {
+                    score += 30
+                } else if haystack.contains(token) || (!compactToken.isEmpty && compactHaystack.contains(compactToken)) {
+                    score += 12
+                } else {
+                    matchedAll = false
+                    break
+                }
+            }
+            if matchedAll {
+                if app.openRouter.isPinned(model.id) { score += 15 }
+                scored.append((score, model))
+            }
+        }
+
+        return scored.sorted { lhs, rhs in
+            if !tokens.isEmpty, lhs.score != rhs.score {
+                return lhs.score > rhs.score
+            }
+            switch sort {
+            case .newest:
+                let ld = lhs.model.created ?? .distantPast
+                let rd = rhs.model.created ?? .distantPast
+                if ld != rd { return ld > rd }
+                return lhs.model.shortName < rhs.model.shortName
+            case .cheapest:
+                let lp = (lhs.model.promptPrice ?? 999) + (lhs.model.completionPrice ?? 999)
+                let rp = (rhs.model.promptPrice ?? 999) + (rhs.model.completionPrice ?? 999)
+                if lp != rp { return lp < rp }
+                return lhs.model.shortName < rhs.model.shortName
+            case .context:
+                let lc = lhs.model.contextLength ?? 0
+                let rc = rhs.model.contextLength ?? 0
+                if lc != rc { return lc > rc }
+                return lhs.model.shortName < rhs.model.shortName
+            case .name:
+                return lhs.model.shortName.localizedCaseInsensitiveCompare(rhs.model.shortName) == .orderedAscending
+            }
+        }.map(\.model)
+    }
+
+    private func select(_ choice: ModelChoice) {
+        app.openRouter.recordRecent(choice)
+        app.choose(model: choice, for: target)
+        Haptics.selection()
+        dismiss()
+    }
+
+    private func modelCard(_ model: ModelInfo, current: ModelChoice) -> some View {
+        let isSelected = current == .model(model.id)
+        let isPinned = app.openRouter.isPinned(model.id)
+        let cantReadRepo = app.repo(for: target) != nil && !model.supportsTools
+
+        return HStack(spacing: 10) {
+            Button {
+                select(.model(model.id))
+            } label: {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(model.maker)
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(theme.accent)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2.5)
+                            .background(theme.accent.opacity(0.12), in: Capsule())
+
+                        Text(model.shortName)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+
+                        Spacer(minLength: 4)
+
+                        if isSelected {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(theme.accent)
+                        }
+                    }
+
+                    Text(model.id)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(Theme.secondaryText)
+                        .lineLimit(1)
+
+                    HStack(spacing: 6) {
+                        badge(text: price(model), highlight: model.isFree)
+                        if let context = model.contextLength {
+                            badge(text: "\(Self.tokens(context)) ctx")
+                        }
+                        if !model.thinkingLevels.isEmpty {
+                            badge(text: "Thinks", icon: "brain")
+                        }
+                        if model.supportsTools {
+                            badge(text: "Tools", icon: "wrench.and.screwdriver")
+                        }
+                        if model.acceptsImages {
+                            badge(text: "Vision", icon: "eye")
+                        }
+                        if model.generatesImages {
+                            badge(text: "Image", icon: "photo")
+                        }
+                    }
+                    .lineLimit(1)
+
                     if cantReadRepo {
-                        Text("Can't read repos")
-                            .font(.caption)
+                        Text("No tool support — attach no repo or pick a Tools model for repo edits")
+                            .font(.caption2)
                             .foregroundStyle(Theme.danger)
                     }
                 }
-                Spacer()
-                if current == .model(model.id) { Image(systemName: "checkmark").foregroundStyle(theme.accent) }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+
+            Button {
+                app.openRouter.togglePin(model.id)
+                Haptics.selection()
+            } label: {
+                Image(systemName: isPinned ? "star.fill" : "star")
+                    .font(.subheadline)
+                    .foregroundStyle(isPinned ? .yellow : Theme.secondaryText.opacity(0.65))
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isPinned ? "Unpin \(model.shortName)" : "Pin \(model.shortName)")
         }
-        .buttonStyle(.plain)
+        .padding(12)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(isSelected ? theme.accent : Theme.stroke, lineWidth: isSelected ? 1.6 : 1)
+        )
+    }
+
+    private func badge(text: String, icon: String? = nil, highlight: Bool = false) -> some View {
+        HStack(spacing: 3) {
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(size: 9, weight: .semibold))
+            }
+            Text(text)
+                .font(.caption2.weight(.medium))
+        }
+        .foregroundStyle(highlight ? .green : Theme.secondaryText)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(highlight ? Color.green.opacity(0.12) : Theme.raised, in: Capsule())
     }
 
     /// "128K", "1M", "1.5M": how much a model can read at once.
@@ -166,8 +653,7 @@ struct ModelPicker: View {
     /// Dollars per million tokens (about 750,000 words), for reading and for writing.
     private func price(_ model: ModelInfo) -> String {
         if model.isFree { return "Free" }
-        guard let input = model.promptPrice, let output = model.completionPrice else { return "Price varies" }
-        // "$3", "$1.50", "$12.50", "$0.25", and "$0.075" when cents alone would round it off.
+        guard let input = model.promptPrice, let output = model.completionPrice else { return "Variable" }
         func dollars(_ perToken: Double) -> String {
             let perMillion = perToken * 1_000_000
             if perMillion == 0 { return "$0" }
@@ -178,7 +664,7 @@ struct ModelPicker: View {
             let text = String(format: "%.2f", perMillion)
             return "$" + (text.hasSuffix(".00") ? String(text.dropLast(3)) : text)
         }
-        return "\(dollars(input)) / \(dollars(output))"
+        return "\(dollars(input))/\(dollars(output))"
     }
 }
 

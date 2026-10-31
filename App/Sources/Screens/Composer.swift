@@ -46,6 +46,7 @@ struct Composer: View {
     var onPicture: () -> Void
     var onPreview: () -> Void
     var onFiles: (() -> Void)? = nil
+    var onWorkstation: (() -> Void)? = nil
     var canCompact = false
     var onCompact: (() -> Void)? = nil
 
@@ -66,6 +67,25 @@ struct Composer: View {
     var body: some View {
         VStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 10) {
+                if !attachments.isEmpty {
+                    ScrollView(.vertical, showsIndicators: attachments.count > 4) {
+                        LazyVGrid(
+                            columns: [
+                                GridItem(.flexible(minimum: 110), spacing: 7),
+                                GridItem(.flexible(minimum: 110), spacing: 7)
+                            ],
+                            spacing: 7
+                        ) {
+                            ForEach(attachments) { attachment in
+                                ArenaComposerAttachmentChip(attachment: attachment) {
+                                    attachments.removeAll { $0.id == attachment.id }
+                                }
+                            }
+                        }
+                        .padding(.vertical, 1)
+                    }
+                    .frame(maxHeight: attachments.count > 4 ? 104 : nil)
+                }
                 TextField("Ask anything…", text: $text, axis: .vertical)
                     .font(.body)
                     .lineLimit(1...8)
@@ -73,23 +93,6 @@ struct Composer: View {
                     .submitLabel(.return)
                     .padding(.horizontal, 4)
                     .padding(.top, 2)
-                if !attachments.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 7) {
-                            ForEach(attachments) { attachment in
-                                HStack(spacing: 5) {
-                                    Image(systemName: attachment.kind == .image ? "photo" : attachment.kind == .pdf ? "doc.richtext" : "doc")
-                                    Text(attachment.name).lineLimit(1)
-                                    Button { attachments.removeAll { $0.id == attachment.id } } label: { Image(systemName: "xmark") }
-                                        .buttonStyle(.plain)
-                                }
-                                .font(.caption)
-                                .padding(.horizontal, 9).padding(.vertical, 6)
-                                .background(Theme.raised, in: Capsule())
-                            }
-                        }
-                    }
-                }
                 HStack(alignment: .center, spacing: 6) {
                     plusMenu
                     modelButton
@@ -327,6 +330,11 @@ struct Composer: View {
                 Button { app.sheet = .connectors } label: {
                     Label("Connectors", systemImage: "puzzlepiece.extension")
                 }
+                if let onWorkstation {
+                    Button(action: onWorkstation) {
+                        Label("Workstation (Canvas & Files)", systemImage: "square.on.square.dashed")
+                    }
+                }
                 if repo != nil {
                     if let onFiles {
                         Button(action: onFiles) {
@@ -503,4 +511,75 @@ private struct ContextMeter: View {
     }
 
     private var accessibilityText: String { "Context: \(detailText)" }
+}
+
+/// Arena-style compact rounded-rectangle attachment pill inside the composer box:
+/// `[ 24x24 mini thumbnail / badge | filename | × ]`.
+struct ArenaComposerAttachmentChip: View {
+    let attachment: AttachmentReference
+    var onRemove: () -> Void
+    @Environment(AppModel.self) private var app
+    @Environment(\.theme) private var theme
+    @State private var thumbnail: UIImage?
+
+    var body: some View {
+        HStack(spacing: 7) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Theme.surface)
+                if let thumbnail {
+                    Image(uiImage: thumbnail)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 24, height: 24)
+                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                } else {
+                    Image(systemName: iconName)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(theme.accent)
+                }
+            }
+            .frame(width: 24, height: 24)
+            .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(Theme.stroke))
+
+            Text(attachment.name)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button(action: onRemove) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Theme.secondaryText)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Remove \(attachment.name)")
+        }
+        .padding(.leading, 5)
+        .padding(.trailing, 6)
+        .padding(.vertical, 5)
+        .background(Theme.raised.opacity(0.95), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Theme.stroke))
+        .task(id: attachment.id) {
+            guard attachment.kind == .image || attachment.kind == .pdf else { return }
+            thumbnail = await ImageDownsampler.attachmentThumbnail(attachment, store: app.attachmentStore, maxPixelSize: 96)
+        }
+    }
+
+    private var iconName: String {
+        switch attachment.kind {
+        case .image: return "photo"
+        case .pdf: return "doc.richtext"
+        case .text: return "doc.text"
+        case .file:
+            let ext = (attachment.name as NSString).pathExtension.lowercased()
+            if ["zip", "ipa", "tar", "gz"].contains(ext) { return "doc.zipper" }
+            if ["p12", "cer", "mobileprovision"].contains(ext) { return "key.fill" }
+            return "doc"
+        }
+    }
 }

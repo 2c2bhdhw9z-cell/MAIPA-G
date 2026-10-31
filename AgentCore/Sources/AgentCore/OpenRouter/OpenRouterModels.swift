@@ -124,6 +124,12 @@ public struct ModelInfo: Codable, Sendable, Hashable, Identifiable {
     public var isChatModel: Bool {
         outputModalities.contains("text") && !id.hasSuffix(":batch")
     }
+
+    /// Every non-batch OpenRouter model that can be searched and selected in the AI picker
+    /// (including openrouter/* stealth/router models and multimodal/image-generating models).
+    public var isSelectableModel: Bool {
+        !id.hasSuffix(":batch")
+    }
 }
 
 extension ModelInfo {
@@ -153,6 +159,28 @@ extension ModelInfo {
                 defaultEffort: object["default_effort"]?.stringValue.flatMap(ThinkingLevel.init(rawValue:))
             )
         }
+        let modalityString = architecture?["modality"]?.stringValue?.lowercased() ?? ""
+        let modalityParts = modalityString.components(separatedBy: "->")
+        let parsedInputs = architecture?["input_modalities"]?.arrayValue?.compactMap(\.stringValue).filter { !$0.isEmpty } ?? []
+        let parsedOutputs = architecture?["output_modalities"]?.arrayValue?.compactMap(\.stringValue).filter { !$0.isEmpty } ?? []
+        let fallbackInputs: [String] = {
+            guard let lhs = modalityParts.first, !lhs.isEmpty else { return ["text"] }
+            var list: [String] = []
+            if lhs.contains("text") { list.append("text") }
+            if lhs.contains("image") { list.append("image") }
+            if lhs.contains("file") || lhs.contains("pdf") { list.append("file") }
+            if lhs.contains("audio") { list.append("audio") }
+            return list.isEmpty ? ["text"] : list
+        }()
+        let fallbackOutputs: [String] = {
+            guard modalityParts.count > 1 else { return ["text"] }
+            let rhs = modalityParts[1]
+            var list: [String] = []
+            if rhs.contains("text") { list.append("text") }
+            if rhs.contains("image") { list.append("image") }
+            if rhs.contains("audio") { list.append("audio") }
+            return list.isEmpty ? ["text"] : list
+        }()
         self.init(
             id: id,
             name: entry["name"]?.stringValue ?? id,
@@ -160,8 +188,8 @@ extension ModelInfo {
             contextLength: entry["context_length"]?.intValue ?? entry["top_provider"]?["context_length"]?.intValue,
             promptPrice: price("prompt"),
             completionPrice: price("completion"),
-            inputModalities: architecture?["input_modalities"]?.arrayValue?.compactMap(\.stringValue) ?? ["text"],
-            outputModalities: architecture?["output_modalities"]?.arrayValue?.compactMap(\.stringValue) ?? ["text"],
+            inputModalities: parsedInputs.isEmpty ? fallbackInputs : parsedInputs,
+            outputModalities: parsedOutputs.isEmpty ? fallbackOutputs : parsedOutputs,
             supportedParameters: Set(entry["supported_parameters"]?.arrayValue?.compactMap(\.stringValue) ?? []),
             reasoning: reasoning,
             created: entry["created"]?.doubleValue.map { Date(timeIntervalSince1970: $0) }

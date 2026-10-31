@@ -471,4 +471,51 @@ struct GlobTests {
     func matches(pattern: String, path: String, expected: Bool) {
         #expect(Glob(pattern).matches(path) == expected)
     }
+
+    @Test func openRouterCatalogueKeepsEmptyModalityRouterAndImageModelsSelectable() throws {
+        let payload = Data("""
+        {
+          "data": [
+            {
+              "id": "anthropic/claude-sonnet-5.5",
+              "name": "Anthropic: Claude Sonnet 5.5",
+              "architecture": { "modality": "text+image->text", "input_modalities": [], "output_modalities": [] },
+              "supported_parameters": ["tools", "reasoning"]
+            },
+            {
+              "id": "openrouter/hunter-alpha",
+              "name": "OpenRouter: Hunter Alpha",
+              "architecture": { "modality": "text->text" }
+            },
+            {
+              "id": "black-forest-labs/flux.2-pro",
+              "name": "Black Forest Labs: FLUX.2 Pro",
+              "architecture": { "input_modalities": ["text"], "output_modalities": ["image"] }
+            },
+            {
+              "id": "openai/gpt-5:batch",
+              "name": "OpenAI: GPT-5 Batch",
+              "architecture": { "output_modalities": ["text"] }
+            }
+          ]
+        }
+        """.utf8)
+        let parsed = try ModelInfo.parseCatalogue(payload)
+        #expect(parsed.count == 4)
+        let claude = try #require(parsed.first { $0.id == "anthropic/claude-sonnet-5.5" })
+        #expect(claude.isChatModel)
+        #expect(claude.acceptsImages)
+        #expect(claude.isSelectableModel)
+
+        let hunter = try #require(parsed.first { $0.id == "openrouter/hunter-alpha" })
+        #expect(hunter.isSelectableModel)
+        #expect(hunter.isChatModel)
+
+        let flux = try #require(parsed.first { $0.id == "black-forest-labs/flux.2-pro" })
+        #expect(flux.generatesImages)
+        #expect(flux.isSelectableModel)
+
+        let batch = try #require(parsed.first { $0.id == "openai/gpt-5:batch" })
+        #expect(!batch.isSelectableModel)
+    }
 }

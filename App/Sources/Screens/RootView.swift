@@ -21,12 +21,13 @@ struct RootView: View {
                 SideMenu()
                     .frame(width: width)
                     .offset(x: (progress - 1) * width * 0.25)
-                    .opacity(0.4 + 0.6 * progress)
+                    .opacity(progress > 0.001 ? (0.4 + 0.6 * progress) : 0)
+                    .allowsHitTesting(app.isMenuOpen)
                     .accessibilityHidden(!app.isMenuOpen)
                     .accessibilityAction(.escape) { close() }
 
                 main
-                    .frame(width: proxy.size.width)
+                    .frame(width: proxy.size.width, height: proxy.size.height)
                     .accessibilityHidden(app.isMenuOpen)
                     .clipShape(RoundedRectangle(cornerRadius: progress * 28, style: .continuous))
                     .shadow(color: .black.opacity(0.25 * progress), radius: 20, x: -4)
@@ -42,6 +43,8 @@ struct RootView: View {
                     }
                     .offset(x: offset)
             }
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .leading)
+            .clipped()
         }
         .background(Theme.surface.ignoresSafeArea())
         .background(KeyboardDismissAttachment().frame(width: 0, height: 0))
@@ -169,6 +172,7 @@ struct SheetContent: View {
         case .pictureGenerator(let target): PictureViewer(target: target, result: nil)
         case .picture(let id): PictureViewer(target: nil, result: app.library.generatedImage(id))
         case .webPreview(let repo): WebPreviewScreen(repo: repo)
+        case .workstation(let target, let tab): WorkstationScreen(target: target, initialTab: tab)
         }
     }
 }

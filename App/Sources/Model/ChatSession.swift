@@ -61,6 +61,26 @@ final class ChatSession: Identifiable {
         chat.messages.reversed().compactMap(\.assistantTurn).flatMap { $0.steps.reversed() }.compactMap(\.model).first
     }
     var contextUsedTokens: Int {
+        // When older messages were compacted and no newer turn has run yet, estimate directly from
+        // the compacted summary + remaining uncompacted tail so the context ring shrinks immediately.
+        if let compactedID = chat.compactedThroughMessageID,
+           let cutIndex = chat.messages.firstIndex(where: { $0.id == compactedID }) {
+            let tail = Array(chat.messages.dropFirst(cutIndex + 1))
+            let newerTurnHasUsage = tail.dropFirst(2).compactMap(\.assistantTurn).flatMap(\.steps).compactMap(\.usage).isEmpty == false
+            if !newerTurnHasUsage {
+                let summaryChars = chat.compactedSummary?.count ?? 0
+                let tailChars = tail.reduce(0) { total, message in
+                    switch message.body {
+                    case .user(let user): return total + user.text.count
+                    case .assistant(let turn):
+                        return total + turn.steps.reduce(0) { partial, step in
+                            partial + step.text.count + step.reasoning.count + step.toolCalls.reduce(0) { $0 + $1.arguments.count + ($1.result?.count ?? 0) }
+                        }
+                    }
+                }
+                return max(0, (summaryChars + tailChars) / 4)
+            }
+        }
         // The latest request's prompt already includes the conversation and every returned tool
         // result. Add its answer to show what the next request will need to carry forward.
         if let usage = chat.messages.reversed().compactMap(\.assistantTurn).flatMap({ $0.steps.reversed() }).compactMap(\.usage).first {
@@ -91,7 +111,9 @@ final class ChatSession: Identifiable {
         settleWaitingTurn()
         chat.messages.append(.user(message, attachments: attachments))
         chat.messages.append(ChatMessage(body: .assistant(AssistantTurn())))
-        if chat.title.isEmpty { chat.title = Self.provisionalTitle(message.isEmpty ? attachments.first?.name ?? "Attachment" : message) }
+        if chat.title.isEmpty {
+            chat.title = message.isEmpty ? Self.provisionalAttachmentTitle(attachments) : Self.provisionalTitle(message)
+        }
         touch()
         start()
     }
@@ -647,7 +669,7 @@ final class ChatSession: Identifiable {
         await nameChatIfNeeded()
     }
 
-    /// Streamed updates are drawn at most every 33 ms; finished steps and tools at once.
+    /// Streamed updates are drawn at most every 45 ms; finished steps and tools at once.
     private func receive(_ turn: AssistantTurn, milestone: Bool) {
         if milestone {
             pendingTurn = nil
@@ -660,7 +682,7 @@ final class ChatSession: Identifiable {
         guard !flushScheduled else { return }
         flushScheduled = true
         Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 33_000_000)
+            try? await Task.sleep(nanoseconds: 45_000_000)
             self?.flush()
         }
     }
@@ -817,16 +839,31 @@ final class ChatSession: Identifiable {
         return String(cut) + "…"
     }
 
+    static func provisionalAttachmentTitle(_ attachments: [AttachmentReference]) -> String {
+        guard !attachments.isEmpty else { return "New chat" }
+        let images = attachments.filter { $0.kind == .image }
+        if images.count == attachments.count {
+            return images.count == 1 ? "Photo" : "\(images.count) photos"
+        }
+        return attachments.count == 1 ? provisionalTitle(attachments[0].name) : "\(attachments.count) attachments"
+    }
+
     /// After the first reply, asks the iPhone's own AI for a better title.
     private func nameChatIfNeeded() async {
         guard !chat.titleIsCustom,
               chat.messages.filter({ $0.userText != nil }).count == 1,
-              let message = chat.firstUserText,
-              chat.title == Self.provisionalTitle(message),
+              let firstUserMsg = chat.messages.first(where: { $0.userText != nil }),
+              case .user(let userPayload) = firstUserMsg.body,
               let turn = lastTurn, turn.status == .done
         else { return }
+        let message = userPayload.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let expectedProvisional = message.isEmpty
+            ? Self.provisionalAttachmentTitle(userPayload.attachments)
+            : Self.provisionalTitle(message)
+        guard chat.title == expectedProvisional else { return }
         let reply = turn.steps.last(where: { !$0.text.isEmpty })?.text ?? ""
-        if let title = await OnDeviceAI.title(message: message, reply: reply), !chat.titleIsCustom {
+        let seed = message.isEmpty ? "User shared \(expectedProvisional.lowercased())" : message
+        if let title = await OnDeviceAI.title(message: seed, reply: reply), !chat.titleIsCustom {
             chat.title = title
             saveSoon(immediately: true)
         }

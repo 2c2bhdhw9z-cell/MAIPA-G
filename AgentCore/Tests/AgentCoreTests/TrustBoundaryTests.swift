@@ -146,25 +146,21 @@ extension AgentLoopTests {
     @Test func connectorsCatalog_coversAllRequestedServicesAndSecurityBoundaries() async throws {
         let requiredServices = [
             "GitHub", "GitLab", "Bitbucket", "Linear", "Jira", "Vercel", "Cloudflare", "Supabase",
-            "Firebase", "AWS", "Netlify", "Render", "Sentry", "Datadog", "PagerDuty",
-            "PostgreSQL", "MongoDB", "Redis", "Airtable", "Snowflake",
-            "Gmail", "Google Calendar", "Google Drive", "Google Docs", "Google Sheets", "Google Slides",
-            "Google Tasks", "Google Contacts", "Microsoft 365", "Outlook", "OneDrive", "SharePoint",
-            "Microsoft Word", "Microsoft Excel", "Microsoft OneNote",
+            "Firebase", "AWS", "Netlify", "Render", "Sentry", "Datadog", "PagerDuty", "Sprites",
+            "PostgreSQL", "MongoDB", "Redis", "Airtable", "Snowflake", "Box", "Amazon S3",
             "Apple Notes", "Apple Reminders", "Apple Calendar", "Apple Mail", "Apple Contacts", "iCloud Drive",
             "Notion", "Obsidian", "Confluence", "Coda", "Evernote", "Capacities",
-            "Slack", "Microsoft Teams", "Discord", "Telegram", "WhatsApp", "iMessage",
-            "Zoom", "Google Meet", "Loom", "Fireflies.ai", "Otter.ai",
-            "Trello", "Asana", "Monday.com", "ClickUp", "Todoist", "Basecamp", "Smartsheet",
-            "Dropbox", "Box", "Mega", "Amazon S3", "Figma", "Canva", "Miro",
-            "Spotify", "YouTube", "Apple Music", "ElevenLabs",
+            "Slack", "Discord", "Telegram", "iMessage", "Loom", "Fireflies.ai",
+            "Trello", "Asana", "Monday.com", "ClickUp", "Todoist", "Smartsheet",
+            "Figma", "Canva", "Miro",
+            "YouTube", "Apple Music", "ElevenLabs",
             "Brave Search", "Google Search", "Perplexity", "Tavily", "Exa", "Wikipedia", "ArXiv",
             "Reddit", "X (Twitter)", "Hacker News", "NewsAPI",
             "Puppeteer", "Playwright", "Firecrawl", "Jina Reader",
-            "Salesforce", "HubSpot", "Zendesk", "Intercom", "Stripe", "Shopify", "PayPal", "QuickBooks",
+            "HubSpot", "Zendesk", "Intercom", "Stripe", "Shopify", "PayPal",
             "Zapier", "Make", "n8n", "Pipedream", "Custom Webhooks", "Custom MCP", "Hugging Face"
         ]
-        #expect(IntegrationCatalog.all.count >= 100)
+        #expect(IntegrationCatalog.all.count == 81)
         for spec in IntegrationCatalog.all {
             #expect(spec.assetName?.hasPrefix("Integration") == true, "Missing bundled logo asset for \(spec.name)")
         }

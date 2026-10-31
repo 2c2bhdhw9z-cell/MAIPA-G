@@ -8,28 +8,54 @@ final class MarkdownCache {
     static let shared = MarkdownCache()
     private var documents: [String: MarkdownDocument] = [:]
     private var order: [String] = []
+    private var highlightedCode: [String: AttributedString] = [:]
+    private var codeOrder: [String] = []
 
-    func document(for text: String) -> MarkdownDocument {
+    func document(for text: String, cacheable: Bool = true) -> MarkdownDocument {
         if let cached = documents[text] { return cached }
         let document = MarkdownDocument(parsing: text)
+        guard cacheable else { return document }
         documents[text] = document
         order.append(text)
-        if order.count > 300 {
+        if order.count > 240 {
             documents[order.removeFirst()] = nil
         }
         return document
+    }
+
+    func highlighted(code: String, language: String?, dark: Bool, cacheable: Bool = true) -> AttributedString {
+        let key = "\(dark ? 1 : 0):\(language ?? ""):\(code)"
+        if let cached = highlightedCode[key] { return cached }
+        let palette = CodePalette(dark: dark)
+        var result = AttributedString()
+        for token in SyntaxHighlighter.highlight(code, language: language) {
+            var piece = AttributedString(token.text)
+            piece.foregroundColor = palette.color(token.kind)
+            if token.kind == .added { piece.backgroundColor = palette.addedBackground }
+            if token.kind == .removed { piece.backgroundColor = palette.removedBackground }
+            result += piece
+        }
+        guard cacheable else { return result }
+        highlightedCode[key] = result
+        codeOrder.append(key)
+        if codeOrder.count > 180 {
+            highlightedCode[codeOrder.removeFirst()] = nil
+        }
+        return result
     }
 }
 
 /// An AI reply drawn natively: headings, paragraphs, lists, quotes, tables and coloured code.
 struct MarkdownView: View {
     var text: String
+    var isStreaming: Bool = false
 
     var body: some View {
-        let document = MarkdownCache.shared.document(for: text)
+        let document = MarkdownCache.shared.document(for: text, cacheable: !isStreaming)
         VStack(alignment: .leading, spacing: 12) {
-            ForEach(Array(document.blocks.enumerated()), id: \.offset) { _, block in
-                MarkdownBlockView(block: block)
+            ForEach(Array(document.blocks.enumerated()), id: \.offset) { index, block in
+                let blockIsLive = isStreaming && index == document.blocks.count - 1
+                MarkdownBlockView(block: block, isStreaming: blockIsLive)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -38,6 +64,7 @@ struct MarkdownView: View {
 
 struct MarkdownBlockView: View {
     var block: MarkdownBlock
+    var isStreaming: Bool = false
     @Environment(\.theme) private var theme
 
     var body: some View {
@@ -57,9 +84,9 @@ struct MarkdownBlockView: View {
         case .code(let language, let code):
             let normalizedLang = language?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if normalizedLang == "mermaid" || normalizedLang == "mmd" {
-                MermaidBlockView(code: code)
+                MermaidBlockView(code: code, isStreaming: isStreaming)
             } else {
-                CodeBlockView(language: language, code: code)
+                CodeBlockView(language: language, code: code, isStreaming: isStreaming)
             }
         case .quote(let blocks):
             HStack(alignment: .top, spacing: 10) {
@@ -147,6 +174,7 @@ enum InlineStyler {
 struct CodeBlockView: View {
     var language: String?
     var code: String
+    var isStreaming: Bool = false
     @State private var copied = false
     @Environment(\.colorScheme) private var colorScheme
 
@@ -188,16 +216,7 @@ struct CodeBlockView: View {
     }
 
     private var highlighted: AttributedString {
-        let palette = CodePalette(dark: colorScheme == .dark)
-        var result = AttributedString()
-        for token in SyntaxHighlighter.highlight(code, language: language) {
-            var piece = AttributedString(token.text)
-            piece.foregroundColor = palette.color(token.kind)
-            if token.kind == .added { piece.backgroundColor = palette.addedBackground }
-            if token.kind == .removed { piece.backgroundColor = palette.removedBackground }
-            result += piece
-        }
-        return result
+        MarkdownCache.shared.highlighted(code: code, language: language, dark: colorScheme == .dark, cacheable: !isStreaming)
     }
 }
 

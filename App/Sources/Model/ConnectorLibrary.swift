@@ -32,7 +32,6 @@ final class ConnectorLibrary {
         }
         connected = await store.loadAll().compactMap(Self.configuration).sorted { $0.displayName < $1.displayName }
         for configuration in connected { await restore(configuration) }
-        if catalog.isEmpty { await search() }
         if !PreviewScenes.isActive, app?.settings.chatComputerOff == false,
            let control = computerControl(),
            !UserDefaults.standard.bool(forKey: Self.toolsReadyDefaultsKey(control.machine)) {

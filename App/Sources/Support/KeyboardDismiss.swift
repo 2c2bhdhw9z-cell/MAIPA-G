@@ -2,14 +2,39 @@ import SwiftUI
 import UIKit
 
 /// Dismisses any open iPhone keyboard when the person swipes down, taps outside a text field, or
-/// switches to another sheet, menu, or chat — with no floating "Done" bar needed.
+/// switches to another sheet, menu, or chat — with no floating "Done" bar needed, and zero overhead
+/// when the keyboard isn't open.
 @MainActor
 enum KeyboardDismiss {
+    private static var keyboardVisible = false
+    private static var observersInstalled = false
+
     static func dismiss() {
+        guard keyboardVisible else { return }
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 
+    private static func installKeyboardObserversIfNeeded() {
+        guard !observersInstalled else { return }
+        observersInstalled = true
+        NotificationCenter.default.addObserver(
+            forName: UIResponder.keyboardWillShowNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { keyboardVisible = true }
+        }
+        NotificationCenter.default.addObserver(
+            forName: UIResponder.keyboardDidHideNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { keyboardVisible = false }
+        }
+    }
+
     static func installIfNeeded(in window: UIWindow) {
+        installKeyboardObserversIfNeeded()
         if window.gestureRecognizers?.contains(where: { $0 is OutsideTapGestureRecognizer }) == true {
             return
         }
@@ -39,11 +64,12 @@ enum KeyboardDismiss {
         private var dismissedDuringCurrentPan = false
 
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
-            guard recognizer.state == .ended else { return }
+            guard KeyboardDismiss.keyboardVisible, recognizer.state == .ended else { return }
             KeyboardDismiss.dismiss()
         }
 
         @objc func handlePan(_ recognizer: UIPanGestureRecognizer) {
+            guard KeyboardDismiss.keyboardVisible else { return }
             switch recognizer.state {
             case .began:
                 dismissedDuringCurrentPan = false
@@ -61,10 +87,12 @@ enum KeyboardDismiss {
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            // Do zero work and never intercept touches when no keyboard is visible.
+            guard KeyboardDismiss.keyboardVisible else { return false }
             if gestureRecognizer is OutsideTapGestureRecognizer {
                 var current: UIView? = touch.view
                 while let view = current {
-                    if view is UITextField || view is UITextView {
+                    if view is UITextField || view is UITextView || view is UIControl {
                         return false
                     }
                     let typeName = String(describing: type(of: view))
@@ -74,6 +102,7 @@ enum KeyboardDismiss {
                         || typeName.contains("EditMenu")
                         || typeName.contains("CalloutBar")
                         || typeName.contains("Autocomplete")
+                        || typeName.contains("Button")
                     {
                         return false
                     }
@@ -107,11 +136,15 @@ enum KeyboardDismiss {
     }
 }
 
+/// Attaches the window-wide swipe/tap keyboard dismissal to whichever UIWindow hosts the view.
 struct KeyboardDismissAttachment: UIViewRepresentable {
-    func makeUIView(context: Context) -> InstallerView { InstallerView() }
-    func updateUIView(_ uiView: InstallerView, context: Context) {}
+    func makeUIView(context: Context) -> WindowObserverView {
+        WindowObserverView()
+    }
 
-    final class InstallerView: UIView {
+    func updateUIView(_ uiView: WindowObserverView, context: Context) {}
+
+    final class WindowObserverView: UIView {
         override func didMoveToWindow() {
             super.didMoveToWindow()
             if let window {
