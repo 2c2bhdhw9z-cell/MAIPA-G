@@ -89,7 +89,7 @@ struct WorkstationScreen: View {
             tab = initialTab
             loadSavedPositions()
         }
-        .task(id: activeRepo?.id) {
+        .task(id: activeRepo) {
             await loadRepoTreeIfNeeded()
         }
         .photosPicker(
