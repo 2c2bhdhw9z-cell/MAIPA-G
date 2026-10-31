@@ -144,7 +144,7 @@ struct AIProviderAndPayloadTests {
     }
 
     @Test func transcriptCapsWireBytesToPreventCloudflare413() {
-        #expect(Transcript.defaultMaxPayloadBytes == 7_500_000)
+        #expect(Transcript.defaultMaxPayloadBytes == 9_000_000)
         let fakePNG = String(repeating: "A", count: 80_000)
         let imagePart: JSONValue = .object([
             "type": .string("image_url"),
@@ -207,6 +207,6 @@ struct AIProviderAndPayloadTests {
         let defs = BuiltinIntegrationFactory.definitions(for: config)
         #expect(defs.count == 2)
         #expect(defs.contains { $0.originalName == "search" })
-        #expect(defs.contains { $0.originalName == "request" })
+        #expect(defs.contains { $0.originalName == "api_request" })
     }
 }

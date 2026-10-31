@@ -124,13 +124,19 @@ public enum Transcript {
                     tokens += Int(Double(part.jsonString().count) / 3.6)
                 }
             }
-            tokens += Int(Double(message.toolCalls?.reduce(0) { $0 + $1.function.arguments.count + $1.function.name.count + 16 } ?? 0) / 3.6)
+            if let calls = message.toolCalls {
+                var callChars = 0
+                for call in calls {
+                    callChars += call.function.arguments.count + call.function.name.count + 16
+                }
+                tokens += Int(Double(callChars) / 3.6)
+            }
             tokens += 12
         }
         return tokens
     }
 
-    public static let defaultMaxPayloadBytes = 7_500_000
+    public static let defaultMaxPayloadBytes = 9_000_000
 
     /// Approximate JSON wire bytes of `messages`, including full base64 lengths of inline images and PDFs.
     public static func estimatedWireBytes(_ messages: [APIMessage]) -> Int {
