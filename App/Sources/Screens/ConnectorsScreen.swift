@@ -94,7 +94,7 @@ struct ConnectorsScreen: View {
                 ForEach(app.connectors.connected) { connector in
                     Button { app.sheet = .connectorDetail(connector.id) } label: {
                         ConnectorCard(
-                            service: IntegrationService.matching(connector.displayName + " " + connector.serverID),
+                            service: IntegrationService.forConnector(connector),
                             name: connector.displayName,
                             detail: connectedStatus(connector),
                             trailing: .chevron,
@@ -268,7 +268,21 @@ struct ConnectorsScreen: View {
     }
 
     private func connectedService(_ service: IntegrationService) -> ConnectorConfiguration? {
-        app.connectors.connected.first { service.matches($0.displayName + " " + $0.serverID) }
+        if let mode = service.spec?.mode {
+            switch mode {
+            case .customWebhook, .customMCP:
+                // Multi-instance custom endpoints always remain available to add another endpoint.
+                return nil
+            default:
+                break
+            }
+        }
+        return app.connectors.connected.first { connector in
+            if let spec = service.spec, (connector.serverID == spec.id || connector.serverID == "builtin:\(spec.id)" || connector.serverID == "apple:\(spec.id)") {
+                return true
+            }
+            return service.matches(connector.displayName + " " + connector.serverID)
+        }
     }
 
     private func connectedServer(_ server: RegistryServer) -> Bool {
@@ -426,10 +440,6 @@ struct IntegrationIcon: View {
                     .frame(width: 26, height: 26)
             } else if let remoteURL {
                 RemoteConnectorLogo(url: remoteURL, fallback: initials)
-            } else if service.spec != nil {
-                Image(systemName: service.symbol)
-                    .font(.system(size: 19, weight: .semibold))
-                    .foregroundStyle(service.colour)
             } else {
                 Text(initials)
                     .font(.system(size: initials.count > 1 ? 13 : 18, weight: .bold, design: .rounded))
@@ -541,6 +551,22 @@ struct IntegrationService: Identifiable {
     static func matching(_ text: String) -> IntegrationService {
         all.first(where: { $0.matches(text) })
             ?? IntegrationService(name: text, detail: "Connected tool", search: text, aliases: [], symbol: "puzzlepiece.extension.fill", colour: colour(forText: text))
+    }
+
+    static func forConnector(_ connector: ConnectorConfiguration) -> IntegrationService {
+        if let spec = IntegrationCatalog.byServerID(connector.serverID) {
+            return IntegrationService(spec: spec)
+        }
+        if let found = all.first(where: { $0.matches(connector.displayName + " " + connector.serverID) }) {
+            return found
+        }
+        if connector.kind == .webhook, let webhookSpec = IntegrationCatalog.byServerID("custom_webhooks") {
+            return IntegrationService(spec: webhookSpec)
+        }
+        if connector.serverID.hasPrefix("custom:"), let mcpSpec = IntegrationCatalog.byServerID("custom_mcp") {
+            return IntegrationService(spec: mcpSpec)
+        }
+        return matching(connector.displayName + " " + connector.serverID)
     }
 
     private static func colour(for spec: IntegrationProviderSpec) -> Color {

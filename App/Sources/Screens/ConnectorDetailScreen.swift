@@ -52,7 +52,7 @@ struct ConnectorDetailScreen: View {
         Section {
             HStack(spacing: 12) {
                 IntegrationIcon(
-                    service: IntegrationService.matching(connector.displayName + " " + connector.serverID),
+                    service: IntegrationService.forConnector(connector),
                     name: connector.displayName,
                     remoteURL: app.connectors.catalog.first(where: { $0.name == connector.serverID })?.preferredIconURL
                 )

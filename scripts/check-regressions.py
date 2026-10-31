@@ -27,8 +27,8 @@ def check_oct29_01_real_connector_logos() -> None:
     """Report 1: every built-in connector shows the company's own full-colour logo on a plain tile."""
     assets = ROOT / "App/Resources/Assets.xcassets"
     sets = sorted(assets.glob("Integration*.imageset"))
-    if len(sets) < 18:
-        failures.append(f"OCT29-01: expected at least 18 connector logos, found {len(sets)}")
+    if len(sets) < 107:
+        failures.append(f"OCT29-01: expected at least 107 connector logos, found {len(sets)}")
     for image_set in sets:
         contents = json.loads((image_set / "Contents.json").read_text())
         files = [image.get("filename") for image in contents.get("images", []) if image.get("filename")]
@@ -44,10 +44,28 @@ def check_oct29_01_real_connector_logos() -> None:
             color_type = data[25]
             if color_type not in (2, 3, 6):
                 failures.append(f"OCT29-01: {image_set.name}/{name} is greyscale, not full colour")
+
+    # Every single entry in IntegrationCatalog.all must specify a real bundled assetName on disk.
+    catalog_src = (ROOT / "AgentCore/Sources/AgentCore/MCP/BuiltinIntegrationTools.swift").read_text()
+    entries = re.findall(r'\.init\(id:\s*"([^"]+)"[^\n]+', catalog_src)
+    if len(entries) < 107:
+        failures.append(f"OCT29-01: expected at least 107 IntegrationCatalog entries, found {len(entries)}")
+    for line_match in re.finditer(r'\.init\(id:\s*"([^"]+)"([^\n]+)', catalog_src):
+        cid, rest = line_match.group(1), line_match.group(2)
+        m_asset = re.search(r'assetName:\s*"([^"]+)"', rest)
+        if not m_asset:
+            failures.append(f"OCT29-01: IntegrationCatalog '{cid}' is missing assetName (no SF Symbol stand-ins allowed)")
+            continue
+        asset_dir = assets / f"{m_asset.group(1)}.imageset"
+        if not asset_dir.is_dir():
+            failures.append(f"OCT29-01: IntegrationCatalog '{cid}' references missing {asset_dir.name}")
+
     screen = (ROOT / "App/Sources/Screens/ConnectorsScreen.swift").read_text()
     icon = body_of(screen, "IntegrationIcon")
     if ".renderingMode(.original)" not in icon:
         failures.append("OCT29-01: IntegrationIcon must draw logos in their original colours")
+    if "Image(systemName:" in icon:
+        failures.append("OCT29-01: IntegrationIcon must never draw generic SF Symbol stand-ins")
     if ".fill(Theme.raised)" not in icon or "service.colour.opacity" in icon:
         failures.append("OCT29-01: IntegrationIcon must use a plain tile, not a brand-tinted one")
 
