@@ -1,8 +1,8 @@
 # MAIPA-G plan
 
-**Status (31 October 2026, 2:06 PM ET): Build 76 (`build-76-1cee4f3`, 7.59 MB, PR #22) is the latest
-installable build: 0.1.0 (76), iPhone arm64, built from commit `bb99358` (merged to `main` as `1cee4f3`),
-checked by the AgentCore tests on Linux and macOS (173 tests) and an independent IPA inspection.
+**Status (31 October 2026, 7:44 PM ET): Build 80 (`build-80-eb1dec3`, 7.95 MB, PR #23) is the latest
+installable build: 0.1.0 (80), iPhone arm64, built from commit `e97a3ec` (merged to `main` as `eb1dec3`),
+checked by the AgentCore tests on Linux and macOS (178 tests) and an independent IPA inspection.
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
 saving works (Settings and the side menu showed "Saved just now", and the 173 MB Continuum .ipa is
@@ -126,6 +126,26 @@ Built since then:
   `Workstation` `Canvas`, responsive multi-column `Arrange` grids + persisted zoom/pan + live
   staged files in `Workstation`, preserved chat scroll across switches with an exact `visibleRect`
   `↓` button, collapsible large attachment trays, calm retry indicators, and clean web `Sources`.
+- Build 80 (PR #23): added Kiro's 5 sub-agent roles (`Context Gatherer`, `General Task Execution`,
+  `Semantic Reviewer`, `Introspect`, `Custom Agent Creator`) + `.kiro/agents` repo loader +
+  `create_custom_agent`, role-scoped tool isolation with live `Sub-agent: <Role> · <N> tools`
+  streaming cards, and clean `cancelled` handling on Stop; added Kiro's 5-node `WorkflowEngine`
+  (`agent`/`step`, `sequence`, `repeat` with `onMaxIterations` `pause|continue|fail` +
+  `containsText`, `parallel` `joinPolicy`, and `watch`) with per-step model & thinking-effort
+  overrides, `<workflow_step_output>` untrusted boundaries, `send_message`, chat tools
+  (`run_workflow`, `inspect_workflow`, `save_workflow_definition`, `update_workflow`), inline
+  `ACTIVE WORKFLOWS` tree cards, and the `Workstation` `Workflows` tab with live steering and
+  paused model switching; fixed the `Composer` blank-space attachment tray (`IMG_7695`) and raised
+  file attachments to `250 MB` with zero-copy URL streaming/slices, off-main-thread camera
+  downscaling, and `.ipa` store mode in `DataExport`; added AI `Workstation` tools
+  (`list_workstation_files`, `read_workstation_file`, `write_workstation_file`) and `run_command`;
+  upgraded `edit_file` (`old_text`/`new_text`) + `append_file` + unified `@@` diffs + commit
+  advancement/rebasing across sync/undo; added OpenRouter `/api/v1/images/models` + pure-image
+  chat turns + `/chat/completions` `message.images`, `thinkingmachines/inkling:free` allowlisted
+  headers, 60s `429` auto-wait, external-gateway PDF text extraction & older-media stripping on
+  text-only model switches, vision `read_file` on repo images, authenticated `.ipa` downloads in
+  `JobsScreen`, and child-sheet navigation fixes across `ConnectorsScreen`, `FilesScreen`, and
+  `WorkstationScreen`.
 
 Still not done: Stability 11 (about 250 silent `try?` failures remain), necessary item 4 (sandbox
 for downloaded connectors blocks all network, so npx/uvx connectors can't install), and necessary
