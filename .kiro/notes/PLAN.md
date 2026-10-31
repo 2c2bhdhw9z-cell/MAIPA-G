@@ -1,7 +1,7 @@
 # MAIPA-G plan
 
-**Status (30 October 2026, 11:33 PM ET): Build 65 (`build-65-1f5c133`, 6.29 MB, PR #18) is the latest
-installable build: 0.1.0 (65), iPhone arm64, built from commit `1f5c133`, checked by the AgentCore
+**Status (31 October 2026, 12:06 AM ET): Build 66 (`build-66-165e7cf`, 6.95 MB, PR #19) is the latest
+installable build: 0.1.0 (66), iPhone arm64, built from commit `165e7cf`, checked by the AgentCore
 tests on Linux and macOS and an independent IPA inspection.
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
@@ -66,6 +66,17 @@ Built since then:
   file overlays across `read_file`/`list_files`/`search_code`, 7–40 char SHAs in `read_repo_file`,
   OpenRouter HTTP 400 retry recovery, and 5 hard-coded prompt-injection security locks verified by
   `TrustBoundaryTests`.
+- Build 66 (PR #19): replaced every generic SF Symbol stand-in in Connectors with authentic,
+  official full-colour `@2x` (`52x52`) and `@3x` (`78x78`) `.imageset` logos (plus dark-mode
+  variants for monochrome logos like Vercel, X, Render, Sentry, Sprites, ElevenLabs, Wikipedia, and
+  Custom MCP) across all 107 built-in integrations — including official Apple app icons for Apple
+  Calendar, Apple Reminders, Apple Contacts, iCloud Drive, Apple Mail, iMessage, Apple Notes, and
+  Apple Music, dedicated product logos for Jira, Confluence, Bitbucket, Outlook, OneDrive,
+  SharePoint, Word, Excel, OneNote, and Teams, and official brand logos for Stripe, Zapier, Vercel,
+  Cloudflare, Supabase, Webhooks, Custom MCP, and every other connector; removed the SF Symbol
+  fallback in `IntegrationIcon`; added automated checks in `scripts/check-regressions.py` and
+  `TrustBoundaryTests` requiring a real bundled logo on every catalog entry; and fixed `Custom MCP`
+  falsely showing `Connected · 6 tools ready` when `Hugging Face` MCP was connected.
 
 Still not done: Stability 11 (about 250 silent `try?` failures remain), necessary item 4 (sandbox
 for downloaded connectors blocks all network, so npx/uvx connectors can't install), and necessary
