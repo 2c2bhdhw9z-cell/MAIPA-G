@@ -1,8 +1,8 @@
 # MAIPA-G plan
 
-**Status (31 October 2026, 6:15 AM ET): Build 75 (`build-75-cbdf191`, 7.47 MB, PR #21) is the latest
-installable build: 0.1.0 (75), iPhone arm64, built from commit `41d6286` (merged to `main` as `cbdf191`),
-checked by the AgentCore tests on Linux and macOS and an independent IPA inspection.
+**Status (31 October 2026, 2:06 PM ET): Build 76 (`build-76-1cee4f3`, 7.59 MB, PR #22) is the latest
+installable build: 0.1.0 (76), iPhone arm64, built from commit `bb99358` (merged to `main` as `1cee4f3`),
+checked by the AgentCore tests on Linux and macOS (173 tests) and an independent IPA inspection.
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
 saving works (Settings and the side menu showed "Saved just now", and the 173 MB Continuum .ipa is
@@ -109,6 +109,23 @@ Built since then:
   `OmniRoute` (`Cheaper Inference` + self-hosted URLs), and custom OpenAI/Anthropic-compatible
   gateways across Settings, Model Picker (with official provider logos), Chat, Image generation,
   Health Check, and Autonomous cloud runs.
+- Build 76 (PR #22): unlocked the full selected model context window (1M–2M+ tokens without the old
+  60K/150K/300K/0.75x caps), full max output capacity, full thinking levels (`Low`–`Max`, never
+  silently downgraded), and unthrottled tool steps/file reads; replaced character-chopping
+  compaction with structured AI session summarization + one-tap `Restore full memory` undo and
+  overhead-aware context tracking; enabled live mid-run steering in `Composer` (`■` Stop + `↑`
+  Send) and parallel `launch_helpers` sub-agents (including custom `Agents`) directly in chat;
+  brought full catalog/pricing/cache-price/single-header-auth/live-USD-balance parity across
+  `OpenRouter`, `OneProvider`, `SayGM`, `TeamoRouter`, `OmniRoute`, and `Custom` (including native
+  `/v1/messages` prompt caching and mandatory adaptive thinking on Claude Opus 5.5); added
+  automatic OAuth token refresh + origin-root discovery + foreground auto-reconnect for `Sprites`
+  and remote MCP connectors, plus lazy Sprite wake; excluded estimated Sprite compute time and paid
+  web search from free AIs so free replies stay `$0.00` and auto-continued empty tool/reasoning
+  turns so replies never end blank; fixed `SideMenu` slide-close oscillation via `.global`
+  coordinate space, snapshot-cached persistent/collapsible Mermaid diagrams in chat and
+  `Workstation` `Canvas`, responsive multi-column `Arrange` grids + persisted zoom/pan + live
+  staged files in `Workstation`, preserved chat scroll across switches with an exact `visibleRect`
+  `↓` button, collapsible large attachment trays, calm retry indicators, and clean web `Sources`.
 
 Still not done: Stability 11 (about 250 silent `try?` failures remain), necessary item 4 (sandbox
 for downloaded connectors blocks all network, so npx/uvx connectors can't install), and necessary
