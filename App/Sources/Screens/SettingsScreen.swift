@@ -240,13 +240,10 @@ struct SettingsScreen: View {
     private var workflowPolicy: some View {
         Section {
             Toggle("Autonomous enabled", isOn: $draft.autonomousEnabled)
-            Picker("Use Autonomous", selection: $draft.workflowPolicy) {
-                ForEach(WorkflowPolicy.allCases) { policy in Text(policy.label).tag(policy) }
-            }
         } header: {
-            Text("Workflows")
+            Text("Autonomous")
         } footer: {
-            Text("Autonomous uses GitHub's computer for repo work. Jobs without a repo stay on this iPhone.")
+            Text("Turn Autonomous on from the + button in any chat so the AI plans, uses helper agents and finishes the whole job inside the chat using Auto or whichever AI you pick.")
         }
     }
 

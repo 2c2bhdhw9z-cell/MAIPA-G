@@ -80,6 +80,11 @@ public struct SaveChangesTool: AgentTool {
         guard rules.directSave, selectedBranch == defaultBranch, await session.activeReceipt() == nil else { return nil }
         return ToolApprovalRequest(question: "Allow MAIPA-G to save these staged changes directly to \(defaultBranch)?", allowLabel: "Save directly")
     }
+    public func approvalAfterOutsideContent(for arguments: JSONValue) async -> ToolApprovalRequest? {
+        guard await session.activeReceipt() == nil else { return nil }
+        let title = String((arguments.optionalString("title") ?? "Changes").prefix(160))
+        return ToolApprovalRequest(question: "Allow MAIPA-G to push staged changes to GitHub (\(title))?", allowLabel: "Save changes")
+    }
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         if rules.directSave, selectedBranch == defaultBranch, await session.activeReceipt() == nil {
             throw ToolInputError("Saving directly to the default branch needs the person's approval.")

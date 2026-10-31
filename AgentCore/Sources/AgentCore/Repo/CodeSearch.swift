@@ -53,14 +53,15 @@ public enum SearchError: Error, Sendable, CustomStringConvertible {
 public enum CodeSearch {
     static let maxLineLength = 240
 
-    public static func run(_ query: SearchQuery, in snapshot: RepoSnapshot) async throws -> SearchResult {
+    public static func run(_ query: SearchQuery, in snapshot: RepoSnapshot, stagedChanges: [StagedChange] = []) async throws -> SearchResult {
         let pattern = query.pattern
         guard !pattern.isEmpty else { throw SearchError.emptyPattern }
         let matcher = try Matcher(query)
         let glob = query.pathGlob.flatMap { $0.isEmpty ? nil : Glob($0) }
+        let stagedPaths = Set(stagedChanges.map(\.path))
 
         let candidates = snapshot.manifest.files.filter { file in
-            glob.map { $0.matches(file.path) } ?? true
+            !stagedPaths.contains(file.path) && (glob.map { $0.matches(file.path) } ?? true)
         }
         let searchable = candidates.filter { $0.kind == .text }
         let skipped = candidates.count - searchable.count
@@ -70,7 +71,7 @@ public enum CodeSearch {
         let chunks = stride(from: 0, to: searchable.count, by: chunkSize).map { Array(searchable[$0..<min($0 + chunkSize, searchable.count)]) }
 
         let perFileCap = query.maxPerFile
-        let fileMatches: [(path: String, matches: [SearchMatch], total: Int)] = try await withThrowingTaskGroup(of: [(String, [SearchMatch], Int)].self) { group in
+        var fileMatches: [(path: String, matches: [SearchMatch], total: Int)] = try await withThrowingTaskGroup(of: [(String, [SearchMatch], Int)].self) { group in
             for chunk in chunks {
                 group.addTask {
                     var found: [(String, [SearchMatch], Int)] = []
@@ -102,8 +103,33 @@ public enum CodeSearch {
             for try await batch in group {
                 all += batch.map { (path: $0.0, matches: $0.1, total: $0.2) }
             }
-            return all.sorted { $0.path < $1.path }
+            return all
         }
+
+        var stagedSearched = 0
+        for change in stagedChanges {
+            guard case .write(let path, let data, _) = change,
+                  glob.map({ $0.matches(path) }) ?? true,
+                  let document = TextFileCodec.decode(data)
+            else { continue }
+            stagedSearched += 1
+            let text = document.text
+            guard matcher.matchesAnywhere(text) else { continue }
+            var matches: [SearchMatch] = []
+            var total = 0
+            var lineNumber = 0
+            text.enumerateLines { line, _ in
+                lineNumber += 1
+                if matcher.matches(line) {
+                    total += 1
+                    if matches.count < perFileCap {
+                        matches.append(SearchMatch(path: path, line: lineNumber, text: Self.trimmed(line)))
+                    }
+                }
+            }
+            if total > 0 { fileMatches.append((path: path, matches: matches, total: total)) }
+        }
+        fileMatches.sort { $0.path < $1.path }
 
         var matches: [SearchMatch] = []
         var truncated = false
@@ -119,7 +145,7 @@ public enum CodeSearch {
         }
         return SearchResult(
             matches: matches,
-            filesSearched: searchable.count,
+            filesSearched: searchable.count + stagedSearched,
             filesMatched: fileMatches.count,
             truncated: truncated,
             filesSkipped: skipped

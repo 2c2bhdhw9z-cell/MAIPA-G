@@ -238,8 +238,13 @@ struct AssistantTurnView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(turn.steps) { step in
-                StepView(step: step, isLive: turn.status == .running && step.id == turn.steps.last?.id)
+            ForEach(segments) { segment in
+                switch segment {
+                case .activity(let id, let items, let isActive):
+                    ActivityTimelineCard(id: id, items: items, isActive: isActive)
+                case .content(let step):
+                    StepContentView(step: step)
+                }
             }
             if turn.status == .running, showsThinkingLine {
                 WorkingLine(text: "Thinking…")
@@ -271,9 +276,54 @@ struct AssistantTurnView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Groups consecutive thoughts and tool calls into a single collapsible Arena/Kiro-style
+    /// activity card that stays open while running and folds into one summary line once done.
+    private var segments: [TurnSegment] {
+        var output: [TurnSegment] = []
+        var buffer: [ActivityItem] = []
+        let lastStepID = turn.steps.last?.id
+
+        func flushBuffer(isActive: Bool) {
+            guard !buffer.isEmpty else { return }
+            let id = buffer[0].id
+            output.append(.activity(id: id, items: buffer, isActive: isActive))
+            buffer.removeAll(keepingCapacity: true)
+        }
+
+        for (index, step) in turn.steps.enumerated() {
+            let isLastStep = step.id == lastStepID
+            let stepIsLive = turn.status == .running && isLastStep
+            let hasVisibleContent = !step.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !(step.generatedImages ?? []).isEmpty
+                || !(step.citations ?? []).isEmpty
+
+            if !step.reasoning.isEmpty {
+                buffer.append(.thought(step: step, isLive: stepIsLive && !hasVisibleContent && step.toolCalls.isEmpty && step.finishedAt == nil))
+            }
+            // If visible text came BEFORE toolCalls in the same step, flush thoughts before text, show text, then buffer toolCalls.
+            if hasVisibleContent {
+                flushBuffer(isActive: false)
+                output.append(.content(step))
+                for call in step.toolCalls {
+                    buffer.append(.tool(call))
+                }
+            } else {
+                for call in step.toolCalls {
+                    buffer.append(.tool(call))
+                }
+            }
+            if index == turn.steps.count - 1 {
+                let active = turn.status == .running && (!hasVisibleContent || step.toolCalls.contains(where: { $0.status == .running }))
+                flushBuffer(isActive: active)
+            }
+        }
+        return output
+    }
+
     /// "Thinking…" shows until words, thoughts or a tool appear.
     private var showsThinkingLine: Bool {
         guard let last = turn.steps.last else { return true }
+        if !segments.isEmpty, case .activity(_, _, let active) = segments.last, active { return false }
         if last.finishedAt != nil { return !last.toolCalls.contains { $0.status == .running } }
         return last.text.isEmpty && last.reasoning.isEmpty
     }
@@ -321,6 +371,248 @@ struct AssistantTurnView: View {
         }
         .font(.caption)
         .foregroundStyle(Theme.secondaryText)
+    }
+}
+
+enum TurnSegment: Identifiable {
+    case activity(id: String, items: [ActivityItem], isActive: Bool)
+    case content(AssistantStep)
+
+    var id: String {
+        switch self {
+        case .activity(let id, _, _): return "activity-\(id)"
+        case .content(let step): return "content-\(step.id.uuidString)"
+        }
+    }
+}
+
+enum ActivityItem: Identifiable {
+    case thought(step: AssistantStep, isLive: Bool)
+    case tool(ToolCallRecord)
+
+    var id: String {
+        switch self {
+        case .thought(let step, _): return "thought-\(step.id.uuidString)"
+        case .tool(let call): return "tool-\(call.id)"
+        }
+    }
+}
+
+struct StepContentView: View {
+    var step: AssistantStep
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !step.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                MarkdownView(text: step.text)
+            }
+            ForEach(step.generatedImages ?? []) { image in
+                GeneratedImageCard(result: image)
+            }
+            ForEach(step.citations ?? []) { citation in
+                Link(destination: URL(string: citation.url) ?? URL(string: "https://openrouter.ai")!) {
+                    Label(citation.title ?? citation.url, systemImage: "link")
+                        .font(.footnote).lineLimit(1)
+                }
+            }
+        }
+    }
+}
+
+/// Arena + Kiro style unified activity drawer: stays open with a live compact timeline while the
+/// AI is thinking and running tools, then automatically collapses into a single summary pill once
+/// that block completes. Tap anytime to open or close.
+struct ActivityTimelineCard: View {
+    var id: String
+    var items: [ActivityItem]
+    var isActive: Bool
+    @State private var manualOpen: Bool?
+    @Environment(\.theme) private var theme
+
+    private var isOpen: Bool { manualOpen ?? isActive }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                withAnimation(.snappy) {
+                    manualOpen = !isOpen
+                }
+                Haptics.selection()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: headerIcon)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(hasFailure ? Theme.danger : theme.accent)
+                        .frame(width: 18)
+                    Text(headerTitle)
+                        .font(.subheadline.weight(isActive ? .medium : .regular))
+                        .foregroundStyle(isActive ? .primary : Theme.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .shimmer(isActive && theme.thinkingShimmer)
+                    if isActive, items.count > 1 {
+                        Text("\(items.count)")
+                            .font(.caption2.weight(.bold).monospacedDigit())
+                            .foregroundStyle(theme.accent)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(theme.accent.opacity(0.14), in: Capsule())
+                    }
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(Theme.secondaryText)
+                        .rotationEffect(.degrees(isOpen ? 90 : 0))
+                    if isActive {
+                        ProgressView().controlSize(.mini)
+                    }
+                }
+                .padding(.vertical, 7)
+                .padding(.horizontal, 12)
+                .background(Theme.surface.opacity(isOpen ? 0.85 : 0.65), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(isActive ? theme.accent.opacity(0.32) : Theme.stroke))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(headerTitle)
+            .accessibilityValue(isOpen ? "Expanded" : "Collapsed")
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .onChange(of: isActive) { wasActive, nowActive in
+                // Auto-collapse smoothly as soon as running finishes unless the user manually toggled it after finishing.
+                if wasActive && !nowActive {
+                    withAnimation(.snappy) {
+                        manualOpen = nil
+                    }
+                }
+            }
+
+            if isOpen {
+                ScrollViewReader { timelineProxy in
+                    ScrollView(.vertical, showsIndicators: items.count > 5) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(items) { item in
+                                ActivityTimelineRow(item: item)
+                                    .id(item.id)
+                            }
+                        }
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 240)
+                    .background(Theme.surface.opacity(0.45), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.stroke.opacity(0.8)))
+                    .onChange(of: items.count) { _, _ in
+                        if isActive, let lastID = items.last?.id {
+                            withAnimation(.snappy) { timelineProxy.scrollTo(lastID, anchor: .bottom) }
+                        }
+                    }
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .topLeading)))
+            }
+        }
+    }
+
+    private var toolItems: [ToolCallRecord] {
+        items.compactMap { if case .tool(let call) = $0 { return call }; return nil }
+    }
+
+    private var thoughtSteps: [AssistantStep] {
+        items.compactMap { if case .thought(let step, _) = $0 { return step }; return nil }
+    }
+
+    private var hasFailure: Bool {
+        toolItems.contains { $0.status == .failed }
+    }
+
+    private var headerIcon: String {
+        if hasFailure { return "exclamationmark.triangle" }
+        if isActive { return "sparkles" }
+        if !thoughtSteps.isEmpty && !toolItems.isEmpty { return "sparkles" }
+        if !toolItems.isEmpty { return "wrench.and.screwdriver" }
+        return "sparkles"
+    }
+
+    private var totalSeconds: Int? {
+        let starts = thoughtSteps.map(\.startedAt)
+        let ends = thoughtSteps.compactMap(\.finishedAt) + toolItems.compactMap(\.finishedAt)
+        if let first = starts.min(), let last = ends.max() {
+            let secs = Int(round(last.timeIntervalSince(first)))
+            if secs > 0 { return secs }
+        }
+        let summed = thoughtSteps.compactMap(\.thinkingSeconds).reduce(0, +)
+        return summed > 0 ? summed : nil
+    }
+
+    private static func formatDuration(_ seconds: Int) -> String {
+        if seconds < 60 { return "\(seconds)s" }
+        let mins = seconds / 60
+        let rem = seconds % 60
+        return rem == 0 ? "\(mins)m" : "\(mins)m \(rem)s"
+    }
+
+    private var headerTitle: String {
+        if isActive {
+            if let runningTool = toolItems.last(where: { $0.status == .running }) {
+                return runningTool.summary
+            }
+            if let waitingTool = toolItems.last(where: { $0.status == .waitingForUser }) {
+                return waitingTool.summary
+            }
+            return "Thinking…"
+        }
+        let toolsCount = toolItems.count
+        let durationText = totalSeconds.map(Self.formatDuration)
+        if toolsCount == 0 {
+            if let durationText { return "Thought for \(durationText)" }
+            return thoughtSteps.count > 1 ? "Thought (\(thoughtSteps.count) steps)" : "Thoughts"
+        }
+        if thoughtSteps.isEmpty {
+            return toolsCount == 1 ? (toolItems[0].summary) : "Ran \(toolsCount) actions"
+        }
+        if let durationText {
+            return "Worked for \(durationText) · \(toolsCount) \(toolsCount == 1 ? "action" : "actions")"
+        }
+        return "Thought & ran \(toolsCount) \(toolsCount == 1 ? "action" : "actions")"
+    }
+}
+
+private struct ActivityTimelineRow: View {
+    var item: ActivityItem
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(spacing: 2) {
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: 7, height: 7)
+                    .padding(.top, 7)
+                Rectangle()
+                    .fill(Theme.stroke.opacity(0.75))
+                    .frame(width: 1.5)
+                    .frame(maxHeight: .infinity)
+            }
+            .frame(width: 10)
+
+            switch item {
+            case .thought(let step, let isLive):
+                ThoughtsView(step: step, isLive: isLive)
+            case .tool(let call):
+                ToolLine(call: call)
+            }
+        }
+    }
+
+    private var dotColor: Color {
+        switch item {
+        case .thought(_, let isLive):
+            return isLive ? theme.accent : Theme.secondaryText.opacity(0.6)
+        case .tool(let call):
+            switch call.status {
+            case .failed: return Theme.danger
+            case .running, .waitingForUser: return theme.accent
+            case .done: return .green.opacity(0.75)
+            }
+        }
     }
 }
 

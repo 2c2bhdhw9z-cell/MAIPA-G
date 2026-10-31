@@ -65,13 +65,31 @@ public struct WebPageReader: Sendable {
 
     static func readableText(_ html: String) -> String {
         var text = html
-        for pattern in [#"(?is)<script\b[^>]*>.*?</script>"#, #"(?is)<style\b[^>]*>.*?</style>"#, #"(?is)<nav\b[^>]*>.*?</nav>"#, #"(?is)<svg\b[^>]*>.*?</svg>"#] {
+        for pattern in [
+            #"(?is)<!--.*?-->"#,
+            #"(?is)<script\b[^>]*>.*?</script>"#,
+            #"(?is)<style\b[^>]*>.*?</style>"#,
+            #"(?is)<noscript\b[^>]*>.*?</noscript>"#,
+            #"(?is)<template\b[^>]*>.*?</template>"#,
+            #"(?is)<iframe\b[^>]*>.*?</iframe>"#,
+            #"(?is)<nav\b[^>]*>.*?</nav>"#,
+            #"(?is)<footer\b[^>]*>.*?</footer>"#,
+            #"(?is)<svg\b[^>]*>.*?</svg>"#,
+        ] {
             text = text.replacingOccurrences(of: pattern, with: " ", options: .regularExpression)
         }
-        text = text.replacingOccurrences(of: #"(?i)<br\s*/?>|</p>|</div>|</li>|</h[1-6]>"#, with: "\n", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"(?i)<br\s*/?>|</p>|</div>|</li>|</h[1-6]>|</section>|</article>|</tr>"#, with: "\n", options: .regularExpression)
         text = text.replacingOccurrences(of: #"(?s)<[^>]+>"#, with: " ", options: .regularExpression)
         text = clean(text)
-        let lines = text.components(separatedBy: .newlines).map { $0.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let lines = text.components(separatedBy: .newlines).compactMap { rawLine -> String? in
+            let line = rawLine.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression).trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty else { return nil }
+            // Drop hydrated JSON state / inline telemetry blobs left outside script tags.
+            if line.count > 240, (line.hasPrefix("{\"") || line.hasPrefix("[{\"")), (line.hasSuffix("}") || line.hasSuffix("]")) {
+                return nil
+            }
+            return line
+        }
         return String(lines.joined(separator: "\n").prefix(200_000))
     }
 

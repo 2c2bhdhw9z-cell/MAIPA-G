@@ -100,6 +100,10 @@ public enum ConnectorActionPolicy {
             return nil
         }
         if nameWords.contains(where: accessWords.contains) { return .changesAccess }
+        let pathArg = (arguments["path"]?.stringValue ?? arguments["file"]?.stringValue ?? arguments["filepath"]?.stringValue ?? "").lowercased()
+        if !pathArg.isEmpty, [".ssh", "authorized_keys", ".bashrc", ".bash_profile", ".profile", ".zshrc", "/etc/"].contains(where: { pathArg.contains($0) }) {
+            return .changesAccess
+        }
         // Taking a checkpoint or backup only adds a way back.
         if nameWords.contains(where: protectiveWords.contains) { return nil }
         if nameWords.contains(where: spendingWords.contains) { return .spends }
@@ -141,23 +145,61 @@ public enum ConnectorActionPolicy {
 /// building, testing, reading and installing into the project run without a pause.
 public enum ShellRisk {
     static let riskyPrograms: Set<String> = ["rm", "rmdir", "shred", "unlink", "dd", "mkfs", "fdisk", "wipefs", "truncate", "kill", "pkill", "killall", "shutdown", "reboot", "halt", "poweroff", "sudo", "su", "doas", "chown", "chattr", "passwd", "useradd", "userdel", "crontab", "systemctl", "iptables", "nft", "ufw", "gh", "fly", "flyctl", "sprite", "aws", "gcloud", "az", "kubectl", "terraform", "scp", "rsync", "ssh", "sftp", "ftp", "nc", "ncat", "netcat", "socat", "telnet", "mail", "sendmail"]
-    static let riskyPhrases: [String] = ["git push", "git reset --hard", "git clean", "git checkout --", "git branch -d", "git branch -D", "git tag -d", "git filter-", "git rebase", "git stash drop", "git stash clear", "npm publish", "yarn publish", "pnpm publish", "cargo publish", "gem push", "twine upload", "docker rm", "docker rmi", "docker system prune", "docker volume rm", "find -delete", " -delete", "--delete", "> /dev/sd", "chmod -R", "chmod 777", "-X DELETE", "-X POST", "-X PUT", "-X PATCH", "--request DELETE", "--request POST", "--request PUT", "--data", " -d @", "--upload-file", " -T ", ":(){", "~/.ssh", ".ssh/", "id_rsa", "id_ed25519", ".aws/", "base64 -d", "eval "]
+    static let riskyPhrases: [String] = ["git push", "git reset --hard", "git clean", "git checkout --", "git branch -d", "git branch -D", "git tag -d", "git filter-", "git rebase", "git stash drop", "git stash clear", "npm publish", "yarn publish", "pnpm publish", "cargo publish", "gem push", "twine upload", "docker rm", "docker rmi", "docker system prune", "docker volume rm", "find -delete", " -delete", "--delete", "> /dev/sd", "chmod -R", "chmod 777", "-X DELETE", "-X POST", "-X PUT", "-X PATCH", "--request DELETE", "--request POST", "--request PUT", "--data", " -d @", "--upload-file", " -T ", ":(){", "~/.ssh", ".ssh/", "authorized_keys", "id_rsa", "id_ed25519", "~/.bashrc", ".bash_profile", "~/.zshrc", ".aws/", "base64 -d", "eval ", "shutil.rmtree", "os.remove(", "os.unlink(", "fs.rmSync(", "fs.unlinkSync("]
+
+    static let shellWrappers: Set<String> = ["env", "nohup", "time", "xargs", "exec", "command", "nice", "timeout", "bash", "sh", "zsh", "dash"]
+
+    static func cleanProgramName(_ token: String) -> String {
+        let unquoted = token.filter { $0 != "'" && $0 != "\"" && $0 != "\\" }
+        return (unquoted as NSString).lastPathComponent
+    }
+
+    /// Extracts inner `-c` / `-lc` scripts passed to `bash`, `sh`, `zsh`, or `dash` so wrapped
+    /// commands get the exact same risk and network checks as top-level commands.
+    static func unwrappedCommands(_ command: String, depth: Int = 0) -> [String] {
+        guard depth < 3 else { return [command] }
+        var results = [command]
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shells = ["bash", "sh", "zsh", "dash", "/bin/bash", "/bin/sh", "/usr/bin/env bash", "/usr/bin/env sh"]
+        for shell in shells {
+            for flag in ["-lc", "-c", "-ic", "-ilc"] {
+                let prefix = shell + " " + flag + " "
+                if trimmed.hasPrefix(prefix) {
+                    var inner = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if (inner.hasPrefix("\"") && inner.hasSuffix("\"")) || (inner.hasPrefix("'") && inner.hasSuffix("'")), inner.count >= 2 {
+                        inner = String(inner.dropFirst().dropLast())
+                    }
+                    results += unwrappedCommands(inner, depth: depth + 1)
+                }
+            }
+        }
+        return results
+    }
 
     public static func isRisky(_ command: String) -> Bool {
         let value = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return true }
         guard !value.contains("\u{0}") else { return true }
-        if riskyPhrases.contains(where: { value.contains($0) }) { return true }
-        // Downloading a script straight into a shell runs code nobody reviewed.
-        let lowered = value.lowercased()
-        if lowered.contains("curl") || lowered.contains("wget"),
-           lowered.range(of: #"\|\s*(sudo\s+)?(-\S+\s+)*(ba|z|da)?sh\b|\|\s*(sudo\s+)?(python3?|node|perl|ruby)\b"#, options: .regularExpression) != nil { return true }
-        for segment in segments(value) {
-            let words = segment.split(whereSeparator: \.isWhitespace).map(String.init).filter { !$0.contains("=") || $0.hasPrefix("-") }
-            guard let program = words.first.map({ ($0 as NSString).lastPathComponent }) else { continue }
-            if riskyPrograms.contains(program) { return true }
-            if ["env", "nohup", "time", "xargs", "exec", "command", "nice", "timeout", "bash", "sh", "zsh"].contains(program),
-               words.dropFirst().contains(where: { riskyPrograms.contains(($0 as NSString).lastPathComponent) }) { return true }
+        for candidate in unwrappedCommands(value) {
+            if riskyPhrases.contains(where: { candidate.contains($0) }) { return true }
+            // Downloading a script straight into a shell runs code nobody reviewed.
+            let lowered = candidate.lowercased()
+            if lowered.contains("curl") || lowered.contains("wget"),
+               lowered.range(of: #"\|\s*(sudo\s+)?(-\S+\s+)*(ba|z|da)?sh\b|\|\s*(sudo\s+)?(python3?|node|perl|ruby)\b"#, options: .regularExpression) != nil { return true }
+            for segment in segments(candidate) {
+                let words = segment.split(whereSeparator: \.isWhitespace).map(String.init).filter { !$0.contains("=") || $0.hasPrefix("-") }
+                guard let program = words.first.map(cleanProgramName) else { continue }
+                if riskyPrograms.contains(program) { return true }
+                if shellWrappers.contains(program) {
+                    if words.dropFirst().contains(where: { riskyPrograms.contains(cleanProgramName($0)) }) { return true }
+                    if ["bash", "sh", "zsh", "dash"].contains(program),
+                       let flagIdx = words.firstIndex(where: { ["-c", "-lc", "-ic", "-ilc"].contains($0) }),
+                       flagIdx + 1 < words.count {
+                        let rest = words[(flagIdx + 1)...].joined(separator: " ").trimmingCharacters(in: CharacterSet(charactersIn: "'\" "))
+                        if !rest.isEmpty, isRisky(rest) { return true }
+                    }
+                }
+            }
         }
         return false
     }

@@ -300,6 +300,7 @@ final class AppModel {
             }
         case .active:
             guard started else { return }
+            library.resumePausedChats()
             Task {
                 await openRouter.refreshKeyInfo()
                 await updates.check(using: github.publicClient)
@@ -376,17 +377,7 @@ final class AppModel {
             return
         }
         notifications.requestIfNeeded(enabled: settings.notificationsOn)
-        // Same routing as a message sent inside a chat: the Autonomous switch starts one cloud agent,
-        // and otherwise the Settings workflow choice may start a workflow for a repo job.
-        let request = text
-        let routedWorkflow = home.attachments.isEmpty && !home.autonomous ? jobs.routedWorkflow(request: request, repo: home.repo) : nil
-        if home.attachments.isEmpty, let repo = home.repo, home.autonomous {
-            Task { await jobs.start(request: request, repo: repo) }
-        } else if let repo = home.repo, let workflow = routedWorkflow {
-            Task { await jobs.start(request: request, repo: repo, workflow: workflow) }
-        } else {
-            library.startChat(text: text, attachments: home.attachments, repo: home.repo, model: home.model, thinking: home.thinking, groupID: home.groupID, memories: memories.activeTexts)
-        }
+        library.startChat(text: text, attachments: home.attachments, repo: home.repo, model: home.model, thinking: home.thinking, groupID: home.groupID, memories: memories.activeTexts, autonomous: home.autonomous)
         home.text = ""
         home.attachments = []
         home.groupID = nil

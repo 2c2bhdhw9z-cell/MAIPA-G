@@ -255,11 +255,13 @@ enum Format {
 
 public struct ListFilesTool: AgentTool {
     public let workspace: RepoWorkspace
+    public let changes: ChangeWorkspace?
     public let name = "list_files"
     static let maxLines = 400
 
-    public init(workspace: RepoWorkspace) {
+    public init(workspace: RepoWorkspace, changes: ChangeWorkspace? = nil) {
         self.workspace = workspace
+        self.changes = changes
     }
 
     public var spec: ToolSpec {
@@ -289,7 +291,7 @@ public struct ListFilesTool: AgentTool {
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let folder = RepoWorkspace.normalize(arguments.optionalString("path") ?? "")
         let depth = min(max(arguments.optionalInt("depth") ?? 2, 1), 8)
-        let tree = try await workspace.tree()
+        let tree = if let changes { try await changes.mergedTree() } else { try await workspace.tree() }
         let prefix = folder.isEmpty ? "" : folder + "/"
         let inside = tree.entries.filter { folder.isEmpty || $0.path.hasPrefix(prefix) }
 
@@ -371,13 +373,15 @@ public struct ListFilesTool: AgentTool {
 
 public struct ReadFileTool: AgentTool {
     public let workspace: RepoWorkspace
+    public let changes: ChangeWorkspace?
     public let name = "read_file"
     static let maxLines = 600
     static let maxCharacters = 60_000
     static let maxLineLength = 1_000
 
-    public init(workspace: RepoWorkspace) {
+    public init(workspace: RepoWorkspace, changes: ChangeWorkspace? = nil) {
         self.workspace = workspace
+        self.changes = changes
     }
 
     public var spec: ToolSpec {
@@ -405,7 +409,17 @@ public struct ReadFileTool: AgentTool {
 
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let path = RepoWorkspace.normalize(try arguments.requiredString("path"))
-        switch try await workspace.readFile(path) {
+        let readResult: FileRead
+        if let changes {
+            do {
+                readResult = try await changes.read(path)
+            } catch ChangeWorkspaceError.unsafePath {
+                readResult = .missing(suggestions: [])
+            }
+        } else {
+            readResult = try await workspace.readFile(path)
+        }
+        switch readResult {
         case .missing(let suggestions):
             throw ToolInputError("There is no file \(path)." + (suggestions.isEmpty ? " Use list_files or search_code to find it." : " Did you mean: " + suggestions.joined(separator: ", ") + "?"))
         case .folder:
@@ -460,10 +474,12 @@ public struct ReadFileTool: AgentTool {
 
 public struct SearchCodeTool: AgentTool {
     public let workspace: RepoWorkspace
+    public let changes: ChangeWorkspace?
     public let name = "search_code"
 
-    public init(workspace: RepoWorkspace) {
+    public init(workspace: RepoWorkspace, changes: ChangeWorkspace? = nil) {
         self.workspace = workspace
+        self.changes = changes
     }
 
     public var spec: ToolSpec {
@@ -507,9 +523,10 @@ public struct SearchCodeTool: AgentTool {
             case .updating(let changed): progress("Updating the copy · \(changed) changed file\(changed == 1 ? "" : "s")")
             }
         }
+        let staged = await changes?.stagedChanges() ?? []
         let result: SearchResult
         do {
-            result = try await CodeSearch.run(query, in: copy)
+            result = try await CodeSearch.run(query, in: copy, stagedChanges: staged)
         } catch let error as SearchError {
             throw ToolInputError(error.description)
         }

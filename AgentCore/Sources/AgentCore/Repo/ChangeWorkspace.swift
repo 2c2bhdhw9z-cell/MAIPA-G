@@ -57,14 +57,45 @@ public actor ChangeWorkspace {
         }
     }
 
+    public func mergedTree() async throws -> GitTree {
+        let baseTree = try await base.tree()
+        guard !changes.isEmpty else { return baseTree }
+        var byPath: [String: GitTreeEntry] = [:]
+        for entry in baseTree.entries {
+            byPath[entry.path] = entry
+        }
+        for change in changes.values {
+            switch change {
+            case .delete(let path, _):
+                byPath.removeValue(forKey: path)
+            case .write(let path, let data, _):
+                let sha = byPath[path]?.sha ?? ""
+                byPath[path] = GitTreeEntry(path: path, mode: "100644", type: "blob", sha: sha, size: data.count)
+                var parts = path.split(separator: "/").dropLast()
+                while !parts.isEmpty {
+                    let folder = parts.joined(separator: "/")
+                    if byPath[folder] == nil {
+                        byPath[folder] = GitTreeEntry(path: folder, mode: "040000", type: "tree", sha: "")
+                    }
+                    parts = parts.dropLast()
+                }
+            }
+        }
+        let sorted = byPath.values.sorted { $0.path < $1.path }
+        return GitTree(sha: baseTree.sha, entries: sorted, truncated: baseTree.truncated)
+    }
+
     public func create(path rawPath: String, text: String, buildSetupApproved: Bool = false) async throws {
         let path = try Self.safe(rawPath)
         if Self.isBuildSetup(path), !buildSetupApproved { throw ChangeWorkspaceError.buildSetupApprovalRequired(path) }
-        switch try await readBase(path) {
+        switch try await readDecoded(path) {
         case .missing:
             let data = Data(text.utf8)
             guard TextFileCodec.decode(data) != nil else { throw ChangeWorkspaceError.notText(path) }
-            changes[path] = .write(path: path, data: data, existed: false)
+            let existedInBase: Bool
+            if case .missing = try await readBase(path) { existedInBase = false }
+            else { existedInBase = true }
+            changes[path] = .write(path: path, data: data, existed: existedInBase)
         default: throw ChangeWorkspaceError.alreadyExists(path)
         }
     }
@@ -73,15 +104,21 @@ public actor ChangeWorkspace {
         let path = try Self.safe(rawPath)
         if Self.isBuildSetup(path), !buildSetupApproved { throw ChangeWorkspaceError.buildSetupApprovalRequired(path) }
         let document: TextFileCodec.Document
-        switch try await readBase(path) {
+        switch try await readDecoded(path) {
         case .text(let decoded, _): document = decoded
         case .missing: throw ChangeWorkspaceError.missing(path)
         case .folder: throw ChangeWorkspaceError.notText(path)
         case .binary, .tooLarge, .symlink: throw ChangeWorkspaceError.notText(path)
         }
+        let existedInBase: Bool
+        if case .write(_, _, let prevExisted)? = changes[path] {
+            existedInBase = prevExisted
+        } else {
+            existedInBase = true
+        }
         let data = TextFileCodec.encode(text, preserving: document)
         guard TextFileCodec.decode(data) != nil else { throw ChangeWorkspaceError.notText(path) }
-        changes[path] = .write(path: path, data: data, existed: true)
+        changes[path] = .write(path: path, data: data, existed: existedInBase)
     }
 
     public func delete(path rawPath: String, approved: Bool = false) async throws {

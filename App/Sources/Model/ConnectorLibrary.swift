@@ -27,9 +27,11 @@ final class ConnectorLibrary {
     }
 
     func load() async {
-        if let data = try? Data(contentsOf: cacheURL), let saved = try? JSONCoding.decoder().decode([RegistryServer].self, from: data) { catalog = saved.sorted(by: MCPRegistryClient.catalogOrder) }
+        if let data = try? Data(contentsOf: cacheURL), let saved = try? JSONCoding.decoder().decode([RegistryServer].self, from: data) {
+            catalog = saved.sorted(by: MCPRegistryClient.catalogOrder)
+        }
         connected = await store.loadAll().compactMap(Self.configuration).sorted { $0.displayName < $1.displayName }
-        for configuration in connected where configuration.kind == .remote { await restore(configuration) }
+        for configuration in connected { await restore(configuration) }
         if catalog.isEmpty { await search() }
         if !PreviewScenes.isActive, app?.settings.chatComputerOff == false,
            let control = computerControl(),
@@ -56,8 +58,6 @@ final class ConnectorLibrary {
         } catch { if catalog.isEmpty { errors[UUID()] = ErrorExplainer.explain(error).message } }
     }
 
-    /// Looks up one familiar service without replacing the screen's current catalogue/search.
-    /// The UI uses this behind a normal Connect button; the source remains the official Registry.
     func lookup(_ search: String) async throws -> [RegistryServer] {
         let text = search.trimmingCharacters(in: .whitespacesAndNewlines)
         let pages = try await firstPages(for: text)
@@ -67,10 +67,6 @@ final class ConnectorLibrary {
         return found
     }
 
-    /// The Registry's `search` only matches server names as a substring, so "Hugging Face" finds
-    /// nothing while "huggingface" finds `co.huggingface/hf-mcp-server`. This asks for the first
-    /// page of up to three spellings at once: as typed, without spaces, and with words joined by
-    /// "-". Only the as-typed request has to succeed, and "Load more" continues from its cursor.
     private func firstPages(for text: String) async throws -> (servers: [RegistryServer], nextCursor: String?) {
         let client = MCPRegistryClient(transport: transport)
         let spellings = Self.spellings(of: text)
@@ -80,7 +76,6 @@ final class ConnectorLibrary {
         return (typed.servers + others, typed.nextCursor)
     }
 
-    /// The text as typed first (even when empty, which lists everything), then the other spellings.
     nonisolated static func spellings(of text: String) -> [String] {
         let words = text.split(whereSeparator: \.isWhitespace).map(String.init)
         var spellings = [text]
@@ -101,15 +96,10 @@ final class ConnectorLibrary {
         }
     }
 
-    /// One entry per server name; a later copy replaces an earlier one.
     nonisolated private static func unique(_ servers: [RegistryServer]) -> [RegistryServer] {
         Array(servers.reduce(into: [String: RegistryServer]()) { $0[$1.name] = $1 }.values)
     }
 
-    /// Entries titled exactly like the query come first (ignoring case, spaces and punctuation),
-    /// then the publisher's own entries ("co.huggingface/…" for "Hugging Face"), then the rest,
-    /// each group in the Registry's usual order. Among exact titles, the publisher's own entry
-    /// leads, so an untitled `io.github.someone/huggingface-mcp` can't push ahead of it.
     nonisolated static func ranked(_ servers: [RegistryServer], for query: String) -> [RegistryServer] {
         let title = compacted(query)
         let publisherQuery = query.filter { !$0.isWhitespace }.lowercased()
@@ -128,6 +118,98 @@ final class ConnectorLibrary {
         text.lowercased().filter { $0.isLetter || $0.isNumber }
     }
 
+    // MARK: - Adding & Connecting Any of the 100+ Providers or Registry Servers
+
+    func connectCatalogProvider(_ spec: IntegrationProviderSpec) async -> ConnectorConfiguration? {
+        if let existing = connected.first(where: { spec.matches($0.displayName + " " + $0.serverID) }) {
+            return existing
+        }
+        switch spec.mode {
+        case .publicZeroKey(let providerKey):
+            let config = ConnectorConfiguration(
+                serverID: "builtin:\(spec.id)",
+                displayName: spec.name,
+                kind: .builtin,
+                launchValues: ["provider": providerKey]
+            )
+            await save(config)
+            await restore(config)
+            return config
+
+        case .appleNative(let appleKey, _):
+            let granted = (try? await AppleDeviceIntegrations.requestAuthorization(for: appleKey)) ?? false
+            let config = ConnectorConfiguration(
+                serverID: "apple:\(spec.id)",
+                displayName: spec.name,
+                kind: .apple,
+                launchValues: ["apple_key": appleKey]
+            )
+            await save(config)
+            if granted {
+                await restore(config)
+            } else {
+                toolDefinitions[config.id] = AppleDeviceIntegrations.definitions(for: config)
+                states[config.id] = .authorizationNeeded
+                errors[config.id] = "Turn on \(spec.name) permission for MAIPA-G in iOS Settings."
+            }
+            return config
+
+        case .remoteMCP(let urlText, _, let authHeader, _):
+            guard let url = URL(string: urlText) else { return nil }
+            let config = ConnectorConfiguration(
+                serverID: "mcp:\(spec.id)",
+                displayName: spec.name,
+                endpoint: url,
+                authHeaderName: authHeader
+            )
+            // Convenience: if connecting GitHub MCP and the user already signed in to GitHub in MAIPA-G, seed credential if none set.
+            if spec.id == "github", let ghToken = Keychain.string(.githubUserToken), !ghToken.isEmpty {
+                Keychain.setValue(ConnectorCredential(accessToken: ghToken, clientID: "github-app"), account: credentialKey(config.id))
+            }
+            await save(config)
+            await restore(config)
+            return config
+
+        case .apiKeyREST(let providerKey, let baseURL, let authStyle, let authName, _, let extraKey, _, _):
+            var values: [String: String] = [
+                "provider": providerKey,
+                "auth_style": authStyle.rawValue,
+                "auth_name": authName,
+            ]
+            if let extraKey { values["extra_key"] = extraKey }
+            let config = ConnectorConfiguration(
+                serverID: "builtin:\(spec.id)",
+                displayName: spec.name,
+                kind: .builtin,
+                endpoint: URL(string: baseURL),
+                launchValues: values,
+                secretNames: ["api_key"],
+                authHeaderName: authName
+            )
+            await save(config)
+            await restore(config)
+            return config
+
+        case .stdioPackage(let packageName, let registryType, let secretEnvNames, let plainEnvNames, _):
+            let inputs = plainEnvNames.map { RegistryServer.LaunchInput(name: $0, isRequired: false, isSecret: false) }
+                + secretEnvNames.map { RegistryServer.LaunchInput(name: $0, isRequired: true, isSecret: true) }
+            let pkg = RegistryServer.Package(registryType: registryType, identifier: packageName, environmentVariables: inputs)
+            let config = ConnectorConfiguration(
+                serverID: "stdio:\(spec.id)",
+                displayName: spec.name,
+                package: pkg,
+                launchValues: [:],
+                secretNames: Set(secretEnvNames)
+            )
+            await save(config)
+            await restore(config)
+            return config
+
+        case .customWebhook, .customMCP:
+            return nil
+        }
+    }
+
     func add(_ server: RegistryServer, preferPhone: Bool = true, launchValues: [String: String] = [:], secretValues: [String: String] = [:]) async {
         if preferPhone, let remote = server.preferredRemote { await addRemote(name: server.displayName, serverID: server.name, endpoint: remote.url) }
         else if let package = server.packages.first(where: \.isAutonomousCompatible) {
@@ -135,9 +217,101 @@ final class ConnectorLibrary {
         }
     }
 
-    func addCustom(name: String, urlText: String) async throws {
-        guard let url = URL(string: urlText), url.scheme == "https", url.host != nil else { throw MCPAuthorizationError.insecureURL }
-        await addRemote(name: name.isEmpty ? url.host! : name, serverID: "custom:\(url.absoluteString)", endpoint: url)
+    func addCustom(name: String, urlText: String, token: String = "", headerName: String = "") async throws {
+        guard let url = URL(string: urlText.trimmingCharacters(in: .whitespacesAndNewlines)),
+              (try? OAuthURLPolicy.validate(url)) != nil, let host = url.host else {
+            throw MCPAuthorizationError.insecureURL
+        }
+        let cleanHeader = headerName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let config = ConnectorConfiguration(
+            serverID: "custom:\(url.absoluteString)",
+            displayName: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? host : name.trimmingCharacters(in: .whitespacesAndNewlines),
+            endpoint: url,
+            authHeaderName: cleanHeader.isEmpty ? nil : cleanHeader
+        )
+        let cleanToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanToken.isEmpty {
+            Keychain.setValue(ConnectorCredential(accessToken: cleanToken, clientID: "manual-token"), account: credentialKey(config.id))
+        }
+        await save(config)
+        await restore(config)
+    }
+
+    func addWebhook(name: String, urlText: String, method: String = "POST", headerName: String = "", secret: String = "") async throws {
+        guard let url = URL(string: urlText.trimmingCharacters(in: .whitespacesAndNewlines)),
+              (try? OAuthURLPolicy.validate(url)) != nil, let host = url.host else {
+            throw MCPAuthorizationError.insecureURL
+        }
+        let cleanHeader = headerName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanSecret = secret.trimmingCharacters(in: .whitespacesAndNewlines)
+        let config = ConnectorConfiguration(
+            serverID: "webhook:\(UUID().uuidString.lowercased())",
+            displayName: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Webhook (\(host))" : name.trimmingCharacters(in: .whitespacesAndNewlines),
+            kind: .webhook,
+            endpoint: url,
+            secretNames: cleanSecret.isEmpty ? [] : ["webhook_secret"],
+            authHeaderName: cleanHeader.isEmpty ? nil : cleanHeader,
+            webhookMethod: method.uppercased()
+        )
+        if !cleanSecret.isEmpty {
+            Keychain.set(Data(cleanSecret.utf8), account: builtinSecretKey(config.id))
+        }
+        await save(config)
+        await restore(config)
+    }
+
+    func saveRemoteToken(_ token: String, headerName: String?, for configuration: ConnectorConfiguration) async {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        await sessions[configuration.id]?.disconnect()
+        sessions[configuration.id] = nil
+        Keychain.setValue(ConnectorCredential(accessToken: trimmed, clientID: "manual-token"), account: credentialKey(configuration.id))
+        var updated = configuration
+        let cleanHeader = headerName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        updated.authHeaderName = cleanHeader.isEmpty ? nil : cleanHeader
+        await save(updated)
+        await restore(updated)
+    }
+
+    func saveBuiltinCredentials(secret: String, extraKey: String?, extraValue: String?, for configuration: ConnectorConfiguration) async {
+        let trimmedSecret = secret.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedSecret.isEmpty {
+            Keychain.set(Data(trimmedSecret.utf8), account: builtinSecretKey(configuration.id))
+        }
+        var updated = configuration
+        if let extraKey, !extraKey.isEmpty {
+            let val = (extraValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            updated.launchValues["extra_key"] = extraKey
+            updated.launchValues["extra_value"] = val
+            updated.launchValues[extraKey] = val
+        }
+        await save(updated)
+        await restore(updated)
+    }
+
+    func saveStdioInputs(launchValues: [String: String], secretValues: [String: String], for configuration: ConnectorConfiguration) async {
+        var updated = configuration
+        for (k, v) in launchValues {
+            updated.launchValues[k] = v.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        for (k, v) in secretValues {
+            let clean = v.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !clean.isEmpty else { continue }
+            updated.secretNames.insert(k)
+            Keychain.set(Data(clean.utf8), account: stdioSecretKey(configuration.id, name: k))
+        }
+        await save(updated)
+        await restore(updated)
+    }
+
+    func hasStoredBuiltinSecret(_ configuration: ConnectorConfiguration) -> Bool {
+        if let data = Keychain.data(account: builtinSecretKey(configuration.id)), !data.isEmpty { return true }
+        return false
+    }
+
+    func hasStoredStdioSecret(_ configuration: ConnectorConfiguration, name: String) -> Bool {
+        if let data = Keychain.data(account: stdioSecretKey(configuration.id, name: name)), !data.isEmpty { return true }
+        return false
     }
 
     private func addRemote(name: String, serverID: String, endpoint: URL) async {
@@ -146,11 +320,6 @@ final class ConnectorLibrary {
     }
 
     private func addStdio(name: String, serverID: String, package: RegistryServer.Package, launchValues: [String: String], secretValues: [String: String]) async {
-        let required = package.launchInputs.filter(\.isRequired)
-        guard required.allSatisfy({ input in
-            let value = input.isSecret ? secretValues[input.name] : launchValues[input.name]
-            return value?.isEmpty == false || input.defaultValue != nil
-        }) else { return }
         let configuration = ConnectorConfiguration(
             serverID: serverID, displayName: name, package: package,
             launchValues: launchValues, secretNames: Set(package.launchInputs.filter(\.isSecret).map(\.name))
@@ -158,7 +327,8 @@ final class ConnectorLibrary {
         for (key, value) in secretValues where !value.isEmpty {
             Keychain.set(Data(value.utf8), account: stdioSecretKey(configuration.id, name: key))
         }
-        await save(configuration); states[configuration.id] = .disconnected
+        await save(configuration)
+        await restore(configuration)
     }
 
     private func save(_ configuration: ConnectorConfiguration) async {
@@ -166,37 +336,82 @@ final class ConnectorLibrary {
         let record = ConnectorRecord(id: configuration.id, serverID: configuration.serverID, displayName: configuration.displayName, configuration: json)
         try? await store.save(record)
         connected.removeAll { $0.id == configuration.id }; connected.append(configuration)
+        connected.sort { $0.displayName < $1.displayName }
         app?.sync.request()
         await app?.jobs.reconcileAutonomousConnectorSecrets()
     }
 
     private func restore(_ configuration: ConnectorConfiguration) async {
-        guard configuration.kind == .remote else { return }
-        states[configuration.id] = .connecting
-        let credential = Keychain.value(ConnectorCredential.self, account: credentialKey(configuration.id))
-        let session = MCPConnectorSession(
-            configuration: configuration,
-            credential: credential,
-            refreshCredential: { [weak self] current in
-                guard let self else { throw MCPAuthorizationError.rejected("The connector is no longer available.") }
-                return try await self.refreshCredential(current, for: configuration)
-            },
-            upgradeScopes: { [weak self] current, scopes in
-                guard let self else { throw MCPAuthorizationError.rejected("The connector is no longer available.") }
-                return try await self.upgradeCredential(current, scopes: scopes, for: configuration)
+        switch configuration.kind {
+        case .apple:
+            let defs = AppleDeviceIntegrations.definitions(for: configuration)
+            toolDefinitions[configuration.id] = defs
+            states[configuration.id] = .connected
+            errors[configuration.id] = nil
+
+        case .webhook:
+            toolDefinitions[configuration.id] = BuiltinIntegrationFactory.definitions(for: configuration)
+            states[configuration.id] = .connected
+            errors[configuration.id] = nil
+
+        case .builtin:
+            let defs = BuiltinIntegrationFactory.definitions(for: configuration)
+            toolDefinitions[configuration.id] = defs
+            let needsSecret = configuration.secretNames.contains("api_key")
+            let provider = configuration.launchValues["provider"] ?? ""
+            let optionalSecretProviders: Set<String> = ["whatsapp", "loom", "jina", "jina_reader"]
+            if !needsSecret || hasStoredBuiltinSecret(configuration) || optionalSecretProviders.contains(provider) {
+                states[configuration.id] = .connected
+                errors[configuration.id] = nil
+            } else {
+                states[configuration.id] = .authorizationNeeded
+                errors[configuration.id] = nil
             }
-        )
-        sessions[configuration.id] = session
-        do {
-            let tools = try await session.tools()
-            toolDefinitions[configuration.id] = tools; states[configuration.id] = .connected; errors[configuration.id] = nil
-        } catch {
-            states[configuration.id] = credential == nil ? .authorizationNeeded : .failed
-            errors[configuration.id] = ErrorExplainer.explain(error).message
+
+        case .stdio:
+            toolDefinitions[configuration.id] = BuiltinIntegrationFactory.definitions(for: configuration)
+            let missingRequiredSecret = configuration.secretNames.contains { !hasStoredStdioSecret(configuration, name: $0) }
+            if missingRequiredSecret {
+                states[configuration.id] = .authorizationNeeded
+            } else {
+                states[configuration.id] = .connected
+            }
+            errors[configuration.id] = nil
+
+        case .remote:
+            states[configuration.id] = .connecting
+            let credential = Keychain.value(ConnectorCredential.self, account: credentialKey(configuration.id))
+            let session = MCPConnectorSession(
+                configuration: configuration,
+                credential: credential,
+                refreshCredential: { [weak self] current in
+                    guard let self else { throw MCPAuthorizationError.rejected("The connector is no longer available.") }
+                    return try await self.refreshCredential(current, for: configuration)
+                },
+                upgradeScopes: { [weak self] current, scopes in
+                    guard let self else { throw MCPAuthorizationError.rejected("The connector is no longer available.") }
+                    return try await self.upgradeCredential(current, scopes: scopes, for: configuration)
+                }
+            )
+            sessions[configuration.id] = session
+            do {
+                let tools = try await session.tools()
+                toolDefinitions[configuration.id] = tools; states[configuration.id] = .connected; errors[configuration.id] = nil
+            } catch {
+                states[configuration.id] = credential == nil ? .authorizationNeeded : .failed
+                errors[configuration.id] = ErrorExplainer.explain(error).message
+            }
         }
     }
 
     func authorize(_ configuration: ConnectorConfiguration, dynamicRegistration: Bool = false, scopes: Set<String> = []) async {
+        if configuration.kind == .apple {
+            let key = configuration.launchValues["apple_key"] ?? ""
+            let granted = (try? await AppleDeviceIntegrations.requestAuthorization(for: key)) ?? false
+            states[configuration.id] = granted ? .connected : .authorizationNeeded
+            errors[configuration.id] = granted ? nil : "Enable access for MAIPA-G in iOS Settings."
+            return
+        }
         guard let endpoint = configuration.endpoint else { return }
         states[configuration.id] = .connecting; errors[configuration.id] = nil
         do {
@@ -238,13 +453,13 @@ final class ConnectorLibrary {
     }
 
     func recheck(_ configuration: ConnectorConfiguration) async {
-        if configuration.kind == .remote { await restore(configuration) }
-        else { states[configuration.id] = .disconnected }
+        await restore(configuration)
     }
 
     func disconnect(_ configuration: ConnectorConfiguration) async {
         await sessions[configuration.id]?.disconnect(); sessions[configuration.id] = nil
-        Keychain.remove(account: credentialKey(configuration.id)); toolDefinitions[configuration.id] = nil
+        Keychain.remove(account: credentialKey(configuration.id))
+        Keychain.remove(account: builtinSecretKey(configuration.id))
         states[configuration.id] = .disconnected
     }
 
@@ -252,6 +467,7 @@ final class ConnectorLibrary {
         await disconnect(configuration); try? await store.delete(configuration.id)
         for name in configuration.secretNames { Keychain.remove(account: stdioSecretKey(configuration.id, name: name)) }
         await app?.jobs.reconcileAutonomousConnectorSecrets()
+        toolDefinitions[configuration.id] = nil
         connected.removeAll { $0.id == configuration.id }; app?.sync.request()
     }
 
@@ -276,22 +492,39 @@ final class ConnectorLibrary {
     }
 
     func agentTools() -> [any AgentTool] {
-        let computerID = computerConnector()?.id
+        let computerConn = computerConnector()
+        let computerID = computerConn?.id
         let rate = app?.settings.chatComputerHourlyCost
+        let control = computerControl()
+
         return connected.flatMap { configuration -> [any AgentTool] in
-            guard states[configuration.id] == .connected, let session = sessions[configuration.id] else { return [] }
-            return (toolDefinitions[configuration.id] ?? [])
-                .filter { !configuration.disabledTools.contains($0.originalName) }
-                .map { MCPTool(definition: $0, session: session, computerHourlyRate: configuration.id == computerID ? rate : nil) }
+            guard states[configuration.id] == .connected else { return [] }
+            switch configuration.kind {
+            case .remote:
+                guard let session = sessions[configuration.id] else { return [] }
+                return (toolDefinitions[configuration.id] ?? [])
+                    .filter { !configuration.disabledTools.contains($0.originalName) }
+                    .map { MCPTool(definition: $0, session: session, computerHourlyRate: configuration.id == computerID ? rate : nil) }
+            case .apple:
+                return AppleDeviceIntegrations.tools(for: configuration)
+            case .builtin, .webhook:
+                let secret = Keychain.data(account: builtinSecretKey(configuration.id)).map { String(decoding: $0, as: UTF8.self) }
+                return BuiltinIntegrationFactory.tools(for: configuration, secret: secret, transport: transport, computer: control)
+            case .stdio:
+                var envSecrets: [String: String] = [:]
+                for name in configuration.secretNames {
+                    if let data = Keychain.data(account: stdioSecretKey(configuration.id, name: name)) {
+                        envSecrets[name] = String(decoding: data, as: UTF8.self)
+                    }
+                }
+                return BuiltinIntegrationFactory.tools(for: configuration, secret: nil, transport: transport, computer: control, stdioEnvSecrets: envSecrets)
+            }
         }
     }
 
-    /// The connector that gives chats a Linux computer, as chosen in Settings: none when it's off,
-    /// the chosen one, or for Automatic the first one on sprites.dev. Only a connector that is
-    /// connected right now counts, as only those give the AI their tools.
     func computerConnector() -> ConnectorConfiguration? {
         guard let settings = app?.settings, !settings.chatComputerOff else { return nil }
-        let ready = connected.filter { states[$0.id] == .connected }
+        let ready = connected.filter { $0.kind == .remote && states[$0.id] == .connected }
         if let chosen = settings.chatComputerServer {
             return ready.first { $0.serverID == chosen && canRunCommands($0) }
         }
@@ -301,16 +534,13 @@ final class ConnectorLibrary {
         } ?? ready.first(where: canRunCommands)
     }
 
-    /// Whether this connector is a computer: its tools include one that runs a command. Before
-    /// its tools have loaded, only Sprites counts.
     func canRunCommands(_ configuration: ConnectorConfiguration) -> Bool {
+        guard configuration.kind == .remote else { return false }
         if let tools = toolDefinitions[configuration.id], !tools.isEmpty { return ComputerControl.hasCommandTool(tools) }
         guard let host = configuration.endpoint?.host?.lowercased() else { return false }
         return host == "sprites.dev" || host.hasSuffix(".sprites.dev")
     }
 
-    /// App-driven control of the chat computer: health checks, recreating a missing machine,
-    /// syncing staged changes and checkpoints run from MAIPA-G's own code.
     func computerControl() -> ComputerControl? {
         guard let configuration = computerConnector(), let session = sessions[configuration.id], let machine = app?.settings.chatComputerMachineName else { return nil }
         return ComputerControl(tools: toolDefinitions[configuration.id] ?? [], machine: machine) { name, arguments in
@@ -320,10 +550,6 @@ final class ConnectorLibrary {
 
     static func toolsReadyDefaultsKey(_ machine: String) -> String { "computerToolsReady.\(machine)" }
 
-    /// Sprites pause about 30 seconds after the last request from outside unless held awake. When
-    /// the machine's own local keep-awake hold isn't supported yet, MAIPA-G pings its health check
-    /// every 20 seconds while setup is running (capped at 45 minutes) so installation finishes
-    /// cleanly and stops pinging the moment `~/.maipa-g/ready` appears.
     func keepComputerAwakeDuringSetup(resetReadyCache: Bool = false) {
         if resetReadyCache, let machine = app?.settings.chatComputerMachineName {
             UserDefaults.standard.removeObject(forKey: Self.toolsReadyDefaultsKey(machine))
@@ -382,6 +608,7 @@ final class ConnectorLibrary {
     }
 
     private func credentialKey(_ id: UUID) -> String { "mcp.\(id.uuidString.lowercased()).credential" }
+    private func builtinSecretKey(_ id: UUID) -> String { "mcp.\(id.uuidString.lowercased()).builtin.secret" }
     private func stdioSecretKey(_ id: UUID, name: String) -> String { "mcp.\(id.uuidString.lowercased()).stdio.\(name)" }
 
     private static func configuration(_ record: ConnectorRecord) -> ConnectorConfiguration? {

@@ -20,35 +20,40 @@ struct ChatScreen: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 22) {
-                    let messages = session.chat.messages
-                    ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
-                        MessageRow(
-                            message: message,
-                            isLatest: index == messages.count - 1,
-                            modelName: modelName,
-                            actions: actions
-                        )
-                        .equatable()
-                        .id(message.id)
-                        .transition(theme.messagesSlideIn ? AnyTransition.move(edge: .bottom).combined(with: .opacity) : AnyTransition.identity)
+                let messages = session.chat.messages
+                Group {
+                    if messages.count <= 80 {
+                        VStack(alignment: .leading, spacing: 22) {
+                            messageRows(messages)
+                            Color.clear.frame(height: 1).id(bottomID)
+                        }
+                    } else {
+                        LazyVStack(alignment: .leading, spacing: 22) {
+                            messageRows(messages)
+                            Color.clear.frame(height: 1).id(bottomID)
+                        }
                     }
-                    Color.clear.frame(height: 1).id(bottomID)
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
                 .animation(theme.messagesSlideIn ? .snappy : nil, value: session.chat.messages.count)
             }
             .scrollDismissesKeyboard(.interactively)
-            .defaultScrollAnchor(.bottom)
             .simultaneousGesture(
                 DragGesture(minimumDistance: 12).onChanged { value in
                     // Scrolling up to read stops the chat jumping to the newest words.
                     if value.translation.height > 16 { followsBottom = false }
                 }
             )
+            .onAppear {
+                followsBottom = true
+                scrollToBottomWithoutAnimation(proxy)
+                DispatchQueue.main.async {
+                    if followsBottom { scrollToBottomWithoutAnimation(proxy) }
+                }
+            }
             .onChange(of: contentSize) { _, _ in
-                if followsBottom { proxy.scrollTo(bottomID, anchor: .bottom) }
+                if followsBottom { scrollToBottomWithoutAnimation(proxy) }
             }
             .overlay(alignment: .bottomTrailing) {
                 if !followsBottom {
@@ -189,6 +194,29 @@ struct ChatScreen: View {
             TextField("Name", text: $newTitle)
             Button("Save") { session.rename(newTitle) }
             Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    @ViewBuilder
+    private func messageRows(_ messages: [ChatMessage]) -> some View {
+        ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
+            MessageRow(
+                message: message,
+                isLatest: index == messages.count - 1,
+                modelName: modelName,
+                actions: actions
+            )
+            .equatable()
+            .id(message.id)
+            .transition(theme.messagesSlideIn ? AnyTransition.move(edge: .bottom).combined(with: .opacity) : AnyTransition.identity)
+        }
+    }
+
+    private func scrollToBottomWithoutAnimation(_ proxy: ScrollViewProxy) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            proxy.scrollTo(bottomID, anchor: .bottom)
         }
     }
 

@@ -67,7 +67,8 @@ public enum SystemPrompt {
         agent: AgentDefinition? = nil,
         workflowContext: String? = nil,
         memories: [String] = [],
-        connectedRepositories: [String] = []
+        connectedRepositories: [String] = [],
+        isAutonomous: Bool = false
     ) -> String {
         var formatter = Date.FormatStyle(date: .complete, time: .shortened)
         formatter.timeZone = timeZone
@@ -134,6 +135,15 @@ public enum SystemPrompt {
             parts.append(computerSection(computer))
         }
 
+        if isAutonomous {
+            parts.append("""
+            Autonomous chat mode is ON for this turn:
+            - Work end-to-end inside this chat to complete the whole goal without stopping halfway for routine confirmation.
+            - Ask upfront with `ask_user` only if genuinely blocked on an ambiguous product choice; otherwise inspect, make a brief internal plan, delegate independent read/review sub-tasks with `launch_helpers` when helpful, implement the changes, verify them on the Linux computer when available, and finish cleanly.
+            - If you modified repository files and verified they pass checks, call `save_changes` to save/open a pull request (subject to repository rules and user approvals) and report what was verified and saved.
+            """)
+        }
+
         if let agent {
             parts.append(agent.prompt(task: workflowContext ?? "Complete the assigned step."))
         } else if let workflowContext, !workflowContext.isEmpty {
@@ -166,7 +176,7 @@ public enum SystemPrompt {
     static func computerSection(_ computer: ComputerContext) -> String {
         var steps = [
             "- The machine is named `\(computer.machine)`. MAIPA-G's own code checks it with a real command before each message and creates it again when it is missing. If commands fail, say so plainly and suggest Settings → Check everything.",
-            "- Batch related shell commands into one call (`cmd1 && cmd2`) instead of running separate calls one by one. When an `mcp_` exec tool takes a command array (`argv`), pass programs directly (such as `[\"python3\", \"-c\", code]` with no extra shell quoting) or `[\"bash\", \"-lc\", \"...\"]`. Put temporary scratch files in `/tmp` or `/var/tmp`, delete them when done, and never reuse old ad-hoc scratch scripts unless asked.",
+            "- Batch related shell commands into one call (`cmd1 && cmd2`) instead of running separate calls one by one. When an `mcp_` exec tool takes a command array (`argv`), pass programs directly (such as `[\"python3\", \"-c\", code]` with no extra shell quoting) or `[\"bash\", \"-c\", \". ~/.maipa-g/env.sh 2>/dev/null; ...\"]` (avoid `-i` so interactive `.bashrc` line-editing warnings don't clutter output). Put temporary scratch files in `/tmp` or `/var/tmp`, delete them when done, and never reuse old ad-hoc scratch scripts unless asked.",
             "- Use the tools already present in the provider's reviewed machine image. Do not download or run setup scripts, moving `latest` installers, or `curl | bash`. If a required tool is missing, explain which exact tool is unavailable instead of installing unverified code.",
         ]
         if let fullName = computer.repoFullName, let cloneURL = computer.cloneURL, let path = computer.repoPath {
