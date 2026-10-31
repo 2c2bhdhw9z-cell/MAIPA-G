@@ -84,7 +84,6 @@ public struct ModelInfo: Codable, Sendable, Hashable, Identifiable {
     public var supportsTools: Bool { supportedParameters.contains("tools") }
     public var acceptsImages: Bool { inputModalities.contains("image") }
     public var acceptsFiles: Bool { inputModalities.contains("file") }
-    public var generatesImages: Bool { outputModalities.contains("image") }
 
     /// The company, from "Anthropic: Claude Sonnet 5.5" or else from the id's prefix.
     public var maker: String {
