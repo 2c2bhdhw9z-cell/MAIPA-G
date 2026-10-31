@@ -304,6 +304,15 @@ private struct Runner {
                 case .shrinkContext:
                     route.contextBudget = max(8_000, route.contextBudget / 2)
                     continue
+                case .simplifyRequest:
+                    if route.effort == "xhigh" || route.effort == "max" {
+                        route.effort = "high"
+                    } else if route.effort != nil {
+                        route.effort = nil
+                    }
+                    route.automaticCaching = false
+                    fallbackModels = []
+                    continue
                 case .giveUp:
                     throw error
                 }
@@ -337,7 +346,7 @@ private struct Runner {
         turn.steps[index] = step
     }
 
-    enum Recovery { case retry(TimeInterval), switchToFree, shrinkContext, giveUp }
+    enum Recovery { case retry(TimeInterval), switchToFree, shrinkContext, simplifyRequest, giveUp }
 
     func recovery(for error: Error, attempt: Int) async -> Recovery {
         if let api = error as? OpenRouterAPIError {
@@ -352,6 +361,8 @@ private struct Runner {
                 return .retry(Double(attempt) * 1.5)
             case .contextTooLong where attempt <= 2:
                 return .shrinkContext
+            case .badRequest where attempt <= 2 && (route.effort != nil || route.automaticCaching || !fallbackModels.isEmpty):
+                return .simplifyRequest
             default:
                 return .giveUp
             }
@@ -536,7 +547,7 @@ private struct Runner {
     }
 
     /// Outside-content tools by name, for earlier turns whose tools may not be loaded now.
-    static let outsideContentToolNames: Set<String> = ["web_search", "read_web_page", "read_file", "search_code", "read_repo_file", "read_other_repo_file"]
+    static let outsideContentToolNames: Set<String> = ["web_search", "read_web_page", "read_file", "search_code", "read_repo_file", "read_other_repo_file", "load_repo_rules", "read_attachment"]
 
     mutating func apply(_ result: (Int, Result<ToolOutput, Error>), stepIndex: Int) {
         let callIndex = result.0

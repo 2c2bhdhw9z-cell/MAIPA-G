@@ -30,6 +30,7 @@ final class ChatSession: Identifiable {
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored private var draftSaveTask: Task<Void, Never>?
     @ObservationIgnored private var lastSaved = Date()
+    @ObservationIgnored private var pausedInBackground = false
 
     init(chat: Chat, app: AppModel?, draft: ComposerDraft? = nil) {
         self.id = chat.id
@@ -86,17 +87,7 @@ final class ChatSession: Identifiable {
     func send(_ text: String, attachments: [AttachmentReference] = []) {
         let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (!message.isEmpty || !attachments.isEmpty), !isRunning else { return }
-        if attachments.isEmpty, let repo = chat.repo, let app {
-            if autonomous {
-                autonomous = false
-                Task { await app.jobs.start(request: message, repo: repo) }
-                return
-            }
-            if let workflow = app.jobs.routedWorkflow(request: message, repo: repo) {
-                Task { await app.jobs.start(request: message, repo: repo, workflow: workflow) }
-                return
-            }
-        }
+        pausedInBackground = false
         settleWaitingTurn()
         chat.messages.append(.user(message, attachments: attachments))
         chat.messages.append(ChatMessage(body: .assistant(AssistantTurn())))
@@ -106,7 +97,15 @@ final class ChatSession: Identifiable {
     }
 
     func resumeInterruptedTurn() {
-        guard !isRunning, lastTurn?.status == .running else { return }
+        guard !isRunning else { return }
+        if pausedInBackground, var turn = lastTurn, turn.status == .stopped {
+            pausedInBackground = false
+            turn.status = .running
+            replaceLastTurn(turn)
+            start()
+            return
+        }
+        guard lastTurn?.status == .running else { return }
         start()
     }
 
@@ -148,10 +147,17 @@ final class ChatSession: Identifiable {
     }
 
     func stop() {
+        pausedInBackground = false
         guard isRunning else {
             settleWaitingTurn()
             return
         }
+        run?.cancel()
+    }
+
+    private func suspendForBackground() {
+        guard isRunning else { return }
+        pausedInBackground = true
         run?.cancel()
     }
 
@@ -342,7 +348,7 @@ final class ChatSession: Identifiable {
     private func start() {
         app?.notifications.requestIfNeeded(enabled: app?.settings.notificationsOn == true)
         isRunning = true
-        let grace = BackgroundGrace(name: "MAIPA-G reply") { [weak self] in self?.stop() }
+        let grace = BackgroundGrace(name: "MAIPA-G reply") { [weak self] in self?.suspendForBackground() }
         Task { [weak self] in
             await self?.runTurn()
             grace.end()
@@ -386,6 +392,7 @@ final class ChatSession: Identifiable {
         if !allAttachments.filter({ $0.kind == .text }).isEmpty {
             tools.append(ReadAttachmentTool(attachments: allAttachments, store: app.attachmentStore))
         }
+        var readOnlyHelperTools: [any AgentTool] = webEnabled ? [WebSearchTool(transport: app.transport), ReadWebPageTool(transport: app.transport)] : []
         var repoContext: SystemPrompt.RepoContext?
         var repoHooks: [RepoHook] = []
         var hookProblems: [String] = []
@@ -395,7 +402,17 @@ final class ChatSession: Identifiable {
                 return
             }
             do {
-                let activeReceipt = (chat.saveReceipts ?? []).last { $0.repo == repo.ref && $0.pullRequest != nil && $0.resolution == nil }
+                var activeReceipt = (chat.saveReceipts ?? []).last { $0.repo == repo.ref && $0.pullRequest != nil && $0.resolution == nil }
+                if let candidate = activeReceipt, let pull = candidate.pullRequest {
+                    if let current = try? await github.pullRequest(repo.ref, number: pull.number), current.state != "open" {
+                        if var receipts = chat.saveReceipts, let idx = receipts.firstIndex(where: { $0.id == candidate.id }) {
+                            receipts[idx].resolution = "closed"
+                            chat.saveReceipts = receipts
+                        }
+                        changeSession = nil
+                        activeReceipt = nil
+                    }
+                }
                 let workingBranch = activeReceipt?.branch ?? repo.branch
                 let workingRepo = ChatRepo(ref: repo.ref, branch: workingBranch, defaultBranch: repo.defaultBranch, isPrivate: repo.isPrivate)
                 let commit = try await github.resolveCommit(repo.ref, ref: workingBranch)
@@ -415,8 +432,14 @@ final class ChatSession: Identifiable {
                 hookProblems = loadedHooks.problems
                 let saves = changeSession ?? ChangeSession(receipts: chat.saveReceipts ?? [])
                 changeSession = saves
+                let listTool = ListFilesTool(workspace: workspace, changes: changes)
+                let searchTool = SearchCodeTool(workspace: workspace, changes: changes)
+                let readTool = ReadFileTool(workspace: workspace, changes: changes)
+                let readRefTool = ReadRepoFileTool(github: github)
+                let loadRulesTool = LoadRepoRulesTool(documents: rules.documents)
+                readOnlyHelperTools.append(contentsOf: [listTool, searchTool, readTool, readRefTool, loadRulesTool])
                 let repoTools: [any AgentTool] = [
-                    ListFilesTool(workspace: workspace), SearchCodeTool(workspace: workspace), ReadFileTool(workspace: workspace), ReadRepoFileTool(github: github), LoadRepoRulesTool(documents: rules.documents),
+                    listTool, searchTool, readTool, readRefTool, loadRulesTool,
                     CreateFileTool(workspace: changes, authorization: changeAuthorization, rules: rules), EditFileTool(workspace: changes, authorization: changeAuthorization, rules: rules), DeleteFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
                     SaveChangesTool(workspace: changes, service: service, session: saves, selectedBranch: workingBranch, defaultBranch: repo.defaultBranch, rules: rules),
                 ]
@@ -495,6 +518,79 @@ final class ChatSession: Identifiable {
                 && (!hasImageInput || model.acceptsImages)
                 && (!route.isFree || model.isFree)
         }.prefix(ChatCompletionRequest.maxModels - 1).map(\.id)
+        let isAutonomousTurn = autonomous && app.settings.autonomousEnabled
+        let userChoice = chat.model
+        let accountState = app.openRouter.accountState
+        let userLogin = app.github.login
+        let connectedRepoNames = app.github.repos.map(\.fullName)
+        let helperTransport = app.transport
+        if isAutonomousTurn, app.openRouter.supportsTools(chat.model) {
+            let helperDefinitions = BuiltInAgents.all.filter {
+                ["planner", "designer", "design-checker", "code-checker", "second-opinion", "review-combiner", "investigator"].contains($0.id)
+            }
+            if let lead = BuiltInAgents.named("coder") {
+                let helperToolsSnapshot = readOnlyHelperTools
+                let repoContextSnapshot = repoContext
+                let primaryModelID = route.model
+                let coordinator = AgentHelperCoordinator(
+                    lead: lead,
+                    definitions: helperDefinitions,
+                    context: lastMessage,
+                    spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil
+                ) { invocation in
+                    var helperChoice = userChoice
+                    if helperChoice == .auto, invocation.definition.modelPolicy == .differentFromPrimary {
+                        if let alt = catalogue.values.first(where: { $0.id != primaryModelID && $0.isChatModel && $0.supportsTools && (!route.isFree || $0.isFree) }) {
+                            helperChoice = .model(alt.id)
+                        }
+                    }
+                    let helperRoute = ModelRouter.route(
+                        choice: helperChoice,
+                        difficulty: invocation.definition.difficulty,
+                        thinking: thinking,
+                        account: accountState,
+                        catalogue: catalogue,
+                        requiresImageInput: false
+                    )
+                    var helperChat = Chat(model: helperChoice, thinking: thinking)
+                    helperChat.messages.append(.user(invocation.task))
+                    helperChat.messages.append(ChatMessage(body: .assistant(AssistantTurn())))
+                    let helperPrompt = SystemPrompt.make(
+                        userLogin: userLogin,
+                        repo: repoContextSnapshot,
+                        agent: invocation.definition,
+                        workflowContext: invocation.context,
+                        connectedRepositories: connectedRepoNames
+                    )
+                    let helperInput = AgentTurnInput(
+                        chat: helperChat,
+                        route: helperRoute,
+                        systemPrompt: helperPrompt,
+                        tools: helperToolsSnapshot,
+                        allowTools: true,
+                        spendLimit: invocation.spendLimit,
+                        requiresInitialSpendApproval: false
+                    )
+                    let helperEnv = AgentEnvironment(
+                        openRouter: OpenRouterClient(transport: helperTransport, apiKey: apiKey),
+                        freeRoute: {
+                            ModelRouter.route(choice: .free, difficulty: .normal, thinking: .default, account: AccountState(), catalogue: catalogue)
+                        },
+                        onOutOfCredits: {}
+                    )
+                    let helperRun = AgentLoop.start(helperInput, environment: helperEnv)
+                    var finalTurn: AssistantTurn?
+                    for await event in helperRun.events {
+                        if case .updated(let updated, _) = event { finalTurn = updated }
+                    }
+                    let text = finalTurn?.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n") ?? "Helper produced no report."
+                    let cost = finalTurn?.usage.cost ?? 0
+                    let modelUsed = finalTurn?.modelsUsed.last ?? helperRoute.model
+                    return AgentExecutionResult(output: text, model: modelUsed, goalOutcome: AgentGoalOutcome.parse(text), cost: cost)
+                }
+                tools.append(LaunchHelpersTool(lead: lead, definitions: helperDefinitions, coordinator: coordinator))
+            }
+        }
         let input = AgentTurnInput(
             chat: chat,
             route: route,
@@ -503,7 +599,8 @@ final class ChatSession: Identifiable {
                 repo: repoContext,
                 computer: computer,
                 memories: chat.memoryContext,
-                connectedRepositories: app.github.repos.map(\.fullName)
+                connectedRepositories: app.github.repos.map(\.fullName),
+                isAutonomous: isAutonomousTurn
             ),
             tools: tools,
             allowTools: app.openRouter.supportsTools(chat.model),

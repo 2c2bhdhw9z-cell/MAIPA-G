@@ -40,6 +40,11 @@ public struct AddMemoryTool: AgentTool {
 
     public func runningSummary(for arguments: JSONValue) -> String { "Saving a memory…" }
 
+    public func approvalAfterOutsideContent(for arguments: JSONValue) async -> ToolApprovalRequest? {
+        let preview = String((arguments.optionalString("text") ?? "").prefix(300))
+        return ToolApprovalRequest(question: "This chat contains outside text. Allow MAIPA-G to save this persistent memory for future chats?\n\(preview)", allowLabel: "Save memory")
+    }
+
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let text = try arguments.requiredString("text").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw ToolInputError("Memory text can't be empty.") }
@@ -71,6 +76,11 @@ public struct EditMemoryTool: AgentTool {
     }
 
     public func runningSummary(for arguments: JSONValue) -> String { "Updating a memory…" }
+
+    public func approvalAfterOutsideContent(for arguments: JSONValue) async -> ToolApprovalRequest? {
+        let preview = String((arguments.optionalString("text") ?? "").prefix(300))
+        return ToolApprovalRequest(question: "This chat contains outside text. Allow MAIPA-G to edit your saved memory?\n\(preview)", allowLabel: "Update memory")
+    }
 
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         guard let id = UUID(uuidString: try arguments.requiredString("id")), var record = await store.load(id) else {

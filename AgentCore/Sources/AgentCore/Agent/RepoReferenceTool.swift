@@ -8,11 +8,11 @@ public struct ReadRepoFileTool: AgentTool {
     public init(github: GitHubClient) { self.github = github }
 
     public var spec: ToolSpec {
-        ToolSpec(name: name, description: "Read a text file at an exact repository commit. Use this for a Repo file reference in the person's message.", parameters: [
+        ToolSpec(name: name, description: "Read a text file at a repository commit SHA (7 to 40 hex characters). Use this for a Repo file reference in the person's message.", parameters: [
             "type": "object",
             "properties": [
                 "repository": ["type": "string", "description": "owner/name"],
-                "commit": ["type": "string", "description": "Exact 40-character Git commit SHA"],
+                "commit": ["type": "string", "description": "Git commit SHA (7 to 40 hex characters)"],
                 "path": ["type": "string"],
             ],
             "required": ["repository", "commit", "path"],
@@ -24,8 +24,8 @@ public struct ReadRepoFileTool: AgentTool {
 
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         guard let repo = RepoRef(fullName: try arguments.requiredString("repository")) else { throw ToolInputError("The repository must be owner/name.") }
-        let commit = try arguments.requiredString("commit").lowercased()
-        guard commit.count == 40, commit.allSatisfy({ $0.isHexDigit }) else { throw ToolInputError("The file reference needs an exact 40-character commit SHA.") }
+        let commit = try arguments.requiredString("commit").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard (7...40).contains(commit.count), commit.allSatisfy({ $0.isHexDigit }) else { throw ToolInputError("The file reference needs a 7- to 40-character hexadecimal commit SHA.") }
         let path = try ChangeWorkspace.safe(try arguments.requiredString("path"))
         let data = try await github.fileContents(repo, path: path, ref: commit)
         guard data.count <= 1_000_000, let text = String(data: data, encoding: .utf8) else { throw ToolInputError("That referenced file is not UTF-8 text under 1 MB.") }

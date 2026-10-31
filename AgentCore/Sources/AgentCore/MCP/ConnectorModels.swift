@@ -1,6 +1,12 @@
 import Foundation
 
-public enum ConnectorKind: String, Codable, Sendable, Hashable { case remote, stdio }
+public enum ConnectorKind: String, Codable, Sendable, Hashable {
+    case remote
+    case stdio
+    case builtin
+    case apple
+    case webhook
+}
 public enum ConnectorConnectionState: String, Codable, Sendable, Hashable { case disconnected, connecting, authorizationNeeded, connected, failed }
 
 public struct ConnectorConfiguration: Codable, Sendable, Hashable, Identifiable {
@@ -16,19 +22,44 @@ public struct ConnectorConfiguration: Codable, Sendable, Hashable, Identifiable 
     public var scopes: Set<String>
     /// Tool names the owner turned off. Missing in older records means every discovered tool is enabled.
     public var disabledTools: Set<String>
+    /// Optional custom HTTP header name for API-key/webhook auth (defaults to Authorization Bearer when nil).
+    public var authHeaderName: String?
+    /// Optional HTTP method for webhook connectors (defaults to POST).
+    public var webhookMethod: String?
     public var createdAt: Date
 
-    public init(id: UUID = UUID(), serverID: String, displayName: String, endpoint: URL) {
+    public init(id: UUID = UUID(), serverID: String, displayName: String, endpoint: URL, authHeaderName: String? = nil) {
         self.id = id; self.serverID = serverID; self.displayName = displayName; kind = .remote
-        self.endpoint = endpoint; package = nil; launchValues = [:]; secretNames = []; scopes = []; disabledTools = []; createdAt = Date()
+        self.endpoint = endpoint; package = nil; launchValues = [:]; secretNames = []; scopes = []; disabledTools = []
+        self.authHeaderName = authHeaderName; webhookMethod = nil; createdAt = Date()
     }
 
     public init(id: UUID = UUID(), serverID: String, displayName: String, package: RegistryServer.Package, launchValues: [String: String] = [:], secretNames: Set<String> = []) {
         self.id = id; self.serverID = serverID; self.displayName = displayName; kind = .stdio
-        endpoint = nil; self.package = package; self.launchValues = launchValues; self.secretNames = secretNames; scopes = []; disabledTools = []; createdAt = Date()
+        endpoint = nil; self.package = package; self.launchValues = launchValues; secretNames = secretNames; scopes = []; disabledTools = []
+        authHeaderName = nil; webhookMethod = nil; createdAt = Date()
     }
 
-    enum CodingKeys: String, CodingKey { case id, serverID, displayName, kind, endpoint, package, launchValues, secretNames, scopes, disabledTools, createdAt }
+    public init(
+        id: UUID = UUID(),
+        serverID: String,
+        displayName: String,
+        kind: ConnectorKind,
+        endpoint: URL? = nil,
+        launchValues: [String: String] = [:],
+        secretNames: Set<String> = [],
+        authHeaderName: String? = nil,
+        webhookMethod: String? = nil
+    ) {
+        self.id = id; self.serverID = serverID; self.displayName = displayName; self.kind = kind
+        self.endpoint = endpoint; package = nil; self.launchValues = launchValues; self.secretNames = secretNames
+        scopes = []; disabledTools = []; self.authHeaderName = authHeaderName; self.webhookMethod = webhookMethod
+        createdAt = Date()
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, serverID, displayName, kind, endpoint, package, launchValues, secretNames, scopes, disabledTools, authHeaderName, webhookMethod, createdAt
+    }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id); serverID = try c.decode(String.self, forKey: .serverID)
@@ -38,6 +69,8 @@ public struct ConnectorConfiguration: Codable, Sendable, Hashable, Identifiable 
         secretNames = try c.decodeIfPresent(Set<String>.self, forKey: .secretNames) ?? []
         scopes = try c.decodeIfPresent(Set<String>.self, forKey: .scopes) ?? []
         disabledTools = try c.decodeIfPresent(Set<String>.self, forKey: .disabledTools) ?? []
+        authHeaderName = try c.decodeIfPresent(String.self, forKey: .authHeaderName)
+        webhookMethod = try c.decodeIfPresent(String.self, forKey: .webhookMethod)
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
     }
 }

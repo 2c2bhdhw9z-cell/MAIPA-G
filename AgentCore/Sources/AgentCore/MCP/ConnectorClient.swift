@@ -191,14 +191,16 @@ public actor MCPConnectorSession {
 
     public let configuration: ConnectorConfiguration
     private var credential: ConnectorCredential?
+    private let staticHeaders: [String: String]
     private let refreshCredential: CredentialRefresher?
     private let upgradeScopes: ScopeUpgrader?
     private var client = Client(name: "MAIPA-G", version: "0.1.0", title: "MAIPA-G", websiteUrl: OpenRouterClient.appURL)
     private var transport: HTTPClientTransport?
     private var connected = false
 
-    public init(configuration: ConnectorConfiguration, credential: ConnectorCredential? = nil, refreshCredential: CredentialRefresher? = nil, upgradeScopes: ScopeUpgrader? = nil) {
-        self.configuration = configuration; self.credential = credential; self.refreshCredential = refreshCredential; self.upgradeScopes = upgradeScopes
+    public init(configuration: ConnectorConfiguration, credential: ConnectorCredential? = nil, staticHeaders: [String: String] = [:], refreshCredential: CredentialRefresher? = nil, upgradeScopes: ScopeUpgrader? = nil) {
+        self.configuration = configuration; self.credential = credential; self.staticHeaders = staticHeaders
+        self.refreshCredential = refreshCredential; self.upgradeScopes = upgradeScopes
     }
 
     public func connect() async throws {
@@ -206,10 +208,22 @@ public actor MCPConnectorSession {
         try await refreshIfNeeded(force: false)
         guard let endpoint = configuration.endpoint, endpoint.scheme == "https" else { throw MCPAuthorizationError.insecureURL }
         let token = credential?.accessToken
-        // The bearer token below must never follow a redirect to another host or down to HTTP.
+        let customHeaders = staticHeaders
+        let headerOverride = configuration.authHeaderName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Credentials and headers below never follow a redirect to another host or down to HTTP.
         let transport = HTTPClientTransport(endpoint: endpoint, configuration: OriginPinnedRedirectProtocol.configuration(), streaming: true) { request in
             var request = request
-            if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+            if let token, !token.isEmpty {
+                if let headerOverride, !headerOverride.isEmpty, headerOverride.lowercased() != "authorization" {
+                    request.setValue(token, forHTTPHeaderField: headerOverride)
+                } else {
+                    let value = token.lowercased().hasPrefix("bearer ") ? token : "Bearer \(token)"
+                    request.setValue(value, forHTTPHeaderField: "Authorization")
+                }
+            }
+            for (field, value) in customHeaders where !field.isEmpty && !value.isEmpty {
+                request.setValue(value, forHTTPHeaderField: field)
+            }
             return request
         }
         _ = try await client.connect(transport: transport)

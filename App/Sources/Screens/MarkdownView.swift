@@ -55,7 +55,12 @@ struct MarkdownBlockView: View {
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
         case .code(let language, let code):
-            CodeBlockView(language: language, code: code)
+            let normalizedLang = language?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if normalizedLang == "mermaid" || normalizedLang == "mmd" {
+                MermaidBlockView(code: code)
+            } else {
+                CodeBlockView(language: language, code: code)
+            }
         case .quote(let blocks):
             HStack(alignment: .top, spacing: 10) {
                 RoundedRectangle(cornerRadius: 2).fill(theme.accent.opacity(0.7)).frame(width: 3)

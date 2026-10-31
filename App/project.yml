@@ -47,6 +47,7 @@ targets:
     sources:
       - path: Sources
       - path: Resources
+        buildPhase: resources
     info:
       path: Info.plist
       # XcodeGen writes this file from the keys below on every generate.
@@ -83,6 +84,10 @@ targets:
           - dev.maipag.app.autonomous
         NSCameraUsageDescription: Take a photo to attach to your MAIPA-G chat.
         NSPhotoLibraryAddUsageDescription: Save pictures you generate in MAIPA-G to your Photos library.
+        NSCalendarsFullAccessUsageDescription: Allow MAIPA-G to read and manage your Apple Calendar events when you connect Apple Calendar.
+        NSCalendarsWriteOnlyAccessUsageDescription: Allow MAIPA-G to add events to your Apple Calendar when you ask.
+        NSRemindersFullAccessUsageDescription: Allow MAIPA-G to read and manage your Apple Reminders when you connect Apple Reminders.
+        NSContactsUsageDescription: Allow MAIPA-G to search and read your contacts when you connect Apple Contacts.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.maipag.app

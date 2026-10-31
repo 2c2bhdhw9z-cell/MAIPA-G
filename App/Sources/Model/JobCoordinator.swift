@@ -45,21 +45,9 @@ final class JobCoordinator {
         app?.sheet = .jobs
     }
 
-    /// Settings-driven routing always chooses a concrete workflow. The separate composer switch
-    /// still starts one ordinary Autonomous agent, and repo-less work stays on this phone.
+    /// Chat messages always stay inside the chat; workflows only run when explicitly started from Workflows.
     func routedWorkflow(request: String, repo: ChatRepo?) -> WorkflowDefinition? {
-        guard repo != nil, let app else { return nil }
-        let mode: BuiltInWorkflows.RoutingMode
-        switch app.settings.workflowPolicy {
-        case .whenAsked: mode = .whenAsked
-        case .bigJobs: mode = .bigJobs
-        case .everything: mode = .everything
-        }
-        return BuiltInWorkflows.routed(
-            request: request,
-            mode: mode,
-            difficulty: TaskDifficulty.estimate(request, hasRepo: true)
-        )
+        nil
     }
 
     @discardableResult

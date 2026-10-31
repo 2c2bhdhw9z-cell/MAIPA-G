@@ -2,9 +2,9 @@ import AgentCore
 import SwiftUI
 import UIKit
 
-/// Connectors shown like integrations in an ordinary app: familiar services, plain descriptions,
-/// recognisable coloured icons and one Connect button. "All" still exposes every result from the
-/// official MCP Registry instead of replacing the open ecosystem with a hard-coded list.
+/// Connectors screen covering 100+ curated integrations (Apple iPhone apps, official hosted MCP
+/// servers, zero-key public research sources, Keychain API-key services, Custom Webhooks, Custom
+/// MCP, and Linux-computer stdio packages) plus the live open MCP Registry in "All".
 struct ConnectorsScreen: View {
     enum Tab: String, CaseIterable, Identifiable {
         case mine = "My apps"
@@ -13,10 +13,25 @@ struct ConnectorsScreen: View {
         var id: String { rawValue }
     }
 
+    enum DiscoverFilter: String, CaseIterable, Identifiable {
+        case popular = "Popular"
+        case allCurated = "All 107"
+        case apple = "Apple"
+        case devCloud = "Dev & Cloud"
+        case dataStorage = "Data & Files"
+        case workDocs = "Work & Docs"
+        case chatMeetings = "Chat & Meet"
+        case searchMedia = "Search & Media"
+        case businessAuto = "Business & Auto"
+        var id: String { rawValue }
+    }
+
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
     @State private var tab: Tab = .discover
-    @State private var showCustom = false
+    @State private var filter: DiscoverFilter = .popular
+    @State private var customSheetMode: CustomConnectorMode?
     @State private var connecting: String?
     @State private var notice: String?
 
@@ -39,17 +54,19 @@ struct ConnectorsScreen: View {
 
                 switch tab {
                 case .mine: myApps
-                case .discover: popularApps
+                case .discover: discoverApps
                 case .all: allRegistry
                 }
             }
             .listStyle(.plain)
+            .scrollDismissesKeyboard(.interactively)
             .scrollContentBackground(.hidden)
             .background(Theme.background)
-            .searchable(text: $connectors.query, prompt: "Search integrations")
+            .searchable(text: $connectors.query, prompt: "Search 100+ apps & integrations")
             .onSubmit(of: .search) {
-                tab = .all
-                Task { await connectors.search() }
+                if tab == .all {
+                    Task { await connectors.search() }
+                }
             }
             .refreshable { await connectors.search() }
             .navigationTitle("Connectors")
@@ -57,20 +74,20 @@ struct ConnectorsScreen: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
                 ToolbarItem(placement: .primaryAction) {
-                    Button { showCustom = true } label: { Image(systemName: "plus") }
-                        .accessibilityLabel("Add a custom connector")
+                    Button { customSheetMode = .mcp } label: { Image(systemName: "plus") }
+                        .accessibilityLabel("Add a custom MCP server or webhook")
                 }
             }
-            .sheet(isPresented: $showCustom) { CustomConnectorSheet() }
+            .sheet(item: $customSheetMode) { mode in CustomConnectorSheet(initialMode: mode) }
             .task { if connectors.catalog.isEmpty { await connectors.search() } }
         }
     }
 
     @ViewBuilder
     private var myApps: some View {
-        Section("Connected apps") {
+        Section("Connected apps (\(app.connectors.connected.count))") {
             if app.connectors.connected.isEmpty {
-                Text("Nothing connected yet.")
+                Text("Nothing connected yet. Pick an app in Discover to connect in one tap.")
                     .foregroundStyle(Theme.secondaryText)
                     .connectorRow()
             } else {
@@ -89,22 +106,57 @@ struct ConnectorsScreen: View {
                 }
             }
         }
-        Section("Suggested") {
-            ForEach(IntegrationService.popular.prefix(6)) { service in
+        Section("Quick connect") {
+            ForEach(IntegrationService.popular.prefix(8)) { service in
                 suggestedCard(service)
             }
         }
     }
 
     @ViewBuilder
-    private var popularApps: some View {
+    private var discoverApps: some View {
         Section {
-            ForEach(filteredPopular) { service in suggestedCard(service) }
-        } header: {
-            Text("Popular")
-        } footer: {
-            Text("Connectors come from the official MCP Registry. MAIPA-G shows the sign-in and permissions before an app is connected.")
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(DiscoverFilter.allCases) { chip in
+                        let selected = filter == chip && app.connectors.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        Button {
+                            filter = chip
+                            Haptics.selection()
+                        } label: {
+                            Text(chip.rawValue)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(selected ? .white : .primary)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 7)
+                                .background(selected ? theme.accent : Theme.surface, in: Capsule())
+                                .overlay(Capsule().strokeBorder(selected ? Color.clear : Theme.stroke))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 18)
+            }
+            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 6, trailing: 0))
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
         }
+
+        Section {
+            ForEach(filteredDiscover) { service in
+                suggestedCard(service)
+            }
+        } header: {
+            Text(discoverSectionTitle)
+        } footer: {
+            Text("All API keys and tokens stay exclusively in this iPhone's Keychain. Outside content can never send messages, webhooks, or edits without your confirmation.")
+        }
+    }
+
+    private var discoverSectionTitle: String {
+        let q = app.connectors.query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !q.isEmpty { return "Matching integrations (\(filteredDiscover.count))" }
+        return "\(filter.rawValue) (\(filteredDiscover.count))"
     }
 
     @ViewBuilder
@@ -132,23 +184,38 @@ struct ConnectorsScreen: View {
                     .connectorRow()
             }
         } header: {
-            Text("All integrations")
+            Text("Open MCP Registry")
         } footer: {
-            Text("Every result here comes from the official MCP Registry. Some run on your iPhone; others run only during Autonomous jobs.")
+            Text("Every result here comes live from the official MCP Registry. Remote HTTPS servers run directly on your iPhone; package servers run via your connected Linux computer and Autonomous jobs.")
         }
     }
 
-    private var filteredPopular: [IntegrationService] {
+    private var filteredDiscover: [IntegrationService] {
         let query = app.connectors.query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return IntegrationService.popular }
-        return IntegrationService.popular.filter { Self.text($0.name, matches: query) || Self.text($0.detail, matches: query) }
+        if !query.isEmpty {
+            return IntegrationService.all.filter {
+                Self.text($0.name, matches: query)
+                    || Self.text($0.detail, matches: query)
+                    || $0.aliases.contains(where: { Self.text($0, matches: query) })
+            }
+        }
+        switch filter {
+        case .popular: return IntegrationService.popular
+        case .allCurated: return IntegrationService.all
+        case .apple: return IntegrationService.byCategory(.apple)
+        case .devCloud: return IntegrationService.byCategory(.devCloud)
+        case .dataStorage: return IntegrationService.byCategory(.dataStorage)
+        case .workDocs: return IntegrationService.byCategory(.workDocs)
+        case .chatMeetings: return IntegrationService.byCategory(.chatMeetings)
+        case .searchMedia: return IntegrationService.byCategory(.searchMedia)
+        case .businessAuto: return IntegrationService.byCategory(.businessAuto)
+        }
     }
 
     private var filteredCatalog: [RegistryServer] {
         let catalog = app.connectors.catalog
         let query = app.connectors.query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
-            // Familiar apps first, then the rest of the Registry in its usual order.
             var familiar: [RegistryServer] = []
             var others: [RegistryServer] = []
             for server in catalog {
@@ -167,8 +234,6 @@ struct ConnectorsScreen: View {
         }
     }
 
-    /// Substring match as typed, or once case, spaces and punctuation are ignored on both sides,
-    /// so "Hugging Face" finds "huggingface" and "co.huggingface/hf-mcp-server".
     private static func text(_ field: String, matches query: String) -> Bool {
         if field.localizedCaseInsensitiveContains(query) { return true }
         let compactQuery = compacted(query)
@@ -181,16 +246,20 @@ struct ConnectorsScreen: View {
 
     @ViewBuilder
     private func suggestedCard(_ service: IntegrationService) -> some View {
-        let connected = connectedService(service)
+        let existing = connectedService(service)
+        let isReady = existing.map { app.connectors.states[$0.id] == .connected } ?? false
         Button {
-            if let connected { app.sheet = .connectorDetail(connected.id) }
-            else { findAndConnect(service) }
+            if let existing {
+                app.sheet = .connectorDetail(existing.id)
+            } else {
+                connectCurated(service)
+            }
         } label: {
             ConnectorCard(
                 service: service,
                 name: service.name,
-                detail: service.detail,
-                trailing: connected != nil ? .connected : (connecting == service.id ? .working : .connect)
+                detail: existing.map(connectedStatus) ?? service.detail,
+                trailing: existing != nil ? (isReady ? .connected : .chevron) : (connecting == service.id ? .working : .connect)
             )
         }
         .buttonStyle(.plain)
@@ -206,7 +275,34 @@ struct ConnectorsScreen: View {
         app.connectors.connected.contains { $0.serverID == server.name }
     }
 
-    private func findAndConnect(_ service: IntegrationService) {
+    private func connectCurated(_ service: IntegrationService) {
+        if let spec = service.spec {
+            switch spec.mode {
+            case .customWebhook:
+                customSheetMode = .webhook
+                return
+            case .customMCP:
+                customSheetMode = .mcp
+                return
+            default:
+                connecting = service.id
+                notice = nil
+                Task {
+                    let added = await app.connectors.connectCatalogProvider(spec)
+                    connecting = nil
+                    if let added {
+                        // Open setup/detail sheet whenever sign-in or an API key is needed, or let zero-key/Apple show ✓ immediately.
+                        if app.connectors.states[added.id] != .connected {
+                            app.sheet = .connectorDetail(added.id)
+                        } else {
+                            Haptics.selection()
+                        }
+                    }
+                }
+                return
+            }
+        }
+        // Fallback to live Registry lookup if ever needed.
         connecting = service.id
         notice = nil
         Task {
@@ -251,10 +347,17 @@ struct ConnectorsScreen: View {
 
     private func connectedStatus(_ item: ConnectorConfiguration) -> String {
         switch app.connectors.states[item.id] ?? .disconnected {
-        case .connected: return "Connected · \(app.connectors.toolDefinitions[item.id]?.count ?? 0) tools ready"
+        case .connected:
+            let count = app.connectors.toolDefinitions[item.id]?.count ?? 0
+            if item.kind == .stdio {
+                return app.connectors.computerConnector() != nil
+                    ? "Connected via Linux computer · \(max(count, 1)) tool ready"
+                    : "Ready for Linux computer & Autonomous"
+            }
+            return "Connected · \(count) \(count == 1 ? "tool" : "tools") ready"
         case .connecting: return "Connecting…"
-        case .authorizationNeeded: return "Sign in needed"
-        case .failed: return "Needs attention"
+        case .authorizationNeeded: return "Tap to finish sign-in or API key setup"
+        case .failed: return "Needs attention · tap to inspect"
         case .disconnected: return item.kind == .stdio ? "Ready for Autonomous" : "Disconnected"
         }
     }
@@ -264,7 +367,7 @@ struct ConnectorsScreen: View {
         if !text.isEmpty { return text }
         if server.supportsPhone && server.supportsAutonomous { return "Use this app on your iPhone and in Autonomous jobs." }
         if server.supportsPhone { return "Use this app in your chats on this iPhone." }
-        return "Use this app in Autonomous jobs."
+        return "Use this app on your connected Linux computer and in Autonomous jobs."
     }
 }
 
@@ -323,6 +426,10 @@ struct IntegrationIcon: View {
                     .frame(width: 26, height: 26)
             } else if let remoteURL {
                 RemoteConnectorLogo(url: remoteURL, fallback: initials)
+            } else if service.spec != nil {
+                Image(systemName: service.symbol)
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(service.colour)
             } else {
                 Text(initials)
                     .font(.system(size: initials.count > 1 ? 13 : 18, weight: .bold, design: .rounded))
@@ -395,7 +502,7 @@ private actor ConnectorLogoLoader {
 }
 
 struct IntegrationService: Identifiable {
-    var id: String { name }
+    var id: String { spec?.id ?? name }
     let name: String
     let detail: String
     let search: String
@@ -403,13 +510,26 @@ struct IntegrationService: Identifiable {
     let symbol: String
     let colour: Color
     let assetName: String?
+    let spec: IntegrationProviderSpec?
 
-    init(name: String, detail: String, search: String, aliases: [String], symbol: String, colour: Color, assetName: String? = nil) {
+    init(name: String, detail: String, search: String, aliases: [String], symbol: String, colour: Color, assetName: String? = nil, spec: IntegrationProviderSpec? = nil) {
         self.name = name; self.detail = detail; self.search = search; self.aliases = aliases
-        self.symbol = symbol; self.colour = colour; self.assetName = assetName
+        self.symbol = symbol; self.colour = colour; self.assetName = assetName; self.spec = spec
+    }
+
+    init(spec: IntegrationProviderSpec) {
+        self.name = spec.name
+        self.detail = spec.detail
+        self.search = spec.search
+        self.aliases = spec.aliases
+        self.symbol = spec.symbol
+        self.colour = Self.colour(for: spec)
+        self.assetName = spec.assetName
+        self.spec = spec
     }
 
     func matches(_ text: String) -> Bool {
+        if let spec { return spec.matches(text) }
         let value = " " + Self.normalized(text) + " "
         return aliases.contains { value.contains(" " + Self.normalized($0) + " ") }
     }
@@ -419,38 +539,37 @@ struct IntegrationService: Identifiable {
     }
 
     static func matching(_ text: String) -> IntegrationService {
-        popular.first(where: { $0.matches(text) })
-            ?? IntegrationService(name: text, detail: "Connected tool", search: text, aliases: [], symbol: "puzzlepiece.extension.fill", colour: colour(for: text))
+        all.first(where: { $0.matches(text) })
+            ?? IntegrationService(name: text, detail: "Connected tool", search: text, aliases: [], symbol: "puzzlepiece.extension.fill", colour: colour(forText: text))
     }
 
-    private static func colour(for text: String) -> Color {
+    private static func colour(for spec: IntegrationProviderSpec) -> Color {
+        switch spec.category {
+        case .apple: return .cyan
+        case .devCloud: return .indigo
+        case .dataStorage: return .green
+        case .workDocs: return .blue
+        case .chatMeetings: return .purple
+        case .searchMedia: return .orange
+        case .businessAuto: return .mint
+        case .popular: return .blue
+        }
+    }
+
+    private static func colour(forText text: String) -> Color {
         var value: UInt64 = 14_695_981_039_346_656_037
         for byte in text.utf8 { value = (value ^ UInt64(byte)) &* 1_099_511_628_211 }
         let choices: [Color] = [.mint, .cyan, .blue, .indigo, .purple, .pink, .orange, .green]
         return choices[Int(value % UInt64(choices.count))]
     }
 
-    static let popular: [IntegrationService] = [
-        .init(name: "GitHub", detail: "Search repositories, manage issues and review changes", search: "github", aliases: ["github"], symbol: "chevron.left.forwardslash.chevron.right", colour: .primary, assetName: "IntegrationGitHub"),
-        .init(name: "Gmail", detail: "Read, search and draft email", search: "gmail", aliases: ["gmail", "google mail"], symbol: "envelope.fill", colour: .red, assetName: "IntegrationGmail"),
-        .init(name: "Google Calendar", detail: "Read and manage your calendar events", search: "calendar", aliases: ["google calendar", "gcalendar", "google agenda"], symbol: "calendar", colour: .blue, assetName: "IntegrationGoogleCalendar"),
-        .init(name: "Google Drive", detail: "Search, read and upload your files", search: "drive", aliases: ["google drive", "gdrive"], symbol: "externaldrive.fill", colour: .green, assetName: "IntegrationGoogleDrive"),
-        .init(name: "Google Docs", detail: "Read, edit and create documents", search: "docs", aliases: ["google docs", "gdocs"], symbol: "doc.text.fill", colour: .blue, assetName: "IntegrationGoogleDocs"),
-        .init(name: "Google Sheets", detail: "Read, analyse and update spreadsheets", search: "sheets", aliases: ["google sheets", "gsheets"], symbol: "tablecells.fill", colour: .green, assetName: "IntegrationGoogleSheets"),
-        .init(name: "Google Slides", detail: "Read and create presentations", search: "slides", aliases: ["google slides", "gslides"], symbol: "rectangle.on.rectangle.angled", colour: .orange, assetName: "IntegrationGoogleSlides"),
-        .init(name: "Microsoft 365", detail: "Use Outlook, OneDrive, Teams and SharePoint", search: "microsoft", aliases: ["microsoft 365", "office 365", "m365", "m365 copilot"], symbol: "square.grid.2x2.fill", colour: .blue, assetName: "IntegrationMicrosoft"),
-        .init(name: "Slack", detail: "Search channels and send messages", search: "slack", aliases: ["slack"], symbol: "number", colour: .purple, assetName: "IntegrationSlack"),
-        .init(name: "Notion", detail: "Search, read and update your workspace", search: "notion", aliases: ["notion"], symbol: "doc.text", colour: .primary, assetName: "IntegrationNotion"),
-        .init(name: "Linear", detail: "Search and manage issues and projects", search: "linear", aliases: ["linear"], symbol: "circle.lefthalf.filled", colour: .indigo, assetName: "IntegrationLinear"),
-        .init(name: "Hugging Face", detail: "Search models, datasets and Spaces", search: "huggingface", aliases: ["hugging face", "huggingface", "hf mcp server"], symbol: "face.smiling", colour: .yellow, assetName: "IntegrationHuggingFace"),
-        .init(name: "Figma", detail: "Read designs, comments and project details", search: "figma", aliases: ["figma"], symbol: "paintbrush.pointed.fill", colour: .pink, assetName: "IntegrationFigma"),
-        .init(name: "Dropbox", detail: "Search, read and manage cloud files", search: "dropbox", aliases: ["dropbox"], symbol: "shippingbox.fill", colour: .blue, assetName: "IntegrationDropbox"),
-        .init(name: "Atlassian", detail: "Use Jira and Confluence projects", search: "atlassian", aliases: ["atlassian", "jira", "confluence"], symbol: "triangle.fill", colour: .blue, assetName: "IntegrationAtlassian"),
-        .init(name: "Box", detail: "Search and work with company files", search: "box", aliases: ["box", "box mcp"], symbol: "archivebox.fill", colour: .blue, assetName: "IntegrationBox"),
-        .init(name: "Asana", detail: "Read and manage tasks and projects", search: "asana", aliases: ["asana"], symbol: "circle.grid.3x3.fill", colour: .pink, assetName: "IntegrationAsana"),
-        .init(name: "Canva", detail: "Search and work with Canva designs", search: "canva", aliases: ["canva"], symbol: "wand.and.stars", colour: .cyan, assetName: "IntegrationCanva"),
-        .init(name: "YouTube", detail: "Search videos and work with channel information", search: "youtube", aliases: ["youtube"], symbol: "play.rectangle.fill", colour: .red, assetName: "IntegrationYouTube"),
-    ]
+    static let all: [IntegrationService] = IntegrationCatalog.all.map(IntegrationService.init(spec:))
+
+    static let popular: [IntegrationService] = all.filter { $0.spec?.isPopular == true }
+
+    static func byCategory(_ category: IntegrationCategory) -> [IntegrationService] {
+        all.filter { $0.spec?.category == category }
+    }
 }
 
 private extension View {
@@ -461,37 +580,94 @@ private extension View {
     }
 }
 
+enum CustomConnectorMode: String, CaseIterable, Identifiable {
+    case mcp = "Custom MCP"
+    case webhook = "Webhook"
+    var id: String { rawValue }
+}
+
 private struct CustomConnectorSheet: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
+    let initialMode: CustomConnectorMode
+
+    @State private var mode: CustomConnectorMode = .mcp
     @State private var name = ""
     @State private var url = ""
+    @State private var method = "POST"
+    @State private var headerName = ""
+    @State private var secret = ""
     @State private var error: String?
 
     var body: some View {
         NavigationStack {
             Form {
-                TextField("Name", text: $name)
-                TextField("https://example.com/mcp", text: $url)
-                    .textInputAutocapitalization(.never)
-                    .keyboardType(.URL)
-                Text("Use the secure MCP web address the app gives you.")
-                    .font(.footnote)
-                    .foregroundStyle(Theme.secondaryText)
-                if let error { Text(error).foregroundStyle(Theme.danger) }
+                Section {
+                    Picker("Type", selection: $mode) {
+                        ForEach(CustomConnectorMode.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                Section {
+                    TextField(mode == .mcp ? "Server name (e.g. Internal Tools)" : "Webhook name (e.g. Deploy Hook)", text: $name)
+                    TextField(mode == .mcp ? "https://example.com/mcp" : "https://hooks.example.com/trigger", text: $url)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                    if mode == .webhook {
+                        Picker("HTTP Method", selection: $method) {
+                            Text("POST").tag("POST")
+                            Text("PUT").tag("PUT")
+                            Text("GET").tag("GET")
+                        }
+                    }
+                } header: {
+                    Text("Endpoint")
+                }
+
+                Section {
+                    SecureField(mode == .mcp ? "Bearer token / API key (optional)" : "Secret token (optional)", text: $secret)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextField("Custom header name (default: Authorization)", text: $headerName)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                } header: {
+                    Text("Authentication (Keychain only)")
+                } footer: {
+                    Text(mode == .mcp
+                        ? "Leave the token blank if this MCP server signs you in with OAuth."
+                        : "Secrets stay exclusively in this iPhone's Keychain and are never sent anywhere except this exact HTTPS host.")
+                }
+
+                if let error {
+                    Section { Text(error).foregroundStyle(Theme.danger) }
+                }
             }
-            .navigationTitle("Custom connector")
+            .scrollDismissesKeyboard(.interactively)
+            .navigationTitle(mode == .mcp ? "Custom MCP" : "Custom Webhook")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Add") {
                         Task {
-                            do { try await app.connectors.addCustom(name: name, urlText: url); dismiss() }
-                            catch { self.error = "That secure connector address didn't work." }
+                            do {
+                                if mode == .mcp {
+                                    try await app.connectors.addCustom(name: name, urlText: url, token: secret, headerName: headerName)
+                                } else {
+                                    try await app.connectors.addWebhook(name: name, urlText: url, method: method, headerName: headerName, secret: secret)
+                                }
+                                dismiss()
+                            } catch {
+                                self.error = "Enter a valid public https:// address."
+                            }
                         }
                     }
                 }
             }
+            .onAppear { mode = initialMode }
         }
     }
 }

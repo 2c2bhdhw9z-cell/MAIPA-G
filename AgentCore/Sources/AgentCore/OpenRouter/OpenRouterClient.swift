@@ -45,10 +45,18 @@ public struct OpenRouterAPIError: Error, Sendable, Hashable, CustomStringConvert
         } else {
             code = errorObject["code"]?.stringValue ?? String(httpStatus)
         }
+        let baseMessage = errorObject["message"]?.stringValue ?? "OpenRouter returned HTTP \(httpStatus) without an error message."
+        let rawDetail = errorObject["metadata"]?["raw"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let fullMessage: String
+        if !rawDetail.isEmpty, !baseMessage.contains(rawDetail) {
+            fullMessage = "\(baseMessage) (\(String(SensitiveDataRedactor().redact(rawDetail).prefix(240))))"
+        } else {
+            fullMessage = baseMessage
+        }
         self.init(
             httpStatus: httpStatus,
             code: code,
-            message: errorObject["message"]?.stringValue ?? "OpenRouter returned HTTP \(httpStatus) without an error message.",
+            message: fullMessage,
             metadata: errorObject["metadata"],
             retryAfter: retryAfter
         )

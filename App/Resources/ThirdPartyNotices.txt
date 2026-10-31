@@ -18,3 +18,7 @@ Each logo comes from the company's own published files:
 - Canva: static.canva.com
 - YouTube: gstatic.com
 - Hugging Face: huggingface.co
+
+Mermaid (mermaid.min.js)
+Copyright (c) 2014 - 2024 Knut Sveidqvist. Licensed under the MIT License.
+

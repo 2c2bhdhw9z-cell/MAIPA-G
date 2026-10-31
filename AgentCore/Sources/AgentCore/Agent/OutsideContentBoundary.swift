@@ -11,6 +11,8 @@ extension ReadFileTool { public var bringsOutsideContent: Bool { true } }
 extension SearchCodeTool { public var bringsOutsideContent: Bool { true } }
 extension ReadRepoFileTool { public var bringsOutsideContent: Bool { true } }
 extension ReadOtherRepositoryFileTool { public var bringsOutsideContent: Bool { true } }
+extension LoadRepoRulesTool { public var bringsOutsideContent: Bool { true } }
+extension ReadAttachmentTool { public var bringsOutsideContent: Bool { true } }
 
 enum OutsideContentBoundary {
     static func connectorApproval(_ definition: ConnectorToolDefinition, arguments: JSONValue) -> ToolApprovalRequest? {
@@ -64,21 +66,34 @@ extension HookedTool {
 }
 
 extension ShellRisk {
-    static let networkPrograms: Set<String> = ["curl", "wget", "nc", "ncat", "netcat", "socat", "telnet", "ssh", "scp", "sftp", "ftp", "rsync", "http", "https", "aria2c", "lynx", "w3m"]
+    static let networkPrograms: Set<String> = ["curl", "wget", "nc", "ncat", "netcat", "socat", "telnet", "ssh", "scp", "sftp", "ftp", "tftp", "rsync", "http", "https", "xh", "httpie", "aria2c", "lynx", "w3m", "dig", "nslookup", "host", "whois", "ping", "openssl"]
 
     /// Commands that can send data off the machine. Package installs from their registries
     /// (npm, pip, cargo, swift) are left alone; explicit network clients and pushes are not.
     public static func reachesNetwork(_ command: String) -> Bool {
         let value = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return true }
-        if ["git push", "git remote add", "git remote set-url", "/dev/tcp/", "/dev/udp/"].contains(where: { value.contains($0) }) { return true }
-        for segment in segments(value) {
-            let words = segment.split(whereSeparator: \.isWhitespace).map(String.init).filter { !$0.contains("=") || $0.hasPrefix("-") }
-            guard let program = words.first.map({ ($0 as NSString).lastPathComponent }) else { continue }
-            if networkPrograms.contains(program) { return true }
-            // An inline script is split across segments, so the whole command is checked.
-            if ["python", "python3", "node", "deno", "bun", "perl", "ruby", "php"].contains(program),
-               ["http://", "https://", "socket", "fetch(", "urllib", "requests.", "net/http", "XMLHttpRequest"].contains(where: { value.contains($0) }) { return true }
+        for candidate in unwrappedCommands(value) {
+            if ["git push", "git remote add", "git remote set-url", "/dev/tcp/", "/dev/udp/"].contains(where: { candidate.contains($0) }) { return true }
+            for segment in segments(candidate) {
+                let words = segment.split(whereSeparator: \.isWhitespace).map(String.init).filter { !$0.contains("=") || $0.hasPrefix("-") }
+                guard let program = words.first.map(cleanProgramName) else { continue }
+                if networkPrograms.contains(program) { return true }
+                if shellWrappers.contains(program) {
+                    let nonFlags = words.dropFirst().filter { !$0.hasPrefix("-") }.map(cleanProgramName)
+                    if nonFlags.contains(where: networkPrograms.contains) { return true }
+                    if ["bash", "sh", "zsh", "dash"].contains(program),
+                       let flagIdx = words.firstIndex(where: { ["-c", "-lc", "-ic", "-ilc"].contains($0) }),
+                       flagIdx + 1 < words.count {
+                        let rest = words[(flagIdx + 1)...].joined(separator: " ").trimmingCharacters(in: CharacterSet(charactersIn: "'\" "))
+                        if !rest.isEmpty, reachesNetwork(rest) { return true }
+                    }
+                }
+                // An inline script is split across segments, so the whole command is checked.
+                let interpreters: Set<String> = ["python", "python3", "node", "deno", "bun", "perl", "ruby", "php"]
+                if interpreters.contains(program) || (shellWrappers.contains(program) && words.dropFirst().map(cleanProgramName).contains(where: interpreters.contains)),
+                   ["http://", "https://", "socket", "fetch(", "urllib", "requests.", "httpx", "aiohttp", "net/http", "XMLHttpRequest"].contains(where: { candidate.contains($0) }) { return true }
+            }
         }
         return false
     }

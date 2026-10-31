@@ -118,9 +118,8 @@ public actor GitHubChangeService {
         let repo = workspace.base.repo
         let continuing: SaveReceipt?
         if let activeReceipt, activeReceipt.repo == repo, let pull = activeReceipt.pullRequest {
-            let current = try await github.pullRequest(repo, number: pull.number)
-            guard current.state == "open" else { throw GitHubChangeFailure.pullRequestClosed }
-            continuing = activeReceipt
+            let current = try? await github.pullRequest(repo, number: pull.number)
+            continuing = current?.state == "open" ? activeReceipt : nil
         } else {
             continuing = nil
         }

@@ -103,14 +103,21 @@ final class ChatLibrary {
     }
 
     /// Starts a chat from the home screen's box.
-    func startChat(text: String, attachments: [AttachmentReference] = [], repo: ChatRepo?, model: ModelChoice, thinking: ThinkingLevel, groupID: UUID? = nil, memories: [String] = []) {
+    func startChat(text: String, attachments: [AttachmentReference] = [], repo: ChatRepo?, model: ModelChoice, thinking: ThinkingLevel, groupID: UUID? = nil, memories: [String] = [], autonomous: Bool = false) {
         let chat = Chat(repo: repo, model: model, thinking: thinking, groupID: groupID, memoryContext: memories)
         let session = ChatSession(chat: chat, app: app)
+        session.autonomous = autonomous
         sessions[chat.id] = session
         openSession = session
         session.send(text, attachments: attachments)
         upsert(session.chat)
         dropIdleSessions()
+    }
+
+    func resumePausedChats() {
+        for session in sessions.values {
+            session.resumeInterruptedTurn()
+        }
     }
 
     func showHome() {
