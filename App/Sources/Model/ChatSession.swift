@@ -1022,7 +1022,7 @@ final class ChatSession: Identifiable {
                                 let calls = updated.steps.flatMap(\.toolCalls)
                                 if calls.count != lastReportedCount {
                                     lastReportedCount = calls.count
-                                    invocation.onProgress?(calls.count, calls.last?.summary)
+                                    invocation.onProgress?(calls.count, calls.last?.summary ?? "")
                                 }
                             }
                         }
