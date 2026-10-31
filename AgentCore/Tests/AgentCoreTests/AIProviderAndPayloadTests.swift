@@ -27,7 +27,7 @@ private final class GatewayMockTransport: HTTPTransport, @unchecked Sendable {
     }
 }
 
-@Suite("Multi-Provider AI Gateways, Payload Cap & GitHub Connector")
+@Suite("Multi-Provider AI Gateways, Payload Cap & GitHub Connector", .timeLimit(.minutes(1)))
 struct AIProviderAndPayloadTests {
     @Test func sayGMCatalogParsesNanoDollarsAndWireShapes() {
         let payload = """
@@ -144,26 +144,33 @@ struct AIProviderAndPayloadTests {
     }
 
     @Test func transcriptCapsWireBytesToPreventCloudflare413() {
-        let bigFakePNG = String(repeating: "A", count: 3_200_000)
+        #expect(Transcript.defaultMaxPayloadBytes == 7_500_000)
+        let fakePNG = String(repeating: "A", count: 80_000)
+        let imagePart: JSONValue = .object([
+            "type": .string("image_url"),
+            "image_url": .object(["url": .string("data:image/png;base64,\(fakePNG)")]),
+        ])
+        let textPart: JSONValue = .object([
+            "type": .string("text"),
+            "text": .string("Here are the earlier screenshots"),
+        ])
         let oldImageMsg = APIMessage(
             role: .user,
             content: nil,
-            contentParts: [
-                ["type": "text", "text": "Here are the earlier screenshots"],
-                ["type": "image_url", "image_url": ["url": .string("data:image/png;base64,\(bigFakePNG)")]],
-                ["type": "image_url", "image_url": ["url": .string("data:image/png;base64,\(bigFakePNG)")]],
-                ["type": "image_url", "image_url": ["url": .string("data:image/png;base64,\(bigFakePNG)")]],
-            ]
+            contentParts: [textPart, imagePart, imagePart, imagePart]
         )
         let assistantMsg = APIMessage(role: .assistant, content: "Got them!")
         let latestMsg = APIMessage.user("Now fix the top button")
 
+        let cap = 180_000
         let input: [APIMessage] = [.system("System"), oldImageMsg, assistantMsg, latestMsg]
-        #expect(Transcript.estimatedWireBytes(input) > Transcript.defaultMaxPayloadBytes)
+        let beforeBytes = Transcript.estimatedWireBytes(input)
+        #expect(beforeBytes > cap)
 
-        let fitted = Transcript.fit(input, budget: 150_000)
+        let fitted = Transcript.fit(input, budget: 150_000, maxPayloadBytes: cap)
+        let afterBytes = Transcript.estimatedWireBytes(fitted.messages)
         #expect(fitted.trimmed)
-        #expect(Transcript.estimatedWireBytes(fitted.messages) <= Transcript.defaultMaxPayloadBytes)
+        #expect(afterBytes <= cap)
         #expect(fitted.messages.last?.content == "Now fix the top button")
     }
 
