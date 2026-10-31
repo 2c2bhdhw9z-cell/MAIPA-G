@@ -47,24 +47,46 @@ struct HomeScreen: View {
                     onSpec: { app.sheet = .specs(home.repo) },
                     onPicture: { app.sheet = .pictureGenerator(.home) },
                     onPreview: { if let repo = home.repo { app.sheet = .webPreview(repo) } },
-                    onFiles: { if let repo = home.repo { app.sheet = .files(repo, .home) } }
+                    onFiles: { if let repo = home.repo { app.sheet = .files(repo, .home) } },
+                    onWorkstation: { app.sheet = .workstation(.home) }
                 )
             }
             .padding(.horizontal, 14)
             .padding(.bottom, 8)
         }
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) { MenuButton() }
-            if app.jobs.activeCount > 0 {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { app.jobs.show() } label: {
-                        Label("\(app.jobs.activeCount) working", systemImage: "gearshape.2")
-                            .font(.caption.weight(.semibold))
+        .safeAreaInset(edge: .top, spacing: 0) {
+            HStack(spacing: 10) {
+                MenuButton()
+                Spacer()
+                HStack(spacing: 12) {
+                    if app.jobs.activeCount > 0 {
+                        Button { app.jobs.show() } label: {
+                            Label("\(app.jobs.activeCount) working", systemImage: "gearshape.2")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(theme.accent)
+                        }
+                        .buttonStyle(.plain)
                     }
+                    Button {
+                        app.sheet = .workstation(.home)
+                    } label: {
+                        Image(systemName: "square.on.square.dashed")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(theme.accent)
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Workstation")
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .glassPanel(cornerRadius: 20, interactive: true)
             }
+            .padding(.horizontal, 14)
+            .padding(.top, 6)
+            .padding(.bottom, 4)
         }
-        .toolbarBackground(.hidden, for: .navigationBar)
+        .toolbar(.hidden, for: .navigationBar)
     }
 }
 
@@ -118,6 +140,7 @@ struct SetupCards: View {
 /// The side-menu button at the top left.
 struct MenuButton: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.theme) private var theme
     @AccessibilityFocusState(for: .voiceOver) private var menuButtonFocused: Bool
 
     var body: some View {
@@ -126,12 +149,16 @@ struct MenuButton: View {
         } label: {
             Image(systemName: "line.3.horizontal")
                 .font(.body.weight(.semibold))
+                .foregroundStyle(theme.accent)
+                .frame(width: 40, height: 40)
+                .glassPanel(cornerRadius: 20, interactive: true)
                 .overlay(alignment: .topTrailing) {
                     if app.updates.newer != nil {
-                        Circle().fill(.red).frame(width: 8, height: 8).offset(x: 4, y: -3)
+                        Circle().fill(.red).frame(width: 8, height: 8).offset(x: -2, y: 2)
                     }
                 }
         }
+        .buttonStyle(.plain)
         .accessibilityLabel("Menu")
         .accessibilityFocused($menuButtonFocused)
         .onChange(of: app.isMenuOpen) { _, isOpen in

@@ -15,6 +15,7 @@ private enum MermaidBundle {
 /// Renders a ```mermaid diagram offline with pan/zoom, full-screen inspection, and a Chart/Code toggle.
 struct MermaidBlockView: View {
     var code: String
+    var isStreaming: Bool = false
     @State private var showCode = false
     @State private var copied = false
     @State private var showingFullScreen = false
@@ -30,7 +31,7 @@ struct MermaidBlockView: View {
                     Image(systemName: "point.3.connected.trianglepath.dotted")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(theme.accent)
-                    Text("Diagram")
+                    Text(isStreaming ? "Drawing diagram…" : "Diagram")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.primary)
                 }
@@ -49,7 +50,7 @@ struct MermaidBlockView: View {
                 .padding(2)
                 .background(Theme.surface, in: Capsule())
 
-                if !showCode && !renderFailed {
+                if !showCode && !renderFailed && !isStreaming {
                     Button {
                         showingFullScreen = true
                     } label: {
@@ -81,7 +82,16 @@ struct MermaidBlockView: View {
             .padding(.vertical, 8)
             .background(Color.white.opacity(colorScheme == .dark ? 0.04 : 0.5))
 
-            if showCode || renderFailed || MermaidBundle.userScript == nil {
+            if isStreaming && !showCode {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Writing diagram…")
+                        .font(.footnote)
+                        .foregroundStyle(Theme.secondaryText)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 140)
+            } else if showCode || renderFailed || MermaidBundle.userScript == nil {
                 ScrollView(.horizontal, showsIndicators: false) {
                     Text(code)
                         .font(.system(.footnote, design: .monospaced))

@@ -32,6 +32,7 @@ struct MessageRow: View, Equatable {
         case .user(let user):
             UserBubble(
                 message: user,
+                createdAt: message.createdAt,
                 isStarred: message.starredMemoryID != nil,
                 canStar: canStar,
                 onToggleStar: {
@@ -43,6 +44,7 @@ struct MessageRow: View, Equatable {
         case .assistant(let turn):
             AssistantTurnView(
                 messageID: message.id,
+                createdAt: message.createdAt,
                 turn: turn,
                 isLatest: isLatest,
                 isStarred: message.starredMemoryID != nil,
@@ -63,6 +65,7 @@ struct MessageRow: View, Equatable {
 
 struct UserBubble: View {
     var message: UserMessage
+    var createdAt: Date = Date()
     var isStarred: Bool
     var canStar: Bool
     var onToggleStar: () -> Void
@@ -93,65 +96,92 @@ struct UserBubble: View {
         return prefix.count < message.text.count ? prefix + "…" : prefix
     }
 
+    private var imageAttachments: [AttachmentReference] {
+        message.attachments.filter { $0.kind == .image }
+    }
+
+    private var otherAttachments: [AttachmentReference] {
+        message.attachments.filter { $0.kind != .image }
+    }
+
     var body: some View {
-        HStack(alignment: .center, spacing: 6) {
-            Spacer(minLength: 36)
-            if canStar {
-                Button(action: onToggleStar) {
-                    Image(systemName: isStarred ? "star.fill" : "star")
-                        .font(.caption)
-                        .foregroundStyle(isStarred ? .yellow : Theme.secondaryText.opacity(0.75))
-                        .frame(width: 28, height: 28)
-                        .contentShape(Rectangle())
+        VStack(alignment: .trailing, spacing: 8) {
+            if !imageAttachments.isEmpty {
+                HStack {
+                    Spacer(minLength: 40)
+                    GrokPhotoStackView(images: imageAttachments)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(isStarred ? "Remove memory" : "Save as memory")
             }
-            VStack(alignment: .leading, spacing: 8) {
-                if !message.text.isEmpty {
-                    Text(previewText)
-                        .font(.body)
-                        .textSelection(.enabled)
-                    if isLongText {
-                        Button { showingFullText = true } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: "doc.text.magnifyingglass")
-                                Text("Show full message (\(message.text.count.formatted()) characters)")
-                                Image(systemName: "chevron.right")
-                                    .font(.caption2.weight(.bold))
-                            }
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(theme.accent)
-                            .padding(.top, 2)
+
+            if !otherAttachments.isEmpty {
+                HStack {
+                    Spacer(minLength: 40)
+                    FlowLayout(spacing: 6, lineSpacing: 6) {
+                        ForEach(otherAttachments) { attachment in
+                            ChatFileAttachmentPill(attachment: attachment)
+                        }
+                    }
+                }
+            }
+
+            if !message.text.isEmpty {
+                HStack(alignment: .center, spacing: 6) {
+                    Spacer(minLength: 36)
+                    if canStar {
+                        Button(action: onToggleStar) {
+                            Image(systemName: isStarred ? "star.fill" : "star")
+                                .font(.caption)
+                                .foregroundStyle(isStarred ? .yellow : Theme.secondaryText.opacity(0.75))
+                                .frame(width: 28, height: 28)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel(isStarred ? "Remove memory" : "Save as memory")
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(previewText)
+                            .font(.body)
+                            .textSelection(.enabled)
+                        if isLongText {
+                            Button { showingFullText = true } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "doc.text.magnifyingglass")
+                                    Text("Show full message (\(message.text.count.formatted()) characters)")
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption2.weight(.bold))
+                                }
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(theme.accent)
+                                .padding(.top, 2)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(theme.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(theme.accent.opacity(0.25)))
+                    .contextMenu {
+                        if canStar {
+                            Button(action: onToggleStar) {
+                                Label(isStarred ? "Remove memory" : "Save as memory", systemImage: isStarred ? "star.slash" : "star")
+                            }
+                        }
+                        if isLongText {
+                            Button { showingFullText = true } label: { Label("Show full message", systemImage: "doc.text.magnifyingglass") }
+                        }
+                        if message.text.count <= 20_000 {
+                            Button(action: onEdit) { Label("Edit and resend", systemImage: "pencil") }
+                        }
+                        Button { UIPasteboard.general.string = message.text } label: { Label("Copy", systemImage: "doc.on.doc") }
                     }
                 }
-                ForEach(message.attachments) { attachment in
-                    Label(attachment.name, systemImage: attachment.kind == .image ? "photo" : attachment.kind == .pdf ? "doc.richtext" : "paperclip")
-                        .font(.caption.weight(.medium))
-                }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(theme.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(theme.accent.opacity(0.25)))
-            .contextMenu {
-                if canStar {
-                    Button(action: onToggleStar) {
-                        Label(isStarred ? "Remove memory" : "Save as memory", systemImage: isStarred ? "star.slash" : "star")
-                    }
-                }
-                if isLongText {
-                    Button { showingFullText = true } label: { Label("Show full message", systemImage: "doc.text.magnifyingglass") }
-                }
-                if message.text.count <= 20_000 {
-                    Button(action: onEdit) { Label("Edit and resend", systemImage: "pencil") }
-                }
-                if !message.text.isEmpty {
-                    Button { UIPasteboard.general.string = message.text } label: { Label("Copy", systemImage: "doc.on.doc") }
-                }
-            }
+
+            Text(MessageTimestampFormatter.shortTime(createdAt))
+                .font(.caption2)
+                .foregroundStyle(Theme.secondaryText.opacity(0.7))
+                .padding(.trailing, 4)
         }
         .sheet(isPresented: $showingFullText) {
             FullUserMessageSheet(text: message.text)
@@ -228,6 +258,7 @@ private struct FullUserMessageSheet: View {
 
 struct AssistantTurnView: View {
     var messageID: UUID
+    var createdAt: Date = Date()
     var turn: AssistantTurn
     var isLatest: Bool
     var isStarred: Bool
@@ -235,6 +266,8 @@ struct AssistantTurnView: View {
     var modelName: (String) -> String
     var actions: TurnActions
     @Environment(\.theme) private var theme
+    @State private var showRelativeTime = false
+    @State private var showingSources = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -242,8 +275,8 @@ struct AssistantTurnView: View {
                 switch segment {
                 case .activity(let id, let items, let isActive):
                     ActivityTimelineCard(id: id, items: items, isActive: isActive)
-                case .content(let step):
-                    StepContentView(step: step)
+                case .content(let step, let isLive):
+                    StepContentView(step: step, isStreaming: isLive)
                 }
             }
             if turn.status == .running, showsThinkingLine {
@@ -274,6 +307,20 @@ struct AssistantTurnView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .sheet(isPresented: $showingSources) {
+            TurnSourcesSheet(sources: collectedSources, onOpenURL: actions.openURL)
+        }
+    }
+
+    private var collectedSources: [TurnSourceItem] {
+        TurnSourceItem.collect(from: turn)
+    }
+
+    private var turnDurationSeconds: Int? {
+        guard let firstStart = turn.steps.first?.startedAt else { return nil }
+        let lastEnd = turn.steps.reversed().compactMap(\.finishedAt).first ?? createdAt
+        let secs = Int(lastEnd.timeIntervalSince(firstStart).rounded())
+        return secs > 0 ? secs : nil
     }
 
     /// Groups consecutive thoughts and tool calls into a single collapsible Arena/Kiro-style
@@ -292,10 +339,9 @@ struct AssistantTurnView: View {
 
         for (index, step) in turn.steps.enumerated() {
             let isLastStep = step.id == lastStepID
-            let stepIsLive = turn.status == .running && isLastStep
+            let stepIsLive = turn.status == .running && isLastStep && step.finishedAt == nil
             let hasVisibleContent = !step.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || !(step.generatedImages ?? []).isEmpty
-                || !(step.citations ?? []).isEmpty
 
             if !step.reasoning.isEmpty {
                 buffer.append(.thought(step: step, isLive: stepIsLive && !hasVisibleContent && step.toolCalls.isEmpty && step.finishedAt == nil))
@@ -303,7 +349,7 @@ struct AssistantTurnView: View {
             // If visible text came BEFORE toolCalls in the same step, flush thoughts before text, show text, then buffer toolCalls.
             if hasVisibleContent {
                 flushBuffer(isActive: false)
-                output.append(.content(step))
+                output.append(.content(step, isLive: stepIsLive))
                 for call in step.toolCalls {
                     buffer.append(.tool(call))
                 }
@@ -329,7 +375,55 @@ struct AssistantTurnView: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                let text = turn.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n")
+                if !text.isEmpty {
+                    Button {
+                        UIPasteboard.general.string = text
+                        Haptics.selection()
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Copy reply")
+                }
+                if canStar {
+                    Button {
+                        actions.toggleStar(messageID)
+                        Haptics.selection()
+                    } label: {
+                        Image(systemName: isStarred ? "star.fill" : "star")
+                            .foregroundStyle(isStarred ? .yellow : Theme.secondaryText)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isStarred ? "Remove memory" : "Save as memory")
+                }
+
+                let sources = collectedSources
+                if !sources.isEmpty {
+                    TurnSourcesPill(sources: sources) {
+                        Haptics.selection()
+                        showingSources = true
+                    }
+                }
+
+                Spacer(minLength: 4)
+
+                Button {
+                    showRelativeTime.toggle()
+                    Haptics.selection()
+                } label: {
+                    Text(MessageTimestampFormatter.turnFooterTime(
+                        finishedAt: turn.steps.reversed().compactMap(\.finishedAt).first ?? createdAt,
+                        durationSeconds: turnDurationSeconds,
+                        preferRelative: showRelativeTime
+                    ))
+                    .lineLimit(1)
+                }
+                .buttonStyle(.plain)
+            }
+
             HStack(spacing: 6) {
                 let models = turn.modelsUsed.map(modelName)
                 if !models.isEmpty {
@@ -345,29 +439,6 @@ struct AssistantTurnView: View {
                 }
             }
             .lineLimit(1)
-            Spacer(minLength: 4)
-            if canStar {
-                Button {
-                    actions.toggleStar(messageID)
-                    Haptics.selection()
-                } label: {
-                    Image(systemName: isStarred ? "star.fill" : "star")
-                        .foregroundStyle(isStarred ? .yellow : Theme.secondaryText)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(isStarred ? "Remove memory" : "Save as memory")
-            }
-            let text = turn.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n")
-            if !text.isEmpty {
-                Button {
-                    UIPasteboard.general.string = text
-                    Haptics.selection()
-                } label: {
-                    Image(systemName: "doc.on.doc")
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Copy reply")
-            }
         }
         .font(.caption)
         .foregroundStyle(Theme.secondaryText)
@@ -376,12 +447,12 @@ struct AssistantTurnView: View {
 
 enum TurnSegment: Identifiable {
     case activity(id: String, items: [ActivityItem], isActive: Bool)
-    case content(AssistantStep)
+    case content(AssistantStep, isLive: Bool)
 
     var id: String {
         switch self {
         case .activity(let id, _, _): return "activity-\(id)"
-        case .content(let step): return "content-\(step.id.uuidString)"
+        case .content(let step, _): return "content-\(step.id.uuidString)"
         }
     }
 }
@@ -400,20 +471,15 @@ enum ActivityItem: Identifiable {
 
 struct StepContentView: View {
     var step: AssistantStep
+    var isStreaming: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if !step.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                MarkdownView(text: step.text)
+                MarkdownView(text: step.text, isStreaming: isStreaming)
             }
             ForEach(step.generatedImages ?? []) { image in
                 GeneratedImageCard(result: image)
-            }
-            ForEach(step.citations ?? []) { citation in
-                Link(destination: URL(string: citation.url) ?? URL(string: "https://openrouter.ai")!) {
-                    Label(citation.title ?? citation.url, systemImage: "link")
-                        .font(.footnote).lineLimit(1)
-                }
             }
         }
     }
@@ -676,10 +742,15 @@ struct GeneratedImageCard: View {
                     .card()
             }
         }
-        .task {
+        .task(id: result.id) {
+            let key = "gen-\(result.id.uuidString)"
+            if let cached = ImageDownsampler.cachedImage(key: key, maxPixelSize: 1_280) {
+                image = cached
+                return
+            }
             do {
                 let data = try await app.attachmentStore.data(for: result.attachment)
-                guard let decoded = ImageDownsampler.image(from: data, maxPixelSize: 1_280) else {
+                guard let decoded = ImageDownsampler.image(from: data, maxPixelSize: 1_280, cacheKey: key) else {
                     failed = true
                     return
                 }

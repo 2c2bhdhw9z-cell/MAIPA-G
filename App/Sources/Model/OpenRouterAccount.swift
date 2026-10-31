@@ -11,9 +11,14 @@ final class OpenRouterAccount {
     private(set) var credits: OpenRouterCredits?
     private(set) var accountState = AccountState()
     private(set) var models: [ModelInfo] = []
+    /// Full selectable OpenRouter catalog (chat, reasoning, vision, router, and image-generating models).
+    private(set) var allSelectableModels: [ModelInfo] = []
     private(set) var modelsByID: [String: ModelInfo] = [:]
+    private(set) var isLoadingModels = false
     private(set) var isSigningIn = false
     private(set) var lastError: String?
+    private(set) var pinnedModelIDs: [String] = UserDefaults.standard.stringArray(forKey: "openRouterPinnedModels") ?? []
+    private(set) var recentModelIDs: [String] = UserDefaults.standard.stringArray(forKey: "openRouterRecentModels") ?? []
 
     @ObservationIgnored weak var app: AppModel?
     let transport: any HTTPTransport
@@ -135,14 +140,36 @@ final class OpenRouterAccount {
         }
     }
 
-    /// Models OpenRouter refused to MAIPA-G as app-restricted. They stay out of the AI picker.
-    private(set) var restrictedModelIDs: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "openRouterRestrictedModels") ?? [])
+    /// Models OpenRouter refused in the current session as app-restricted (kept session-local so a
+    /// temporary provider hiccup never hides a model forever from search).
+    private(set) var restrictedModelIDs: Set<String> = []
 
     func markRestricted(_ modelID: String) {
         guard !modelID.isEmpty, modelID != "openrouter/auto", !restrictedModelIDs.contains(modelID) else { return }
         restrictedModelIDs.insert(modelID)
-        UserDefaults.standard.set(restrictedModelIDs.sorted(), forKey: "openRouterRestrictedModels")
-        models.removeAll { $0.id == modelID }
+    }
+
+    func togglePin(_ modelID: String) {
+        if let idx = pinnedModelIDs.firstIndex(of: modelID) {
+            pinnedModelIDs.remove(at: idx)
+        } else {
+            pinnedModelIDs.insert(modelID, at: 0)
+        }
+        UserDefaults.standard.set(pinnedModelIDs, forKey: "openRouterPinnedModels")
+    }
+
+    func isPinned(_ modelID: String) -> Bool {
+        pinnedModelIDs.contains(modelID)
+    }
+
+    func recordRecent(_ choice: ModelChoice) {
+        guard case .model(let id) = choice, !id.isEmpty else { return }
+        recentModelIDs.removeAll { $0 == id }
+        recentModelIDs.insert(id, at: 0)
+        if recentModelIDs.count > 8 {
+            recentModelIDs = Array(recentModelIDs.prefix(8))
+        }
+        UserDefaults.standard.set(recentModelIDs, forKey: "openRouterRecentModels")
     }
 
     /// Remembers that a paid request was refused for lack of credit.
@@ -157,9 +184,11 @@ final class OpenRouterAccount {
 
     // MARK: The list of AIs
 
-    /// Loads OpenRouter's catalogue, at most every six hours unless `force`.
+    /// Loads OpenRouter's catalogue, at most every hour unless `force`.
     func loadModels(force: Bool = false) async {
-        if !force, let loaded = catalogueLoadedAt, Date().timeIntervalSince(loaded) < 6 * 3600, !models.isEmpty { return }
+        if !force, let loaded = catalogueLoadedAt, Date().timeIntervalSince(loaded) < 3600, !allSelectableModels.isEmpty { return }
+        isLoadingModels = true
+        defer { isLoadingModels = false }
         do {
             let fresh = try await client.models()
             setModels(fresh)
@@ -171,8 +200,9 @@ final class OpenRouterAccount {
     }
 
     private func setModels(_ list: [ModelInfo]) {
-        models = list.filter { $0.isChatModel && !restrictedModelIDs.contains($0.id) }
         modelsByID = Dictionary(list.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        models = list.filter { $0.isChatModel && !restrictedModelIDs.contains($0.id) }
+        allSelectableModels = list.filter(\.isSelectableModel)
     }
 
     /// The name to show for a chat's AI choice.

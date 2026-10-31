@@ -194,6 +194,7 @@ public enum SystemPrompt {
             }
         }
         steps.append("- For builds, tests, or installs that may run longer than a couple of minutes, use `computer_task` (`start`, then `status` or `stop` by `task_id`) so work continues in the background without timing out. Before risky changes on the computer, take a provider checkpoint when supported.")
+        steps.append("- When the person's message directly asks to wake the computer, check it, run a safe command, or keep the computer awake, their message already authorizes doing so — act immediately using the `mcp_` computer tools or `computer_task` rather than asking for another 'explicit yes' (if MAIPA-G itself needs a confirmation button for a risky command, the app prompts automatically).")
         if let hourly = computer.approximateHourlyCost {
             steps.append("- Approximate computer rate: $\(String(format: "%.3f", hourly))/hr (mention elapsed time and rough cost only after genuinely long computer runs).")
         }

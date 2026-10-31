@@ -48,8 +48,8 @@ def check_oct29_01_real_connector_logos() -> None:
     # Every single entry in IntegrationCatalog.all must specify a real bundled assetName on disk.
     catalog_src = (ROOT / "AgentCore/Sources/AgentCore/MCP/BuiltinIntegrationTools.swift").read_text()
     entries = re.findall(r'\.init\(id:\s*"([^"]+)"[^\n]+', catalog_src)
-    if len(entries) < 107:
-        failures.append(f"OCT29-01: expected at least 107 IntegrationCatalog entries, found {len(entries)}")
+    if len(entries) != 81:
+        failures.append(f"OCT29-01: expected exactly 81 working IntegrationCatalog entries, found {len(entries)}")
     for line_match in re.finditer(r'\.init\(id:\s*"([^"]+)"([^\n]+)', catalog_src):
         cid, rest = line_match.group(1), line_match.group(2)
         m_asset = re.search(r'assetName:\s*"([^"]+)"', rest)
@@ -88,8 +88,40 @@ def check_oct29_04_tool_bars_hug_their_content() -> None:
             failures.append(f"OCT29-04: {name} must leave the free width outside the bar, aligned to the leading edge")
 
 
+def check_oct31_build67_workstation_photos_sources_and_models() -> None:
+    """Build 67: Workstation Canvas+Files+Changes, Grok photo stack, Arena chips, Sources pill, 81 connectors, all-model search."""
+    connectors = (ROOT / "App/Sources/Screens/ConnectorsScreen.swift").read_text()
+    if 'case all = "All"' in connectors or "Open MCP Registry" in connectors:
+        failures.append("OCT31-01: ConnectorsScreen still shows the uncurated All / Open MCP Registry tab")
+
+    composer = (ROOT / "App/Sources/Screens/Composer.swift").read_text()
+    if "ArenaComposerAttachmentChip" not in composer:
+        failures.append("OCT31-02: Composer is missing ArenaComposerAttachmentChip")
+
+    media = (ROOT / "App/Sources/Screens/ChatMediaAndSources.swift").read_text()
+    for required in ("struct GrokPhotoStackView", "struct TurnSourcesPill", "struct TurnSourcesSheet", "enum MessageTimestampFormatter"):
+        if required not in media:
+            failures.append(f"OCT31-03: ChatMediaAndSources is missing {required}")
+
+    workstation = (ROOT / "App/Sources/Screens/WorkstationScreen.swift").read_text()
+    for required in ('case canvas = "Canvas"', 'case files = "Files"', 'case changes = "Changes"', "CanvasDotGrid", "WorkstationCanvasCard"):
+        if required not in workstation:
+            failures.append(f"OCT31-04: WorkstationScreen is missing {required}")
+
+    pickers = (ROOT / "App/Sources/Screens/Pickers.swift").read_text()
+    if "guard !model.isRouter else { return false }" in pickers:
+        failures.append("OCT31-05: ModelPicker still hides openrouter/* models from search")
+    if "allSelectableModels" not in pickers:
+        failures.append("OCT31-05: ModelPicker is not searching allSelectableModels")
+
+    chat = (ROOT / "App/Sources/Screens/ChatScreen.swift").read_text()
+    if "jumpToBottom(proxy)" not in chat or "BottomScrollTrackingModifier" not in chat:
+        failures.append("OCT31-06: ChatScreen is missing reliable jumpToBottom scroll wiring")
+
+
 check_oct29_01_real_connector_logos()
 check_oct29_04_tool_bars_hug_their_content()
+check_oct31_build67_workstation_photos_sources_and_models()
 if failures:
     raise SystemExit("\n".join(failures))
-print("29 October UI regression checks passed (OCT29-01, OCT29-04)")
+print("UI regression checks passed (OCT29-01, OCT29-04, OCT31-01..06)")

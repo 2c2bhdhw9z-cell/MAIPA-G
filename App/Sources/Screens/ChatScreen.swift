@@ -1,7 +1,7 @@
 import AgentCore
 import SwiftUI
 
-/// An open chat: the conversation, and the message box at the bottom.
+/// An open chat: the conversation, Workstation access, and the message box at the bottom.
 struct ChatScreen: View {
     @Environment(AppModel.self) private var app
     @Environment(\.theme) private var theme
@@ -15,82 +15,223 @@ struct ChatScreen: View {
     @State private var editedMessageText = ""
     @State private var showingDiff = false
 
-    private let bottomID = "bottom"
+    private let bottomID = "chat-bottom-anchor"
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 let messages = session.chat.messages
-                Group {
-                    if messages.count <= 80 {
-                        VStack(alignment: .leading, spacing: 22) {
-                            messageRows(messages)
-                            Color.clear.frame(height: 1).id(bottomID)
-                        }
-                    } else {
-                        LazyVStack(alignment: .leading, spacing: 22) {
-                            messageRows(messages)
-                            Color.clear.frame(height: 1).id(bottomID)
-                        }
-                    }
+                LazyVStack(alignment: .leading, spacing: 20) {
+                    messageRows(messages)
+                    Color.clear
+                        .frame(height: 10)
+                        .id(bottomID)
                 }
                 .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.top, 10)
+                .padding(.bottom, 8)
                 .animation(theme.messagesSlideIn ? .snappy : nil, value: session.chat.messages.count)
             }
             .scrollDismissesKeyboard(.interactively)
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 12).onChanged { value in
-                    // Scrolling up to read stops the chat jumping to the newest words.
-                    if value.translation.height > 16 { followsBottom = false }
-                }
-            )
+            .modifier(BottomScrollTrackingModifier(followsBottom: $followsBottom))
             .onAppear {
                 followsBottom = true
                 scrollToBottomWithoutAnimation(proxy)
-                DispatchQueue.main.async {
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 90_000_000)
                     if followsBottom { scrollToBottomWithoutAnimation(proxy) }
                 }
             }
             .onChange(of: contentSize) { _, _ in
                 if followsBottom { scrollToBottomWithoutAnimation(proxy) }
             }
-            .overlay(alignment: .bottomTrailing) {
-                if !followsBottom {
+            .safeAreaInset(edge: .top, spacing: 0) {
+                topBar
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                bottomInset(proxy: proxy)
+            }
+        }
+        .background(Theme.background.ignoresSafeArea())
+        .toolbar(.hidden, for: .navigationBar)
+        .alert("Checks did not pass", isPresented: Binding(get: { session.mergeWarning != nil }, set: { if !$0 { session.cancelMergeWarning() } })) {
+            Button("Add it anyway", role: .destructive) { Task { await session.addLastSave(force: true) } }
+            Button("Cancel", role: .cancel) { session.cancelMergeWarning() }
+        } message: { Text(session.mergeWarning ?? "") }
+        .sheet(isPresented: $showingDiff) { ChangesDiffScreen(session: session) }
+        .alert("Edit and resend", isPresented: Binding(get: { editingMessageID != nil }, set: { if !$0 { editingMessageID = nil } })) {
+            TextField("Message", text: $editedMessageText, axis: .vertical)
+            Button("Resend") {
+                guard let id = editingMessageID else { return }
+                editingMessageID = nil
+                session.editAndResend(id, text: editedMessageText)
+            }
+            Button("Cancel", role: .cancel) { editingMessageID = nil }
+        }
+        .alert("Rename chat", isPresented: $renaming) {
+            TextField("Name", text: $newTitle)
+            Button("Save") { session.rename(newTitle) }
+            Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    // MARK: - Lowered Custom Top Bar (Crisp in Light & Dark Mode)
+
+    private var topBar: some View {
+        HStack(spacing: 10) {
+            MenuButton()
+
+            Spacer(minLength: 4)
+
+            Button {
+                newTitle = session.chat.title
+                renaming = true
+            } label: {
+                VStack(spacing: 1) {
+                    Text(session.chat.title.isEmpty ? "New chat" : session.chat.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    if session.isRunning {
+                        Text("Working…")
+                            .font(.caption2)
+                            .foregroundStyle(Theme.secondaryText)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .frame(maxWidth: 220)
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Rename this chat")
+
+            Spacer(minLength: 4)
+
+            HStack(spacing: 12) {
+                if let cost = session.chat.totalUsage.cost {
+                    Text(cost.dollars)
+                        .font(.caption.weight(.medium).monospacedDigit())
+                        .foregroundStyle(Theme.secondaryText)
+                }
+
+                Button {
+                    app.sheet = .workstation(.chat(session.id), hasPendingSave ? .changes : .canvas)
+                } label: {
+                    Image(systemName: "square.on.square.dashed")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(theme.accent)
+                        .frame(width: 28, height: 28)
+                        .overlay(alignment: .topTrailing) {
+                            if hasPendingSave {
+                                Circle()
+                                    .fill(theme.accent)
+                                    .frame(width: 7, height: 7)
+                                    .offset(x: 2, y: 1)
+                            }
+                        }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Workstation")
+
+                Button {
+                    app.newChat()
+                } label: {
+                    Image(systemName: "square.and.pencil")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(theme.accent)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("New chat")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .glassPanel(cornerRadius: 20, interactive: true)
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 6)
+        .padding(.bottom, 4)
+        .background(
+            LinearGradient(
+                colors: [Theme.background, Theme.background.opacity(0.86), Theme.background.opacity(0)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+        )
+    }
+
+    private var hasPendingSave: Bool {
+        guard let receipt = session.chat.saveReceipts?.last else { return false }
+        return receipt.resolution == nil && receipt.undoneAt == nil
+    }
+
+    // MARK: - Bottom Inset (`↓` Jump Button + Solid Save Banner + Composer)
+
+    private func bottomInset(proxy: ScrollViewProxy) -> some View {
+        VStack(spacing: 8) {
+            if !followsBottom {
+                HStack {
+                    Spacer()
                     Button {
-                        followsBottom = true
-                        withAnimation(.snappy) { proxy.scrollTo(bottomID, anchor: .bottom) }
+                        jumpToBottom(proxy)
                     } label: {
                         Image(systemName: "arrow.down")
                             .font(.subheadline.weight(.bold))
-                            .frame(width: 38, height: 38)
-                            .glassPanel(cornerRadius: 19, interactive: true)
+                            .foregroundStyle(.primary)
+                            .frame(width: 40, height: 40)
+                            .glassPanel(cornerRadius: 20, interactive: true)
+                            .shadow(color: .black.opacity(0.16), radius: 8, y: 3)
                     }
                     .buttonStyle(.plain)
-                    .padding(16)
+                    .padding(.trailing, 16)
                     .accessibilityLabel("Jump to the newest")
                 }
+                .transition(.scale.combined(with: .opacity))
             }
-            .safeAreaInset(edge: .bottom) {
-                VStack(spacing: 4) {
-                    if let receipt = session.chat.saveReceipts?.last {
-                        HStack(spacing: 10) {
-                            if receipt.pullRequest != nil, receipt.resolution == nil {
-                                Button("Add it") { Task { await session.addLastSave() } }.buttonStyle(.borderedProminent)
-                                Button("Throw away", role: .destructive) { Task { await session.throwAwayLastSave() } }.buttonStyle(.bordered)
-                            }
-                            if receipt.undoneAt == nil, receipt.resolution == nil {
-                                Button("Undo") { Task { await session.undoLastSave() } }.buttonStyle(.bordered)
-                            }
-                            if let status = session.mergeCheckStatus {
-                                Text(status).font(.caption).foregroundStyle(status == "Checks passed" || status == "No automatic checks" ? .green : .orange)
-                            }
-                            Spacer()
+
+            VStack(spacing: 8) {
+                if let receipt = session.chat.saveReceipts?.last,
+                   (receipt.pullRequest != nil && receipt.resolution == nil) || (receipt.undoneAt == nil && receipt.resolution == nil) {
+                    HStack(spacing: 8) {
+                        if receipt.pullRequest != nil, receipt.resolution == nil {
+                            Button("Add it") { Task { await session.addLastSave() } }
+                                .buttonStyle(.borderedProminent)
+                                .buttonBorderShape(.capsule)
+                            Button("Throw away", role: .destructive) { Task { await session.throwAwayLastSave() } }
+                                .buttonStyle(.bordered)
+                                .buttonBorderShape(.capsule)
                         }
-                        .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 16)
+                        if receipt.undoneAt == nil, receipt.resolution == nil {
+                            Button("Undo") { Task { await session.undoLastSave() } }
+                                .buttonStyle(.bordered)
+                                .buttonBorderShape(.capsule)
+                        }
+                        if let status = session.mergeCheckStatus {
+                            Text(status)
+                                .font(.caption)
+                                .foregroundStyle(status == "Checks passed" || status == "No automatic checks" ? .green : .orange)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 4)
+                        Button {
+                            app.sheet = .workstation(.chat(session.id), .changes)
+                        } label: {
+                            Label("Diff", systemImage: "doc.text.magnifyingglass")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(theme.accent)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    Composer(
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Theme.stroke))
+                    .padding(.horizontal, 12)
+                }
+
+                Composer(
                     text: $session.draft,
                     attachments: $session.draftAttachments,
                     webEnabled: $session.webEnabled,
@@ -113,6 +254,7 @@ struct ChatScreen: View {
                         followsBottom = true
                         session.send(text, attachments: attachments)
                         Haptics.tap()
+                        jumpToBottom(proxy)
                     },
                     onStop: { session.stop() },
                     onPickModel: { app.sheet = .models(.chat(session.id)) },
@@ -125,81 +267,36 @@ struct ChatScreen: View {
                     onPicture: { app.sheet = .pictureGenerator(.chat(session.id)) },
                     onPreview: { if let repo = session.chat.repo { app.sheet = .webPreview(repo) } },
                     onFiles: { if let repo = session.chat.repo { app.sheet = .files(repo, .chat(session.id)) } },
+                    onWorkstation: { app.sheet = .workstation(.chat(session.id)) },
                     canCompact: session.canCompact,
                     onCompact: { session.compact() }
                 )
                 .padding(.horizontal, 12)
                 .padding(.bottom, 6)
-                .padding(.top, 4)
-                .background(alignment: .bottom) {
-                    LinearGradient(colors: [Theme.background.opacity(0), Theme.background], startPoint: .top, endPoint: .center)
-                        .ignoresSafeArea()
-                }
-                }
             }
-        }
-        .background(Theme.background.ignoresSafeArea())
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) { MenuButton() }
-            ToolbarItem(placement: .principal) {
-                Button {
-                    newTitle = session.chat.title
-                    renaming = true
-                } label: {
-                    VStack(spacing: 0) {
-                        Text(session.chat.title.isEmpty ? "New chat" : session.chat.title)
-                            .font(.subheadline.weight(.semibold))
-                            .lineLimit(1)
-                        if session.isRunning {
-                            Text("Working…").font(.caption2).foregroundStyle(Theme.secondaryText)
-                        }
-                    }
-                    .frame(maxWidth: 240)
-                }
-                .buttonStyle(.plain)
-                .accessibilityHint("Rename this chat")
+            .padding(.top, 6)
+            .background {
+                LinearGradient(
+                    colors: [Theme.background.opacity(0), Theme.background.opacity(0.95), Theme.background],
+                    startPoint: .top,
+                    endPoint: UnitPoint(x: 0.5, y: 0.22)
+                )
+                .ignoresSafeArea()
             }
-            ToolbarItem(placement: .topBarTrailing) {
-                HStack(spacing: 12) {
-                    if let cost = session.chat.totalUsage.cost { Text(cost.dollars).font(.caption.monospacedDigit()).foregroundStyle(Theme.secondaryText) }
-                    if let repo = session.chat.repo {
-                        Button { app.sheet = .files(repo, .chat(session.id)) } label: { Image(systemName: "folder") }
-                            .accessibilityLabel("Files")
-                    }
-                    if session.chat.repo != nil {
-                        Button { showingDiff = true } label: { Image(systemName: "doc.text.magnifyingglass") }
-                            .accessibilityLabel("View changes")
-                    }
-                    Button { app.newChat() } label: { Image(systemName: "square.and.pencil") }
-                        .accessibilityLabel("New chat")
-                }
-            }
-        }
-        .alert("Checks did not pass", isPresented: Binding(get: { session.mergeWarning != nil }, set: { if !$0 { session.cancelMergeWarning() } })) {
-            Button("Add it anyway", role: .destructive) { Task { await session.addLastSave(force: true) } }
-            Button("Cancel", role: .cancel) { session.cancelMergeWarning() }
-        } message: { Text(session.mergeWarning ?? "") }
-        .sheet(isPresented: $showingDiff) { ChangesDiffScreen(session: session) }
-        .alert("Edit and resend", isPresented: Binding(get: { editingMessageID != nil }, set: { if !$0 { editingMessageID = nil } })) {
-            TextField("Message", text: $editedMessageText, axis: .vertical)
-            Button("Resend") {
-                guard let id = editingMessageID else { return }
-                editingMessageID = nil
-                session.editAndResend(id, text: editedMessageText)
-            }
-            Button("Cancel", role: .cancel) { editingMessageID = nil }
-        }
-        .alert("Rename chat", isPresented: $renaming) {
-            TextField("Name", text: $newTitle)
-            Button("Save") { session.rename(newTitle) }
-            Button("Cancel", role: .cancel) {}
         }
     }
 
     @ViewBuilder
     private func messageRows(_ messages: [ChatMessage]) -> some View {
         ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
+            if shouldShowTimestampHeader(at: index, in: messages) {
+                Text(MessageTimestampFormatter.sectionHeader(message.createdAt))
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(Theme.secondaryText)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 2)
+            }
+
             MessageRow(
                 message: message,
                 isLatest: index == messages.count - 1,
@@ -209,6 +306,33 @@ struct ChatScreen: View {
             .equatable()
             .id(message.id)
             .transition(theme.messagesSlideIn ? AnyTransition.move(edge: .bottom).combined(with: .opacity) : AnyTransition.identity)
+        }
+    }
+
+    private func shouldShowTimestampHeader(at index: Int, in messages: [ChatMessage]) -> Bool {
+        guard messages.indices.contains(index) else { return false }
+        if index == 0 { return true }
+        let prev = messages[index - 1].createdAt
+        let curr = messages[index].createdAt
+        return curr.timeIntervalSince(prev) >= 20 * 60
+    }
+
+    private func jumpToBottom(_ proxy: ScrollViewProxy) {
+        Haptics.selection()
+        followsBottom = true
+        withAnimation(.snappy(duration: 0.25)) {
+            if let lastID = session.chat.messages.last?.id {
+                proxy.scrollTo(lastID, anchor: .bottom)
+            }
+            proxy.scrollTo(bottomID, anchor: .bottom)
+        }
+        // Second pass after LazyVStack settles offscreen row heights so one tap always lands flush at bottom.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 130_000_000)
+            guard followsBottom else { return }
+            withAnimation(.snappy(duration: 0.16)) {
+                proxy.scrollTo(bottomID, anchor: .bottom)
+            }
         }
     }
 
@@ -236,13 +360,11 @@ struct ChatScreen: View {
 
     private func modelName(_ id: String) -> String {
         if let name = app.openRouter.modelsByID[id]?.shortName { return name }
-        // Not in the list (yet): "anthropic/claude-sonnet-5.5:free" reads as "Claude Sonnet 5.5".
         let base = id.split(separator: "/").last.map(String.init) ?? id
         let plain = base.split(separator: ":").first.map(String.init) ?? base
         let shouted: Set<String> = ["gpt", "glm", "ai", "llm", "qwq", "oss", "vl"]
         return plain.split(separator: "-").map { word in
             if shouted.contains(word.lowercased()) { return word.uppercased() }
-            // Sizes like "70b", "1.5b" and "8x7b" read as "70B", "1.5B" and "8x7B".
             if word.count > 1, let first = word.first, first.isNumber, let unit = word.last, "bkm".contains(unit),
                word.dropLast().allSatisfy({ $0.isNumber || $0 == "." || $0 == "x" }) {
                 return String(word.dropLast()) + String(unit).uppercased()
@@ -273,5 +395,31 @@ struct ChatScreen: View {
             openURL: { openURL($0) },
             toggleStar: { session.toggleStar($0) }
         )
+    }
+}
+
+private struct BottomScrollTrackingModifier: ViewModifier {
+    @Binding var followsBottom: Bool
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content
+                .onScrollGeometryChange(for: Bool.self) { geo in
+                    let visibleBottom = geo.contentOffset.y + geo.containerSize.height - geo.contentInsets.bottom
+                    let remaining = geo.contentSize.height - visibleBottom
+                    return remaining <= 80
+                } action: { _, nearBottom in
+                    if nearBottom != followsBottom {
+                        followsBottom = nearBottom
+                    }
+                }
+        } else {
+            content
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 12).onChanged { value in
+                        if value.translation.height > 16 { followsBottom = false }
+                    }
+                )
+        }
     }
 }

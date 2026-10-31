@@ -39,6 +39,7 @@ enum AppSheet: Identifiable, Hashable {
     case pictureGenerator(ComposerTarget)
     case picture(UUID)
     case webPreview(ChatRepo)
+    case workstation(ComposerTarget, WorkstationScreen.Tab = .canvas)
 
     var id: String {
         switch self {
@@ -71,6 +72,7 @@ enum AppSheet: Identifiable, Hashable {
         case .pictureGenerator(let target): return "picture-generator-\(target)"
         case .picture(let id): return "picture-\(id.uuidString)"
         case .webPreview(let repo): return "preview-\(repo.ref.fullName)-\(repo.branch)"
+        case .workstation(let target, let tab): return "workstation-\(target)-\(tab.rawValue)"
         }
     }
 }

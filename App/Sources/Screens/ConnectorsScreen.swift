@@ -2,20 +2,19 @@ import AgentCore
 import SwiftUI
 import UIKit
 
-/// Connectors screen covering 100+ curated integrations (Apple iPhone apps, official hosted MCP
-/// servers, zero-key public research sources, Keychain API-key services, Custom Webhooks, Custom
-/// MCP, and Linux-computer stdio packages) plus the live open MCP Registry in "All".
+/// Connectors screen covering the 81 reliable mobile-ready integrations (Apple iPhone apps,
+/// official hosted MCP servers, zero-key public research sources, permanent API-key services,
+/// Custom Webhooks, Custom MCP, and verified Linux-computer stdio packages).
 struct ConnectorsScreen: View {
     enum Tab: String, CaseIterable, Identifiable {
         case mine = "My apps"
         case discover = "Discover"
-        case all = "All"
         var id: String { rawValue }
     }
 
     enum DiscoverFilter: String, CaseIterable, Identifiable {
         case popular = "Popular"
-        case allCurated = "All 107"
+        case allCurated = "All 81"
         case apple = "Apple"
         case devCloud = "Dev & Cloud"
         case dataStorage = "Data & Files"
@@ -55,32 +54,31 @@ struct ConnectorsScreen: View {
                 switch tab {
                 case .mine: myApps
                 case .discover: discoverApps
-                case .all: allRegistry
                 }
             }
             .listStyle(.plain)
             .scrollDismissesKeyboard(.interactively)
             .scrollContentBackground(.hidden)
             .background(Theme.background)
-            .searchable(text: $connectors.query, prompt: "Search 100+ apps & integrations")
-            .onSubmit(of: .search) {
-                if tab == .all {
-                    Task { await connectors.search() }
-                }
-            }
-            .refreshable { await connectors.search() }
+            .searchable(text: $connectors.query, prompt: "Search 81 working apps & integrations")
             .navigationTitle("Connectors")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    .accessibilityLabel("Close")
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Button { customSheetMode = .mcp } label: { Image(systemName: "plus") }
                         .accessibilityLabel("Add a custom MCP server or webhook")
                 }
             }
             .sheet(item: $customSheetMode) { mode in CustomConnectorSheet(initialMode: mode) }
-            .task { if connectors.catalog.isEmpty { await connectors.search() } }
         }
+        .presentationDragIndicator(.visible)
     }
 
     @ViewBuilder
@@ -159,37 +157,6 @@ struct ConnectorsScreen: View {
         return "\(filter.rawValue) (\(filteredDiscover.count))"
     }
 
-    @ViewBuilder
-    private var allRegistry: some View {
-        Section {
-            ForEach(filteredCatalog) { server in
-                Button { connect(server) } label: {
-                    ConnectorCard(
-                        service: IntegrationService.matching(server.displayName + " " + server.name),
-                        name: server.displayName,
-                        detail: plainDescription(server),
-                        trailing: connectedServer(server) ? .connected : .connect,
-                        iconURL: server.preferredIconURL
-                    )
-                }
-                .buttonStyle(.plain)
-                .disabled(connecting != nil)
-                .connectorRow()
-            }
-            if app.connectors.isLoading {
-                HStack { ProgressView(); Text("Finding integrations…") }.connectorRow()
-            }
-            if app.connectors.nextCursor != nil {
-                Button("Load more") { Task { await app.connectors.search(reset: false) } }
-                    .connectorRow()
-            }
-        } header: {
-            Text("Open MCP Registry")
-        } footer: {
-            Text("Every result here comes live from the official MCP Registry. Remote HTTPS servers run directly on your iPhone; package servers run via your connected Linux computer and Autonomous jobs.")
-        }
-    }
-
     private var filteredDiscover: [IntegrationService] {
         let query = app.connectors.query.trimmingCharacters(in: .whitespacesAndNewlines)
         if !query.isEmpty {
@@ -209,28 +176,6 @@ struct ConnectorsScreen: View {
         case .chatMeetings: return IntegrationService.byCategory(.chatMeetings)
         case .searchMedia: return IntegrationService.byCategory(.searchMedia)
         case .businessAuto: return IntegrationService.byCategory(.businessAuto)
-        }
-    }
-
-    private var filteredCatalog: [RegistryServer] {
-        let catalog = app.connectors.catalog
-        let query = app.connectors.query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else {
-            var familiar: [RegistryServer] = []
-            var others: [RegistryServer] = []
-            for server in catalog {
-                if IntegrationService.popular.contains(where: { $0.matches(server.displayName + " " + server.name) }) {
-                    familiar.append(server)
-                } else {
-                    others.append(server)
-                }
-            }
-            return familiar + others
-        }
-        return catalog.filter {
-            Self.text($0.displayName, matches: query)
-                || Self.text($0.description, matches: query)
-                || Self.text($0.name, matches: query)
         }
     }
 
