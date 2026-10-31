@@ -115,7 +115,7 @@ private struct Runner {
     let maxSteps: Int
     let spendLimit: Double?
     let attachmentData: [UUID: Data]
-    let fallbackModels: [String]
+    var fallbackModels: [String]
     let requiresInitialSpendApproval: Bool
     let environment: AgentEnvironment
     let continuation: AsyncStream<AgentEvent>.Continuation
@@ -305,8 +305,8 @@ private struct Runner {
                     route.contextBudget = max(8_000, route.contextBudget / 2)
                     continue
                 case .simplifyRequest:
-                    if route.effort == "xhigh" || route.effort == "max" {
-                        route.effort = "high"
+                    if route.effort == .xhigh || route.effort == .max {
+                        route.effort = .high
                     } else if route.effort != nil {
                         route.effort = nil
                     }

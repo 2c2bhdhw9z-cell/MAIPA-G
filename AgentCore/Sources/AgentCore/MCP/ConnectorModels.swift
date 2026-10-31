@@ -36,7 +36,7 @@ public struct ConnectorConfiguration: Codable, Sendable, Hashable, Identifiable 
 
     public init(id: UUID = UUID(), serverID: String, displayName: String, package: RegistryServer.Package, launchValues: [String: String] = [:], secretNames: Set<String> = []) {
         self.id = id; self.serverID = serverID; self.displayName = displayName; kind = .stdio
-        endpoint = nil; self.package = package; self.launchValues = launchValues; secretNames = secretNames; scopes = []; disabledTools = []
+        endpoint = nil; self.package = package; self.launchValues = launchValues; self.secretNames = secretNames; scopes = []; disabledTools = []
         authHeaderName = nil; webhookMethod = nil; createdAt = Date()
     }
 

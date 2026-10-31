@@ -668,7 +668,7 @@ private struct ExaSearchTool: BuiltinDescribedTool {
         guard let secret, !secret.isEmpty else { throw ToolInputError("Add your Exa API key in Connectors → Exa.") }
         let query = try arguments.requiredString("query")
         let count = min(max(arguments.optionalInt("num_results") ?? 6, 1), 10)
-        let body: JSONValue = ["query": .string(query), "numResults": .int(count), "contents": ["text": true]]
+        let body: JSONValue = ["query": .string(query), "numResults": .number(Double(count)), "contents": ["text": true]]
         var req = try HTTPRequest.json("POST", URL(string: "https://api.exa.ai/search")!, body: body, headers: ["x-api-key": secret])
         req.followsRedirects = false
         let res = try await transport.send(req)
@@ -754,7 +754,7 @@ private struct ScopedRESTRequestTool: BuiltinDescribedTool {
                 "type": "object",
                 "properties": [
                     "method": ["type": "string", "description": "HTTP method: GET (default), POST, PUT, PATCH, DELETE."],
-                    "path": ["type": "string", "description": "Relative endpoint path appended to \(baseHint) (for example \"/me\" or \"/tasks\")."],
+                    "path": ["type": "string", "description": .string("Relative endpoint path appended to \(baseHint) (for example \"/me\" or \"/tasks\").")],
                     "query": ["type": "object", "description": "Optional query parameters as string key/value pairs."],
                     "body": ["type": "object", "description": "Optional JSON request body for POST/PUT/PATCH."]
                 ],
