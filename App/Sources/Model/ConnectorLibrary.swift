@@ -477,6 +477,20 @@ final class ConnectorLibrary {
         await restore(configuration)
     }
 
+    /// Automatically restores any remote connector (such as Sprites) that dropped to `.failed` or `.disconnected`
+    /// while holding a valid Keychain credential or refresh token, so the user never has to manually reconnect.
+    func reconnectIfNeeded() async {
+        for configuration in connected where configuration.kind == .remote {
+            let state = states[configuration.id]
+            let credential = Keychain.value(ConnectorCredential.self, account: credentialKey(configuration.id))
+            if (state == .failed || state == .disconnected || state == nil), credential != nil {
+                await restore(configuration)
+            } else if state == .connected, let credential, credential.needsRefresh(), credential.refreshToken != nil {
+                await restore(configuration)
+            }
+        }
+    }
+
     func disconnect(_ configuration: ConnectorConfiguration) async {
         await sessions[configuration.id]?.disconnect(); sessions[configuration.id] = nil
         Keychain.remove(account: credentialKey(configuration.id))

@@ -57,7 +57,7 @@ public struct ReadAttachmentTool: AgentTool {
                 "properties": [
                     "name": ["type": "string", "description": "Attachment file name or ID."],
                     "offset": ["type": "integer", "description": "0-based character offset to start reading from (default 0)."],
-                    "limit": ["type": "integer", "description": "Maximum characters to return (default 120000, max 200000)."],
+                    "limit": ["type": "integer", "description": "Maximum characters to return (default 200000, max 250000)."],
                 ],
                 "required": ["name"],
             ]
@@ -73,7 +73,7 @@ public struct ReadAttachmentTool: AgentTool {
         let fullText = String(decoding: data, as: UTF8.self)
         let total = fullText.count
         let startOffset = max(0, arguments.optionalInt("offset") ?? 0)
-        let maxChars = min(200_000, max(1, arguments.optionalInt("limit") ?? 120_000))
+        let maxChars = min(250_000, max(1, arguments.optionalInt("limit") ?? 200_000))
         guard startOffset <= total else {
             return ToolOutput(forModel: "\(attachment.name) (\(data.count) bytes, \(total) characters): offset \(startOffset) is at or past the end.", summary: "Read attachment \(attachment.name)", detail: "")
         }

@@ -203,13 +203,17 @@ public struct Usage: Codable, Sendable, Hashable {
     }
 
     init(json: JSONValue) {
+        let cached = json["prompt_tokens_details"]?["cached_tokens"]?.intValue
+            ?? json["cache_read_input_tokens"]?.intValue
+        let cacheWrite = json["prompt_tokens_details"]?["cache_write_tokens"]?.intValue
+            ?? json["cache_creation_input_tokens"]?.intValue
         self.init(
-            promptTokens: json["prompt_tokens"]?.intValue ?? 0,
-            completionTokens: json["completion_tokens"]?.intValue ?? 0,
+            promptTokens: json["prompt_tokens"]?.intValue ?? json["input_tokens"]?.intValue ?? 0,
+            completionTokens: json["completion_tokens"]?.intValue ?? json["output_tokens"]?.intValue ?? 0,
             reasoningTokens: json["completion_tokens_details"]?["reasoning_tokens"]?.intValue,
-            cachedTokens: json["prompt_tokens_details"]?["cached_tokens"]?.intValue,
-            cacheWriteTokens: json["prompt_tokens_details"]?["cache_write_tokens"]?.intValue,
-            cost: json["cost"]?.doubleValue
+            cachedTokens: cached,
+            cacheWriteTokens: cacheWrite,
+            cost: json["cost"]?.doubleValue ?? json["total_cost"]?.doubleValue
         )
     }
 

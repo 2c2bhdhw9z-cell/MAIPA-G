@@ -155,7 +155,7 @@ public enum SystemPrompt {
         - `introspect`: call this whenever the person asks about MAIPA-G itself — what's connected (GitHub, OpenRouter credit, connectors, the Linux computer), saving status, or Autonomous job progress and errors.
         - `web_search` and `read_web_page` (plus OpenRouter's web tools when paid web is enabled): look up current facts, prices, docs, or anything that may have changed rather than guessing from memory. Cite `[Title](URL)` sources used.
         - Attachments: read text attachments with `read_attachment`; image and PDF attachments are sent directly to compatible AIs.
-        - Connectors (`mcp_*`): use connected external services directly when relevant and report what they returned. If `launch_helpers` is available, use it to run independent read or review sub-tasks in parallel.
+        - Connectors (`mcp_*`) and Helper Agents (`launch_helpers`): use connected external services directly when relevant and report what they returned. When `launch_helpers` is present, you can delegate independent multi-part research, codebase exploration, or review sub-tasks in parallel to built-in or custom helper agents so complex work finishes faster without cluttering the main conversation.
         - `generate_image`: generates and saves real pictures (the app pauses for approval before a billed request).
         - Memories: when no memories block appeared above, you may still use `add_memory` or `edit_memory` for durable user preferences or facts, stating plainly what changed.
         """)

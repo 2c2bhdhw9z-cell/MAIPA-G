@@ -1,5 +1,34 @@
 import Foundation
 
+/// Thread-safe inbox for live mid-run steering instructions sent while an agent turn is running.
+public actor SteeringInbox {
+    private var pendingMessages: [String] = []
+    private var yieldAfterStep = false
+
+    public init() {}
+
+    public func enqueue(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        pendingMessages.append(trimmed)
+    }
+
+    public func drain() -> [String] {
+        guard !pendingMessages.isEmpty else { return [] }
+        let items = pendingMessages
+        pendingMessages.removeAll()
+        return items
+    }
+
+    public func requestYieldAfterStep() {
+        yieldAfterStep = true
+    }
+
+    public func shouldYieldAfterStep() -> Bool {
+        yieldAfterStep
+    }
+}
+
 /// Everything one run of the AI needs.
 public struct AgentTurnInput: Sendable {
     /// The chat, ending with the assistant turn to work on: a new empty one after a user message,
@@ -23,8 +52,10 @@ public struct AgentTurnInput: Sendable {
     public var requiresInitialSpendApproval: Bool
     /// Fixed role and tool policy when this turn belongs to a named agent.
     public var agent: AgentDefinition?
+    /// Optional live steering inbox so the user can redirect a running turn between steps.
+    public var steering: SteeringInbox?
 
-    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 40, spendLimit: Double? = nil, attachmentData: [UUID: Data] = [:], serverTools: [ToolSpec] = [], fallbackModels: [String] = [], requiresInitialSpendApproval: Bool = false, agent: AgentDefinition? = nil) {
+    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 250, spendLimit: Double? = nil, attachmentData: [UUID: Data] = [:], serverTools: [ToolSpec] = [], fallbackModels: [String] = [], requiresInitialSpendApproval: Bool = false, agent: AgentDefinition? = nil, steering: SteeringInbox? = nil) {
         self.chat = chat
         self.route = route
         self.systemPrompt = systemPrompt
@@ -37,6 +68,7 @@ public struct AgentTurnInput: Sendable {
         self.fallbackModels = fallbackModels
         self.requiresInitialSpendApproval = requiresInitialSpendApproval
         self.agent = agent
+        self.steering = steering
     }
 }
 
@@ -68,14 +100,26 @@ public enum AgentEvent: Sendable {
 public struct AgentRun: Sendable {
     public let events: AsyncStream<AgentEvent>
     private let task: Task<Void, Never>
+    private let steering: SteeringInbox
 
-    init(events: AsyncStream<AgentEvent>, task: Task<Void, Never>) {
+    init(events: AsyncStream<AgentEvent>, task: Task<Void, Never>, steering: SteeringInbox) {
         self.events = events
         self.task = task
+        self.steering = steering
     }
 
     public func cancel() {
         task.cancel()
+    }
+
+    /// Injects a live mid-run steering note into the running turn at the next step boundary.
+    public func steer(_ message: String) async {
+        await steering.enqueue(message)
+    }
+
+    /// Gracefully finishes the current step/tools without killing an in-flight tool command, then ends the run so a chronological user message can continue immediately.
+    public func finishAfterCurrentStep() async {
+        await steering.requestYieldAfterStep()
     }
 }
 
@@ -85,16 +129,19 @@ public enum AgentLoop {
     public static func start(_ input: AgentTurnInput, environment: AgentEnvironment) -> AgentRun {
         // Every event carries the whole turn, so if the reader falls behind, dropping older ones
         // loses nothing.
+        let steering = input.steering ?? SteeringInbox()
+        var effectiveInput = input
+        effectiveInput.steering = steering
         let (events, continuation) = AsyncStream<AgentEvent>.makeStream(bufferingPolicy: .bufferingNewest(256))
         let task = Task {
-            var runner = Runner(input: input, environment: environment, continuation: continuation)
+            var runner = Runner(input: effectiveInput, environment: environment, continuation: continuation)
             await runner.run()
             continuation.finish()
         }
         continuation.onTermination = { reason in
             if case .cancelled = reason { task.cancel() }
         }
-        return AgentRun(events: events, task: task)
+        return AgentRun(events: events, task: task, steering: steering)
     }
 
     public static func run(_ input: AgentTurnInput, environment: AgentEnvironment) -> AsyncStream<AgentEvent> {
@@ -117,10 +164,14 @@ private struct Runner {
     let attachmentData: [UUID: Data]
     var fallbackModels: [String]
     let requiresInitialSpendApproval: Bool
+    let steering: SteeringInbox?
     let environment: AgentEnvironment
     let continuation: AsyncStream<AgentEvent>.Continuation
     var maxPayloadBytes = Transcript.defaultMaxPayloadBytes
     var switchedToFree = false
+    var autoContinuedBlankReply = false
+    var injectedSteeringNotes: [String] = []
+    var pendingBlankReplyNudge: String?
     var lastEmit = Date.distantPast
 
     init(input: AgentTurnInput, environment: AgentEnvironment, continuation: AsyncStream<AgentEvent>.Continuation) {
@@ -156,6 +207,7 @@ private struct Runner {
         attachmentData = input.attachmentData
         fallbackModels = input.fallbackModels.filter { $0 != input.route.model }
         requiresInitialSpendApproval = input.requiresInitialSpendApproval
+        steering = input.steering
         self.environment = environment
         self.continuation = continuation
     }
@@ -183,9 +235,32 @@ private struct Runner {
                     }
                     continue
                 }
-                if let last = turn.steps.last, last.toolCalls.isEmpty, last.finishedAt != nil {
+                if let incoming = await steering?.drain(), !incoming.isEmpty {
+                    injectedSteeringNotes.append(contentsOf: incoming)
+                    for note in incoming {
+                        let preview = note.count > 120 ? String(note.prefix(120)) + "…" : note
+                        turn.notices.append("Steered mid-run: \(preview)")
+                    }
+                    emit(milestone: false)
+                } else if newSteps > 0, await steering?.shouldYieldAfterStep() == true {
                     turn.status = .done
                     break
+                }
+                if let last = turn.steps.last, last.toolCalls.isEmpty, last.finishedAt != nil {
+                    // If the user sent a live mid-run steering note right as this step finished, continue immediately!
+                    if !injectedSteeringNotes.isEmpty {
+                        // Fall through to next step with `injectedSteeringNotes` appended.
+                    } else {
+                        let visibleText = last.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let hasGeneratedImages = !(last.generatedImages ?? []).isEmpty
+                        if visibleText.isEmpty && !hasGeneratedImages && !autoContinuedBlankReply && newSteps < maxSteps {
+                            autoContinuedBlankReply = true
+                            pendingBlankReplyNudge = "You completed the previous step without writing a visible reply to the user. Now write your clear plain-language answer based on the tool outputs and findings above."
+                        } else {
+                            turn.status = .done
+                            break
+                        }
+                    }
                 }
                 guard newSteps < maxSteps else {
                     turn.status = .stopped
@@ -241,14 +316,20 @@ private struct Runner {
 
     mutating func requestStep() async throws {
         var attempt = 0
+        let activeBlankNudge = pendingBlankReplyNudge
+        pendingBlankReplyNudge = nil
+        let activeSteeringNotes = injectedSteeringNotes
+        injectedSteeringNotes.removeAll()
         while true {
             attempt += 1
             chat.messages[chat.messages.count - 1].assistantTurn = turn
-            let (messages, trimmed) = Transcript.fit(
-                Transcript.messages(for: chat, systemPrompt: systemPrompt, attachmentData: attachmentData),
-                budget: route.contextBudget,
-                maxPayloadBytes: maxPayloadBytes
-            )
+            var rawMessages = Transcript.messages(for: chat, systemPrompt: systemPrompt, attachmentData: attachmentData)
+            for note in activeSteeringNotes {
+                rawMessages.append(.user("Live instruction from the user while you were working — follow this update immediately:\n\(note)"))
+            }
+            if let nudge = activeBlankNudge {
+                rawMessages.append(.user(nudge))
+            }
             let isExternalProvider = AIProviderModelID.decode(route.model) != nil
             var effectiveSpecs = specs
             if isExternalProvider {
@@ -260,6 +341,13 @@ private struct Runner {
                     effectiveSpecs.append(contentsOf: [ws.spec, fp.spec])
                 }
             }
+            let toolSchemaTokens = Transcript.estimatedToolTokens(effectiveSpecs)
+            let messageBudget = max(4_096, route.contextBudget - toolSchemaTokens)
+            let (messages, trimmed) = Transcript.fit(
+                rawMessages,
+                budget: messageBudget,
+                maxPayloadBytes: maxPayloadBytes
+            )
             let request = ChatCompletionRequest(
                 model: route.model,
                 // OpenRouter refuses the whole request (400) when this list, the chosen AI
@@ -285,6 +373,11 @@ private struct Runner {
                     accumulator.apply(chunk)
                     if let error = chunk.error { throw error }
                     let changed = turn.steps[index].text != accumulator.text || turn.steps[index].reasoning != accumulator.reasoning
+                    if !accumulator.reasoning.isEmpty,
+                       turn.steps[index].reasoningFinishedAt == nil,
+                       (!accumulator.text.isEmpty || !accumulator.toolCalls.isEmpty) {
+                        turn.steps[index].reasoningFinishedAt = Date()
+                    }
                     turn.steps[index].text = accumulator.text
                     turn.steps[index].reasoning = accumulator.reasoning
                     if let model = accumulator.model { turn.steps[index].model = model }
@@ -330,13 +423,21 @@ private struct Runner {
                     maxPayloadBytes = max(1_500_000, maxPayloadBytes / 2)
                     continue
                 case .simplifyRequest:
-                    if route.effort == .xhigh || route.effort == .max {
-                        route.effort = .high
-                    } else if route.effort != nil {
-                        route.effort = nil
+                    if route.automaticCaching || !fallbackModels.isEmpty {
+                        route.automaticCaching = false
+                        fallbackModels = []
+                    } else {
+                        let msg = (error as? OpenRouterAPIError)?.message.lowercased() ?? ""
+                        if msg.contains("effort") || msg.contains("reasoning") {
+                            if route.effort == .xhigh || route.effort == .max {
+                                route.effort = .high
+                            } else {
+                                route.effort = nil
+                            }
+                        } else {
+                            throw error
+                        }
                     }
-                    route.automaticCaching = false
-                    fallbackModels = []
                     continue
                 case .giveUp:
                     throw error

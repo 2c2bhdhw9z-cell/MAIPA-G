@@ -41,9 +41,12 @@ public struct ModelInfo: Codable, Sendable, Hashable, Identifiable {
     public var name: String
     public var summary: String?
     public var contextLength: Int?
+    public var maxCompletionTokens: Int?
     /// US dollars per token. nil when the price is variable (the routers) or unknown.
     public var promptPrice: Double?
     public var completionPrice: Double?
+    public var cacheReadPrice: Double?
+    public var cacheWritePrice: Double?
     public var inputModalities: [String]
     public var outputModalities: [String]
     public var supportedParameters: Set<String>
@@ -55,8 +58,11 @@ public struct ModelInfo: Codable, Sendable, Hashable, Identifiable {
         name: String,
         summary: String? = nil,
         contextLength: Int? = nil,
+        maxCompletionTokens: Int? = nil,
         promptPrice: Double? = nil,
         completionPrice: Double? = nil,
+        cacheReadPrice: Double? = nil,
+        cacheWritePrice: Double? = nil,
         inputModalities: [String] = ["text"],
         outputModalities: [String] = ["text"],
         supportedParameters: Set<String> = [],
@@ -67,8 +73,11 @@ public struct ModelInfo: Codable, Sendable, Hashable, Identifiable {
         self.name = name
         self.summary = summary
         self.contextLength = contextLength
+        self.maxCompletionTokens = maxCompletionTokens
         self.promptPrice = promptPrice
         self.completionPrice = completionPrice
+        self.cacheReadPrice = cacheReadPrice
+        self.cacheWritePrice = cacheWritePrice
         self.inputModalities = inputModalities
         self.outputModalities = outputModalities
         self.supportedParameters = supportedParameters
@@ -113,8 +122,21 @@ public struct ModelInfo: Codable, Sendable, Hashable, Identifiable {
         // three levels every reasoning model understands are offered, and never "off", which a
         // model that must think would reject.
         if isRouter, supportedParameters.contains("reasoning") { return [.low, .medium, .high] }
-        if supportedParameters.contains("reasoning") || supportedParameters.contains("reasoning_effort") {
-            return [.low, .medium, .high]
+        if supportedParameters.contains("reasoning")
+            || supportedParameters.contains("reasoning_effort")
+            || supportedParameters.contains("include_reasoning") {
+            let lowID = id.lowercased()
+            let mandatory = lowID.contains("claude-opus-5-5")
+                || lowID.contains("claude-opus-5.5")
+                || lowID.contains("claude-fable")
+                || lowID.contains("claude-mythos")
+                || lowID.hasSuffix("-thinking")
+                || lowID.contains("deepseek-r1")
+                || lowID.contains("/o1") || lowID.contains("/o3") || lowID.contains("/o4")
+                || lowID.contains("qwq")
+            return mandatory
+                ? [.low, .medium, .high, .xhigh, .max]
+                : [.none, .low, .medium, .high, .xhigh, .max]
         }
         return []
     }
@@ -122,13 +144,25 @@ public struct ModelInfo: Codable, Sendable, Hashable, Identifiable {
     /// Whether this model can be used for a chat at all: it must write text, and the batch-only
     /// copies OpenRouter lists cannot answer a live chat.
     public var isChatModel: Bool {
-        outputModalities.contains("text") && !id.hasSuffix(":batch")
+        outputModalities.contains("text") && !id.hasSuffix(":batch") && !Self.isNonChatUtilityModel(id: id)
     }
 
-    /// Every non-batch OpenRouter model that can be searched and selected in the AI picker
-    /// (including openrouter/* stealth/router models and multimodal/image-generating models).
+    /// Every non-batch chat or image-generating model that can be searched and selected in the AI picker
+    /// (excluding pure TTS/STT/audio/video/embedding utility endpoints).
     public var isSelectableModel: Bool {
         !id.hasSuffix(":batch")
+            && (outputModalities.contains("text") || outputModalities.contains("image"))
+            && !Self.isNonChatUtilityModel(id: id)
+    }
+
+    public static func isNonChatUtilityModel(id: String) -> Bool {
+        let low = AIProviderModelID.rawModelID(id).lowercased()
+        let bannedTokens = [
+            "embedding", "text-embedding", "bge-", "rerank", "moderation", "omni-moderation",
+            "whisper", "tts-", "-tts", "_tts", "/tts", "stt-", "-stt", "_stt", "/stt", "-transcribe", "transcribe-",
+            "grok-voice", "realtime-audio", "sora", "veo-", "kling-", "seedance", "wan2", "hailuo", "runway-"
+        ]
+        return bannedTokens.contains { low.contains($0) }
     }
 }
 
@@ -186,8 +220,11 @@ extension ModelInfo {
             name: entry["name"]?.stringValue ?? id,
             summary: entry["description"]?.stringValue,
             contextLength: entry["context_length"]?.intValue ?? entry["top_provider"]?["context_length"]?.intValue,
+            maxCompletionTokens: entry["top_provider"]?["max_completion_tokens"]?.intValue ?? entry["max_completion_tokens"]?.intValue,
             promptPrice: price("prompt"),
             completionPrice: price("completion"),
+            cacheReadPrice: price("input_cache_read"),
+            cacheWritePrice: price("input_cache_write"),
             inputModalities: parsedInputs.isEmpty ? fallbackInputs : parsedInputs,
             outputModalities: parsedOutputs.isEmpty ? fallbackOutputs : parsedOutputs,
             supportedParameters: Set(entry["supported_parameters"]?.arrayValue?.compactMap(\.stringValue) ?? []),

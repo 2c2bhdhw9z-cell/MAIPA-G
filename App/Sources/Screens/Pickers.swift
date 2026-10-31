@@ -412,7 +412,7 @@ struct ModelPicker: View {
         if !trimmedQuery.isEmpty { return "Search results" }
         if let maker = selectedMaker { return maker }
         switch filter {
-        case .all: return "All OpenRouter models"
+        case .all: return "All models"
         case .pinned: return "Pinned models"
         case .free: return "Free models"
         case .thinks: return "Thinking / reasoning models"
@@ -590,10 +590,16 @@ struct ModelPicker: View {
                         .foregroundStyle(Theme.secondaryText)
                         .lineLimit(1)
 
-                    HStack(spacing: 6) {
+                    FlowLayout(spacing: 5, lineSpacing: 5) {
                         badge(text: price(model), highlight: model.isFree)
+                        if !model.isFree, let cached = model.cacheReadPrice, cached > 0 {
+                            badge(text: "Cache \(perMillionText(cached))", icon: "bolt.fill", highlight: true)
+                        }
                         if let context = model.contextLength {
                             badge(text: "\(Self.tokens(context)) ctx")
+                        }
+                        if let maxOut = model.maxCompletionTokens, maxOut >= 16_000 {
+                            badge(text: "\(Self.tokens(maxOut)) out")
                         }
                         if !model.thinkingLevels.isEmpty {
                             badge(text: "Thinks", icon: "brain")
@@ -608,7 +614,6 @@ struct ModelPicker: View {
                             badge(text: "Image", icon: "photo")
                         }
                     }
-                    .lineLimit(1)
 
                     if cantReadRepo {
                         Text("No tool support — attach no repo or pick a Tools model for repo edits")
@@ -665,6 +670,13 @@ struct ModelPicker: View {
             return (text.hasSuffix(".0") ? String(text.dropLast(2)) : text) + "M"
         }
         return "\(max(1, count / 1000))K"
+    }
+
+    private func perMillionText(_ perToken: Double) -> String {
+        let m = perToken * 1_000_000
+        if m >= 1 { return String(format: "$%.2f/M", m).replacingOccurrences(of: ".00", with: "") }
+        if m >= 0.01 { return String(format: "$%.2f/M", m) }
+        return String(format: "$%.3f/M", m)
     }
 
     /// Dollars per million tokens (about 750,000 words), for reading and for writing.

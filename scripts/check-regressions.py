@@ -155,10 +155,51 @@ def check_oct31_build70_buttons_github_and_ai_providers() -> None:
         failures.append("OCT31-12: GitHub connector regressed to broken api.githubcopilot.com OAuth URL")
 
 
+def check_oct31_build76_kiro_arena_all_providers() -> None:
+    """Build 76: Global drawer closeDrag, uncapped context/Max thinking, structured AI compaction + undo, live steering, Mermaid cache, multi-col Arrange, clean Sources."""
+    root_view = (ROOT / "App/Sources/Screens/RootView.swift").read_text()
+    if "DragGesture(minimumDistance: 8, coordinateSpace: .global)" not in root_view:
+        failures.append("OCT31-13: RootView.closeDrag must use .global coordinateSpace to prevent drawer feedback oscillation")
+
+    router = (ROOT / "AgentCore/Sources/AgentCore/Agent/ModelRouter.swift").read_text()
+    if "300_000" in router or "* 0.75" in router:
+        failures.append("OCT31-14: ModelRouter still contains hardcoded 300K / 0.75x artificial context caps")
+
+    chat_session = (ROOT / "App/Sources/Model/ChatSession.swift").read_text()
+    for required in ("performStructuredCompaction", "restoreFullMemory", "queuedSteering", "LaunchHelpersTool("):
+        if required not in chat_session:
+            failures.append(f"OCT31-15: ChatSession is missing {required}")
+    if "18_000" in chat_session:
+        failures.append("OCT31-15: ChatSession still contains the old 18_000-character fake prefix chopper")
+
+    composer = (ROOT / "App/Sources/Screens/Composer.swift").read_text()
+    if "Restore full memory" not in composer or "Steer running reply" not in composer:
+        failures.append("OCT31-16: Composer is missing Restore full memory undo or live mid-run steering send button")
+
+    mermaid = (ROOT / "App/Sources/Screens/MermaidDiagramView.swift").read_text()
+    if "MermaidSnapshotCache" not in mermaid or "takeSnapshot" not in mermaid:
+        failures.append("OCT31-17: MermaidDiagramView must snapshot-cache rendered diagrams so scrolling never blanks them out")
+
+    workstation = (ROOT / "App/Sources/Screens/WorkstationScreen.swift").read_text()
+    if "idealGridColumns" not in workstation or "stagedWorkstationItems" not in workstation or "saveViewport" not in workstation:
+        failures.append("OCT31-18: WorkstationScreen must support multi-column grid, persisted viewport, and live staged files")
+
+    chat_screen = (ROOT / "App/Sources/Screens/ChatScreen.swift").read_text()
+    if "geo.contentInsets.bottom" in chat_screen:
+        failures.append("OCT31-19: ChatScreen BottomScrollTrackingModifier regressed to double-subtracting contentInsets.bottom")
+    if "savedFollowsBottom" not in chat_screen:
+        failures.append("OCT31-19: ChatScreen must preserve scroll position across chat switches")
+
+    sources = (ROOT / "App/Sources/Screens/ChatMediaAndSources.swift").read_text()
+    if 'lowerName.contains("search")' in sources:
+        failures.append("OCT31-20: TurnSourceItem still matches search_code via substring 'search'")
+
+
 check_oct29_01_real_connector_logos()
 check_oct29_04_tool_bars_hug_their_content()
 check_oct31_build67_workstation_photos_sources_and_models()
 check_oct31_build70_buttons_github_and_ai_providers()
+check_oct31_build76_kiro_arena_all_providers()
 if failures:
     raise SystemExit("\n".join(failures))
-print("UI regression checks passed (OCT29-01, OCT29-04, OCT31-01..12)")
+print("UI regression checks passed (OCT29-01, OCT29-04, OCT31-01..20)")

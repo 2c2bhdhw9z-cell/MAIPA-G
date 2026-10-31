@@ -15,13 +15,18 @@ final class ChatSession: Identifiable {
     var webEnabled = true
     var autonomous = false
     private(set) var isRunning = false
+    private(set) var isCompacting = false
+    private(set) var queuedSteering: [(text: String, attachments: [AttachmentReference])] = []
     private(set) var mergeCheckStatus: String?
     private(set) var mergeWarning: String?
 
+    var savedFollowsBottom = true
+    var savedAnchorMessageID: UUID?
     @ObservationIgnored weak var app: AppModel?
     @ObservationIgnored private var run: AgentRun?
     @ObservationIgnored private var workspace: RepoWorkspace?
     @ObservationIgnored private var changeWorkspace: ChangeWorkspace?
+    var currentChangeWorkspace: ChangeWorkspace? { changeWorkspace }
     /// What MAIPA-G last put on the chat computer, so unchanged staged edits aren't sent again.
     @ObservationIgnored private var lastComputerSync: String?
     @ObservationIgnored private var lastComputerCheck: Date?
@@ -61,13 +66,30 @@ final class ChatSession: Identifiable {
     var contextModelID: String? {
         chat.messages.reversed().compactMap(\.assistantTurn).flatMap { $0.steps.reversed() }.compactMap(\.model).first
     }
+    private var estimatedPromptAndToolOverheadTokens: Int {
+        let basePromptChars = 3_800 + chat.memoryContext.reduce(0) { $0 + $1.count + 4 } + (chat.repo != nil ? 1_400 : 0)
+        var toolCount = webEnabled ? 2 : 0
+        toolCount += 3 // ask_user, add_memory, edit_memory
+        if chat.repo != nil { toolCount += 9 }
+        if let app {
+            if app.github.isConnected { toolCount += 3 }
+            for conn in app.connectors.connected where app.connectors.states[conn.id] == .connected {
+                let defs = app.connectors.toolDefinitions[conn.id] ?? []
+                toolCount += defs.filter { !conn.disabledTools.contains($0.originalName) }.count
+            }
+            if app.openRouter.supportsTools(chat.model) { toolCount += 1 } // launch_helpers
+        }
+        // ~115 tokens per active tool schema + system prompt tokens
+        return (basePromptChars / 4) + (toolCount * 115)
+    }
+
     var contextUsedTokens: Int {
-        // When older messages were compacted and no newer turn has run yet, estimate directly from
-        // the compacted summary + remaining uncompacted tail so the context ring shrinks immediately.
+        // When older messages were compacted and no newer turn has reported usage yet, estimate from
+        // system prompt + tool schemas + compacted summary + remaining uncompacted tail.
         if let compactedID = chat.compactedThroughMessageID,
            let cutIndex = chat.messages.firstIndex(where: { $0.id == compactedID }) {
             let tail = Array(chat.messages.dropFirst(cutIndex + 1))
-            let newerTurnHasUsage = tail.dropFirst(2).compactMap(\.assistantTurn).flatMap(\.steps).compactMap(\.usage).isEmpty == false
+            let newerTurnHasUsage = tail.compactMap(\.assistantTurn).flatMap(\.steps).compactMap(\.usage).isEmpty == false
             if !newerTurnHasUsage {
                 let summaryChars = chat.compactedSummary?.count ?? 0
                 let tailChars = tail.reduce(0) { total, message in
@@ -75,30 +97,28 @@ final class ChatSession: Identifiable {
                     case .user(let user): return total + user.text.count
                     case .assistant(let turn):
                         return total + turn.steps.reduce(0) { partial, step in
-                            partial + step.text.count + step.reasoning.count + step.toolCalls.reduce(0) { $0 + $1.arguments.count + ($1.result?.count ?? 0) }
+                            partial + step.text.count + step.toolCalls.reduce(0) { $0 + $1.arguments.count + min($1.result?.count ?? 0, 24_000) }
                         }
                     }
                 }
-                return max(0, (summaryChars + tailChars) / 4)
+                return max(0, estimatedPromptAndToolOverheadTokens + Int(Double(summaryChars + tailChars) / 3.6))
             }
         }
-        // The latest request's prompt already includes the conversation and every returned tool
-        // result. Add its answer to show what the next request will need to carry forward.
+        // The latest request's prompt already includes system prompt + tool schemas + history.
         if let usage = chat.messages.reversed().compactMap(\.assistantTurn).flatMap({ $0.steps.reversed() }).compactMap(\.usage).first {
             return max(0, usage.promptTokens + usage.completionTokens)
         }
-        // Before OpenRouter has reported usage, give a conservative plain-text estimate rather than
-        // showing a made-up exact number.
         let characters = chat.messages.reduce(0) { total, message in
             switch message.body {
             case .user(let user): return total + user.text.count
             case .assistant(let turn):
                 return total + turn.steps.reduce(0) { partial, step in
-                    partial + step.text.count + step.reasoning.count + step.toolCalls.reduce(0) { $0 + $1.arguments.count + ($1.result?.count ?? 0) }
+                    partial + step.text.count + step.toolCalls.reduce(0) { $0 + $1.arguments.count + min($1.result?.count ?? 0, 24_000) }
                 }
             }
         }
-        return max(0, characters / 4)
+        if chat.messages.isEmpty { return 0 }
+        return max(0, estimatedPromptAndToolOverheadTokens + Int(Double(characters) / 3.6))
     }
     var isWaitingForAnswers: Bool { lastTurn?.pendingQuestions != nil }
     var isWaitingOnSpend: Bool { lastTurn?.status == .waitingForUser && lastTurn?.spendCheck != nil }
@@ -107,7 +127,17 @@ final class ChatSession: Identifiable {
 
     func send(_ text: String, attachments: [AttachmentReference] = []) {
         let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (!message.isEmpty || !attachments.isEmpty), !isRunning else { return }
+        guard !message.isEmpty || !attachments.isEmpty else { return }
+        if isRunning {
+            // Live mid-run steering: if attachments are empty, inject directly into the active AgentRun
+            // AND record a queued follow-up if the turn was already wrapping up, or gracefully finish
+            // the current step so chronological chat bubbles stay in order!
+            queuedSteering.append((text: message, attachments: attachments))
+            if let activeRun = run {
+                Task { await activeRun.finishAfterCurrentStep() }
+            }
+            return
+        }
         pausedInBackground = false
         settleWaitingTurn()
         chat.messages.append(.user(message, attachments: attachments))
@@ -117,6 +147,16 @@ final class ChatSession: Identifiable {
         }
         touch()
         start()
+    }
+
+    /// Cancels the in-flight step immediately and sends the queued steering message right now.
+    func interruptWithQueuedSteering() {
+        guard isRunning, !queuedSteering.isEmpty else { return }
+        run?.cancel()
+    }
+
+    func clearQueuedSteering() {
+        queuedSteering.removeAll()
     }
 
     func resumeInterruptedTurn() {
@@ -134,6 +174,10 @@ final class ChatSession: Identifiable {
 
     func stagedDiff() async -> String {
         await changeWorkspace?.stagedDiff() ?? "No staged changes in this turn."
+    }
+
+    func currentStagedChanges() async -> [StagedChange] {
+        await changeWorkspace?.stagedChanges() ?? []
     }
 
     func branchDiff() async -> String {
@@ -171,6 +215,7 @@ final class ChatSession: Identifiable {
 
     func stop() {
         pausedInBackground = false
+        queuedSteering.removeAll()
         guard isRunning else {
             settleWaitingTurn()
             return
@@ -211,27 +256,169 @@ final class ChatSession: Identifiable {
         start()
     }
 
-    var canCompact: Bool { !isRunning && chat.messages.count > 4 }
+    private var compactableRangeEndIndex: Int? {
+        guard chat.messages.count > 4 else { return nil }
+        let keepTail = 4
+        let throughIndex = chat.messages.count - keepTail - 1
+        guard throughIndex >= 1 else { return nil }
+        let startIndex: Int
+        if let prevID = chat.compactedThroughMessageID,
+           let prevIdx = chat.messages.firstIndex(where: { $0.id == prevID }) {
+            startIndex = prevIdx + 1
+        } else {
+            startIndex = 0
+        }
+        // Only enable Compact when at least 2 uncompacted older messages exist before the 4-message live tail.
+        guard throughIndex - startIndex + 1 >= 2 else { return nil }
+        return throughIndex
+    }
+
+    var canCompact: Bool { !isRunning && !isCompacting && compactableRangeEndIndex != nil }
+    var canUncompact: Bool { !isRunning && !isCompacting && chat.compactedSummary != nil }
 
     func compact() {
         guard canCompact else { return }
-        let throughIndex = chat.messages.count - 3
-        let older = chat.messages[...throughIndex]
-        var lines: [String] = []
-        for message in older {
+        Task { await performStructuredCompaction() }
+    }
+
+    func restoreFullMemory() {
+        guard canUncompact else { return }
+        chat.compactedSummary = nil
+        chat.compactedThroughMessageID = nil
+        chat.previousCompactedSummary = nil
+        chat.previousCompactedThroughMessageID = nil
+        appendNotice("Restored full conversation memory — all earlier messages are included in future AI requests again.")
+        touch()
+    }
+
+    func undoLastCompaction() {
+        guard canUncompact else { return }
+        if let prevSummary = chat.previousCompactedSummary, let prevThrough = chat.previousCompactedThroughMessageID {
+            chat.compactedSummary = prevSummary
+            chat.compactedThroughMessageID = prevThrough
+            chat.previousCompactedSummary = nil
+            chat.previousCompactedThroughMessageID = nil
+            appendNotice("Undid the latest compaction and restored the previous session summary.")
+        } else {
+            restoreFullMemory()
+            return
+        }
+        touch()
+    }
+
+    private func performStructuredCompaction() async {
+        guard !isCompacting, !isRunning, let throughIndex = compactableRangeEndIndex else { return }
+        isCompacting = true
+        defer { isCompacting = false }
+
+        let prevSummary = chat.compactedSummary
+        let prevThrough = chat.compactedThroughMessageID
+        let startIndex: Int
+        if let prevID = prevThrough, let prevIdx = chat.messages.firstIndex(where: { $0.id == prevID }) {
+            startIndex = prevIdx + 1
+        } else {
+            startIndex = 0
+        }
+        let slice = Array(chat.messages[startIndex...throughIndex])
+        guard !slice.isEmpty else { return }
+
+        var transcriptBlocks: [String] = []
+        if let prevSummary, !prevSummary.isEmpty {
+            transcriptBlocks.append("=== EARLIER SESSION MEMORY ===\n\(prevSummary)")
+        }
+        for (idx, message) in slice.enumerated() {
             switch message.body {
             case .user(let user):
-                if !user.text.isEmpty { lines.append("Person: " + String(user.text.prefix(1_500))) }
+                let attNames = user.attachments.map(\.name)
+                let attNote = attNames.isEmpty ? "" : " [Attachments: \(attNames.joined(separator: ", "))]"
+                transcriptBlocks.append("Turn \(idx + 1) — User\(attNote):\n\(String(user.text.prefix(12_000)))")
             case .assistant(let turn):
-                let text = turn.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n")
-                if !text.isEmpty { lines.append("MAIPA-G: " + String(text.prefix(2_500))) }
+                var parts: [String] = []
+                for step in turn.steps {
+                    for call in step.toolCalls {
+                        let resSnippet = (call.result ?? "").prefix(600).replacingOccurrences(of: "\n", with: " ")
+                        parts.append("• Tool `\(call.name)` (\(call.summary)): \(resSnippet)")
+                    }
+                    let cleanText = step.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !cleanText.isEmpty {
+                        parts.append(String(cleanText.prefix(12_000)))
+                    }
+                }
+                if !parts.isEmpty {
+                    transcriptBlocks.append("Turn \(idx + 1) — Assistant:\n\(parts.joined(separator: "\n"))")
+                }
             }
-            if lines.joined(separator: "\n").count >= 18_000 { break }
         }
-        guard !lines.isEmpty else { return }
-        chat.compactedSummary = String(lines.joined(separator: "\n\n").prefix(20_000))
+        let combinedHistory = transcriptBlocks.joined(separator: "\n\n---\n\n")
+        guard !combinedHistory.isEmpty else { return }
+
+        var aiSummary: String?
+        if let app, app.openRouter.isSignedIn {
+            let catalogue = app.openRouter.modelsByID
+            let route = ModelRouter.route(
+                choice: chat.model,
+                difficulty: .normal,
+                thinking: .low,
+                account: app.openRouter.accountState,
+                catalogue: catalogue,
+                requiresImageInput: false,
+                openRouterAvailable: app.openRouter.hasOpenRouterKey
+            )
+            let budgetChars = max(48_000, min(route.contextBudget * 3, 450_000))
+            let boundedHistory: String
+            if combinedHistory.count > budgetChars {
+                let half = budgetChars / 2
+                boundedHistory = String(combinedHistory.prefix(half)) + "\n\n[... middle turns condensed ...]\n\n" + String(combinedHistory.suffix(half))
+            } else {
+                boundedHistory = combinedHistory
+            }
+            let summarySystem = """
+            You are compacting earlier messages of an active coding/assistant session into high-density structured session memory.
+            Preserve ALL concrete facts, file paths, branch/PR/build numbers, user rules/corrections, decisions, errors/dead ends, and unfinished tasks so continuation is seamless.
+            Write concise Markdown using these exact sections:
+            # Current State
+            # Task & Acceptance Criteria
+            # User Rules & Preferences
+            # Files, Architecture & Findings
+            # Actions Taken & Key Results
+            Output ONLY the structured Markdown summary — no preamble.
+            """
+            let req = ChatCompletionRequest(
+                model: route.model,
+                messages: [
+                    .system(summarySystem),
+                    .user("Summarize this earlier session history without losing important technical details, rules, or unfinished items:\n\n\(boundedHistory)"),
+                ],
+                reasoningEffort: route.effort == nil ? nil : .low
+            )
+            if let stream = try? await app.openRouter.client.stream(req) {
+                var acc = ""
+                do {
+                    for try await chunk in stream {
+                        if let d = chunk.contentDelta { acc += d }
+                    }
+                } catch {}
+                let trimmed = acc.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.count >= 80 {
+                    aiSummary = trimmed
+                }
+            }
+        }
+
+        let finalSummary: String
+        if let aiSummary {
+            finalSummary = aiSummary
+        } else {
+            // Structured offline fallback covering the full slice (head + tail across every turn, never chopping at 18K).
+            let fallbackLines = transcriptBlocks.map { String($0.prefix(2_400)) }.joined(separator: "\n\n")
+            finalSummary = "# Session Digest (Offline Fallback)\n\n" + String(fallbackLines.suffix(48_000))
+        }
+
+        chat.previousCompactedSummary = prevSummary
+        chat.previousCompactedThroughMessageID = prevThrough
+        chat.compactedSummary = finalSummary
         chat.compactedThroughMessageID = chat.messages[throughIndex].id
-        appendNotice("Compacted older messages for future AI requests. The full chat remains visible.")
+        appendNotice("Compacted \(slice.count) older messages into structured session memory (keeping the latest \(chat.messages.count - 1 - throughIndex) messages verbatim). Tap the Context ring anytime to restore full memory.")
         touch()
     }
 
@@ -375,6 +562,14 @@ final class ChatSession: Identifiable {
         Task { [weak self] in
             await self?.runTurn()
             grace.end()
+            await MainActor.run {
+                guard let self, !self.isRunning, !self.queuedSteering.isEmpty else { return }
+                let nextItems = self.queuedSteering
+                self.queuedSteering.removeAll()
+                let combinedText = nextItems.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n")
+                let combinedAttachments = nextItems.flatMap(\.attachments)
+                self.send(combinedText, attachments: combinedAttachments)
+            }
         }
     }
 
@@ -390,6 +585,7 @@ final class ChatSession: Identifiable {
             fail(.signInNeeded, "Connect an AI provider (OpenRouter, OneProvider, SayGM, TeamoRouter, or OmniRoute) in Settings first.")
             return
         }
+        await app.connectors.reconnectIfNeeded()
         let aiClient = app.openRouter.client
         let hasOpenRouter = app.openRouter.hasOpenRouterKey
 
@@ -488,7 +684,7 @@ final class ChatSession: Identifiable {
                 return
             }
         }
-        let computerNote = await prepareComputer(app: app, repo: repoContext)
+        let computerNote = await prepareComputer(app: app, repo: repoContext, lastUserMessage: lastMessage, isAutonomous: autonomous && app.settings.autonomousEnabled)
         var canSyncStaged = false
         if let repoContext, let workspace = changeWorkspace, let control = app.connectors.computerControl(), control.commandTool != nil, app.openRouter.supportsTools(chat.model) {
             tools.append(SyncStagedToComputerTool(
@@ -565,12 +761,19 @@ final class ChatSession: Identifiable {
         let accountState = app.openRouter.accountState
         let userLogin = app.github.login
         let connectedRepoNames = app.github.repos.map(\.fullName)
-        if isAutonomousTurn, app.openRouter.supportsTools(chat.model) {
-            let helperDefinitions = BuiltInAgents.all.filter {
+        if app.openRouter.supportsTools(chat.model) {
+            let builtInHelpers = BuiltInAgents.all.filter {
                 ["planner", "designer", "design-checker", "code-checker", "second-opinion", "review-combiner", "investigator"].contains($0.id)
             }
-            if let lead = BuiltInAgents.named("coder") {
+            let customHelpers = app.automations.customAgents.map(\.definition).filter { custom in
+                !builtInHelpers.contains(where: { $0.id == custom.id })
+            }
+            let helperDefinitions = builtInHelpers + customHelpers
+            if let baseLead = BuiltInAgents.named("coder"), !helperDefinitions.isEmpty {
+                var lead = baseLead
+                lead.maximumHelpers = max(lead.maximumHelpers, 6)
                 let helperToolsSnapshot = readOnlyHelperTools
+                let fullToolsSnapshot = tools
                 let repoContextSnapshot = repoContext
                 let primaryModelID = route.model
                 let coordinator = AgentHelperCoordinator(
@@ -604,14 +807,16 @@ final class ChatSession: Identifiable {
                         workflowContext: invocation.context,
                         connectedRepositories: connectedRepoNames
                     )
+                    let allowedPool = (isAutonomousTurn && invocation.definition.behavior == .changesAllowed) ? fullToolsSnapshot : helperToolsSnapshot
                     let helperInput = AgentTurnInput(
                         chat: helperChat,
                         route: helperRoute,
                         systemPrompt: helperPrompt,
-                        tools: helperToolsSnapshot,
+                        tools: allowedPool,
                         allowTools: true,
                         spendLimit: invocation.spendLimit,
-                        requiresInitialSpendApproval: false
+                        requiresInitialSpendApproval: false,
+                        agent: invocation.definition
                     )
                     let helperEnv = AgentEnvironment(
                         openRouter: aiClient,
@@ -648,9 +853,9 @@ final class ChatSession: Identifiable {
             allowTools: app.openRouter.supportsTools(chat.model),
             spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil,
             attachmentData: attachmentData,
-            serverTools: webEnabled && !isExternalRoute && app.openRouter.accountState.paidAllowed() ? OpenRouterWebTools.paid : [],
+            serverTools: webEnabled && !route.isFree && !isExternalRoute && app.openRouter.accountState.paidAllowed() ? OpenRouterWebTools.paid : [],
             fallbackModels: fallbackModels,
-            requiresInitialSpendApproval: !route.isFree
+            requiresInitialSpendApproval: false
         )
         let account = app.openRouter
         var environment = AgentEnvironment(
@@ -759,8 +964,25 @@ final class ChatSession: Identifiable {
     /// Before the AI starts, MAIPA-G's own code checks the machine with a real command, creates
     /// it again when it is missing, takes a provider checkpoint when the service has one, and puts
     /// the phone-staged changes onto its copy of the repo. Returns what the AI is told.
-    private func prepareComputer(app: AppModel, repo: SystemPrompt.RepoContext?) async -> String? {
+    private func shouldPrewarmComputer(repo: SystemPrompt.RepoContext?, hasStagedChanges: Bool, lastUserMessage: String, isAutonomous: Bool) -> Bool {
+        if isAutonomous || hasStagedChanges { return true }
+        let low = lastUserMessage.lowercased()
+        let computerKeywords = [
+            "sprite", "computer", "linux", "machine", "shell", "bash", "terminal", "command",
+            "build", "test", "compile", "swift ", "python", "node", "npm", "git ", "wake",
+            "install", "script", "server", "port", "benchmark", "docker", "cargo", "pytest",
+        ]
+        if computerKeywords.contains(where: { low.contains($0) }) { return true }
+        return false
+    }
+
+    private func prepareComputer(app: AppModel, repo: SystemPrompt.RepoContext?, lastUserMessage: String, isAutonomous: Bool) async -> String? {
         guard app.openRouter.supportsTools(chat.model), let control = app.connectors.computerControl(), control.commandTool != nil else { return nil }
+        let stagedChanges = await changeWorkspace?.stagedChanges() ?? []
+        guard shouldPrewarmComputer(repo: repo, hasStagedChanges: !stagedChanges.isEmpty, lastUserMessage: lastUserMessage, isAutonomous: isAutonomous) else {
+            // Keep the Sprite sleeping ($0/hr) on plain Q&A turns; `mcp_sprites_*` tools remain connected so the AI can wake it on demand if needed.
+            return nil
+        }
         var notes: [String] = []
         if lastComputerCheck.map({ Date().timeIntervalSince($0) > 600 }) ?? true {
             do {

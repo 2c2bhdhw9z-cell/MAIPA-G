@@ -155,11 +155,18 @@ public struct OpenRouterClient: Sendable {
     let transport: any HTTPTransport
     private let apiKey: String?
     public let extraProviders: [AIProviderEndpoint]
+    public let catalogueByID: [String: ModelInfo]
 
-    public init(transport: any HTTPTransport, apiKey: String?, extraProviders: [AIProviderEndpoint] = []) {
+    public init(
+        transport: any HTTPTransport,
+        apiKey: String?,
+        extraProviders: [AIProviderEndpoint] = [],
+        catalogueByID: [String: ModelInfo] = [:]
+    ) {
         self.transport = transport
         self.apiKey = apiKey
         self.extraProviders = extraProviders
+        self.catalogueByID = catalogueByID
     }
 
     public func providerEndpoint(for modelID: String) -> (endpoint: AIProviderEndpoint, rawModelID: String)? {
@@ -181,14 +188,19 @@ public struct OpenRouterClient: Sendable {
         return headers
     }
 
-    /// Every model OpenRouter lists. Public; works without signing in.
+    /// Every model OpenRouter lists (excluding non-chat TTS/STT/embed/video utility endpoints). Public; works without signing in.
     public func models() async throws -> [ModelInfo] {
         let request = HTTPRequest(url: Self.apiBase.appendingPathComponent("models"), headers: headers, idleTimeout: 30)
         let response = try await withRetries(.standard, retryAfter: defaultRetryDelay) {
             try await transport.send(request)
         }
         guard response.isSuccess else { throw OpenRouterAPIError(status: response.status, body: response.body, headers: response.headers) }
-        return try ModelInfo.parseCatalogue(response.body)
+        return try ModelInfo.parseCatalogue(response.body).filter { !ModelInfo.isNonChatUtilityModel(id: $0.id) }
+    }
+
+    /// Live USD balance for any connected external gateway (OneProvider, TeamoRouter, OmniRoute, SayGM, or Custom).
+    public func providerBalance(for endpoint: AIProviderEndpoint) async -> Double? {
+        await AIProviderGateway.fetchBalance(for: endpoint, transport: transport)
     }
 
     /// Spending, limits and today's free-AI allowance for the signed-in key.
@@ -221,6 +233,7 @@ public struct OpenRouterClient: Sendable {
                 request,
                 rawModelID: routed.rawModelID,
                 endpoint: routed.endpoint,
+                catalogueModel: catalogueByID[request.model],
                 transport: transport
             )
         }

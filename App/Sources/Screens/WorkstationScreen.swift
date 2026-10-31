@@ -38,7 +38,8 @@ struct WorkstationScreen: View {
     @State private var previewingItem: WorkstationItem?
 
     @State private var fileQuery = ""
-    @State private var expandedFolders: Set<String> = ["uploads", "generated", "diagrams", "repo", "computer"]
+    @State private var expandedFolders: Set<String> = ["staged", "uploads", "generated", "diagrams", "repo", "computer"]
+    @State private var stagedChanges: [StagedChange] = []
     @State private var repoEntries: [GitTreeEntry] = []
     @State private var repoCommit: String?
     @State private var repoLoading = false
@@ -88,6 +89,11 @@ struct WorkstationScreen: View {
         .onAppear {
             tab = initialTab
             loadSavedPositions()
+        }
+        .task(id: session?.chat.updatedAt) {
+            if let session {
+                stagedChanges = await session.currentStagedChanges()
+            }
         }
         .task(id: activeRepo) {
             await loadRepoTreeIfNeeded()
@@ -321,6 +327,7 @@ struct WorkstationScreen: View {
                 pan.width += value.translation.width
                 pan.height += value.translation.height
                 dragPanDelta = .zero
+                saveViewport()
             }
     }
 
@@ -331,6 +338,7 @@ struct WorkstationScreen: View {
             }
             .onEnded { _ in
                 baseZoom = zoom
+                saveViewport()
             }
     }
 
@@ -353,6 +361,7 @@ struct WorkstationScreen: View {
                     baseZoom = 1.0
                     pan = .zero
                 }
+                saveViewport()
                 Haptics.selection()
             } label: {
                 Text("\(max(1, Int((zoom * 100).rounded())))%")
@@ -390,15 +399,24 @@ struct WorkstationScreen: View {
             zoom = targetZoom
             baseZoom = targetZoom
         }
+        saveViewport()
         Haptics.selection()
+    }
+
+    private static func idealGridColumns(for count: Int) -> Int {
+        if count <= 1 { return 1 }
+        if count <= 3 { return 2 }
+        if count <= 9 { return 3 }
+        if count <= 16 { return 4 }
+        if count <= 25 { return 5 }
+        return min(8, max(5, Int(ceil(sqrt(Double(count) * 1.3)))))
     }
 
     private func arrangeAllCards(in viewport: CGSize, items: [WorkstationItem]) {
         guard !items.isEmpty else { return }
         positions.removeAll()
-        savePositions()
-        let cols = min(max(items.count == 1 ? 1 : 2, 1), 2)
-        let spacingX: CGFloat = 228
+        let cols = Self.idealGridColumns(for: items.count)
+        let spacingX: CGFloat = 232
         let spacingY: CGFloat = 252
         let originX = -CGFloat(cols - 1) * spacingX * 0.5
         for (idx, item) in items.enumerated() {
@@ -424,9 +442,9 @@ struct WorkstationScreen: View {
         }
         let spanW = max(240, maxX - minX)
         let spanH = max(260, maxY - minY)
-        let scaleX = max(0.45, (viewport.width - 40) / spanW)
-        let scaleY = max(0.45, (viewport.height - 150) / spanH)
-        let fitted = min(max(min(scaleX, scaleY), 0.48), 1.0)
+        let scaleX = max(0.18, (viewport.width - 36) / spanW)
+        let scaleY = max(0.18, (viewport.height - 150) / spanH)
+        let fitted = min(max(min(scaleX, scaleY), 0.20), 1.0)
         let midX = (minX + maxX) * 0.5
         let midY = (minY + maxY) * 0.5
         withAnimation(.snappy(duration: 0.28)) {
@@ -434,12 +452,14 @@ struct WorkstationScreen: View {
             baseZoom = fitted
             pan = CGSize(width: -midX * fitted, height: -midY * fitted)
         }
+        saveViewport()
         Haptics.selection()
     }
 
     private func centerOnCards(items: [WorkstationItem]) {
         guard !items.isEmpty else {
             withAnimation(.snappy(duration: 0.25)) { pan = .zero }
+            saveViewport()
             return
         }
         var minX: CGFloat = .greatestFiniteMagnitude
@@ -455,12 +475,13 @@ struct WorkstationScreen: View {
         }
         let midX = (minX + maxX) * 0.5
         let midY = (minY + maxY) * 0.5
-        let comfortableZoom = min(max(zoom, 0.65), 1.25)
+        let comfortableZoom = min(max(zoom, 0.45), 1.25)
         withAnimation(.snappy(duration: 0.25)) {
             zoom = comfortableZoom
             baseZoom = comfortableZoom
             pan = CGSize(width: -midX * comfortableZoom, height: -midY * comfortableZoom)
         }
+        saveViewport()
         Haptics.selection()
     }
 
@@ -634,6 +655,14 @@ struct WorkstationScreen: View {
             .padding(.vertical, 10)
 
             List {
+                if !stagedWorkstationItems.isEmpty {
+                    folderSection(
+                        id: "staged",
+                        title: "staged-changes",
+                        icon: "pencil.and.outline",
+                        items: filteredItems(stagedWorkstationItems)
+                    )
+                }
                 folderSection(
                     id: "uploads",
                     title: "uploads",
@@ -924,7 +953,7 @@ struct WorkstationScreen: View {
         var idx = 1
         for msg in session.chat.messages {
             guard let turn = msg.assistantTurn else { continue }
-            for step in turn.steps where step.finishedAt != nil {
+            for step in turn.steps {
                 let blocks = Self.extractMermaidBlocks(from: step.text)
                 for code in blocks {
                     list.append(WorkstationItem(
@@ -942,6 +971,36 @@ struct WorkstationScreen: View {
             }
         }
         return list
+    }
+
+    private var stagedWorkstationItems: [WorkstationItem] {
+        stagedChanges.map { change in
+            let fileName = change.path.split(separator: "/").last.map(String.init) ?? change.path
+            switch change {
+            case .write(let path, let data, let existed):
+                return WorkstationItem(
+                    id: "staged:\(path)",
+                    name: fileName,
+                    subtitle: "\(existed ? "Edited" : "Created") · \(path)",
+                    bytes: data.count,
+                    kind: .stagedChange(path: path, data: data, isDelete: false, existed: existed),
+                    attachment: nil,
+                    repoPath: path,
+                    isRemovableDraft: false
+                )
+            case .delete(let path, let previous):
+                return WorkstationItem(
+                    id: "staged:\(path)",
+                    name: fileName,
+                    subtitle: "Deleted · \(path)",
+                    bytes: previous.count,
+                    kind: .stagedChange(path: path, data: previous, isDelete: true, existed: true),
+                    attachment: nil,
+                    repoPath: path,
+                    isRemovableDraft: false
+                )
+            }
+        }
     }
 
     private var repoWorkstationItems: [WorkstationItem] {
@@ -977,18 +1036,22 @@ struct WorkstationScreen: View {
         }
     }
 
-    /// Items placed visually on the Canvas: all uploads (every format!), generated pictures,
+    /// Items placed visually on the Canvas: staged changes, all uploads (every format!), generated pictures,
     /// Mermaid diagrams, and up to 24 key repo files so even a 2,000-file repo stays snappy.
     private var canvasItems: [WorkstationItem] {
-        var combined = uploadItems + generatedItems + diagramItems
+        let stagedPaths = Set(stagedWorkstationItems.compactMap(\.repoPath))
+        var combined = stagedWorkstationItems + uploadItems + generatedItems + diagramItems
         if combined.count < 40 {
-            combined += Array(repoWorkstationItems.prefix(24))
+            combined += Array(repoWorkstationItems.filter { item in
+                guard let p = item.repoPath else { return true }
+                return !stagedPaths.contains(p)
+            }.prefix(24))
         }
         return combined
     }
 
     private var allItems: [WorkstationItem] {
-        uploadItems + generatedItems + diagramItems + repoWorkstationItems + computerWorkstationItems
+        stagedWorkstationItems + uploadItems + generatedItems + diagramItems + repoWorkstationItems + computerWorkstationItems
     }
 
     private var exportableAttachments: [AttachmentReference] {
@@ -1001,6 +1064,7 @@ struct WorkstationScreen: View {
     }
 
     private var pendingChangesCount: Int {
+        if !stagedChanges.isEmpty { return stagedChanges.count }
         guard let session else { return 0 }
         if let receipt = session.chat.saveReceipts?.last, receipt.resolution == nil, receipt.undoneAt == nil {
             return 1
@@ -1042,7 +1106,7 @@ struct WorkstationScreen: View {
 
     private func position(for id: String, index: Int) -> CGPoint {
         if let saved = positions[id] { return saved }
-        let cols = 3
+        let cols = Self.idealGridColumns(for: max(1, canvasItems.count))
         let col = index % cols
         let row = index / cols
         let spacingX: CGFloat = 236
@@ -1052,12 +1116,22 @@ struct WorkstationScreen: View {
     }
 
     private func loadSavedPositions() {
+        if let vp = UserDefaults.standard.array(forKey: "\(storageKey).viewport") as? [Double], vp.count == 3 {
+            let savedZoom = min(max(CGFloat(vp[0]), 0.01), 3.0)
+            zoom = savedZoom
+            baseZoom = savedZoom
+            pan = CGSize(width: vp[1], height: vp[2])
+        }
         guard let raw = UserDefaults.standard.dictionary(forKey: storageKey) as? [String: [Double]] else { return }
         var loaded: [String: CGPoint] = [:]
         for (k, pair) in raw where pair.count == 2 {
             loaded[k] = CGPoint(x: pair[0], y: pair[1])
         }
         positions = loaded
+    }
+
+    private func saveViewport() {
+        UserDefaults.standard.set([Double(zoom), Double(pan.width), Double(pan.height)], forKey: "\(storageKey).viewport")
     }
 
     private func savePositions() {
@@ -1230,6 +1304,7 @@ struct WorkstationItem: Identifiable, Hashable {
         case textOrCode
         case archiveOrBinary(String)
         case mermaid(String)
+        case stagedChange(path: String, data: Data, isDelete: Bool, existed: Bool)
         case repoFile(String)
         case computerFile(String)
     }
@@ -1279,12 +1354,17 @@ struct WorkstationItem: Identifiable, Hashable {
             if ["DOCX", "XLSX", "PPTX"].contains(ext) { return "doc.viewfinder" }
             return "shippingbox.fill"
         case .mermaid: return "point.3.connected.trianglepath.dotted"
+        case .stagedChange(_, _, let isDelete, let existed):
+            return isDelete ? "trash.fill" : (existed ? "pencil.line" : "doc.badge.plus")
         case .repoFile: return "chevron.left.forwardslash.chevron.right"
         case .computerFile: return "terminal.fill"
         }
     }
 
     var badgeText: String {
+        if case .stagedChange(_, _, let isDelete, let existed) = kind {
+            return isDelete ? "DEL" : (existed ? "EDIT" : "NEW")
+        }
         let ext = (name as NSString).pathExtension.uppercased()
         if !ext.isEmpty { return ext }
         switch kind {
@@ -1293,6 +1373,7 @@ struct WorkstationItem: Identifiable, Hashable {
         case .textOrCode: return "TXT"
         case .archiveOrBinary(let label): return label
         case .mermaid: return "CHART"
+        case .stagedChange: return "EDIT"
         case .repoFile: return "REPO"
         case .computerFile: return "VM"
         }
@@ -1305,6 +1386,8 @@ struct WorkstationItem: Identifiable, Hashable {
         case .textOrCode: return .mint
         case .archiveOrBinary: return .orange
         case .mermaid: return .purple
+        case .stagedChange(_, _, let isDelete, let existed):
+            return isDelete ? .red : (existed ? .orange : .green)
         case .repoFile: return .indigo
         case .computerFile: return .teal
         }
@@ -1387,6 +1470,15 @@ private struct WorkstationCanvasCard: View {
                 }
         )
         .task(id: item.id) {
+            if case .stagedChange(let path, let data, _, _) = item.kind {
+                let lower = path.lowercased()
+                if [".png", ".jpg", ".jpeg", ".gif", ".webp"].contains(where: { lower.hasSuffix($0) }) {
+                    thumbnail = ImageDownsampler.image(from: data, maxPixelSize: 640)
+                } else if let str = String(data: data, encoding: .utf8) {
+                    snippet = String(str.prefix(420))
+                }
+                return
+            }
             guard let att = item.attachment else { return }
             switch item.kind {
             case .image, .pdf:
@@ -1411,23 +1503,20 @@ private struct WorkstationCanvasCard: View {
                     .resizable()
                     .scaledToFill()
                     .frame(width: cardWidth, height: previewHeight)
-            } else if let snippet {
-                Text(snippet)
-                    .font(.system(size: 9.5, design: .monospaced))
-                    .foregroundStyle(.primary.opacity(0.86))
-                    .padding(10)
-                    .frame(width: cardWidth, height: previewHeight, alignment: .topLeading)
             } else if case .mermaid(let code) = item.kind {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label("Mermaid Diagram", systemImage: "point.3.connected.trianglepath.dotted")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(item.badgeColor)
-                    Text(String(code.prefix(240)))
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(Theme.secondaryText)
+                MermaidBlockView(code: code, compactCardMode: true)
+                    .frame(width: cardWidth, height: previewHeight)
+            } else if let snippet {
+                if item.name.lowercased().hasSuffix(".mmd") || item.name.lowercased().hasSuffix(".mermaid") {
+                    MermaidBlockView(code: snippet, compactCardMode: true)
+                        .frame(width: cardWidth, height: previewHeight)
+                } else {
+                    Text(snippet)
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundStyle(.primary.opacity(0.86))
+                        .padding(10)
+                        .frame(width: cardWidth, height: previewHeight, alignment: .topLeading)
                 }
-                .padding(12)
-                .frame(width: cardWidth, height: previewHeight, alignment: .topLeading)
             } else {
                 VStack(spacing: 8) {
                     Image(systemName: item.icon)
@@ -1503,8 +1592,11 @@ private struct WorkstationItemPreviewSheet: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let repoText {
                     ScrollView {
-                        if item.name.lowercased().hasSuffix(".md") {
+                        let lowerItemName = item.name.lowercased()
+                        if lowerItemName.hasSuffix(".md") {
                             MarkdownView(text: repoText).padding(16)
+                        } else if lowerItemName.hasSuffix(".mmd") || lowerItemName.hasSuffix(".mermaid") {
+                            MermaidBlockView(code: repoText).padding(16)
                         } else {
                             CodeBlockView(language: (item.name as NSString).pathExtension, code: repoText).padding(16)
                         }
@@ -1553,6 +1645,15 @@ private struct WorkstationItemPreviewSheet: View {
         defer { loading = false }
         if let att = item.attachment {
             attachmentData = try? await app.attachmentStore.data(for: att)
+            return
+        }
+        if case .stagedChange(let path, let data, _, _) = item.kind {
+            let lower = path.lowercased()
+            if [".png", ".jpg", ".jpeg", ".gif", ".webp"].contains(where: { lower.hasSuffix($0) }) {
+                repoImage = ImageDownsampler.image(from: data, maxPixelSize: 2_048)
+            } else {
+                repoText = String(data: data, encoding: .utf8) ?? "Binary staged file (\(ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file)))."
+            }
             return
         }
         if case .repoFile(let path) = item.kind, let repo, let github = app.github.client {

@@ -35,15 +35,29 @@ struct ChatScreen: View {
                 .animation(theme.messagesSlideIn ? .snappy : nil, value: session.chat.messages.count)
             }
             .scrollDismissesKeyboard(.interactively)
-            .modifier(BottomEdgeScrollCompatibilityModifier(animatedJumpCount: animatedJumpCount, instantJumpCount: instantJumpCount))
-            .modifier(BottomScrollTrackingModifier(followsBottom: $followsBottom))
+            .modifier(BottomEdgeScrollCompatibilityModifier(bottomID: bottomID, animatedJumpCount: animatedJumpCount, instantJumpCount: instantJumpCount))
+            .modifier(BottomScrollTrackingModifier(followsBottom: $followsBottom, messages: session.chat.messages) { anchorID in
+                session.savedAnchorMessageID = anchorID
+            })
             .onAppear {
-                followsBottom = true
-                scrollToBottomWithoutAnimation(proxy)
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 90_000_000)
-                    if followsBottom { scrollToBottomWithoutAnimation(proxy) }
+                followsBottom = session.savedFollowsBottom
+                if session.savedFollowsBottom {
+                    scrollToBottomWithoutAnimation(proxy)
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 90_000_000)
+                        if followsBottom { scrollToBottomWithoutAnimation(proxy) }
+                    }
+                } else if let anchor = session.savedAnchorMessageID {
+                    var tx = Transaction()
+                    tx.disablesAnimations = true
+                    withTransaction(tx) {
+                        proxy.scrollTo(anchor, anchor: .center)
+                    }
                 }
+            }
+            .onChange(of: followsBottom) { _, newValue in
+                session.savedFollowsBottom = newValue
+                if newValue { session.savedAnchorMessageID = nil }
             }
             .onChange(of: contentSize) { _, _ in
                 if followsBottom { scrollToBottomWithoutAnimation(proxy) }
@@ -203,6 +217,38 @@ struct ChatScreen: View {
             }
 
             VStack(spacing: 8) {
+                if !session.queuedSteering.isEmpty {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.turn.down.right")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(theme.accent)
+                        Text("Queued next: \(session.queuedSteering.last?.text ?? "Attachment")")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        Button("Send now") {
+                            session.interruptWithQueuedSteering()
+                        }
+                        .font(.caption.weight(.semibold))
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.capsule)
+                        Button {
+                            session.clearQueuedSteering()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(Theme.secondaryText)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Cancel queued message")
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.stroke))
+                    .padding(.horizontal, 12)
+                }
+
                 if let receipt = session.chat.saveReceipts?.last,
                    (receipt.pullRequest != nil && receipt.resolution == nil) || (receipt.undoneAt == nil && receipt.resolution == nil) {
                     HStack(spacing: 8) {
@@ -281,7 +327,10 @@ struct ChatScreen: View {
                     onFiles: { if let repo = session.chat.repo { app.sheet = .files(repo, .chat(session.id)) } },
                     onWorkstation: { app.sheet = .workstation(.chat(session.id)) },
                     canCompact: session.canCompact,
-                    onCompact: { session.compact() }
+                    isCompacting: session.isCompacting,
+                    canRestoreMemory: session.canUncompact,
+                    onCompact: { session.compact() },
+                    onRestoreMemory: { session.restoreFullMemory() }
                 )
                 .padding(.horizontal, 12)
                 .padding(.bottom, 6)
@@ -371,18 +420,7 @@ struct ChatScreen: View {
     }
 
     private func modelName(_ id: String) -> String {
-        if let name = app.openRouter.modelsByID[id]?.shortName { return name }
-        let base = id.split(separator: "/").last.map(String.init) ?? id
-        let plain = base.split(separator: ":").first.map(String.init) ?? base
-        let shouted: Set<String> = ["gpt", "glm", "ai", "llm", "qwq", "oss", "vl"]
-        return plain.split(separator: "-").map { word in
-            if shouted.contains(word.lowercased()) { return word.uppercased() }
-            if word.count > 1, let first = word.first, first.isNumber, let unit = word.last, "bkm".contains(unit),
-               word.dropLast().allSatisfy({ $0.isNumber || $0 == "." || $0 == "x" }) {
-                return String(word.dropLast()) + String(unit).uppercased()
-            }
-            return word.first.map { $0.isLetter ? $0.uppercased() + word.dropFirst() : String(word) } ?? ""
-        }.joined(separator: " ")
+        app.openRouter.displayName(forModelID: id)
     }
 
     private var actions: TurnActions {
@@ -411,12 +449,13 @@ struct ChatScreen: View {
 }
 
 private struct BottomEdgeScrollCompatibilityModifier: ViewModifier {
+    let bottomID: String
     let animatedJumpCount: Int
     let instantJumpCount: Int
 
     func body(content: Content) -> some View {
         if #available(iOS 18.0, *) {
-            content.modifier(BottomEdgeScrollDriver(animatedJumpCount: animatedJumpCount, instantJumpCount: instantJumpCount))
+            content.modifier(BottomEdgeScrollDriver(bottomID: bottomID, animatedJumpCount: animatedJumpCount, instantJumpCount: instantJumpCount))
         } else {
             content
         }
@@ -425,15 +464,16 @@ private struct BottomEdgeScrollCompatibilityModifier: ViewModifier {
 
 @available(iOS 18.0, *)
 private struct BottomEdgeScrollDriver: ViewModifier {
+    let bottomID: String
     let animatedJumpCount: Int
     let instantJumpCount: Int
-    @State private var scrollPosition = ScrollPosition(edge: .bottom)
+    @State private var scrollPosition = ScrollPosition(idType: String.self)
 
     func body(content: Content) -> some View {
         content
             .scrollPosition($scrollPosition)
             .onChange(of: animatedJumpCount) { _, _ in
-                withAnimation(.snappy(duration: 0.24)) {
+                withAnimation(.snappy(duration: 0.22)) {
                     scrollPosition.scrollTo(edge: .bottom)
                 }
             }
@@ -449,17 +489,28 @@ private struct BottomEdgeScrollDriver: ViewModifier {
 
 private struct BottomScrollTrackingModifier: ViewModifier {
     @Binding var followsBottom: Bool
+    var messages: [ChatMessage]
+    var onAnchorChange: (UUID?) -> Void
 
     func body(content: Content) -> some View {
         if #available(iOS 18.0, *) {
             content
-                .onScrollGeometryChange(for: Bool.self) { geo in
-                    let visibleBottom = geo.contentOffset.y + geo.containerSize.height - geo.contentInsets.bottom
-                    let remaining = geo.contentSize.height - visibleBottom
-                    return remaining <= 80
-                } action: { _, nearBottom in
+                .onScrollGeometryChange(for: Int.self) { geo in
+                    guard geo.contentSize.height > 0 else { return 0 }
+                    // `visibleRect.maxY` already accounts for safe-area and bottom composer insets!
+                    let remaining = max(0, geo.contentSize.height - geo.visibleRect.maxY)
+                    if remaining <= 88 { return 0 }
+                    let ratio = min(1.0, max(0.0, Double(geo.visibleRect.midY) / Double(max(1, geo.contentSize.height))))
+                    return 1 + Int((ratio * 1000.0).rounded())
+                } action: { _, bucket in
+                    let nearBottom = (bucket == 0)
                     if nearBottom != followsBottom {
                         followsBottom = nearBottom
+                    }
+                    if !nearBottom, !messages.isEmpty {
+                        let ratio = Double(bucket - 1) / 1000.0
+                        let approxIndex = min(messages.count - 1, max(0, Int((ratio * Double(messages.count - 1)).rounded())))
+                        onAnchorChange(messages[approxIndex].id)
                     }
                 }
         } else {

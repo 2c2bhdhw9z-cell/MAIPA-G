@@ -12,55 +12,162 @@ private enum MermaidBundle {
     }()
 }
 
-/// Renders a ```mermaid diagram offline with pan/zoom, full-screen inspection, and a Chart/Code toggle.
+/// Keeps rendered Mermaid diagram snapshots in memory so scrolling LazyVStack rows or switching
+/// to Workstation Canvas never blanks out or reloads WKWebView processes.
+@MainActor
+final class MermaidSnapshotCache {
+    static let shared = MermaidSnapshotCache()
+    private let images = NSCache<NSString, UIImage>()
+    private var heights: [String: CGFloat] = [:]
+
+    private init() {
+        images.countLimit = 80
+    }
+
+    static func cacheKey(code: String, isDark: Bool) -> String {
+        var hash: UInt64 = 1469598103934665603
+        for b in code.utf8 {
+            hash ^= UInt64(b)
+            hash &*= 1099511628211
+        }
+        return "\(isDark ? "dark" : "light")-\(code.utf8.count)-\(String(hash, radix: 16))"
+    }
+
+    func snapshot(for key: String) -> (image: UIImage, height: CGFloat)? {
+        guard let img = images.object(forKey: key as NSString) else { return nil }
+        return (img, heights[key] ?? img.size.height)
+    }
+
+    func store(image: UIImage, height: CGFloat, for key: String) {
+        images.setObject(image, forKey: key as NSString)
+        heights[key] = height
+    }
+}
+
+/// Renders a ```mermaid diagram offline with persistent snapshot caching, collapsible header,
+/// full-screen pinch-zoom inspection, and a Chart/Code toggle.
 struct MermaidBlockView: View {
     var code: String
     var isStreaming: Bool = false
+    var compactCardMode: Bool = false
+
+    @State private var isCollapsed = false
     @State private var showCode = false
     @State private var copied = false
     @State private var showingFullScreen = false
-    @State private var diagramHeight: CGFloat = 280
+    @State private var diagramHeight: CGFloat = 260
     @State private var renderFailed = false
+    @State private var cachedSnapshot: UIImage?
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.theme) private var theme
 
+    private var cacheKey: String {
+        MermaidSnapshotCache.cacheKey(code: code, isDark: colorScheme == .dark)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                HStack(spacing: 5) {
-                    Image(systemName: "point.3.connected.trianglepath.dotted")
-                        .font(.caption.weight(.semibold))
+        if compactCardMode {
+            compactCanvasPreview
+        } else {
+            fullBlockView
+        }
+    }
+
+    @ViewBuilder
+    private var compactCanvasPreview: some View {
+        ZStack {
+            Theme.codeBackground
+            if let snap = cachedSnapshot ?? MermaidSnapshotCache.shared.snapshot(for: cacheKey)?.image {
+                Image(uiImage: snap)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(6)
+            } else if renderFailed || MermaidBundle.userScript == nil {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Mermaid Diagram", systemImage: "point.3.connected.trianglepath.dotted")
+                        .font(.caption2.weight(.bold))
                         .foregroundStyle(theme.accent)
-                    Text(isStreaming ? "Drawing diagram…" : "Diagram")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.primary)
+                    Text(String(code.prefix(200)))
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundStyle(Theme.secondaryText)
                 }
+                .padding(10)
+            } else {
+                MermaidWebCanvas(
+                    code: code,
+                    isDark: colorScheme == .dark,
+                    allowZoom: false,
+                    reportedHeight: $diagramHeight,
+                    renderFailed: $renderFailed,
+                    onSnapshot: { img, h in
+                        MermaidSnapshotCache.shared.store(image: img, height: h, for: cacheKey)
+                        cachedSnapshot = img
+                    }
+                )
+                .allowsHitTesting(false)
+            }
+        }
+        .onAppear {
+            if let hit = MermaidSnapshotCache.shared.snapshot(for: cacheKey) {
+                cachedSnapshot = hit.image
+                diagramHeight = hit.height
+            }
+        }
+    }
+
+    private var fullBlockView: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Button {
+                    withAnimation(.snappy(duration: 0.22)) {
+                        isCollapsed.toggle()
+                    }
+                    Haptics.selection()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "point.3.connected.trianglepath.dotted")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(theme.accent)
+                        Text(isStreaming ? "Drawing diagram…" : "Diagram")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.primary)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(Theme.secondaryText)
+                            .rotationEffect(.degrees(isCollapsed ? 0 : 90))
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
 
                 Spacer()
 
-                HStack(spacing: 2) {
-                    modeButton(title: "Chart", selected: !showCode && !renderFailed) {
-                        renderFailed = false
-                        showCode = false
+                if !isCollapsed {
+                    HStack(spacing: 2) {
+                        modeButton(title: "Chart", selected: !showCode && !renderFailed) {
+                            renderFailed = false
+                            showCode = false
+                        }
+                        modeButton(title: "Code", selected: showCode || renderFailed) {
+                            showCode = true
+                        }
                     }
-                    modeButton(title: "Code", selected: showCode || renderFailed) {
-                        showCode = true
-                    }
-                }
-                .padding(2)
-                .background(Theme.surface, in: Capsule())
+                    .padding(2)
+                    .background(Theme.surface, in: Capsule())
 
-                if !showCode && !renderFailed && !isStreaming {
-                    Button {
-                        showingFullScreen = true
-                    } label: {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Theme.secondaryText)
-                            .frame(width: 26, height: 26)
+                    if !showCode && !renderFailed && !isStreaming {
+                        Button {
+                            showingFullScreen = true
+                        } label: {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Theme.secondaryText)
+                                .frame(width: 28, height: 28)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Full screen diagram")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Full screen diagram")
                 }
 
                 Button {
@@ -82,37 +189,69 @@ struct MermaidBlockView: View {
             .padding(.vertical, 8)
             .background(Color.white.opacity(colorScheme == .dark ? 0.04 : 0.5))
 
-            if isStreaming && !showCode {
-                HStack(spacing: 10) {
-                    ProgressView()
-                    Text("Writing diagram…")
-                        .font(.footnote)
-                        .foregroundStyle(Theme.secondaryText)
+            if !isCollapsed {
+                if isStreaming && !showCode {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Writing diagram…")
+                            .font(.footnote)
+                            .foregroundStyle(Theme.secondaryText)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 140)
+                } else if showCode || renderFailed || MermaidBundle.userScript == nil {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        Text(code)
+                            .font(.system(.footnote, design: .monospaced))
+                            .textSelection(.enabled)
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                } else if let snap = cachedSnapshot ?? MermaidSnapshotCache.shared.snapshot(for: cacheKey)?.image {
+                    Button {
+                        showingFullScreen = true
+                    } label: {
+                        Image(uiImage: snap)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: .infinity)
+                            .frame(minHeight: 160, maxHeight: 460)
+                            .padding(.vertical, 6)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Diagram — tap to zoom full screen")
+                } else {
+                    MermaidWebCanvas(
+                        code: code,
+                        isDark: colorScheme == .dark,
+                        allowZoom: true,
+                        reportedHeight: $diagramHeight,
+                        renderFailed: $renderFailed,
+                        onSnapshot: { img, h in
+                            MermaidSnapshotCache.shared.store(image: img, height: h, for: cacheKey)
+                            cachedSnapshot = img
+                        }
+                    )
+                    .frame(height: min(max(diagramHeight, 180), 440))
                 }
-                .frame(maxWidth: .infinity)
-                .frame(height: 140)
-            } else if showCode || renderFailed || MermaidBundle.userScript == nil {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    Text(code)
-                        .font(.system(.footnote, design: .monospaced))
-                        .textSelection(.enabled)
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            } else {
-                MermaidWebCanvas(
-                    code: code,
-                    isDark: colorScheme == .dark,
-                    allowZoom: true,
-                    reportedHeight: $diagramHeight,
-                    renderFailed: $renderFailed
-                )
-                .frame(height: min(max(diagramHeight, 180), 440))
             }
         }
         .background(Theme.codeBackground)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.stroke))
+        .onAppear {
+            if let hit = MermaidSnapshotCache.shared.snapshot(for: cacheKey) {
+                cachedSnapshot = hit.image
+                diagramHeight = hit.height
+            }
+        }
+        .onChange(of: colorScheme) { _, _ in
+            cachedSnapshot = MermaidSnapshotCache.shared.snapshot(for: cacheKey)?.image
+        }
+        .onChange(of: code) { _, _ in
+            cachedSnapshot = MermaidSnapshotCache.shared.snapshot(for: cacheKey)?.image
+        }
         .sheet(isPresented: $showingFullScreen) {
             MermaidFullScreenSheet(code: code, isDark: colorScheme == .dark)
         }
@@ -146,7 +285,8 @@ private struct MermaidFullScreenSheet: View {
                 allowZoom: true,
                 fullScreen: true,
                 reportedHeight: $height,
-                renderFailed: $failed
+                renderFailed: $failed,
+                onSnapshot: nil
             )
             .ignoresSafeArea(edges: .bottom)
             .background(Theme.background)
@@ -177,6 +317,7 @@ private struct MermaidWebCanvas: UIViewRepresentable {
     var fullScreen: Bool = false
     @Binding var reportedHeight: CGFloat
     @Binding var renderFailed: Bool
+    var onSnapshot: ((UIImage, CGFloat) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -194,20 +335,23 @@ private struct MermaidWebCanvas: UIViewRepresentable {
         config.userContentController = controller
         config.defaultWebpagePreferences.allowsContentJavaScript = true
 
-        let webView = WKWebView(frame: .zero, configuration: config)
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 360, height: 280), configuration: config)
         webView.isOpaque = false
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
-        webView.scrollView.bounces = true
-        webView.scrollView.minimumZoomScale = 0.5
-        webView.scrollView.maximumZoomScale = fullScreen ? 6.0 : 3.5
+        webView.scrollView.bounces = allowZoom
+        webView.scrollView.isScrollEnabled = allowZoom
+        webView.scrollView.minimumZoomScale = allowZoom ? 0.5 : 1.0
+        webView.scrollView.maximumZoomScale = fullScreen ? 6.0 : (allowZoom ? 3.5 : 1.0)
         webView.navigationDelegate = context.coordinator
+        context.coordinator.webView = webView
         context.coordinator.loadIfNeeded(in: webView, code: code, isDark: isDark, fullScreen: fullScreen)
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.parent = self
+        context.coordinator.webView = webView
         context.coordinator.loadIfNeeded(in: webView, code: code, isDark: isDark, fullScreen: fullScreen)
     }
 
@@ -218,6 +362,7 @@ private struct MermaidWebCanvas: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         var parent: MermaidWebCanvas
+        weak var webView: WKWebView?
         private var lastKey: String?
 
         init(parent: MermaidWebCanvas) {
@@ -238,8 +383,22 @@ private struct MermaidWebCanvas: UIViewRepresentable {
             if failedValue {
                 parent.renderFailed = true
             } else if let heightValue, heightValue > 20 {
+                let clampedHeight = CGFloat(heightValue)
                 parent.renderFailed = false
-                parent.reportedHeight = CGFloat(heightValue)
+                parent.reportedHeight = clampedHeight
+                if let onSnapshot = parent.onSnapshot, let webView {
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 90_000_000)
+                        let snapConfig = WKSnapshotConfiguration()
+                        if webView.bounds.width > 20 {
+                            let targetH = min(max(clampedHeight, 140), max(webView.bounds.height, min(clampedHeight, 440)))
+                            snapConfig.rect = CGRect(x: 0, y: 0, width: webView.bounds.width, height: targetH)
+                        }
+                        if let img = try? await webView.takeSnapshot(configuration: snapConfig) {
+                            onSnapshot(img, clampedHeight)
+                        }
+                    }
+                }
             }
         }
 

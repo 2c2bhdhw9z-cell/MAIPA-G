@@ -205,6 +205,7 @@ struct SettingsScreen: View {
             ForEach(AIProviderPreset.builtIn) { preset in
                 let saved = app.openRouter.endpoint(for: preset.id)
                 let count = app.openRouter.externalModelCounts[preset.id]
+                let bal = app.openRouter.externalBalances[preset.id]
                 let err = app.openRouter.externalErrors[preset.id]
                 Button {
                     providerConnectSheet = AIProviderConnectSheet(mode: .preset(preset))
@@ -218,8 +219,10 @@ struct SettingsScreen: View {
                             if let err {
                                 Text(err).font(.caption).foregroundStyle(Theme.danger).lineLimit(1)
                             } else if let saved {
-                                Text(saved.isEnabled ? "Connected\(count.map { " · \($0) models" } ?? "")" : "Paused")
-                                    .font(.caption)
+                                let countPart = count.map { " · \($0) models" } ?? ""
+                                let balPart = bal.map { " · \($0.dollars)" } ?? ""
+                                Text(saved.isEnabled ? "Connected\(countPart)\(balPart)" : "Paused")
+                                    .font(.caption.monospacedDigit())
                                     .foregroundStyle(saved.isEnabled ? .green : Theme.secondaryText)
                             } else {
                                 Text(preset.subtitle)
@@ -241,6 +244,7 @@ struct SettingsScreen: View {
             // 3. Any user-added Custom AI Providers
             ForEach(app.openRouter.externalProviders.filter { AIProviderPreset.matching($0.id) == nil }) { custom in
                 let count = app.openRouter.externalModelCounts[custom.id]
+                let bal = app.openRouter.externalBalances[custom.id]
                 Button {
                     providerConnectSheet = AIProviderConnectSheet(mode: .existing(custom))
                 } label: {
@@ -248,8 +252,10 @@ struct SettingsScreen: View {
                         AIProviderIcon(assetName: nil, fallbackTitle: custom.name, size: 28)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(custom.name).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
-                            Text(custom.isEnabled ? "Connected\(count.map { " · \($0) models" } ?? "")" : "Paused")
-                                .font(.caption)
+                            let countPart = count.map { " · \($0) models" } ?? ""
+                            let balPart = bal.map { " · \($0.dollars)" } ?? ""
+                            Text(custom.isEnabled ? "Connected\(countPart)\(balPart)" : "Paused")
+                                .font(.caption.monospacedDigit())
                                 .foregroundStyle(custom.isEnabled ? .green : Theme.secondaryText)
                         }
                         Spacer()

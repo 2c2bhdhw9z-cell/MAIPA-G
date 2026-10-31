@@ -40,6 +40,25 @@ public enum OAuthURLPolicy {
         return result
     }
 
+    public static func originRootURL(for endpoint: URL) throws -> URL {
+        let endpoint = try validate(endpoint)
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+            throw MCPAuthorizationError.insecureURL
+        }
+        components.percentEncodedPath = ""
+        components.query = nil
+        components.fragment = nil
+        guard let result = components.url else { throw MCPAuthorizationError.insecureURL }
+        return result
+    }
+
+    public static func authorizationMetadataURLs(for issuer: URL) throws -> [URL] {
+        let primary = try authorizationMetadataURL(for: issuer)
+        let root = try originRootURL(for: issuer)
+        let fallback = try authorizationMetadataURL(for: root)
+        return fallback == primary ? [primary] : [primary, fallback]
+    }
+
     public static func protectedResourceMetadataURLs(for endpoint: URL) throws -> [URL] {
         let endpoint = try validate(endpoint)
         guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {

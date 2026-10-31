@@ -29,42 +29,62 @@ public struct MCPOAuthClient: Sendable {
                 break
             }
         }
-        guard let resourceJSON else {
-            throw MCPAuthorizationError.discovery("The server did not publish protected-resource metadata.")
-        }
-
-        let resource = try OAuthURLPolicy.requireSameOrigin(
-            resourceJSON["resource"]?.stringValue.flatMap(URL.init(string:)) ?? endpoint,
-            as: endpoint
-        )
-        let listedValues = resourceJSON["authorization_servers"]?.arrayValue ?? []
-        let authorizationServers = try listedValues.map { value -> URL in
-            guard let text = value.stringValue, let url = URL(string: text) else {
-                throw MCPAuthorizationError.discovery("An authorization-server address was invalid.")
+        let resourceMetadata: MCPProtectedResourceMetadata
+        let issuer: URL
+        if let resourceJSON {
+            let resource = try OAuthURLPolicy.requireSameOrigin(
+                resourceJSON["resource"]?.stringValue.flatMap(URL.init(string:)) ?? endpoint,
+                as: endpoint
+            )
+            let listedValues = resourceJSON["authorization_servers"]?.arrayValue ?? []
+            let authorizationServers = try listedValues.map { value -> URL in
+                guard let text = value.stringValue, let url = URL(string: text) else {
+                    throw MCPAuthorizationError.discovery("An authorization-server address was invalid.")
+                }
+                return try OAuthURLPolicy.validate(url)
             }
-            return try OAuthURLPolicy.validate(url)
+            guard let firstIssuer = authorizationServers.first else {
+                throw MCPAuthorizationError.discovery("No authorization server was listed.")
+            }
+            issuer = firstIssuer
+            resourceMetadata = MCPProtectedResourceMetadata(
+                resource: resource,
+                authorizationServers: authorizationServers,
+                scopesSupported: Set(resourceJSON["scopes_supported"]?.arrayValue?.compactMap(\.stringValue) ?? [])
+            )
+        } else {
+            // MCP / RFC 8414 fallback for servers like `https://sprites.dev/mcp` that publish
+            // `/.well-known/oauth-authorization-server` directly at their origin root without RFC 9728 resource metadata.
+            let originRoot = try OAuthURLPolicy.originRootURL(for: endpoint)
+            issuer = originRoot
+            resourceMetadata = MCPProtectedResourceMetadata(
+                resource: endpoint,
+                authorizationServers: [originRoot],
+                scopesSupported: []
+            )
         }
-        guard let issuer = authorizationServers.first else {
-            throw MCPAuthorizationError.discovery("No authorization server was listed.")
-        }
-        let resourceMetadata = MCPProtectedResourceMetadata(
-            resource: resource,
-            authorizationServers: authorizationServers,
-            scopesSupported: Set(resourceJSON["scopes_supported"]?.arrayValue?.compactMap(\.stringValue) ?? [])
-        )
 
-        let metadataURL = try OAuthURLPolicy.authorizationMetadataURL(for: issuer)
-        var metadataRequest = HTTPRequest(url: metadataURL, headers: ["Accept": "application/json"])
-        metadataRequest.followsRedirects = false
-        let response = try await transport.send(metadataRequest)
-        if let final = response.finalURL { _ = try OAuthURLPolicy.requireSameOrigin(final, as: metadataURL) }
-        guard response.isSuccess, let json = JSONValue.parse(response.body),
+        let metadataCandidates = try OAuthURLPolicy.authorizationMetadataURLs(for: issuer)
+        var serverJSON: JSONValue?
+        for metadataURL in metadataCandidates {
+            var metadataRequest = HTTPRequest(url: metadataURL, headers: ["Accept": "application/json"])
+            metadataRequest.followsRedirects = false
+            let response = try await transport.send(metadataRequest)
+            if let final = response.finalURL { _ = try OAuthURLPolicy.requireSameOrigin(final, as: metadataURL) }
+            if response.isSuccess, let parsed = JSONValue.parse(response.body) {
+                serverJSON = parsed
+                break
+            }
+        }
+        guard let json = serverJSON,
               let returnedIssuer = json["issuer"]?.stringValue.flatMap(URL.init(string:)),
               let authorization = json["authorization_endpoint"]?.stringValue.flatMap(URL.init(string:)),
               let token = json["token_endpoint"]?.stringValue.flatMap(URL.init(string:))
         else { throw MCPAuthorizationError.discovery("The authorization server metadata was incomplete.") }
         let checkedIssuer = try OAuthURLPolicy.validate(returnedIssuer)
-        guard normalizedIssuer(checkedIssuer) == normalizedIssuer(issuer) else {
+        let issuerMatches = normalizedIssuer(checkedIssuer) == normalizedIssuer(issuer)
+            || (try? normalizedIssuer(OAuthURLPolicy.originRootURL(for: issuer))) == normalizedIssuer(checkedIssuer)
+        guard issuerMatches else {
             throw MCPAuthorizationError.discovery("The authorization server identity did not match the listed issuer.")
         }
         let checkedAuthorization = try OAuthURLPolicy.requireSameOrigin(authorization, as: issuer)
@@ -243,6 +263,10 @@ public actor MCPConnectorSession {
                 try await refreshIfNeeded(force: true)
                 return try await listTools()
             }
+            if Self.isStaleSessionFailure(error) {
+                await resetSession()
+                return try await listTools()
+            }
             throw error
         }
     }
@@ -271,6 +295,10 @@ public actor MCPConnectorSession {
             }
             if Self.isAuthorizationFailure(error), credential?.refreshToken != nil {
                 try await refreshIfNeeded(force: true)
+                return try await callOnce(tool: name, arguments: arguments)
+            }
+            if Self.isStaleSessionFailure(error) {
+                await resetSession()
                 return try await callOnce(tool: name, arguments: arguments)
             }
             throw error
@@ -324,9 +352,34 @@ public actor MCPConnectorSession {
         client = Client(name: "MAIPA-G", version: "0.1.0", title: "MAIPA-G", websiteUrl: OpenRouterClient.appURL)
     }
 
+    private func resetSession() async {
+        if connected { await client.disconnect() }
+        connected = false
+        transport = nil
+        client = Client(name: "MAIPA-G", version: "0.1.0", title: "MAIPA-G", websiteUrl: OpenRouterClient.appURL)
+    }
+
     private static func isAuthorizationFailure(_ error: Error) -> Bool {
         let text = String(describing: error).lowercased()
-        return text.contains("401") || text.contains("unauthorized") || text.contains("authorization") || text.contains("invalid token")
+        return text.contains("401")
+            || text.contains("unauthorized")
+            || text.contains("unauthenticated")
+            || text.contains("authentication")
+            || text.contains("authorization")
+            || text.contains("invalid token")
+            || text.contains("invalid_token")
+            || text.contains("expired")
+    }
+
+    private static func isStaleSessionFailure(_ error: Error) -> Bool {
+        let text = String(describing: error).lowercased()
+        return text.contains("session")
+            || text.contains("404")
+            || text.contains("not initialized")
+            || text.contains("not connected")
+            || text.contains("connection was lost")
+            || text.contains("connection reset")
+            || text.contains("broken pipe")
     }
 }
 

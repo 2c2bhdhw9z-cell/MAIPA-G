@@ -36,7 +36,7 @@ public struct MCPTool: AgentTool {
         let started = Date()
         let response = try await session.call(tool: definition.originalName, arguments: arguments)
         let seconds = Date().timeIntervalSince(started)
-        let text = ConnectorOutputLimit.cap(response.text)
+        let text = ConnectorOutputLimit.cap(response.text, maxCharacters: 250_000)
         let cost = ComputerControl.cost(seconds: seconds, hourlyRate: computerHourlyRate)
         let measured = computerHourlyRate == nil ? "" : String(format: "\n[Computer time %.1f s, about $%.4f]", seconds, cost)
         return ToolOutput(
@@ -44,7 +44,9 @@ public struct MCPTool: AgentTool {
             summary: "Used \(definition.serverName) · \(definition.title)",
             detail: text + measured,
             isError: response.isError,
-            billedCost: cost
+            // Sprite/machine time is billed on the computer provider's own account, not AI token credits,
+            // so $0.00 free AI models never show fake AI spend or hit AI spend-check popups.
+            billedCost: 0
         )
     }
 }
@@ -223,9 +225,9 @@ public enum ShellRisk {
 enum ConnectorOutputLimit {
     static let characters = 80_000
 
-    static func cap(_ text: String) -> String {
-        guard text.count > characters else { return text }
-        let half = characters / 2
-        return String(text.prefix(half)) + "\n[Connector output cut: \(text.count - characters) characters omitted]\n" + String(text.suffix(half))
+    static func cap(_ text: String, maxCharacters: Int = characters) -> String {
+        guard text.count > maxCharacters else { return text }
+        let half = maxCharacters / 2
+        return String(text.prefix(half)) + "\n[Connector output cut: \(text.count - maxCharacters) characters omitted]\n" + String(text.suffix(half))
     }
 }
