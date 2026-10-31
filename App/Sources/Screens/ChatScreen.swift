@@ -9,7 +9,8 @@ struct ChatScreen: View {
     @Bindable var session: ChatSession
 
     @State private var followsBottom = true
-    @State private var scrollPosition = ScrollPosition(edge: .bottom)
+    @State private var animatedJumpCount = 0
+    @State private var instantJumpCount = 0
     @State private var renaming = false
     @State private var newTitle = ""
     @State private var editingMessageID: UUID?
@@ -33,8 +34,8 @@ struct ChatScreen: View {
                 .padding(.bottom, 8)
                 .animation(theme.messagesSlideIn ? .snappy : nil, value: session.chat.messages.count)
             }
-            .scrollPosition($scrollPosition)
             .scrollDismissesKeyboard(.interactively)
+            .modifier(BottomEdgeScrollCompatibilityModifier(animatedJumpCount: animatedJumpCount, instantJumpCount: instantJumpCount))
             .modifier(BottomScrollTrackingModifier(followsBottom: $followsBottom))
             .onAppear {
                 followsBottom = true
@@ -331,26 +332,26 @@ struct ChatScreen: View {
     private func jumpToBottom(_ proxy: ScrollViewProxy) {
         Haptics.selection()
         followsBottom = true
+        animatedJumpCount += 1
         withAnimation(.snappy(duration: 0.25)) {
-            scrollPosition.scrollTo(edge: .bottom)
             proxy.scrollTo(bottomID, anchor: .bottom)
         }
         // Second pass after LazyVStack settles offscreen row heights so one tap always lands flush at bottom.
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 120_000_000)
             guard followsBottom else { return }
+            animatedJumpCount += 1
             withAnimation(.snappy(duration: 0.16)) {
-                scrollPosition.scrollTo(edge: .bottom)
                 proxy.scrollTo(bottomID, anchor: .bottom)
             }
         }
     }
 
     private func scrollToBottomWithoutAnimation(_ proxy: ScrollViewProxy) {
+        instantJumpCount += 1
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
-            scrollPosition.scrollTo(edge: .bottom)
             proxy.scrollTo(bottomID, anchor: .bottom)
         }
     }
@@ -406,6 +407,43 @@ struct ChatScreen: View {
             openURL: { openURL($0) },
             toggleStar: { session.toggleStar($0) }
         )
+    }
+}
+
+private struct BottomEdgeScrollCompatibilityModifier: ViewModifier {
+    let animatedJumpCount: Int
+    let instantJumpCount: Int
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.modifier(BottomEdgeScrollDriver(animatedJumpCount: animatedJumpCount, instantJumpCount: instantJumpCount))
+        } else {
+            content
+        }
+    }
+}
+
+@available(iOS 18.0, *)
+private struct BottomEdgeScrollDriver: ViewModifier {
+    let animatedJumpCount: Int
+    let instantJumpCount: Int
+    @State private var scrollPosition = ScrollPosition(edge: .bottom)
+
+    func body(content: Content) -> some View {
+        content
+            .scrollPosition($scrollPosition)
+            .onChange(of: animatedJumpCount) { _, _ in
+                withAnimation(.snappy(duration: 0.24)) {
+                    scrollPosition.scrollTo(edge: .bottom)
+                }
+            }
+            .onChange(of: instantJumpCount) { _, _ in
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    scrollPosition.scrollTo(edge: .bottom)
+                }
+            }
     }
 }
 

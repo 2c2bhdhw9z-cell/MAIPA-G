@@ -152,7 +152,7 @@ struct AIProviderIcon: View {
 
 /// Sheet to connect or edit OneProvider, SayGM, TeamoRouter, OmniRoute, or a Custom OpenAI/Anthropic-compatible provider.
 struct AIProviderConnectSheet: View, Identifiable {
-    enum Mode: Hashable {
+    enum Mode: Hashable, Sendable {
         case preset(AIProviderPreset)
         case existing(AIProviderEndpoint)
         case customNew
@@ -161,7 +161,7 @@ struct AIProviderConnectSheet: View, Identifiable {
     let mode: Mode
     var onConnected: (() -> Void)? = nil
 
-    var id: String {
+    nonisolated var id: String {
         switch mode {
         case .preset(let p): return "preset-\(p.id)"
         case .existing(let e): return "existing-\(e.id)"

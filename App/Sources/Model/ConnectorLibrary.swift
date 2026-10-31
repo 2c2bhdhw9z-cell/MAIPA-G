@@ -34,16 +34,16 @@ final class ConnectorLibrary {
         for index in loaded.indices {
             let item = loaded[index]
             if item.serverID == "mcp:github" || item.endpoint?.host?.lowercased() == "api.githubcopilot.com" {
-                let migrated = ConnectorConfiguration(
+                var migrated = ConnectorConfiguration(
                     id: item.id,
                     serverID: "builtin:github",
                     displayName: "GitHub",
                     kind: .builtin,
                     endpoint: URL(string: "https://api.github.com"),
                     launchValues: ["provider": "github", "base_url": "https://api.github.com", "auth_style": "bearer"],
-                    secretNames: ["api_key"],
-                    disabledTools: item.disabledTools
+                    secretNames: ["api_key"]
                 )
+                migrated.disabledTools = item.disabledTools
                 loaded[index] = migrated
                 if let data = try? JSONCoding.encoder().encode(migrated), let json = JSONValue.parse(data) {
                     let record = ConnectorRecord(id: migrated.id, serverID: migrated.serverID, displayName: migrated.displayName, configuration: json)
