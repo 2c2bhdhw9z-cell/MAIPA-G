@@ -204,7 +204,7 @@ final class AppModel {
     func liveStatusText() -> String {
         var lines = [
             "GitHub: " + (github.isConnected ? "connected as \(github.login ?? "unknown")" : "not connected"),
-            "OpenRouter: " + (openRouter.isSignedIn ? "signed in" : "not signed in"),
+            "AI providers: \(openRouter.activeProviderSummary)",
             "Chosen AI: \(openRouter.label(for: home.model))",
             "Chat computer: \(settings.chatComputerOff ? "off" : (settings.chatComputerServer ?? "automatic"))",
             "Saving: \(String(describing: sync.status))",

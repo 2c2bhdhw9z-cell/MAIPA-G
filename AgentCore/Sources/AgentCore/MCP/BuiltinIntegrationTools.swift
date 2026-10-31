@@ -127,7 +127,7 @@ public enum IntegrationCatalog {
         .init(id: "apple_music", name: "Apple Music", detail: "Search songs, albums, artists and open tracks in Apple Music", category: .apple, search: "apple music", aliases: ["apple music", "itunes"], symbol: "music.note", assetName: "IntegrationAppleMusic", mode: .publicZeroKey(providerKey: "apple_music")),
 
         // MARK: - Developer & Cloud (18)
-        .init(id: "github", name: "GitHub", detail: "Search repositories, manage issues, pull requests and actions", category: .devCloud, isPopular: true, search: "github", aliases: ["github", "github copilot mcp"], symbol: "chevron.left.forwardslash.chevron.right", assetName: "IntegrationGitHub", mode: .remoteMCP(url: "https://api.githubcopilot.com/mcp/", supportsToken: true, setupHint: "Tap 'Use connected GitHub token' or sign in / paste a GitHub Personal Access Token.")),
+        .init(id: "github", name: "GitHub", detail: "Search repositories, inspect code & PRs, manage issues and check Actions", category: .devCloud, isPopular: true, search: "github", aliases: ["github", "github copilot mcp"], symbol: "chevron.left.forwardslash.chevron.right", assetName: "IntegrationGitHub", mode: .apiKeyREST(providerKey: "github", baseURL: "https://api.github.com", authStyle: .bearer, secretLabel: "GitHub Personal Access Token (optional if signed in)", setupHint: "Tap 'Connect using signed-in GitHub account' to connect in one tap, or paste a GitHub Personal Access Token (`ghp_...` / `github_pat_...`).")),
         .init(id: "gitlab", name: "GitLab", detail: "Search projects, merge requests, issues and CI pipelines", category: .devCloud, search: "gitlab", aliases: ["gitlab"], symbol: "chevron.left.forwardslash.chevron.right", assetName: "IntegrationGitLab", mode: .apiKeyREST(providerKey: "gitlab", baseURL: "https://gitlab.com/api/v4", authStyle: .header, authName: "PRIVATE-TOKEN", secretLabel: "GitLab Personal Access Token", setupHint: "Paste a GitLab Personal Access Token (`glpat-...`) stored only in Keychain.")),
         .init(id: "bitbucket", name: "Bitbucket", detail: "Browse workspaces, repositories, branches and pull requests", category: .devCloud, search: "bitbucket", aliases: ["bitbucket"], symbol: "chevron.left.forwardslash.chevron.right", assetName: "IntegrationBitbucket", mode: .apiKeyREST(providerKey: "bitbucket", baseURL: "https://api.bitbucket.org/2.0", authStyle: .bearer, secretLabel: "Bitbucket Access Token", setupHint: "Paste a Bitbucket Repository/Workspace Access Token (or connect Atlassian MCP).")),
         .init(id: "linear", name: "Linear", detail: "Search and manage Linear issues, cycles, teams and projects", category: .devCloud, isPopular: true, search: "linear", aliases: ["linear"], symbol: "circle.lefthalf.filled", assetName: "IntegrationLinear", mode: .remoteMCP(url: "https://mcp.linear.app/mcp", supportsToken: true, setupHint: "Sign in with Linear OAuth or paste a Linear API key.")),
@@ -288,6 +288,11 @@ public enum BuiltinIntegrationFactory {
             return [JinaReaderTool(configuration: configuration, secret: secret, transport: transport)]
         case "apple_music":
             return [AppleMusicSearchTool(configuration: configuration, transport: transport)]
+        case "github":
+            return [
+                GitHubSearchConnectorTool(configuration: configuration, secret: secret, transport: transport),
+                ScopedRESTRequestTool(configuration: configuration, secret: secret, transport: transport)
+            ]
         case "brave", "brave_search":
             return [
                 BraveSearchTool(configuration: configuration, secret: secret, transport: transport),
@@ -834,6 +839,10 @@ private struct ScopedRESTRequestTool: BuiltinDescribedTool {
         guard let finalURL = comp.url else { throw ToolInputError("Invalid request URL.") }
 
         var headers: [String: String] = ["Accept": "application/json", "User-Agent": "MAIPA-G/1.0"]
+        if pinnedHost == "api.github.com" {
+            headers["Accept"] = "application/vnd.github+json"
+            headers["X-GitHub-Api-Version"] = "2022-11-28"
+        }
         if let secret, !secret.isEmpty {
             switch authStyle {
             case .bearer:
@@ -1056,3 +1065,70 @@ public struct StdioComputerBridgeTool: AgentTool {
         return ToolOutput(forModel: trimmed, summary: "Called \(configuration.displayName)", detail: String(trimmed.prefix(1_200)))
     }
 }
+
+private struct GitHubSearchConnectorTool: BuiltinDescribedTool {
+    let configuration: ConnectorConfiguration
+    let secret: String?
+    let transport: any HTTPTransport
+
+    var definition: ConnectorToolDefinition {
+        ConnectorToolDefinition(
+            serverID: configuration.serverID,
+            serverName: configuration.displayName,
+            originalName: "search",
+            title: "Search GitHub",
+            description: "Search GitHub repositories, issues/PRs, or code via the official GitHub REST API.",
+            inputSchema: [
+                "type": "object",
+                "properties": [
+                    "query": ["type": "string", "description": "GitHub search query (e.g. 'org:apple language:swift' or 'repo:owner/name is:open is:pr')."],
+                    "scope": [
+                        "type": "string",
+                        "enum": ["repositories", "issues", "code"],
+                        "description": "What to search: 'repositories' (default), 'issues' (issues & pull requests), or 'code'."
+                    ],
+                    "per_page": ["type": "integer", "description": "Results to return (1–20, default 10)."]
+                ],
+                "required": ["query"]
+            ],
+            readOnlyHint: true
+        )
+    }
+
+    var name: String { definition.namespacedName }
+    var spec: ToolSpec { ToolSpec(name: name, description: definition.description, parameters: definition.inputSchema) }
+    var bringsOutsideContent: Bool { true }
+
+    func runningSummary(for arguments: JSONValue) -> String {
+        "Searching GitHub for “\(arguments["query"]?.stringValue ?? "…")”…"
+    }
+
+    func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        let query = try arguments.requiredString("query").trimmingCharacters(in: .whitespacesAndNewlines)
+        let scope = (arguments["scope"]?.stringValue ?? "repositories").lowercased()
+        let allowedScopes: Set<String> = ["repositories", "issues", "code"]
+        let cleanScope = allowedScopes.contains(scope) ? scope : "repositories"
+        let limit = min(max(arguments["per_page"]?.intValue ?? 10, 1), 20)
+
+        var comp = URLComponents(string: "https://api.github.com/search/\(cleanScope)")!
+        comp.queryItems = [
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "per_page", value: String(limit)),
+        ]
+        var headers = [
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "MAIPA-G/1.0",
+        ]
+        if let secret, !secret.isEmpty, secret != "__maipag_github_app__" {
+            headers["Authorization"] = secret.lowercased().hasPrefix("bearer ") ? secret : "Bearer \(secret)"
+        }
+        let resp = try await transport.send(HTTPRequest(url: comp.url!, headers: headers, idleTimeout: 25, followsRedirects: false))
+        guard resp.isSuccess else {
+            throw ToolInputError("GitHub search returned HTTP \(resp.status): \(String(resp.text.prefix(240)))")
+        }
+        let trimmed = String(resp.text.prefix(14_000))
+        return ToolOutput(forModel: trimmed, summary: "Searched GitHub \(cleanScope)", detail: String(trimmed.prefix(1_200)))
+    }
+}
+

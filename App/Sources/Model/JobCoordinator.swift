@@ -152,8 +152,8 @@ final class JobCoordinator {
     func start(workflow: WorkflowDefinition, request: String, repo: ChatRepo?) async -> JobRecord? {
         if let repo { return await start(request: request, repo: repo, workflow: workflow) }
         guard let app else { return nil }
-        guard app.openRouter.apiKey != nil else {
-            lastError = "Sign in to OpenRouter in Settings before running an agent or workflow."
+        guard app.openRouter.isSignedIn else {
+            lastError = "Connect an AI provider in Settings before running an agent or workflow."
             return nil
         }
         let job = JobRecord(
@@ -179,7 +179,9 @@ final class JobCoordinator {
     }
 
     private func runOnPhone(workflow: WorkflowDefinition, request: String, jobID: UUID, answer: String? = nil) async {
-        guard let app, let apiKey = app.openRouter.apiKey else { return }
+        guard let app, app.openRouter.isSignedIn else { return }
+        let aiClient = app.openRouter.client
+        let hasOpenRouter = app.openRouter.hasOpenRouterKey
         let transport = app.transport
         let catalogue = app.openRouter.modelsByID
         let accountState = app.openRouter.accountState
@@ -208,12 +210,12 @@ final class JobCoordinator {
             let difficulty: TaskDifficulty = invocation.definition.modelPolicy == .fast ? .quick : invocation.definition.difficulty
             let route: Route
             if invocation.definition.modelPolicy == .differentFromPrimary {
-                guard let distinct = ModelRouter.distinctRoute(avoiding: invocation.avoidModel, difficulty: difficulty, thinking: .medium, account: accountState, catalogue: catalogue) else {
+                guard let distinct = ModelRouter.distinctRoute(avoiding: invocation.avoidModel, difficulty: difficulty, thinking: .medium, account: accountState, catalogue: catalogue, openRouterAvailable: hasOpenRouter) else {
                     throw ToolInputError("A second eligible AI with a different model ID is not available for this review.")
                 }
                 route = distinct
             } else {
-                route = ModelRouter.route(choice: .auto, difficulty: difficulty, thinking: .medium, account: accountState, catalogue: catalogue)
+                route = ModelRouter.route(choice: .auto, difficulty: difficulty, thinking: .medium, account: accountState, catalogue: catalogue, openRouterAvailable: hasOpenRouter)
             }
             let input = AgentTurnInput(
                 chat: chat,
@@ -225,8 +227,8 @@ final class JobCoordinator {
                 agent: invocation.definition
             )
             let environment = AgentEnvironment(
-                openRouter: OpenRouterClient(transport: transport, apiKey: apiKey),
-                freeRoute: { ModelRouter.route(choice: .free, difficulty: difficulty, thinking: .medium, account: AccountState(), catalogue: catalogue) },
+                openRouter: aiClient,
+                freeRoute: { ModelRouter.route(choice: .free, difficulty: difficulty, thinking: .medium, account: AccountState(), catalogue: catalogue, openRouterAvailable: hasOpenRouter) },
                 onOutOfCredits: {}
             )
             var final: AssistantTurn?
@@ -322,7 +324,7 @@ final class JobCoordinator {
     /// Called only by the visible “Set up and start” button in Jobs.
     func confirmSetupAndStart(_ id: UUID) async {
         guard let app, let github = app.github.client, let credentials = app.github.credentials,
-              let openRouterKey = app.openRouter.apiKey,
+              let openRouterKey = app.openRouter.autonomousSecretKey,
               var job = jobs.first(where: { $0.id == id }), let repo = job.targetRepo else { return }
         do {
             job.status = .settingUp
@@ -521,7 +523,7 @@ final class JobCoordinator {
     func updateAutonomousWorkflows() async {
         guard let app, let github = app.github.client,
               let credentials = app.github.credentials,
-              let openRouterKey = app.openRouter.apiKey,
+              let openRouterKey = app.openRouter.autonomousSecretKey,
               let revision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String,
               revision.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil
         else { return }
@@ -629,7 +631,7 @@ final class JobCoordinator {
             "MAIPAG_APP_ID": String(credentials.appID),
             "MAIPAG_APP_PRIVATE_KEY": credentials.privateKeyPEM,
         ]
-        if let key = app.openRouter.apiKey, app.settings.autonomousEnabled { values["OPENROUTER_API_KEY"] = key }
+        if let key = app.openRouter.autonomousSecretKey, app.settings.autonomousEnabled { values["OPENROUTER_API_KEY"] = key }
         if let connectors = app.connectors.autonomousSecretsJSON() { values["MAIPAG_MCP_SECRETS"] = connectors }
         if !app.settings.autonomousEnabled { values = [:] }
         let result = await AutonomousSecretLedger.rotate(

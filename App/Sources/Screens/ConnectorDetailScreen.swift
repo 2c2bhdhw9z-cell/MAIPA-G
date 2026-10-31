@@ -113,11 +113,6 @@ struct ConnectorDetailScreen: View {
                         .buttonStyle(.borderedProminent)
                     Button("Use OAuth dynamic registration") { Task { await app.connectors.authorize(connector, dynamicRegistration: true) } }
                 }
-                if spec?.id == "github", let ghToken = Keychain.string(.githubUserToken), !ghToken.isEmpty {
-                    Button("Use connected GitHub account token") {
-                        Task { await app.connectors.saveRemoteToken(ghToken, headerName: nil, for: connector) }
-                    }
-                }
                 SecureField("Or paste Bearer token / API key", text: $apiSecret)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -141,7 +136,66 @@ struct ConnectorDetailScreen: View {
             }
 
         case .builtin:
-            if connector.secretNames.contains("api_key") || (spec != nil && hasOptionalBuiltinKey(spec!)) {
+            if spec?.id == "github" || connector.launchValues["provider"] == "github" {
+                Section {
+                    if app.github.isConnected {
+                        Label(
+                            "Connected with your signed-in GitHub account\(app.github.login.map { " (@\($0))" } ?? "")",
+                            systemImage: "checkmark.circle.fill"
+                        )
+                        .font(.subheadline)
+                        .foregroundStyle(.green)
+
+                        if app.connectors.hasStoredBuiltinSecret(connector) {
+                            Label("Custom Personal Access Token override active", systemImage: "key.fill")
+                                .font(.caption)
+                                .foregroundStyle(Theme.secondaryText)
+                            Button("Use signed-in GitHub account instead") {
+                                Task {
+                                    await app.connectors.clearBuiltinSecret(for: connector)
+                                    savedConfirmation = true
+                                }
+                            }
+                        } else if app.connectors.states[connector.id] != .connected {
+                            Button("Activate with signed-in GitHub account") {
+                                Task { await app.connectors.recheck(connector) }
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                    } else {
+                        Button("Connect GitHub account") {
+                            Task {
+                                await app.github.connect()
+                                await app.connectors.recheck(connector)
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+
+                    SecureField("Optional: GitHub Personal Access Token (ghp_...)", text: $apiSecret)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    if !apiSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Button("Save Personal Access Token") {
+                            Task {
+                                await app.connectors.saveBuiltinCredentials(
+                                    secret: apiSecret,
+                                    extraKey: nil,
+                                    extraValue: nil,
+                                    for: connector
+                                )
+                                apiSecret = ""
+                                savedConfirmation = true
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                } header: {
+                    Text("GitHub Connection")
+                } footer: {
+                    Text("Uses your signed-in GitHub account automatically on api.github.com, or an optional Personal Access Token stored only in Keychain.")
+                }
+            } else if connector.secretNames.contains("api_key") || (spec != nil && hasOptionalBuiltinKey(spec!)) {
                 let extraMeta = extraFieldMeta(for: spec)
                 Section {
                     if app.connectors.hasStoredBuiltinSecret(connector) {

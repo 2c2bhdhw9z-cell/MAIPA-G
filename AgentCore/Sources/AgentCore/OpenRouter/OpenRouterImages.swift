@@ -38,6 +38,17 @@ public extension OpenRouterClient {
         let clean = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { throw ToolInputError("An image prompt is required.") }
         progress("Generating picture…")
+        if let routed = providerEndpoint(for: model) {
+            let images = try await AIProviderGateway.generateImages(
+                prompt: clean,
+                rawModelID: routed.rawModelID,
+                options: options,
+                endpoint: routed.endpoint,
+                transport: transport
+            )
+            progress("Picture ready")
+            return images
+        }
         let body: JSONValue = [
             "model": .string(model), "prompt": .string(clean), "n": .number(Double(options.count)),
             "aspect_ratio": .string(options.aspectRatio.rawValue), "quality": .string(options.quality.rawValue),

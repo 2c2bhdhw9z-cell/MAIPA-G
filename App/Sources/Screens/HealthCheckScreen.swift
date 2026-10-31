@@ -148,11 +148,15 @@ struct HealthCheckScreen: View {
         }
 
         await app.openRouter.refreshKeyInfo()
-        if app.openRouter.isSignedIn, app.openRouter.keyInfo != nil {
+        if app.openRouter.hasOpenRouterKey, app.openRouter.keyInfo != nil {
             let balance = app.openRouter.balance.map { " Balance \($0.dollars)." } ?? ""
-            items.append(Item(id: "openrouter", title: "OpenRouter", detail: "Signed in.\(balance)", state: .good))
+            let extras = app.openRouter.readyExternalProviders.isEmpty ? "" : " Extra gateways: \(app.openRouter.readyExternalProviders.map(\.name).joined(separator: ", "))."
+            items.append(Item(id: "openrouter", title: "AI Providers", detail: "OpenRouter signed in.\(balance)\(extras)", state: .good))
+        } else if !app.openRouter.readyExternalProviders.isEmpty {
+            let names = app.openRouter.readyExternalProviders.map(\.name).joined(separator: ", ")
+            items.append(Item(id: "openrouter", title: "AI Providers", detail: "Connected to \(names) (\(app.openRouter.allSelectableModels.count) models ready).", state: .good))
         } else {
-            items.append(Item(id: "openrouter", title: "OpenRouter", detail: app.openRouter.lastError ?? "Not signed in.", nextStep: "Sign in to OpenRouter in Settings.", state: .failed, action: .openRouter))
+            items.append(Item(id: "openrouter", title: "AI Providers", detail: app.openRouter.lastError ?? "No AI provider connected.", nextStep: "Connect OpenRouter, OneProvider, SayGM, TeamoRouter, or OmniRoute in Settings.", state: .failed, action: .openRouter))
         }
 
         await app.sync.syncNow()

@@ -1,6 +1,7 @@
 import AgentCore
 import Foundation
 import Observation
+import UIKit
 
 /// One open chat: its messages, what's typed in its box, and the AI working on it. A chat keeps
 /// going while the user looks at other chats.
@@ -385,10 +386,12 @@ final class ChatSession: Identifiable {
             app?.turnFinished(in: self)
         }
         guard let app else { return }
-        guard let apiKey = app.openRouter.apiKey else {
-            fail(.signInNeeded, "Sign in with OpenRouter first, so MAIPA-G can talk to the AIs.")
+        guard app.openRouter.isSignedIn else {
+            fail(.signInNeeded, "Connect an AI provider (OpenRouter, OneProvider, SayGM, TeamoRouter, or OmniRoute) in Settings first.")
             return
         }
+        let aiClient = app.openRouter.client
+        let hasOpenRouter = app.openRouter.hasOpenRouterKey
 
         let lastMessage = chat.messages.last { $0.userText != nil }?.userText ?? ""
         let changeAuthorization = ChangeAuthorization(request: lastMessage)
@@ -398,7 +401,12 @@ final class ChatSession: Identifiable {
         }
         var attachmentData: [UUID: Data] = [:]
         for attachment in allAttachments where attachment.kind == .image || attachment.kind == .pdf {
-            attachmentData[attachment.id] = try? await app.attachmentStore.data(for: attachment)
+            guard let raw = try? await app.attachmentStore.data(for: attachment) else { continue }
+            if attachment.kind == .image, raw.count > 420_000 {
+                attachmentData[attachment.id] = Self.compactWireImageData(raw)
+            } else {
+                attachmentData[attachment.id] = raw
+            }
         }
         var tools: [any AgentTool] = webEnabled ? [WebSearchTool(transport: app.transport), ReadWebPageTool(transport: app.transport)] : []
         tools.append(contentsOf: app.connectors.agentTools())
@@ -531,12 +539,23 @@ final class ChatSession: Identifiable {
         let thinking = chat.thinking
         let judgedDifficulty = difficulty
         let hasImageInput = allAttachments.contains { $0.kind == .image }
-        let route = ModelRouter.route(choice: chat.model, difficulty: judgedDifficulty, thinking: thinking, account: app.openRouter.accountState, catalogue: catalogue, requiresImageInput: hasImageInput)
-        if let imageModel = app.openRouter.models.first(where: \.generatesImages) {
-            tools.append(GenerateImageTool(client: app.openRouter.client, store: app.attachmentStore, model: imageModel.id, maySpend: !imageModel.isFree))
+        let route = ModelRouter.route(
+            choice: chat.model,
+            difficulty: judgedDifficulty,
+            thinking: thinking,
+            account: app.openRouter.accountState,
+            catalogue: catalogue,
+            requiresImageInput: hasImageInput,
+            openRouterAvailable: hasOpenRouter
+        )
+        let imagePool = app.openRouter.allSelectableModels.isEmpty ? app.openRouter.models : app.openRouter.allSelectableModels
+        if let imageModel = imagePool.first(where: \.generatesImages) {
+            tools.append(GenerateImageTool(client: aiClient, store: app.attachmentStore, model: imageModel.id, maySpend: !imageModel.isFree))
         }
-        let fallbackModels = app.openRouter.models.filter { model in
-            model.id != route.model && model.isChatModel
+        let isExternalRoute = AIProviderModelID.decode(route.model) != nil
+        let fallbackModels = isExternalRoute ? [] : app.openRouter.models.filter { model in
+            AIProviderModelID.decode(model.id) == nil
+                && model.id != route.model && model.isChatModel
                 && (!hasRepo || model.supportsTools)
                 && (!hasImageInput || model.acceptsImages)
                 && (!route.isFree || model.isFree)
@@ -546,7 +565,6 @@ final class ChatSession: Identifiable {
         let accountState = app.openRouter.accountState
         let userLogin = app.github.login
         let connectedRepoNames = app.github.repos.map(\.fullName)
-        let helperTransport = app.transport
         if isAutonomousTurn, app.openRouter.supportsTools(chat.model) {
             let helperDefinitions = BuiltInAgents.all.filter {
                 ["planner", "designer", "design-checker", "code-checker", "second-opinion", "review-combiner", "investigator"].contains($0.id)
@@ -563,7 +581,7 @@ final class ChatSession: Identifiable {
                 ) { invocation in
                     var helperChoice = userChoice
                     if helperChoice == .auto, invocation.definition.modelPolicy == .differentFromPrimary {
-                        if let alt = catalogue.values.first(where: { $0.id != primaryModelID && $0.isChatModel && $0.supportsTools && (!route.isFree || $0.isFree) }) {
+                        if let alt = catalogue.values.first(where: { (hasOpenRouter || AIProviderModelID.decode($0.id) != nil) && $0.id != primaryModelID && $0.isChatModel && $0.supportsTools && (!route.isFree || $0.isFree) }) {
                             helperChoice = .model(alt.id)
                         }
                     }
@@ -573,7 +591,8 @@ final class ChatSession: Identifiable {
                         thinking: thinking,
                         account: accountState,
                         catalogue: catalogue,
-                        requiresImageInput: false
+                        requiresImageInput: false,
+                        openRouterAvailable: hasOpenRouter
                     )
                     var helperChat = Chat(model: helperChoice, thinking: thinking)
                     helperChat.messages.append(.user(invocation.task))
@@ -595,9 +614,9 @@ final class ChatSession: Identifiable {
                         requiresInitialSpendApproval: false
                     )
                     let helperEnv = AgentEnvironment(
-                        openRouter: OpenRouterClient(transport: helperTransport, apiKey: apiKey),
+                        openRouter: aiClient,
                         freeRoute: {
-                            ModelRouter.route(choice: .free, difficulty: .normal, thinking: .default, account: AccountState(), catalogue: catalogue)
+                            ModelRouter.route(choice: .free, difficulty: .normal, thinking: .default, account: AccountState(), catalogue: catalogue, openRouterAvailable: hasOpenRouter)
                         },
                         onOutOfCredits: {}
                     )
@@ -629,15 +648,15 @@ final class ChatSession: Identifiable {
             allowTools: app.openRouter.supportsTools(chat.model),
             spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil,
             attachmentData: attachmentData,
-            serverTools: webEnabled && app.openRouter.accountState.paidAllowed() ? OpenRouterWebTools.paid : [],
+            serverTools: webEnabled && !isExternalRoute && app.openRouter.accountState.paidAllowed() ? OpenRouterWebTools.paid : [],
             fallbackModels: fallbackModels,
             requiresInitialSpendApproval: !route.isFree
         )
         let account = app.openRouter
         var environment = AgentEnvironment(
-            openRouter: OpenRouterClient(transport: app.transport, apiKey: apiKey),
+            openRouter: aiClient,
             freeRoute: {
-                ModelRouter.route(choice: .free, difficulty: judgedDifficulty, thinking: thinking, account: AccountState(), catalogue: catalogue, requiresImageInput: hasImageInput)
+                ModelRouter.route(choice: .free, difficulty: judgedDifficulty, thinking: thinking, account: AccountState(), catalogue: catalogue, requiresImageInput: hasImageInput, openRouterAvailable: hasOpenRouter)
             },
             onOutOfCredits: { await account.markOutOfCredits() }
         )
@@ -886,5 +905,29 @@ final class ChatSession: Identifiable {
             self.lastSaved = Date()
             await app.library.save(self.chat)
         }
+    }
+    /// Downscales and JPEG-compresses oversized screenshots/photos solely for the wire request so
+    /// 15–20 attached screenshots stay crisp for vision models without hitting Cloudflare 413 limits.
+    nonisolated static func compactWireImageData(_ raw: Data, maxDimension: CGFloat = 1_600) -> Data {
+        guard let image = UIImage(data: raw), image.size.width > 1, image.size.height > 1 else {
+            return raw
+        }
+        let scaleFactor = min(1.0, maxDimension / max(image.size.width, image.size.height))
+        let targetSize = CGSize(
+            width: max(1, floor(image.size.width * scaleFactor)),
+            height: max(1, floor(image.size.height * scaleFactor))
+        )
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1.0
+        format.opaque = true
+        let rendered = UIGraphicsImageRenderer(size: targetSize, format: format).image { ctx in
+            UIColor.white.setFill()
+            ctx.fill(CGRect(origin: .zero, size: targetSize))
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+        if let jpeg = rendered.jpegData(compressionQuality: 0.78), jpeg.count < raw.count {
+            return jpeg
+        }
+        return raw
     }
 }

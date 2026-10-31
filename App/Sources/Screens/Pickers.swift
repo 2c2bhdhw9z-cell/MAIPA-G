@@ -237,17 +237,21 @@ struct ModelPicker: View {
             smartModeTile(
                 choice: .auto,
                 title: "Auto",
-                subtitle: app.openRouter.accountState.paidAllowed() ? "Best AI per task" : "Auto (free tier)",
+                subtitle: app.openRouter.hasOpenRouterKey
+                    ? (app.openRouter.accountState.paidAllowed() ? "Best AI per task" : "Auto (free tier)")
+                    : "Best connected AI",
                 icon: "wand.and.stars",
                 current: current
             )
-            smartModeTile(
-                choice: .free,
-                title: "Free AIs",
-                subtitle: "$0 · OpenRouter router",
-                icon: "gift.fill",
-                current: current
-            )
+            if app.openRouter.hasOpenRouterKey || app.openRouter.readyExternalProviders.isEmpty {
+                smartModeTile(
+                    choice: .free,
+                    title: "Free AIs",
+                    subtitle: "$0 · OpenRouter router",
+                    icon: "gift.fill",
+                    current: current
+                )
+            }
         }
     }
 
@@ -537,6 +541,13 @@ struct ModelPicker: View {
         dismiss()
     }
 
+    private func providerIconAsset(for modelID: String) -> String? {
+        if let decoded = AIProviderModelID.decode(modelID) {
+            return AIProviderPreset.matching(decoded.providerID)?.assetName
+        }
+        return "ProviderOpenRouter"
+    }
+
     private func modelCard(_ model: ModelInfo, current: ModelChoice) -> some View {
         let isSelected = current == .model(model.id)
         let isPinned = app.openRouter.isPinned(model.id)
@@ -547,7 +558,13 @@ struct ModelPicker: View {
                 select(.model(model.id))
             } label: {
                 VStack(alignment: .leading, spacing: 6) {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    HStack(alignment: .center, spacing: 6) {
+                        AIProviderIcon(
+                            assetName: providerIconAsset(for: model.id),
+                            fallbackTitle: model.maker,
+                            size: 18
+                        )
+
                         Text(model.maker)
                             .font(.caption2.weight(.bold))
                             .foregroundStyle(theme.accent)
@@ -568,7 +585,7 @@ struct ModelPicker: View {
                         }
                     }
 
-                    Text(model.id)
+                    Text(AIProviderModelID.rawModelID(model.id))
                         .font(.caption2.monospaced())
                         .foregroundStyle(Theme.secondaryText)
                         .lineLimit(1)

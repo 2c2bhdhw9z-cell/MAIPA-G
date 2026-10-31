@@ -15,6 +15,12 @@ final class AttachmentFilePicker: NSObject, UIDocumentPickerDelegate, UIAdaptive
 
     @MainActor
     func present(onPick: @escaping ([(Data, String)]) -> Void, onFailure: @escaping (String) -> Void) {
+        if let stale = activePicker, stale.presentingViewController == nil && !stale.isBeingPresented {
+            activePicker = nil
+            self.onPick = nil
+            self.onFailure = nil
+            outcomeDelivered = false
+        }
         guard activePicker == nil else { return }
         guard AppPresenter.topmostViewController() != nil else {
             onFailure("There is no screen to show the file picker on.")

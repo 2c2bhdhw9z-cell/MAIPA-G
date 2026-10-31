@@ -454,6 +454,9 @@ struct SideMenu: View {
         var items: [String] = []
         if let balance = app.openRouter.balance { items.append(balance.dollars) }
         if let free = app.openRouter.freeRequestsLeft { items.append("\(free) free") }
+        if items.isEmpty, !app.openRouter.readyExternalProviders.isEmpty {
+            items.append(app.openRouter.readyExternalProviders.map(\.name).joined(separator: " · "))
+        }
         return items.isEmpty ? nil : items.joined(separator: " · ")
     }
 

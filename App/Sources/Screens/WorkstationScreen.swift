@@ -46,7 +46,7 @@ struct WorkstationScreen: View {
     @State private var computerLoading = false
 
     @State private var photoItems: [PhotosPickerItem] = []
-    @State private var choosingPhotos = false
+    @State private var localAddedAttachments: [AttachmentReference] = []
     @State private var importError: String?
 
     @State private var diffScope = 0
@@ -92,13 +92,6 @@ struct WorkstationScreen: View {
         .task(id: activeRepo) {
             await loadRepoTreeIfNeeded()
         }
-        .photosPicker(
-            isPresented: $choosingPhotos,
-            selection: $photoItems,
-            maxSelectionCount: 20,
-            selectionBehavior: .ordered,
-            matching: .images
-        )
         .onChange(of: photoItems) { _, picked in
             guard !picked.isEmpty else { return }
             photoItems = []
@@ -144,9 +137,10 @@ struct WorkstationScreen: View {
                     } label: {
                         Image(systemName: "arrow.down.to.line")
                             .font(.subheadline.weight(.semibold))
-                            .frame(width: 32, height: 32)
-                            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Theme.stroke))
+                            .frame(width: 40, height: 40)
+                            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Theme.stroke))
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Download or share files")
@@ -158,11 +152,13 @@ struct WorkstationScreen: View {
                     Image(systemName: "xmark")
                         .font(.subheadline.weight(.bold))
                         .foregroundStyle(Theme.secondaryText)
-                        .frame(width: 32, height: 32)
-                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Theme.stroke))
+                        .frame(width: 40, height: 40)
+                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Theme.stroke))
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .contentShape(Rectangle())
                 .accessibilityLabel("Close Workstation")
             }
 
@@ -260,20 +256,37 @@ struct WorkstationScreen: View {
                     .allowsHitTesting(tool == .pointer)
                 }
 
-                // Top-right Runable-style `[ - | 100% | + ]` zoom pill
+                // Top controls: `Arrange` + `Center` on the left, `[ - | 100% | + ]` zoom pill on the right
                 VStack {
-                    HStack {
-                        if items.count > 1 {
-                            Button {
-                                fitAllCards(in: geo.size, items: items)
-                            } label: {
-                                Label("Fit all", systemImage: "viewfinder")
-                                    .font(.caption.weight(.semibold))
-                                    .padding(.horizontal, 11)
-                                    .padding(.vertical, 8)
-                                    .glassPanel(cornerRadius: 18, interactive: true)
+                    HStack(spacing: 8) {
+                        if !items.isEmpty {
+                            HStack(spacing: 2) {
+                                Button {
+                                    arrangeAllCards(in: geo.size, items: items)
+                                } label: {
+                                    Label("Arrange", systemImage: "square.grid.2x2")
+                                        .font(.caption.weight(.semibold))
+                                        .padding(.horizontal, 11)
+                                        .frame(minHeight: 38)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+
+                                Divider().frame(height: 16)
+
+                                Button {
+                                    centerOnCards(items: items)
+                                } label: {
+                                    Label("Center", systemImage: "scope")
+                                        .font(.caption.weight(.semibold))
+                                        .padding(.horizontal, 11)
+                                        .frame(minHeight: 38)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
+                            .padding(.horizontal, 4)
+                            .glassPanel(cornerRadius: 19, interactive: false)
                         }
                         Spacer()
                         zoomPill(viewport: geo.size, items: items)
@@ -328,7 +341,7 @@ struct WorkstationScreen: View {
             } label: {
                 Image(systemName: "minus")
                     .font(.caption.weight(.bold))
-                    .frame(width: 34, height: 34)
+                    .frame(width: 40, height: 38)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -336,36 +349,33 @@ struct WorkstationScreen: View {
 
             Button {
                 withAnimation(.snappy(duration: 0.25)) {
-                    if abs(zoom - 1.0) < 0.02, !items.isEmpty {
-                        fitAllCards(in: viewport, items: items)
-                    } else {
-                        zoom = 1.0
-                        baseZoom = 1.0
-                        pan = .zero
-                    }
+                    zoom = 1.0
+                    baseZoom = 1.0
+                    pan = .zero
                 }
                 Haptics.selection()
             } label: {
                 Text("\(max(1, Int((zoom * 100).rounded())))%")
                     .font(.caption.weight(.bold).monospacedDigit())
-                    .frame(minWidth: 48, minHeight: 34)
+                    .frame(minWidth: 50, minHeight: 38)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Reset zoom")
+            .accessibilityLabel("Reset zoom to 100%")
 
             Button {
                 stepZoom(direction: 1)
             } label: {
                 Image(systemName: "plus")
                     .font(.caption.weight(.bold))
-                    .frame(width: 34, height: 34)
+                    .frame(width: 40, height: 38)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Zoom in")
         }
         .padding(.horizontal, 4)
-        .glassPanel(cornerRadius: 18, interactive: true)
+        .glassPanel(cornerRadius: 19, interactive: false)
     }
 
     private func stepZoom(direction: Int) {
@@ -383,24 +393,40 @@ struct WorkstationScreen: View {
         Haptics.selection()
     }
 
-    private func fitAllCards(in viewport: CGSize, items: [WorkstationItem]) {
+    private func arrangeAllCards(in viewport: CGSize, items: [WorkstationItem]) {
         guard !items.isEmpty else { return }
+        positions.removeAll()
+        savePositions()
+        let cols = min(max(items.count == 1 ? 1 : 2, 1), 2)
+        let spacingX: CGFloat = 228
+        let spacingY: CGFloat = 252
+        let originX = -CGFloat(cols - 1) * spacingX * 0.5
+        for (idx, item) in items.enumerated() {
+            let col = idx % cols
+            let row = idx / cols
+            positions[item.id] = CGPoint(
+                x: originX + CGFloat(col) * spacingX,
+                y: CGFloat(row) * spacingY - 60
+            )
+        }
+        savePositions()
+
         var minX: CGFloat = .greatestFiniteMagnitude
         var maxX: CGFloat = -.greatestFiniteMagnitude
         var minY: CGFloat = .greatestFiniteMagnitude
         var maxY: CGFloat = -.greatestFiniteMagnitude
         for (idx, item) in items.enumerated() {
             let p = position(for: item.id, index: idx)
-            minX = min(minX, p.x - 130)
-            maxX = max(maxX, p.x + 130)
-            minY = min(minY, p.y - 150)
-            maxY = max(maxY, p.y + 150)
+            minX = min(minX, p.x - 115)
+            maxX = max(maxX, p.x + 115)
+            minY = min(minY, p.y - 130)
+            maxY = max(maxY, p.y + 130)
         }
-        let spanW = max(260, maxX - minX)
-        let spanH = max(300, maxY - minY)
-        let scaleX = max(0.02, (viewport.width - 56) / spanW)
-        let scaleY = max(0.02, (viewport.height - 150) / spanH)
-        let fitted = min(max(min(scaleX, scaleY), 0.01), 1.2)
+        let spanW = max(240, maxX - minX)
+        let spanH = max(260, maxY - minY)
+        let scaleX = max(0.45, (viewport.width - 40) / spanW)
+        let scaleY = max(0.45, (viewport.height - 150) / spanH)
+        let fitted = min(max(min(scaleX, scaleY), 0.48), 1.0)
         let midX = (minX + maxX) * 0.5
         let midY = (minY + maxY) * 0.5
         withAnimation(.snappy(duration: 0.28)) {
@@ -411,26 +437,65 @@ struct WorkstationScreen: View {
         Haptics.selection()
     }
 
+    private func centerOnCards(items: [WorkstationItem]) {
+        guard !items.isEmpty else {
+            withAnimation(.snappy(duration: 0.25)) { pan = .zero }
+            return
+        }
+        var minX: CGFloat = .greatestFiniteMagnitude
+        var maxX: CGFloat = -.greatestFiniteMagnitude
+        var minY: CGFloat = .greatestFiniteMagnitude
+        var maxY: CGFloat = -.greatestFiniteMagnitude
+        for (idx, item) in items.enumerated() {
+            let p = position(for: item.id, index: idx)
+            minX = min(minX, p.x)
+            maxX = max(maxX, p.x)
+            minY = min(minY, p.y)
+            maxY = max(maxY, p.y)
+        }
+        let midX = (minX + maxX) * 0.5
+        let midY = (minY + maxY) * 0.5
+        let comfortableZoom = min(max(zoom, 0.65), 1.25)
+        withAnimation(.snappy(duration: 0.25)) {
+            zoom = comfortableZoom
+            baseZoom = comfortableZoom
+            pan = CGSize(width: -midX * comfortableZoom, height: -midY * comfortableZoom)
+        }
+        Haptics.selection()
+    }
+
     private func selectionActionBar(for item: WorkstationItem) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 6) {
             Button {
                 previewingItem = item
             } label: {
                 Label("Open", systemImage: "eye")
+                    .padding(.horizontal, 8)
+                    .frame(minHeight: 36)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
 
             Button {
                 addItemToChat(item)
             } label: {
                 Label("Add to chat", systemImage: "plus.bubble")
+                    .padding(.horizontal, 8)
+                    .frame(minHeight: 36)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
 
             if item.attachment != nil {
                 Button {
                     shareItem(item)
                 } label: {
                     Label("Share", systemImage: "square.and.arrow.up")
+                        .padding(.horizontal, 8)
+                        .frame(minHeight: 36)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
             }
 
             if item.isRemovableDraft {
@@ -438,13 +503,17 @@ struct WorkstationScreen: View {
                     removeDraftItem(item)
                 } label: {
                     Image(systemName: "trash")
+                        .foregroundStyle(.red)
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
             }
         }
         .font(.caption.weight(.semibold))
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .glassPanel(cornerRadius: 20, interactive: true)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .glassPanel(cornerRadius: 20, interactive: false)
     }
 
     private func bottomCanvasDock(viewport: CGSize, items: [WorkstationItem]) -> some View {
@@ -457,26 +526,35 @@ struct WorkstationScreen: View {
                 tool = .hand
                 Haptics.selection()
             }
-            Divider().frame(height: 20).padding(.horizontal, 2)
+            Divider().frame(height: 22).padding(.horizontal, 2)
             dockButton(icon: "plus", active: false, label: "Add any file") {
+                Haptics.selection()
                 pickFilesForWorkstation()
             }
-            dockButton(icon: "photo.on.rectangle", active: false, label: "Add photos") {
-                choosingPhotos = true
+            PhotosPicker(
+                selection: $photoItems,
+                maxSelectionCount: 20,
+                selectionBehavior: .ordered,
+                matching: .images
+            ) {
+                Image(systemName: "photo.on.rectangle")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Circle())
             }
-            if !positions.isEmpty {
-                dockButton(icon: "square.grid.2x2", active: false, label: "Auto-arrange grid") {
-                    withAnimation(.snappy(duration: 0.28)) {
-                        positions.removeAll()
-                        savePositions()
-                        fitAllCards(in: viewport, items: items)
-                    }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Add photos")
+
+            if !items.isEmpty {
+                dockButton(icon: "square.grid.2x2", active: false, label: "Arrange cards into grid") {
+                    arrangeAllCards(in: viewport, items: items)
                 }
             }
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .glassPanel(cornerRadius: 24, interactive: true)
+        .padding(.vertical, 6)
+        .glassPanel(cornerRadius: 26, interactive: false)
     }
 
     private func dockButton(icon: String, active: Bool, label: String, action: @escaping () -> Void) -> some View {
@@ -484,10 +562,12 @@ struct WorkstationScreen: View {
             Image(systemName: icon)
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(active ? .white : .primary)
-                .frame(width: 38, height: 38)
+                .frame(width: 44, height: 44)
                 .background(active ? theme.accent : Color.clear, in: Circle())
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
+        .contentShape(Circle())
         .accessibilityLabel(label)
     }
 
@@ -498,7 +578,7 @@ struct WorkstationScreen: View {
                 .foregroundStyle(theme.accent)
             Text("Your Canvas is ready")
                 .font(.rounded(.title3, weight: .bold))
-            Text("Photos, PDFs, Markdown, code, charts, ZIPs, IPAs, and repo files all appear here as movable cards you can zoom from 1% to 300%.")
+            Text("Photos, PDFs, Markdown, code, charts, ZIPs, IPAs, and repo files all appear here as movable cards you can arrange and zoom.")
                 .font(.footnote)
                 .foregroundStyle(Theme.secondaryText)
                 .multilineTextAlignment(.center)
@@ -512,9 +592,12 @@ struct WorkstationScreen: View {
                 }
                 .buttonStyle(.borderedProminent)
 
-                Button {
-                    choosingPhotos = true
-                } label: {
+                PhotosPicker(
+                    selection: $photoItems,
+                    maxSelectionCount: 20,
+                    selectionBehavior: .ordered,
+                    matching: .images
+                ) {
                     Label("Add photos", systemImage: "photo")
                         .font(.footnote.weight(.semibold))
                 }
@@ -794,6 +877,11 @@ struct WorkstationScreen: View {
         var seen: Set<UUID> = []
         var list: [WorkstationItem] = []
 
+        for att in localAddedAttachments where !seen.contains(att.id) {
+            seen.insert(att.id)
+            list.append(WorkstationItem.fromAttachment(att, source: "Draft upload", removableDraft: true))
+        }
+
         if let session {
             for att in session.draftAttachments where !seen.contains(att.id) {
                 seen.insert(att.id)
@@ -1018,6 +1106,7 @@ struct WorkstationScreen: View {
 
     private func removeDraftItem(_ item: WorkstationItem) {
         guard let att = item.attachment else { return }
+        localAddedAttachments.removeAll { $0.id == att.id }
         switch target {
         case .home:
             app.home.attachments.removeAll { $0.id == att.id }
@@ -1084,12 +1173,20 @@ struct WorkstationScreen: View {
     }
 
     private func appendDraftAttachment(_ attachment: AttachmentReference) {
+        if !localAddedAttachments.contains(where: { $0.id == attachment.id }) {
+            localAddedAttachments.append(attachment)
+        }
         switch target {
         case .home:
-            app.home.attachments.append(attachment)
+            if !app.home.attachments.contains(where: { $0.id == attachment.id }) {
+                app.home.attachments.append(attachment)
+            }
         case .chat(let id):
-            app.library.session(id)?.draftAttachments.append(attachment)
+            if let s = app.library.session(id), !s.draftAttachments.contains(where: { $0.id == attachment.id }) {
+                s.draftAttachments.append(attachment)
+            }
         }
+        Haptics.selection()
     }
 
     private func loadRepoTreeIfNeeded() async {
@@ -1402,7 +1499,8 @@ private struct WorkstationItemPreviewSheet: View {
                             .padding(16)
                     }
                 } else if let repoImage {
-                    ScrollView { Image(uiImage: repoImage).resizable().scaledToFit().padding() }
+                    ZoomableImageCanvas(image: repoImage)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let repoText {
                     ScrollView {
                         if item.name.lowercased().hasSuffix(".md") {

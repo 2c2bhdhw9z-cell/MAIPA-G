@@ -58,12 +58,15 @@ struct HomeScreen: View {
             HStack(spacing: 10) {
                 MenuButton()
                 Spacer()
-                HStack(spacing: 12) {
+                HStack(spacing: 4) {
                     if app.jobs.activeCount > 0 {
                         Button { app.jobs.show() } label: {
                             Label("\(app.jobs.activeCount) working", systemImage: "gearshape.2")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(theme.accent)
+                                .padding(.horizontal, 10)
+                                .frame(minHeight: 40)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                     }
@@ -73,14 +76,14 @@ struct HomeScreen: View {
                         Image(systemName: "square.on.square.dashed")
                             .font(.body.weight(.semibold))
                             .foregroundStyle(theme.accent)
-                            .frame(width: 28, height: 28)
+                            .frame(width: 40, height: 40)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Workstation")
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .glassPanel(cornerRadius: 20, interactive: true)
+                .padding(.horizontal, 4)
+                .glassPanel(cornerRadius: 20, interactive: false)
             }
             .padding(.horizontal, 14)
             .padding(.top, 6)
@@ -99,9 +102,9 @@ struct SetupCards: View {
             if !app.openRouter.isSignedIn {
                 setupCard(
                     icon: "sparkles",
-                    title: "Sign in with OpenRouter",
-                    detail: "So MAIPA-G can talk to the AIs. The free ones cost nothing.",
-                    button: "Sign in"
+                    title: "Connect an AI provider",
+                    detail: "Sign in with OpenRouter (includes free AIs) or paste a key from OneProvider, SayGM, TeamoRouter, or OmniRoute.",
+                    button: "Connect"
                 ) { app.sheet = .signInOpenRouter }
             }
             if !app.github.isConnected {
@@ -150,8 +153,9 @@ struct MenuButton: View {
             Image(systemName: "line.3.horizontal")
                 .font(.body.weight(.semibold))
                 .foregroundStyle(theme.accent)
-                .frame(width: 40, height: 40)
-                .glassPanel(cornerRadius: 20, interactive: true)
+                .frame(width: 44, height: 44)
+                .glassPanel(cornerRadius: 22, interactive: false)
+                .contentShape(Circle())
                 .overlay(alignment: .topTrailing) {
                     if app.updates.newer != nil {
                         Circle().fill(.red).frame(width: 8, height: 8).offset(x: -2, y: 2)
@@ -159,6 +163,7 @@ struct MenuButton: View {
                 }
         }
         .buttonStyle(.plain)
+        .contentShape(Circle())
         .accessibilityLabel("Menu")
         .accessibilityFocused($menuButtonFocused)
         .onChange(of: app.isMenuOpen) { _, isOpen in
