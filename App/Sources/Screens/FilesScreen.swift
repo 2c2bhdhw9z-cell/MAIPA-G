@@ -14,6 +14,7 @@ struct FilesScreen: View {
     @State private var selectedPath: String?
     @State private var text: String?
     @State private var image: UIImage?
+    @State private var showingPreview = false
     @State private var state: RequestState = .loading
 
     private enum RequestState: Equatable {
@@ -44,16 +45,29 @@ struct FilesScreen: View {
                         }
                         .accessibilityLabel("Add file to chat")
                     }
-                    Button { app.sheet = .webPreview(repo) } label: { Image(systemName: "safari") }
+                    Button { showingPreview = true } label: { Image(systemName: "safari") }
                         .accessibilityLabel("Live preview")
                 }
                 ToolbarItem(placement: .cancellationAction) {
                     if selectedPath != nil {
-                        Button("Files") { selectedPath = nil; text = nil; image = nil }
+                        Button {
+                            selectedPath = nil; text = nil; image = nil
+                        } label: {
+                            Label(folder.isEmpty ? "Files" : (folder.split(separator: "/").last.map(String.init) ?? "Back"), systemImage: "chevron.left")
+                        }
+                    } else if !folder.isEmpty {
+                        Button {
+                            folder = parent(folder)
+                        } label: {
+                            Label("Back", systemImage: "chevron.left")
+                        }
                     } else {
                         Button("Done") { dismiss() }
                     }
                 }
+            }
+            .sheet(isPresented: $showingPreview) {
+                WebPreviewScreen(repo: repo)
             }
             .task { await load() }
         }

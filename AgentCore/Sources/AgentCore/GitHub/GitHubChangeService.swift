@@ -176,6 +176,7 @@ public actor GitHubChangeService {
             pullRequest = try await github.openOrReusePullRequest(repo, title: title, body: body, head: targetBranch, base: defaultBranch)
         }
         await workspace.discardAll()
+        await workspace.advanceBase(toCommit: commit, branch: targetBranch)
         return SaveReceipt(repo: repo, branch: targetBranch, baseCommit: selectedHead, savedCommit: commit, files: states, pullRequest: pullRequest)
     }
 

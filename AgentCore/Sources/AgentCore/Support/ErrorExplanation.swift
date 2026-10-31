@@ -64,6 +64,20 @@ public enum ErrorExplainer {
                 return ErrorExplanation(cause: "The server returned HTTP \(status).", nextStep: status >= 500 || status == 429 ? "Wait a moment and try again." : "Check the account or request details, then try again.", technical: technical, isTemporary: status >= 500 || status == 429)
             }
         }
+        if let api = error as? OpenRouterAPIError {
+            switch api.kind {
+            case .invalidKey:
+                return ErrorExplanation(cause: "\(api.providerName) rejected the API key.", nextStep: "Update the key for \(api.providerName) in Settings.", technical: technical, isTemporary: false)
+            case .outOfCredits:
+                return ErrorExplanation(cause: "\(api.providerName) reported no remaining credits.", nextStep: "Add credit in \(api.providerName) or switch AI providers.", technical: technical, isTemporary: false)
+            case .rateLimited:
+                return ErrorExplanation(cause: "\(api.providerName) is rate-limiting requests right now.", nextStep: "Wait up to 60 seconds or choose another model.", technical: technical, isTemporary: true)
+            case .appRestricted:
+                return ErrorExplanation(cause: "That model is restricted by its publisher on \(api.providerName) and was hidden from the AI picker.", nextStep: "Pick another AI model.", technical: technical, isTemporary: false)
+            default:
+                return ErrorExplanation(cause: "\(api.providerName) returned HTTP \(api.httpStatus): \(api.message)", nextStep: "Try again or choose another AI model.", technical: technical, isTemporary: api.httpStatus >= 500)
+            }
+        }
         if let error = error as? GitHubAPIError {
             if error.isRateLimited {
                 return ErrorExplanation(cause: "GitHub’s request limit was reached.", nextStep: "Wait for the limit to reset, then retry.", technical: technical, isTemporary: true)

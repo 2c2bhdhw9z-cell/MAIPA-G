@@ -25,6 +25,8 @@ struct Composer: View {
     @Binding var webEnabled: Bool
     @Binding var autonomous: Bool
     var modelLabel: String
+    var supportsTools = true
+    var isImageOnlyModel = false
     var contextUsedTokens: Int
     var contextLimitTokens: Int?
     var thinking: ThinkingLevel
@@ -109,8 +111,25 @@ struct Composer: View {
                             }
                             .padding(.horizontal, 4)
                         }
-                        if attachments.count <= 4 || attachmentsExpanded {
-                            ScrollView(.vertical, showsIndicators: attachments.count > 4) {
+                        if attachments.count <= 4 {
+                            LazyVGrid(
+                                columns: [
+                                    GridItem(.flexible(minimum: 110), spacing: 7),
+                                    GridItem(.flexible(minimum: 110), spacing: 7)
+                                ],
+                                spacing: 7
+                            ) {
+                                ForEach(attachments) { attachment in
+                                    ArenaComposerAttachmentChip(attachment: attachment) {
+                                        attachments.removeAll { $0.id == attachment.id }
+                                    }
+                                }
+                            }
+                            .padding(.vertical, 1)
+                            .fixedSize(horizontal: false, vertical: true)
+                        } else if attachmentsExpanded {
+                            let rows = (attachments.count + 1) / 2
+                            ScrollView(.vertical, showsIndicators: true) {
                                 LazyVGrid(
                                     columns: [
                                         GridItem(.flexible(minimum: 110), spacing: 7),
@@ -126,7 +145,7 @@ struct Composer: View {
                                 }
                                 .padding(.vertical, 1)
                             }
-                            .frame(maxHeight: attachments.count > 4 ? 148 : nil)
+                            .frame(height: min(CGFloat(rows) * 44, 148))
                         } else {
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(spacing: 6) {
@@ -153,7 +172,13 @@ struct Composer: View {
                         }
                     }
                 }
-                TextField(isRunning ? "Steer or add a follow-up…" : "Ask anything…", text: $text, axis: .vertical)
+                TextField(
+                    isRunning
+                        ? "Steer or add a follow-up…"
+                        : (isImageOnlyModel ? "Describe the picture to generate…" : "Ask anything…"),
+                    text: $text,
+                    axis: .vertical
+                )
                     .font(.body)
                     .lineLimit(1...8)
                     .focused($focused)
@@ -208,6 +233,11 @@ struct Composer: View {
                     }
                     if !webEnabled {
                         Chip(title: "Web off", systemImage: "globe.badge.chevron.backward") { webEnabled = true }
+                    }
+                    if isImageOnlyModel {
+                        Chip(title: "Image model", systemImage: "paintbrush.fill", tint: theme.accent, action: onPickModel)
+                    } else if !supportsTools {
+                        Chip(title: "Chat only · No tools", systemImage: "bubble.left", action: onPickModel)
                     }
                 }
                 .padding(.horizontal, 4)
@@ -453,13 +483,13 @@ struct Composer: View {
             onPick: { files in
                 Task {
                     var failures: [String] = []
-                    for (data, name) in files {
+                    for picked in files {
                         do {
-                            attachments.append(try await AttachmentImporter.importFile(data, name: name, store: app.attachmentStore))
+                            attachments.append(try await AttachmentImporter.importFileURL(picked.url, name: picked.name, store: app.attachmentStore))
                         } catch let error as AttachmentImporter.Failure {
-                            failures.append("\(name): \(error.localizedDescription)")
+                            failures.append("\(picked.name): \(error.localizedDescription)")
                         } catch {
-                            failures.append("Couldn't add \(name).")
+                            failures.append("Couldn't add \(picked.name).")
                         }
                     }
                     if !failures.isEmpty {

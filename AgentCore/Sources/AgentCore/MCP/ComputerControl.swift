@@ -569,3 +569,98 @@ public struct ComputerTaskTool: AgentTool {
         }
     }
 }
+
+/// Dedicated foreground command tool for MAIPA-G's connected Linux computer (`mcp-maipa-g`),
+/// eliminating ambiguity with external sandbox MCP tools (such as Hugging Face's `hf_sandbox`)
+/// and enforcing `ShellRisk` + post-outside-content network egress approvals consistently.
+public struct RunCommandTool: AgentTool {
+    public let name = "run_command"
+    let control: ComputerControl
+    let homePath: String?
+
+    public init(control: ComputerControl, homePath: String?) {
+        self.control = control
+        self.homePath = homePath
+    }
+
+    public var spec: ToolSpec {
+        ToolSpec(
+            name: name,
+            description: "Run a foreground shell command on this chat's connected Linux computer (`\(control.machine)` via `mcp-maipa-g`). Defaults to the repository checkout directory when the chat has a repository, or `$HOME` otherwise. For commands lasting longer than 2 minutes, use `computer_task` instead.",
+            parameters: [
+                "type": "object",
+                "properties": [
+                    "command": ["type": "string", "description": .string("Shell command to run in bash on `\(control.machine)`.")],
+                    "working_directory": ["type": "string", "description": "Optional safe relative path inside `$HOME` (defaults to the repo checkout when attached)."],
+                ],
+                "required": ["command"],
+                "additionalProperties": false,
+            ]
+        )
+    }
+
+    public var bringsOutsideContent: Bool { true }
+
+    public func runningSummary(for arguments: JSONValue) -> String {
+        let cmd = (arguments.optionalString("command") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let firstLine = cmd.split(whereSeparator: \.isNewline).first.map(String.init) ?? cmd
+        let preview = firstLine.isEmpty ? "command" : String(firstLine.prefix(48))
+        return "mcp-maipa-g · \(preview)"
+    }
+
+    public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
+        let command = arguments.optionalString("command") ?? ""
+        guard ShellRisk.isRisky(command) else { return nil }
+        return ToolApprovalRequest(
+            question: "Allow MAIPA-G to run this command on \(control.machine)? It can delete files, change the machine, or reach external services.\n\(String(command.prefix(500)))",
+            allowLabel: "Run command"
+        )
+    }
+
+    public func approvalAfterOutsideContent(for arguments: JSONValue) async -> ToolApprovalRequest? {
+        let command = arguments.optionalString("command") ?? ""
+        guard ShellRisk.reachesNetwork(command) else { return nil }
+        return ToolApprovalRequest(
+            question: "This chat now contains text from the web, a repo, or a connector. Allow a command on \(control.machine) that reaches the network?\n\(String(command.prefix(500)))",
+            allowLabel: "Run command"
+        )
+    }
+
+    public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        if let approval = await approvalRequest(for: arguments) {
+            throw ToolApprovalRequired(approval)
+        }
+        return try await runApproved(arguments: arguments, progress: progress)
+    }
+
+    public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        let command = try arguments.requiredString("command")
+        let customDir = arguments.optionalString("working_directory")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveRelPath: String?
+        if let customDir, !customDir.isEmpty {
+            guard ComputerControl.isSafeRelativePath(customDir) else {
+                throw ToolInputError("working_directory must be a safe relative path inside $HOME.")
+            }
+            effectiveRelPath = customDir
+        } else {
+            effectiveRelPath = homePath
+        }
+        let dirSetup: String
+        if let rel = effectiveRelPath, ComputerControl.isSafeRelativePath(rel) {
+            dirSetup = "if [ -d \"$HOME/\(rel)\" ]; then cd \"$HOME/\(rel)\"; fi; "
+        } else {
+            dirSetup = ""
+        }
+        let wrapped = ". \"$HOME/.maipa-g/env.sh\" 2>/dev/null || true; \(dirSetup)\(command)"
+        let raw = try await control.run(wrapped)
+        let plain = ComputerControl.plainOutput(raw)
+        let redacted = SensitiveDataRedactor().redact(plain)
+        let capped = ConnectorOutputLimit.cap(redacted)
+        let shown = capped.isEmpty ? "(command exited with no output)" : capped
+        return ToolOutput(
+            forModel: shown,
+            summary: "mcp-maipa-g · ran command",
+            detail: String(shown.prefix(4_000))
+        )
+    }
+}

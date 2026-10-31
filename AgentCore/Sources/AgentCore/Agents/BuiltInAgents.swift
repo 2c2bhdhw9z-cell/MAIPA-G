@@ -1,11 +1,24 @@
 import Foundation
 
 public enum BuiltInAgents {
+    public static let inspectToolNames = [
+        "list_files", "search_code", "read_file", "read_repo_file", "read_other_repo_file",
+        "load_repo_rules", "inspect_workspace", "read_attachment",
+        "list_workstation_files", "read_workstation_file",
+        "web_search", "read_web_page", "introspect", "inspect_workflow", "ask_user",
+    ]
+    public static let generalExecutionToolNames = inspectToolNames + [
+        "create_file", "edit_file", "append_file", "delete_file", "save_changes",
+        "write_workstation_file", "run_command", "run_shell", "computer_task", "sync_staged_to_computer",
+        "mcp_*",
+    ]
+
     private static let inspect = ["list_files", "search_code", "read_file", "read_repo_file", "inspect_workspace", "read_attachment", "web_search", "read_web_page", "ask_user"]
-    private static let change = inspect + ["create_file", "edit_file", "delete_file", "save_changes", "run_shell"]
+    private static let change = inspect + ["create_file", "edit_file", "append_file", "delete_file", "save_changes", "run_shell", "run_command"]
     private static let review = inspect + ["read_pull_request", "read_pull_request_comments", "read_checks", "read_workflow_logs"]
     private static let build = change + ["list_workflows", "dispatch_workflow", "read_checks", "read_workflow_logs", "list_artifacts", "inspect_ipa", "read_releases"]
 
+    /// Core 13 workflow/product agents (count and IDs preserved for existing workflow & regression contracts).
     public static let all: [AgentDefinition] = [
         agent("planner", "Planner", "Turns a request into checked requirements and an ordered plan.", "Clarify only consequential unknowns, inspect the project, state requirements, dependencies, acceptance checks, and a practical implementation order. Do not implement.", inspect, .hard, .strong, .reportOnly, 3),
         agent("designer", "Designer", "Designs product behavior and technical structure before implementation.", "Produce a concrete design that fits the existing product and code. Cover user-visible states, data flow, failure behavior, accessibility, and test strategy. Do not implement.", inspect, .hard, .strong, .reportOnly, 3),
@@ -22,9 +35,75 @@ public enum BuiltInAgents {
         agent("feedback-answerer", "Feedback answerer", "Handles review comments and verifies each resulting change.", "Read every unresolved review comment, determine whether it is valid, make focused fixes when needed, rerun relevant checks, reply with evidence, and leave disputed feedback clearly explained.", change + ["read_pull_request_comments", "reply_to_review_comment"], .hard, .automatic, .feedback, 3),
     ]
 
-    public static var byID: [String: AgentDefinition] { Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) }) }
+    /// Kiro's 5 first-class sub-agents for fast parallel delegation inside chat and workflows.
+    public static let kiroSubagents: [AgentDefinition] = [
+        agent(
+            "context-gatherer",
+            "Context Gatherer",
+            "Explores repositories, files, attachments, and web docs in parallel to gather exact context.",
+            "Quickly locate relevant files, symbols, call sites, rules, and documentation for the assigned question. Batch read/search calls in parallel and return a concise, high-signal report with exact file:line references. Never modify files or run mutating commands.",
+            inspectToolNames,
+            .quick,
+            .fast,
+            .reportOnly,
+            0
+        ),
+        agent(
+            "general-task-execution",
+            "General Task Execution",
+            "Executes a self-contained implementation, analysis, or verification task end to end.",
+            "Complete the assigned task thoroughly in your isolated context window. Read relevant files first, make surgical edits or run needed checks when permitted by the parent chat, verify your work, and return a clear summary of what changed and what was verified.",
+            generalExecutionToolNames,
+            .normal,
+            .automatic,
+            .changesAllowed,
+            0
+        ),
+        agent(
+            "semantic-reviewer",
+            "Semantic Reviewer",
+            "Audits code, diffs, security boundaries, concurrency, and edge cases independently.",
+            "Perform a deep semantic review of the target code or staged changes. Check logic bugs, race conditions, security boundaries, error handling, UI layout traps, and test coverage. Cite exact file:line locations and concrete fixes. Never edit files.",
+            inspectToolNames + ["read_pull_request", "read_pull_request_comments", "read_checks", "read_workflow_logs"],
+            .hard,
+            .strong,
+            .review,
+            0
+        ),
+        agent(
+            "introspect",
+            "Introspect",
+            "Inspects MAIPA-G's live model, provider balances, repo, computer, connectors, and active jobs.",
+            "Call `introspect` (and `inspect_workflow` when relevant) to check MAIPA-G's exact live state — selected AI model, provider, thinking effort, limits, USD balances across connected providers, GitHub repo/branch/commit, Linux computer status, connectors, and jobs — and report clearly without exposing secrets.",
+            ["introspect", "inspect_workflow", "list_workstation_files"],
+            .quick,
+            .fast,
+            .reportOnly,
+            0
+        ),
+        agent(
+            "custom-agent-creator",
+            "Custom Agent Creator",
+            "Designs and saves reusable custom sub-agents or repository .kiro/agents definitions.",
+            "Design a focused, well-scoped sub-agent for the user's goal with clear instructions, minimal necessary tool permissions, and safe read-only vs. changes-allowed behavior. Save it with `create_custom_agent` (or stage `.kiro/agents/<name>.json` when asked to add a repo agent) and summarize its capabilities.",
+            inspectToolNames + ["create_custom_agent", "create_file", "edit_file"],
+            .normal,
+            .strong,
+            .changesAllowed,
+            0
+        ),
+    ]
 
-    public static func named(_ id: String) -> AgentDefinition? { byID[id] }
+    public static var allIncludingKiroSubagents: [AgentDefinition] {
+        kiroSubagents + all
+    }
+
+    public static var byID: [String: AgentDefinition] { Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) }) }
+    public static var kiroByID: [String: AgentDefinition] { Dictionary(uniqueKeysWithValues: kiroSubagents.map { ($0.id, $0) }) }
+
+    public static func named(_ id: String) -> AgentDefinition? {
+        byID[id] ?? kiroByID[id]
+    }
 
     private static func agent(
         _ id: String, _ name: String, _ summary: String, _ instructions: String,

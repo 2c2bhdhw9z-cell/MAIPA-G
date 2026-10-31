@@ -71,19 +71,34 @@ final class ChatLibrary {
         }
     }
 
-    /// After a save brought chats from GitHub: refreshes the list, and any open chat that isn't busy.
+    /// After a save brought chats from GitHub: refreshes the list, and any open chat that isn't busy
+    /// while preserving unsaved staged repository changes, active workflows, and Composer drafts.
     func reloadFromDisk() async {
         let chats = await store.loadAll()
         summaries = chats.map(ChatSummary.init).sorted { $0.updatedAt > $1.updatedAt }
         for chat in chats {
-            if let session = sessions[chat.id], !session.isRunning, chat.updatedAt > session.chat.updatedAt {
-                sessions[chat.id] = ChatSession(chat: chat, app: app)
-                if openSession?.id == chat.id { openSession = sessions[chat.id] }
+            if let session = sessions[chat.id], !session.isRunning, !session.hasActiveWorkflowRuns, chat.updatedAt > session.chat.updatedAt {
+                let hasUnsaved = await session.hasUnsavedStagedWork()
+                if hasUnsaved {
+                    session.adoptSyncedChatMetadataPreservingWorkspace(chat)
+                } else {
+                    let existingDraft = ComposerDraft(text: session.draft, attachments: session.draftAttachments)
+                    let savedDraft = await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: chat.id.uuidString.lowercased()))
+                    let mergedDraft = existingDraft.isEmpty ? savedDraft : existingDraft
+                    let fresh = ChatSession(chat: chat, app: app, draft: mergedDraft)
+                    fresh.workstationFiles = session.workstationFiles
+                    fresh.activeWorkflowRuns = session.activeWorkflowRuns
+                    sessions[chat.id] = fresh
+                    if openSession?.id == chat.id { openSession = fresh }
+                }
             }
         }
         let ids = Set(chats.map(\.id))
-        if let open = openSession, !ids.contains(open.id), !open.isRunning, !open.chat.messages.isEmpty {
-            openSession = nil
+        if let open = openSession, !ids.contains(open.id), !open.isRunning, !open.hasActiveWorkflowRuns, !open.chat.messages.isEmpty {
+            let hasUnsaved = await open.hasUnsavedStagedWork()
+            if !hasUnsaved {
+                openSession = nil
+            }
         }
     }
 
@@ -125,10 +140,23 @@ final class ChatLibrary {
         dropIdleSessions()
     }
 
-    /// Frees memory from chats that are neither on screen nor working.
+    /// Frees memory from chats that are neither on screen, working, running a workflow, nor holding unsaved staged repo changes.
     private func dropIdleSessions() {
-        for (id, session) in sessions where session.id != openSession?.id && !session.isRunning {
-            sessions[id] = nil
+        for (id, session) in sessions where session.id != openSession?.id && !session.isRunning && !session.hasActiveWorkflowRuns {
+            if !session.hasInMemoryWorkToPreserve {
+                sessions[id] = nil
+            } else {
+                Task { @MainActor [weak self] in
+                    guard let self, let candidate = self.sessions[id],
+                          candidate.id != self.openSession?.id,
+                          !candidate.isRunning,
+                          !candidate.hasActiveWorkflowRuns else { return }
+                    let hasStaged = await candidate.hasUnsavedStagedWork()
+                    if !hasStaged && candidate.workstationFiles.isEmpty && candidate.activeWorkflowRuns.isEmpty {
+                        self.sessions[id] = nil
+                    }
+                }
+            }
         }
     }
 

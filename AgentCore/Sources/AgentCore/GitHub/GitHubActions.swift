@@ -130,6 +130,35 @@ public extension GitHubClient {
         try await send("GET", Self.path(repo, "/actions/artifacts/\(artifactID)/zip"), accept: "application/octet-stream").body
     }
 
+    /// Streams an authenticated `api.github.com` Actions artifact or Release asset URL to disk
+    /// without forwarding GitHub credentials to third-party blob storage.
+    func downloadAuthenticatedArtifact(at rawURL: String, to destination: URL) async throws {
+        guard let parsed = URL(string: rawURL), parsed.scheme == "https" else {
+            throw GitHubAPIError(status: 400, message: "Invalid artifact download URL")
+        }
+        if parsed.host?.lowercased() == "api.github.com" {
+            let apiPath = parsed.path
+            let response = try await send("GET", apiPath, accept: "application/octet-stream", allow: [301, 302, 303, 307, 308], followsRedirects: false)
+            if response.isSuccess {
+                try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try response.body.write(to: destination, options: .atomic)
+                return
+            }
+            guard let location = response.header("location"), let redirectURL = URL(string: location), redirectURL.scheme == "https" else {
+                throw GitHubAPIError(status: response.status, message: "GitHub didn't return a download location (HTTP \(response.status))")
+            }
+            let stored = try await transport.download(HTTPRequest(url: redirectURL, idleTimeout: 180), to: destination)
+            guard stored.isSuccess else {
+                throw GitHubAPIError(status: stored.status, message: "Artifact storage returned HTTP \(stored.status)")
+            }
+            return
+        }
+        let stored = try await transport.download(HTTPRequest(url: parsed, idleTimeout: 180), to: destination)
+        guard stored.isSuccess else {
+            throw GitHubAPIError(status: stored.status, message: "Download returned HTTP \(stored.status)")
+        }
+    }
+
     func cancelWorkflowRun(_ repo: RepoRef, runID: Int) async throws {
         _ = try await send("POST", Self.path(repo, "/actions/runs/\(runID)/cancel"), allow: [409])
     }

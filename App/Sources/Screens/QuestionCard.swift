@@ -48,12 +48,20 @@ struct QuestionCard: View {
                 }
             }
             PrimaryButton(title: questions.questions.count == 1 ? "Send answer" : "Send answers", systemImage: "arrow.up") {
+                focused = nil
+                KeyboardDismiss.dismiss()
                 onSubmit(answers)
             }
             .disabled(!allAnswered)
             .opacity(allAnswered ? 1 : 0.5)
         }
         .card(cornerRadius: 20, padding: 16)
+        .onChange(of: questions) { _, newQuestions in
+            chosen = Array(repeating: "", count: newQuestions.questions.count)
+            typed = Array(repeating: "", count: newQuestions.questions.count)
+            typing.removeAll()
+            focused = nil
+        }
     }
 
     private var answers: [String] {

@@ -91,7 +91,7 @@ struct ModelPicker: View {
                 Text("Choose an AI")
                     .font(.rounded(.title3, weight: .bold))
                 HStack(spacing: 6) {
-                    Text(catalog.isEmpty ? "Loading OpenRouter catalog…" : "\(catalog.count) OpenRouter models")
+                    Text(catalog.isEmpty ? "Loading AI catalog…" : "\(catalog.count) models available")
                     if let left = app.openRouter.freeRequestsLeft {
                         Text("· \(left) free left today")
                     }
@@ -601,21 +601,31 @@ struct ModelPicker: View {
                         if let maxOut = model.maxCompletionTokens, maxOut >= 16_000 {
                             badge(text: "\(Self.tokens(maxOut)) out")
                         }
-                        if !model.thinkingLevels.isEmpty {
-                            badge(text: "Thinks", icon: "brain")
-                        }
-                        if model.supportsTools {
-                            badge(text: "Tools", icon: "wrench.and.screwdriver")
-                        }
-                        if model.acceptsImages {
-                            badge(text: "Vision", icon: "eye")
-                        }
-                        if model.generatesImages {
-                            badge(text: "Image", icon: "photo")
+                        if model.isPureImageModel {
+                            badge(text: "Image gen only", icon: "paintbrush.fill", highlight: true)
+                        } else {
+                            if !model.thinkingLevels.isEmpty {
+                                badge(text: "Thinks", icon: "brain")
+                            }
+                            if model.supportsTools {
+                                badge(text: "Tools", icon: "wrench.and.screwdriver")
+                            } else {
+                                badge(text: "Chat only · No tools", icon: "bubble.left")
+                            }
+                            if model.acceptsImages {
+                                badge(text: "Vision", icon: "eye")
+                            }
+                            if model.generatesImages {
+                                badge(text: "Image", icon: "photo")
+                            }
                         }
                     }
 
-                    if cantReadRepo {
+                    if model.isPureImageModel {
+                        Text("Generates pictures directly from your prompt (no chat or repo tools)")
+                            .font(.caption2)
+                            .foregroundStyle(theme.accent)
+                    } else if cantReadRepo {
                         Text("No tool support — attach no repo or pick a Tools model for repo edits")
                             .font(.caption2)
                             .foregroundStyle(Theme.danger)

@@ -80,11 +80,19 @@ public struct AgentEnvironment: Sendable {
     public var onOutOfCredits: @Sendable () async -> Void
     /// Called with a model OpenRouter refused to MAIPA-G as app-restricted, so it can be hidden.
     public var onModelRestricted: @Sendable (String) async -> Void = { _ in }
+    /// Saves inline images streamed directly by multimodal image-generating chat models (`choices[0].message.images`).
+    public var saveInlineGeneratedImage: (@Sendable (_ data: Data, _ mimeType: String, _ prompt: String, _ model: String) async -> GeneratedImageResult?)?
 
-    public init(openRouter: OpenRouterClient, freeRoute: @escaping @Sendable () -> Route, onOutOfCredits: @escaping @Sendable () async -> Void) {
+    public init(
+        openRouter: OpenRouterClient,
+        freeRoute: @escaping @Sendable () -> Route,
+        onOutOfCredits: @escaping @Sendable () async -> Void,
+        saveInlineGeneratedImage: (@Sendable (_ data: Data, _ mimeType: String, _ prompt: String, _ model: String) async -> GeneratedImageResult?)? = nil
+    ) {
         self.openRouter = openRouter
         self.freeRoute = freeRoute
         self.onOutOfCredits = onOutOfCredits
+        self.saveInlineGeneratedImage = saveInlineGeneratedImage
     }
 }
 
@@ -172,6 +180,7 @@ private struct Runner {
     var autoContinuedBlankReply = false
     var injectedSteeringNotes: [String] = []
     var pendingBlankReplyNudge: String?
+    var toolInlineImages: [String: [ToolInlineImage]] = [:]
     var lastEmit = Date.distantPast
 
     init(input: AgentTurnInput, environment: AgentEnvironment, continuation: AsyncStream<AgentEvent>.Continuation) {
@@ -323,7 +332,14 @@ private struct Runner {
         while true {
             attempt += 1
             chat.messages[chat.messages.count - 1].assistantTurn = turn
-            var rawMessages = Transcript.messages(for: chat, systemPrompt: systemPrompt, attachmentData: attachmentData)
+            var rawMessages = Transcript.messages(
+                for: chat,
+                systemPrompt: systemPrompt,
+                attachmentData: attachmentData,
+                readsImages: route.readsImages,
+                readsPDFs: route.readsPDFs,
+                toolInlineImages: toolInlineImages
+            )
             for note in activeSteeringNotes {
                 rawMessages.append(.user("Live instruction from the user while you were working — follow this update immediately:\n\(note)"))
             }
@@ -341,6 +357,11 @@ private struct Runner {
                     effectiveSpecs.append(contentsOf: [ws.spec, fp.spec])
                 }
             }
+            // Multimodal chat-image models (like `google/gemini-3.1-flash-image-preview` or `openai/gpt-5-image`)
+            // emit `choices[0].message.images` when `modalities: ["image", "text"]` is set.
+            let requestModalities: [String]? = (!isExternalProvider && route.generatesImages && effectiveSpecs.isEmpty)
+                ? ["image", "text"]
+                : nil
             let toolSchemaTokens = Transcript.estimatedToolTokens(effectiveSpecs)
             let messageBudget = max(4_096, route.contextBudget - toolSchemaTokens)
             let (messages, trimmed) = Transcript.fit(
@@ -358,7 +379,8 @@ private struct Runner {
                 reasoningEffort: route.effort,
                 plugins: isExternalProvider ? [] : route.plugins,
                 sessionID: isExternalProvider ? nil : chat.id.uuidString,
-                automaticCaching: isExternalProvider ? false : route.automaticCaching
+                automaticCaching: isExternalProvider ? false : route.automaticCaching,
+                modalities: requestModalities
             )
             if trimmed, !turn.notices.contains(Self.trimmedNotice) { turn.notices.append(Self.trimmedNotice) }
 
@@ -389,7 +411,7 @@ private struct Runner {
                 guard accumulator.hasOutput || !accumulator.reasoning.isEmpty || accumulator.finishReason != nil else {
                     throw OpenRouterAPIError(httpStatus: 502, code: "empty_reply", message: "The AI sent back an empty reply.")
                 }
-                finish(step: index, with: accumulator)
+                await finish(step: index, with: accumulator)
                 if accumulator.finishReason == "length", accumulator.toolCalls.isEmpty {
                     turn.notices.append("This reply hit its length limit and may be cut off.")
                 }
@@ -399,14 +421,18 @@ private struct Runner {
                 let producedOutput = accumulator.hasOutput
                 if producedOutput || error is CancellationError || Task.isCancelled {
                     // Keep what arrived; a half-written tool call is not safe to run, so drop those.
-                    finish(step: index, with: accumulator, keepToolCalls: false)
+                    await finish(step: index, with: accumulator, keepToolCalls: false)
                     emit(milestone: true)
                     throw error
                 }
                 turn.steps.remove(at: index)
                 switch await recovery(for: error, attempt: attempt) {
                 case .retry(let delay):
-                    if delay > 0 { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+                    if delay >= 4 {
+                        try await waitWithLiveCountdown(seconds: Int(delay.rounded(.up)))
+                    } else if delay > 0 {
+                        try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    }
                     continue
                 case .switchToFree:
                     await environment.onOutOfCredits()
@@ -446,7 +472,25 @@ private struct Runner {
         }
     }
 
-    mutating func finish(step index: Int, with accumulator: StreamAccumulator, keepToolCalls: Bool = true) {
+    /// Waits out a temporary rate-limit (`429`) window up to 60 seconds with a live countdown notice
+    /// that cleans itself up automatically once the retry resumes, so recovered retries leave zero warning clutter.
+    private mutating func waitWithLiveCountdown(seconds totalSeconds: Int) async throws {
+        let clamped = min(max(totalSeconds, 1), 60)
+        let prefix = "Rate limit reached — retrying automatically in "
+        defer {
+            turn.notices.removeAll { $0.hasPrefix(prefix) }
+            emit(milestone: false)
+        }
+        for remaining in stride(from: clamped, through: 1, by: -1) {
+            try Task.checkCancellation()
+            turn.notices.removeAll { $0.hasPrefix(prefix) }
+            turn.notices.append("\(prefix)\(remaining)s…")
+            emit(milestone: false)
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+    }
+
+    mutating func finish(step index: Int, with accumulator: StreamAccumulator, keepToolCalls: Bool = true) async {
         var step = turn.steps[index]
         step.finishedAt = Date()
         step.text = accumulator.text
@@ -462,6 +506,23 @@ private struct Runner {
         step.usage = accumulator.usage
         step.finishReason = accumulator.finishReason
         step.citations = accumulator.citations.isEmpty ? nil : accumulator.citations
+        if !accumulator.imageDataURLs.isEmpty, let saver = environment.saveInlineGeneratedImage {
+            let promptText = chat.messages.reversed().compactMap { msg -> String? in
+                if case .user(let u) = msg.body { return u.text }
+                return nil
+            }.first { !$0.isEmpty } ?? "Generated picture"
+            var savedImages = step.generatedImages ?? []
+            for rawURL in accumulator.imageDataURLs {
+                let decoded = OpenRouterClient.decodeImagePayload(rawURL)
+                if let bytes = decoded.data, !bytes.isEmpty,
+                   let saved = await saver(bytes, decoded.mimeType ?? "image/png", promptText, accumulator.model ?? route.model) {
+                    savedImages.append(saved)
+                }
+            }
+            if !savedImages.isEmpty {
+                step.generatedImages = savedImages
+            }
+        }
         if keepToolCalls {
             step.toolCalls = accumulator.toolCalls.map { call in
                 let arguments = JSONValue.parse(call.function.arguments) ?? .object([:])
@@ -482,9 +543,10 @@ private struct Runner {
             case .outOfCredits where route.isAuto && !route.isFree && !switchedToFree:
                 return .switchToFree
             case .busyRetrySoon where attempt <= 3:
-                return .retry(min(api.retryAfter ?? 3, 20))
-            case .rateLimited where attempt <= 2 && (api.retryAfter ?? 5) <= 20:
-                return .retry(api.retryAfter ?? Double(attempt) * 4)
+                return .retry(min(api.retryAfter ?? 4, 30))
+            case .rateLimited where attempt <= 3 && (api.retryAfter ?? 15) <= 65:
+                let suggested = api.retryAfter ?? Double(attempt * 5)
+                return .retry(min(max(suggested, 1), 60))
             case .providerFailed where attempt <= 2, .noModelAvailable where attempt <= 2:
                 return .retry(Double(attempt) * 1.5)
             case .contextTooLong where attempt <= 2:
@@ -596,8 +658,6 @@ private struct Runner {
         emit(milestone: true)
 
         if !jobs.isEmpty {
-            // The jobs run side by side and report through one stream: progress lines while they
-            // work ("Getting a copy of the repo · 12 MB"), then their results.
             enum ToolEvent: Sendable {
                 case progress(Int, String)
                 case finished(Int, Result<ToolOutput, Error>)
@@ -658,9 +718,6 @@ private struct Runner {
         return waiting
     }
 
-    /// Whether anything from outside the person's own words is in the conversation: OpenRouter's
-    /// own web tools (their citations), or a finished call to a tool that brings outside content,
-    /// in this turn or an earlier one the AI still sees.
     func outsideContentSeen() -> Bool {
         let earlier = chat.messages.dropLast().compactMap(\.assistantTurn)
         for candidate in earlier + [turn] {
@@ -674,8 +731,10 @@ private struct Runner {
         return false
     }
 
-    /// Outside-content tools by name, for earlier turns whose tools may not be loaded now.
-    static let outsideContentToolNames: Set<String> = ["web_search", "read_web_page", "read_file", "search_code", "read_repo_file", "read_other_repo_file", "load_repo_rules", "read_attachment"]
+    static let outsideContentToolNames: Set<String> = [
+        "web_search", "read_web_page", "read_file", "search_code", "read_repo_file",
+        "read_other_repo_file", "load_repo_rules", "read_attachment",
+    ]
 
     mutating func apply(_ result: (Int, Result<ToolOutput, Error>), stepIndex: Int) {
         let callIndex = result.0
@@ -691,6 +750,9 @@ private struct Runner {
             turn.steps[stepIndex].toolCalls[callIndex] = record
             if !output.generatedImages.isEmpty {
                 turn.steps[stepIndex].generatedImages = (turn.steps[stepIndex].generatedImages ?? []) + output.generatedImages
+            }
+            if !output.inlineImages.isEmpty {
+                toolInlineImages[record.id] = output.inlineImages
             }
             if !output.isError, callIndex < turn.steps[stepIndex].toolCalls.count {
                 if record.name == "add_memory", !turn.notices.contains("Saved a memory: \(output.detail ?? output.summary)") {
@@ -730,23 +792,37 @@ private struct Runner {
 
     static func describe(_ error: Error) -> TurnFailure {
         if let api = error as? OpenRouterAPIError {
+            let service = api.providerName.isEmpty ? "OpenRouter" : api.providerName
+            let isOpenRouter = service == "OpenRouter"
             switch api.kind {
             case .outOfCredits:
-                return TurnFailure(kind: .outOfCredits, message: "Your OpenRouter credit has run out.", detail: api.description)
+                return TurnFailure(kind: .outOfCredits, message: "Your \(service) credit has run out.", detail: api.description)
             case .spendingCapReached:
-                return TurnFailure(kind: .outOfCredits, message: "This OpenRouter key has reached its spending limit.", detail: api.description)
+                return TurnFailure(kind: .outOfCredits, message: "This \(service) key has reached its spending limit.", detail: api.description)
             case .freeDailyLimit:
-                return TurnFailure(kind: .freeLimitReached, message: "You've used today's free AI requests. They come back at midnight UTC (8 PM Eastern in summer, 7 PM in winter).", detail: api.description)
+                return TurnFailure(
+                    kind: .freeLimitReached,
+                    message: isOpenRouter
+                        ? "You've used today's free AI requests. They come back at midnight UTC (8 PM Eastern in summer, 7 PM in winter)."
+                        : "You've reached \(service)'s daily request limit.",
+                    detail: api.description
+                )
             case .rateLimited, .busyRetrySoon:
-                return TurnFailure(kind: .providerFailed, message: "The AI is busy right now. Try again in a minute.", detail: api.description)
+                return TurnFailure(kind: .providerFailed, message: "The AI on \(service) is busy right now. Try again in a minute.", detail: api.description)
             case .invalidKey:
-                return TurnFailure(kind: .signInNeeded, message: "OpenRouter didn't accept the sign-in. Sign in again in Settings.", detail: api.description)
+                return TurnFailure(
+                    kind: .signInNeeded,
+                    message: isOpenRouter
+                        ? "OpenRouter didn't accept the sign-in. Sign in again in Settings."
+                        : "\(service) didn't accept the API key. Check it in Settings -> AI Providers.",
+                    detail: api.description
+                )
             case .contextTooLong:
                 return TurnFailure(kind: .tooLong, message: "This chat is too long for this AI. Start a new chat, or pick an AI that can hold more.", detail: api.description)
             case .noModelAvailable:
-                return TurnFailure(kind: .providerFailed, message: "No AI could take this request just now. Try again, or pick another AI.", detail: api.description)
+                return TurnFailure(kind: .providerFailed, message: "No AI on \(service) could take this request just now. Try again, or pick another AI.", detail: api.description)
             case .providerFailed:
-                return TurnFailure(kind: .providerFailed, message: "The AI's service had a problem partway through. Try again.", detail: api.description)
+                return TurnFailure(kind: .providerFailed, message: "\(service) had a problem partway through. Try again.", detail: api.description)
             case .moderated:
                 return TurnFailure(kind: .other, message: "The AI's provider refused this request.", detail: api.description)
             case .appRestricted:

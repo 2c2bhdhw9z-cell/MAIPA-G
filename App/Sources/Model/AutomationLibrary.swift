@@ -20,7 +20,7 @@ final class AutomationLibrary {
         workflowStore = ProductStore(dataDirectory: dataDirectory, folder: "workflows")
     }
 
-    var agents: [AgentDefinition] { BuiltInAgents.all + customAgents.map(\.definition) }
+    var agents: [AgentDefinition] { BuiltInAgents.allIncludingKiroSubagents + customAgents.map(\.definition) }
     var workflows: [WorkflowDefinition] { BuiltInWorkflows.all + customWorkflows.map(\.definition) }
 
     func load() async {
@@ -121,7 +121,7 @@ final class AutomationLibrary {
         var chat = Chat(title: "Workflow maker")
         chat.messages = [.user(prompt), ChatMessage(body: .assistant(AssistantTurn()))]
         let catalogue = app.openRouter.modelsByID
-        let route = ModelRouter.route(choice: .free, difficulty: .hard, thinking: .medium, account: app.openRouter.accountState, catalogue: catalogue, openRouterAvailable: hasOpenRouter)
+        let route = ModelRouter.route(choice: .auto, difficulty: .hard, thinking: .medium, account: app.openRouter.accountState, catalogue: catalogue, openRouterAvailable: hasOpenRouter)
         let input = AgentTurnInput(
             chat: chat, route: route,
             systemPrompt: SystemPrompt.make(userLogin: app.github.login, repo: nil, agent: maker),

@@ -11,6 +11,7 @@ struct WorkstationScreen: View {
         case canvas = "Canvas"
         case files = "Files"
         case changes = "Changes"
+        case workflows = "Workflows"
         var id: String { rawValue }
     }
 
@@ -52,6 +53,8 @@ struct WorkstationScreen: View {
 
     @State private var diffScope = 0
     @State private var diffText = "Loading changes…"
+    @State private var workflowSteerDrafts: [String: String] = [:]
+    @State private var showingWorkflowsLibrary = false
 
     private static let zoomSteps: [CGFloat] = [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 1.0, 1.5, 2.0, 3.0]
 
@@ -83,6 +86,8 @@ struct WorkstationScreen: View {
                 filesWorkspace
             case .changes:
                 changesWorkspace
+            case .workflows:
+                workflowsWorkspace
             }
         }
         .background(Theme.background.ignoresSafeArea())
@@ -110,6 +115,9 @@ struct WorkstationScreen: View {
                 repoCommit: repoCommit,
                 onAddToChat: { addItemToChat(item) }
             )
+        }
+        .sheet(isPresented: $showingWorkflowsLibrary) {
+            WorkflowsScreen()
         }
         .alert("Workstation", isPresented: Binding(get: { importError != nil }, set: { if !$0 { importError = nil } })) {
             Button("OK") {}
@@ -172,6 +180,7 @@ struct WorkstationScreen: View {
                 tabButton(.canvas, badge: canvasItems.count)
                 tabButton(.files, badge: allItems.count)
                 tabButton(.changes, badge: pendingChangesCount)
+                tabButton(.workflows, badge: session?.activeWorkflowRuns.count ?? 0)
             }
         }
         .padding(.horizontal, 16)
@@ -900,6 +909,159 @@ struct WorkstationScreen: View {
         }
     }
 
+    // MARK: - Kiro Workflows Tab (Live Step Tree, Transcript, Steer, & Stopped-State Model Switcher)
+
+    private var workflowsWorkspace: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Chat Workflows")
+                            .font(.rounded(.headline, weight: .bold))
+                        Text("Inspect live step trees, steer active runs, or switch the default AI while paused.")
+                            .font(.caption)
+                            .foregroundStyle(Theme.secondaryText)
+                    }
+                    Spacer()
+                    Button {
+                        showingWorkflowsLibrary = true
+                    } label: {
+                        Label("Library", systemImage: "point.3.connected.trianglepath.dotted")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                }
+
+                if let session, !session.activeWorkflowRuns.isEmpty {
+                    ActiveWorkflowsInlineCard(
+                        runs: session.activeWorkflowRuns,
+                        onPause: { session.pauseWorkflowRun($0) },
+                        onResume: { id, ans in session.resumeWorkflowRun(id, answer: ans) },
+                        onStop: { session.stopWorkflowRun($0) },
+                        onRetry: { session.retryWorkflowRun($0) },
+                        onOpenWorkstation: {}
+                    )
+
+                    ForEach(session.activeWorkflowRuns) { run in
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Text("\(run.definition.name) · Controls & Transcript")
+                                    .font(.subheadline.weight(.semibold))
+                                Spacer()
+                                if let defaultModel = run.checkpoint.defaultModelID {
+                                    Text(app.openRouter.displayName(forModelID: defaultModel))
+                                        .font(.caption.weight(.medium))
+                                        .foregroundStyle(theme.accent)
+                                }
+                            }
+
+                            if !run.isRunning {
+                                let candidateModels = (app.openRouter.models).filter { !$0.isFree && $0.id != ModelChoice.freeID }.prefix(24)
+                                if !candidateModels.isEmpty {
+                                    Menu {
+                                        ForEach(Array(candidateModels)) { model in
+                                            Button {
+                                                session.setWorkflowRunModel(run.id, modelID: model.id, effort: .max)
+                                            } label: {
+                                                Text(model.shortName)
+                                            }
+                                        }
+                                    } label: {
+                                        HStack(spacing: 6) {
+                                            Image(systemName: "cpu")
+                                                .foregroundStyle(theme.accent)
+                                            Text("Switch default AI: \(app.openRouter.displayName(forModelID: run.checkpoint.defaultModelID ?? ModelChoice.autoID))")
+                                                .font(.caption.weight(.semibold))
+                                            Image(systemName: "chevron.down")
+                                                .font(.system(size: 9, weight: .bold))
+                                        }
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 6)
+                                        .background(Theme.raised, in: Capsule())
+                                        .overlay(Capsule().strokeBorder(Theme.stroke))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+
+                            HStack(spacing: 8) {
+                                TextField(
+                                    "Steer the agent for upcoming steps…",
+                                    text: Binding(
+                                        get: { workflowSteerDrafts[run.id] ?? "" },
+                                        set: { workflowSteerDrafts[run.id] = $0 }
+                                    )
+                                )
+                                .font(.footnote)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 8)
+                                .background(Theme.raised, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.stroke))
+
+                                Button("Steer") {
+                                    let note = (workflowSteerDrafts[run.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                                    guard !note.isEmpty else { return }
+                                    session.steerWorkflowRun(run.id, note: note)
+                                    workflowSteerDrafts[run.id] = ""
+                                    Haptics.selection()
+                                }
+                                .font(.caption.weight(.semibold))
+                                .buttonStyle(.borderedProminent)
+                                .buttonBorderShape(.capsule)
+                            }
+
+                            if !run.checkpoint.steeringNotes.isEmpty {
+                                Text("Active steering notes: " + run.checkpoint.steeringNotes.joined(separator: " · "))
+                                    .font(.caption2)
+                                    .foregroundStyle(Theme.secondaryText)
+                            }
+
+                            if !run.checkpoint.outputs.isEmpty {
+                                Divider()
+                                Text("Step Outputs (\(run.checkpoint.outputs.count))")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Theme.secondaryText)
+                                ForEach(Array(run.checkpoint.outputs.enumerated()), id: \.offset) { _, output in
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        HStack {
+                                            Text(output.title)
+                                                .font(.caption.weight(.bold))
+                                            if let model = output.model {
+                                                Text("· \(app.openRouter.displayName(forModelID: model))")
+                                                    .font(.caption2)
+                                                    .foregroundStyle(Theme.secondaryText)
+                                            }
+                                            Spacer()
+                                        }
+                                        Text(String(output.text.prefix(1_600)))
+                                            .font(.caption)
+                                            .foregroundStyle(.primary.opacity(0.9))
+                                            .textSelection(.enabled)
+                                    }
+                                    .padding(10)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(Theme.raised.opacity(0.6), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                }
+                            }
+                        }
+                        .padding(12)
+                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Theme.stroke))
+                    }
+                } else {
+                    ContentUnavailableView(
+                        "No active workflows in this chat",
+                        systemImage: "point.3.connected.trianglepath.dotted",
+                        description: Text("Ask the AI to design or run a multi-step workflow, or open the Workflows library.")
+                    )
+                    .padding(.vertical, 28)
+                }
+            }
+            .padding(16)
+        }
+    }
+
     // MARK: - Data Aggregation Across Attachments, Generated Media, Diagrams, Repo, & Computer
 
     private var uploadItems: [WorkstationItem] {
@@ -912,6 +1074,10 @@ struct WorkstationScreen: View {
         }
 
         if let session {
+            for att in session.workstationFiles where !seen.contains(att.id) {
+                seen.insert(att.id)
+                list.append(WorkstationItem.fromAttachment(att, source: "Workstation artifact", removableDraft: false))
+            }
             for att in session.draftAttachments where !seen.contains(att.id) {
                 seen.insert(att.id)
                 list.append(WorkstationItem.fromAttachment(att, source: "Draft upload", removableDraft: true))
@@ -1194,10 +1360,9 @@ struct WorkstationScreen: View {
     private func shareItem(_ item: WorkstationItem) {
         guard let att = item.attachment else { return }
         Task {
-            guard let data = try? await app.attachmentStore.data(for: att) else { return }
-            let url = FileManager.default.temporaryDirectory.appendingPathComponent(att.name)
-            try? data.write(to: url, options: .atomic)
-            SharePresenter.present(items: [url])
+            if let url = await ShareableAttachmentURL.prepare(attachment: att, store: app.attachmentStore) {
+                SharePresenter.present(items: [url])
+            }
         }
     }
 
@@ -1207,9 +1372,7 @@ struct WorkstationScreen: View {
         Task {
             var urls: [URL] = []
             for att in items.prefix(30) {
-                if let data = try? await app.attachmentStore.data(for: att) {
-                    let url = FileManager.default.temporaryDirectory.appendingPathComponent(att.name)
-                    try? data.write(to: url, options: .atomic)
+                if let url = await ShareableAttachmentURL.prepare(attachment: att, store: app.attachmentStore) {
                     urls.append(url)
                 }
             }
@@ -1223,10 +1386,19 @@ struct WorkstationScreen: View {
         AttachmentFilePicker.shared.present(
             onPick: { files in
                 Task {
-                    for (data, name) in files {
-                        if let imported = try? await AttachmentImporter.importFile(data, name: name, store: app.attachmentStore) {
+                    var failures: [String] = []
+                    for picked in files {
+                        do {
+                            let imported = try await AttachmentImporter.importFileURL(picked.url, name: picked.name, store: app.attachmentStore)
                             appendDraftAttachment(imported)
+                        } catch let error as AttachmentImporter.Failure {
+                            failures.append("\(picked.name): \(error.localizedDescription)")
+                        } catch {
+                            failures.append("Couldn't add \(picked.name).")
                         }
+                    }
+                    if !failures.isEmpty {
+                        importError = failures.joined(separator: "\n")
                     }
                 }
             },
@@ -1484,8 +1656,8 @@ private struct WorkstationCanvasCard: View {
             case .image, .pdf:
                 thumbnail = await ImageDownsampler.attachmentThumbnail(att, store: app.attachmentStore, maxPixelSize: 640)
             case .textOrCode:
-                if let data = try? await app.attachmentStore.data(for: att),
-                   let str = AttachmentDataPreviewBody.readableText(from: data, name: att.name) {
+                if let slice = (try? await app.attachmentStore.readSlice(for: att, offsetBytes: 0, maxBytes: 8_192))?.data,
+                   let str = AttachmentDataPreviewBody.readableText(from: slice, name: att.name) {
                     snippet = String(str.prefix(420))
                 }
             default:
@@ -1567,6 +1739,8 @@ private struct WorkstationItemPreviewSheet: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
     @State private var attachmentData: Data?
+    @State private var attachmentFileURL: URL?
+    @State private var attachmentImage: UIImage?
     @State private var repoText: String?
     @State private var repoImage: UIImage?
     @State private var loading = true
@@ -1577,8 +1751,19 @@ private struct WorkstationItemPreviewSheet: View {
                 if let att = item.attachment {
                     if loading {
                         ProgressView("Opening \(item.name)…")
+                    } else if let attachmentImage {
+                        ZoomableImageCanvas(image: attachmentImage)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if (att.kind == .pdf || att.name.lowercased().hasSuffix(".pdf")), let attachmentFileURL {
+                        PDFInlineReaderView(url: attachmentFileURL)
                     } else if let attachmentData {
-                        AttachmentDataPreviewBody(name: att.name, kind: att.kind, bytes: att.bytes, data: attachmentData)
+                        AttachmentDataPreviewBody(
+                            name: att.name,
+                            kind: att.kind,
+                            bytes: att.bytes,
+                            data: attachmentData,
+                            shareURL: attachmentFileURL
+                        )
                     } else {
                         ContentUnavailableView("File unavailable", systemImage: "doc.badge.exclamationmark")
                     }
@@ -1622,11 +1807,13 @@ private struct WorkstationItemPreviewSheet: View {
                     }
                     .accessibilityLabel("Add to chat")
 
-                    if let att = item.attachment, let attachmentData {
+                    if let att = item.attachment, attachmentFileURL != nil {
                         Button {
-                            let url = FileManager.default.temporaryDirectory.appendingPathComponent(att.name)
-                            try? attachmentData.write(to: url, options: .atomic)
-                            SharePresenter.present(items: [url])
+                            Task {
+                                if let url = await ShareableAttachmentURL.prepare(attachment: att, store: app.attachmentStore) {
+                                    SharePresenter.present(items: [url])
+                                }
+                            }
                         } label: {
                             Image(systemName: "square.and.arrow.up")
                         }
@@ -1644,7 +1831,15 @@ private struct WorkstationItemPreviewSheet: View {
     private func loadPreview() async {
         defer { loading = false }
         if let att = item.attachment {
-            attachmentData = try? await app.attachmentStore.data(for: att)
+            if let resolvedURL = try? app.attachmentStore.fileURL(for: att),
+               FileManager.default.fileExists(atPath: resolvedURL.path) {
+                attachmentFileURL = resolvedURL
+                if att.kind == .image {
+                    attachmentImage = await ImageDownsampler.attachmentThumbnail(att, store: app.attachmentStore, maxPixelSize: 2_400)
+                } else if att.kind != .pdf && !att.name.lowercased().hasSuffix(".pdf") {
+                    attachmentData = (try? await app.attachmentStore.readSlice(for: att, offsetBytes: 0, maxBytes: 256_000))?.data
+                }
+            }
             return
         }
         if case .stagedChange(let path, let data, _, _) = item.kind {

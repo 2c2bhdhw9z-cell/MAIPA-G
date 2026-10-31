@@ -38,11 +38,33 @@ struct CameraPicker: UIViewControllerRepresentable {
             _ picker: UIImagePickerController,
             didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
         ) {
-            if let image = info[.originalImage] as? UIImage,
-               let data = image.jpegData(compressionQuality: 0.92) {
-                owner.onPhoto(data)
-            }
+            let capturedImage = info[.originalImage] as? UIImage
+            let callback = owner.onPhoto
+            // Dismiss immediately so the camera close animation never stalls while encoding 48 MP photos.
             owner.isPresented = false
+            guard let capturedImage else { return }
+            let box = UncheckedImageBox(image: capturedImage)
+            Task.detached(priority: .userInitiated) {
+                let maxDim: CGFloat = 2_048
+                let size = box.image.size
+                let scale = min(1.0, maxDim / max(max(size.width, size.height), 1))
+                let targetSize = CGSize(width: max(1, floor(size.width * scale)), height: max(1, floor(size.height * scale)))
+                let format = UIGraphicsImageRendererFormat.default()
+                format.scale = 1.0
+                let scaled = scale < 1.0
+                    ? UIGraphicsImageRenderer(size: targetSize, format: format).image { _ in
+                        box.image.draw(in: CGRect(origin: .zero, size: targetSize))
+                    }
+                    : box.image
+                guard let data = scaled.jpegData(compressionQuality: 0.86) else { return }
+                await MainActor.run {
+                    callback(data)
+                }
+            }
         }
+    }
+
+    private struct UncheckedImageBox: @unchecked Sendable {
+        let image: UIImage
     }
 }

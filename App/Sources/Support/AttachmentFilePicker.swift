@@ -3,18 +3,23 @@ import UIKit
 import UniformTypeIdentifiers
 
 /// Continuum's proven Files-picker pattern: UIKit instead of SwiftUI's `.fileImporter`, an
-/// app-owned copy, a strongly retained delegate, and the bytes read before the temporary copy can
-/// disappear. The singleton deliberately owns both the picker and its weak delegate (itself).
+/// app-owned staged file copy on disk (never loading 250 MB files into RAM simultaneously),
+/// and a strongly retained delegate.
 final class AttachmentFilePicker: NSObject, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate {
     @MainActor static let shared = AttachmentFilePicker()
 
+    struct PickedTempFile: Sendable {
+        let url: URL
+        let name: String
+    }
+
     private var activePicker: UIDocumentPickerViewController?
-    private var onPick: (([(Data, String)]) -> Void)?
+    private var onPick: (([PickedTempFile]) -> Void)?
     private var onFailure: ((String) -> Void)?
     private var outcomeDelivered = false
 
     @MainActor
-    func present(onPick: @escaping ([(Data, String)]) -> Void, onFailure: @escaping (String) -> Void) {
+    func present(onPick: @escaping ([PickedTempFile]) -> Void, onFailure: @escaping (String) -> Void) {
         if let stale = activePicker, stale.presentingViewController == nil && !stale.isBeingPresented {
             activePicker = nil
             self.onPick = nil
@@ -48,15 +53,23 @@ final class AttachmentFilePicker: NSObject, UIDocumentPickerDelegate, UIAdaptive
             settle { _, fail in fail?("No file was picked.") }
             return
         }
-        var picked: [(Data, String)] = []
+        let stagingDir = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-picked-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+
+        var picked: [PickedTempFile] = []
         var failed: [String] = []
-        for url in urls {
+        for (index, url) in urls.enumerated() {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             let name = url.lastPathComponent
+            let stagedURL = stagingDir.appendingPathComponent("\(index)-\(name.isEmpty ? "file" : name)")
             do {
-                // `asCopy: true` gives this app temporary copies. Read all of them before dismissing
-                // or hopping to another task because a File Provider may remove them right afterwards.
-                let data = try Data(contentsOf: url, options: .mappedIfSafe)
-                picked.append((data, name))
+                // Move or hard-copy the File Provider's temporary file on disk right away without
+                // reading multi-hundred-MB files into RAM.
+                if (try? FileManager.default.moveItem(at: url, to: stagedURL)) == nil {
+                    try FileManager.default.copyItem(at: url, to: stagedURL)
+                }
+                picked.append(PickedTempFile(url: stagedURL, name: name))
             } catch {
                 failed.append("\(name) (\(error.localizedDescription))")
             }
@@ -69,8 +82,6 @@ final class AttachmentFilePicker: NSObject, UIDocumentPickerDelegate, UIAdaptive
         }
     }
 
-    /// Kept beside the modern array callback, as Continuum does, so a provider that delivers only
-    /// the older callback still returns the selected file.
     @objc func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentAt url: URL) {
         documentPicker(controller, didPickDocumentsAt: [url])
     }
@@ -84,7 +95,7 @@ final class AttachmentFilePicker: NSObject, UIDocumentPickerDelegate, UIAdaptive
         settle { _, _ in }
     }
 
-    private func settle(_ deliver: @escaping ((([(Data, String)]) -> Void)?, ((String) -> Void)?) -> Void) {
+    private func settle(_ deliver: @escaping ((([PickedTempFile]) -> Void)?, ((String) -> Void)?) -> Void) {
         guard !outcomeDelivered else { return }
         outcomeDelivered = true
         Task { @MainActor in

@@ -89,6 +89,13 @@ public struct Route: Sendable, Hashable {
     public var contextBudget: Int
     /// The maximum completion tokens supported by this model, if known.
     public var maxOutputTokens: Int?
+    /// Whether this model accepts inline image inputs (`image_url`). False for text-only models.
+    public var readsImages: Bool
+    /// Whether this route natively accepts raw PDF `file` blocks (OpenRouter file parser or Anthropic/Gemini).
+    /// When false, attached PDFs are converted locally via `PDFTextExtractor` before sending.
+    public var readsPDFs: Bool
+    /// True when the selected model writes images directly in `/chat/completions` (`modalities: ["image", "text"]`).
+    public var generatesImages: Bool
 
     public init(
         model: String,
@@ -100,7 +107,10 @@ public struct Route: Sendable, Hashable {
         label: String,
         contextWindow: Int? = nil,
         contextBudget: Int,
-        maxOutputTokens: Int? = nil
+        maxOutputTokens: Int? = nil,
+        readsImages: Bool = true,
+        readsPDFs: Bool = true,
+        generatesImages: Bool = false
     ) {
         self.model = model
         self.plugins = plugins
@@ -112,6 +122,9 @@ public struct Route: Sendable, Hashable {
         self.contextWindow = contextWindow ?? contextBudget
         self.contextBudget = contextBudget
         self.maxOutputTokens = maxOutputTokens
+        self.readsImages = readsImages
+        self.readsPDFs = readsPDFs
+        self.generatesImages = generatesImages
     }
 }
 
@@ -139,26 +152,30 @@ public enum ModelRouter {
             case .auto, .free: true
             case .model(let id): AIProviderModelID.decode(id) == nil
             }
-            if needsExternalFallback,
-               let fallback = externalGatewayAutoModel(
-                   in: catalogue,
-                   difficulty: difficulty,
-                   requiresImageInput: requiresImageInput,
-                   freeOnly: choice == .free
-               ) {
-                var routed = route(
-                    choice: .model(fallback.id),
+            if needsExternalFallback {
+                let candidate = externalGatewayAutoModel(
+                    in: catalogue,
                     difficulty: difficulty,
-                    thinking: thinking,
-                    account: account,
-                    catalogue: catalogue,
-                    requiresImageInput: false,
-                    openRouterAvailable: true,
-                    now: now
-                )
-                routed.isAuto = true
-                routed.label = "Auto · \(fallback.shortName)"
-                return routed
+                    requiresImageInput: requiresImageInput,
+                    freeOnly: choice == .free
+                ) ?? (choice == .free
+                    ? cheapestExternalGatewayModel(in: catalogue, requiresImageInput: requiresImageInput)
+                    : nil)
+                if let fallback = candidate {
+                    var routed = route(
+                        choice: .model(fallback.id),
+                        difficulty: difficulty,
+                        thinking: thinking,
+                        account: account,
+                        catalogue: catalogue,
+                        requiresImageInput: false,
+                        openRouterAvailable: true,
+                        now: now
+                    )
+                    routed.isAuto = true
+                    routed.label = "Auto · \(fallback.shortName)"
+                    return routed
+                }
             }
         }
 
@@ -166,12 +183,17 @@ public enum ModelRouter {
             switch choice {
             case .auto:
                 let paid = account.paidAllowed(at: now)
-                if let model = imageInputModel(in: catalogue, freeOnly: !paid, openRouterAvailable: openRouterAvailable) {
-                    return route(choice: .model(model.id), difficulty: difficulty, thinking: thinking, account: account, catalogue: catalogue, requiresImageInput: false, openRouterAvailable: openRouterAvailable, now: now)
+                if let model = imageInputModel(in: catalogue, difficulty: difficulty, freeOnly: !paid, openRouterAvailable: openRouterAvailable) {
+                    var routed = route(choice: .model(model.id), difficulty: difficulty, thinking: thinking, account: account, catalogue: catalogue, requiresImageInput: false, openRouterAvailable: openRouterAvailable, now: now)
+                    routed.isAuto = true
+                    routed.label = "Auto · \(model.shortName)"
+                    return routed
                 }
             case .free:
-                if let model = imageInputModel(in: catalogue, freeOnly: true, openRouterAvailable: openRouterAvailable) {
-                    return route(choice: .model(model.id), difficulty: difficulty, thinking: thinking, account: account, catalogue: catalogue, requiresImageInput: false, openRouterAvailable: openRouterAvailable, now: now)
+                if let model = imageInputModel(in: catalogue, difficulty: difficulty, freeOnly: true, openRouterAvailable: openRouterAvailable) {
+                    var routed = route(choice: .model(model.id), difficulty: difficulty, thinking: thinking, account: account, catalogue: catalogue, requiresImageInput: false, openRouterAvailable: openRouterAvailable, now: now)
+                    routed.label = "Free · \(model.shortName)"
+                    return routed
                 }
             case .model:
                 break
@@ -192,7 +214,10 @@ public enum ModelRouter {
                 label: "Auto · \(difficulty.costTier)",
                 contextWindow: fullWindow,
                 contextBudget: usableInputBudget(contextLength: fullWindow, maxOut: routerInfo?.maxCompletionTokens),
-                maxOutputTokens: routerInfo?.maxCompletionTokens
+                maxOutputTokens: routerInfo?.maxCompletionTokens,
+                readsImages: true,
+                readsPDFs: true,
+                generatesImages: false
             )
         case .auto:
             var route = freeRoute(thinking: thinking, catalogue: catalogue)
@@ -211,6 +236,18 @@ public enum ModelRouter {
                 if levels.isEmpty { return nil }
                 return thinking.nearest(in: levels)
             }()
+            let isExternal = AIProviderModelID.decode(id) != nil
+            let readsImages = info?.acceptsImages ?? true
+            let readsPDFs: Bool = {
+                if !isExternal {
+                    // OpenRouter's backend parses PDF `file` blocks across chat models automatically;
+                    // still extract locally if the catalogue explicitly says text-only free without file input.
+                    return info?.acceptsFiles ?? true
+                }
+                return info?.acceptsFiles == true
+                    || AIProviderGateway.isClaudeModel(id.lowercased())
+                    || id.lowercased().contains("gemini")
+            }()
             return Route(
                 model: id,
                 plugins: [],
@@ -221,7 +258,10 @@ public enum ModelRouter {
                 label: info?.shortName ?? id,
                 contextWindow: context,
                 contextBudget: usableInputBudget(contextLength: context, maxOut: maxOut),
-                maxOutputTokens: maxOut
+                maxOutputTokens: maxOut,
+                readsImages: readsImages,
+                readsPDFs: readsPDFs,
+                generatesImages: info?.generatesImages ?? false
             )
         }
     }
@@ -248,7 +288,10 @@ public enum ModelRouter {
             (openRouterAvailable || AIProviderModelID.decode($0.id) != nil)
                 && $0.id != modelID && $0.isChatModel && $0.supportsTools && !$0.isRouter && (!freeOnly || $0.isFree)
         }.sorted {
+            let sa = visionAndCodingQualityScore($0, difficulty: difficulty)
+            let sb = visionAndCodingQualityScore($1, difficulty: difficulty)
             if $0.isFree != $1.isFree { return freeOnly ? $0.isFree : !$0.isFree }
+            if sa != sb { return sa > sb }
             if ($0.created ?? .distantPast) != ($1.created ?? .distantPast) { return ($0.created ?? .distantPast) > ($1.created ?? .distantPast) }
             return $0.id < $1.id
         }
@@ -270,12 +313,33 @@ public enum ModelRouter {
                 && (!freeOnly || $0.isFree)
         }
         guard !external.isEmpty else { return nil }
-        if !requiresImageInput, let omniAuto = external.first(where: { AIProviderModelID.rawModelID($0.id) == "auto" }) {
+        if !requiresImageInput, !freeOnly, let omniAuto = external.first(where: { AIProviderModelID.rawModelID($0.id) == "auto" }) {
             return omniAuto
         }
         return external.sorted { a, b in
             let sa = externalScore(a, difficulty: difficulty)
             let sb = externalScore(b, difficulty: difficulty)
+            if sa != sb { return sa > sb }
+            return a.id < b.id
+        }.first
+    }
+
+    private static func cheapestExternalGatewayModel(
+        in catalogue: [String: ModelInfo],
+        requiresImageInput: Bool
+    ) -> ModelInfo? {
+        let external = catalogue.values.filter {
+            AIProviderModelID.decode($0.id) != nil
+                && $0.isChatModel
+                && $0.supportsTools
+                && (!requiresImageInput || $0.acceptsImages)
+        }
+        return external.sorted { a, b in
+            let ca = (a.promptPrice ?? 0.001) + (a.completionPrice ?? 0.004)
+            let cb = (b.promptPrice ?? 0.001) + (b.completionPrice ?? 0.004)
+            if ca != cb { return ca < cb }
+            let sa = externalScore(a, difficulty: .quick)
+            let sb = externalScore(b, difficulty: .quick)
             if sa != sb { return sa > sb }
             return a.id < b.id
         }.first
@@ -297,16 +361,54 @@ public enum ModelRouter {
         }
     }
 
-    static func imageInputModel(in catalogue: [String: ModelInfo], freeOnly: Bool, openRouterAvailable: Bool = true) -> ModelInfo? {
+    static func imageInputModel(
+        in catalogue: [String: ModelInfo],
+        difficulty: TaskDifficulty = .normal,
+        freeOnly: Bool,
+        openRouterAvailable: Bool = true
+    ) -> ModelInfo? {
         catalogue.values.filter {
             (openRouterAvailable || AIProviderModelID.decode($0.id) != nil)
-                && $0.isChatModel && $0.acceptsImages && $0.supportsTools && (!freeOnly || $0.isFree)
+                && !$0.isRouter
+                && $0.isChatModel
+                && $0.acceptsImages
+                && $0.supportsTools
+                && (!freeOnly || $0.isFree)
         }
-            .sorted {
-                if $0.isFree != $1.isFree { return freeOnly ? $0.isFree : !$0.isFree }
-                if ($0.created ?? .distantPast) != ($1.created ?? .distantPast) { return ($0.created ?? .distantPast) > ($1.created ?? .distantPast) }
-                return $0.id < $1.id
-            }.first
+        .sorted { a, b in
+            if a.isFree != b.isFree { return freeOnly ? a.isFree : !a.isFree }
+            let sa = visionAndCodingQualityScore(a, difficulty: difficulty)
+            let sb = visionAndCodingQualityScore(b, difficulty: difficulty)
+            if sa != sb { return sa > sb }
+            if (a.created ?? .distantPast) != (b.created ?? .distantPast) {
+                return (a.created ?? .distantPast) > (b.created ?? .distantPast)
+            }
+            return a.id < b.id
+        }.first
+    }
+
+    private static func visionAndCodingQualityScore(_ model: ModelInfo, difficulty: TaskDifficulty) -> Int {
+        let low = AIProviderModelID.rawModelID(model.id).lowercased()
+        // Deprioritize experimental/preview image-output variants when we want strong multimodal reasoning + tools.
+        if model.isPureImageModel { return 0 }
+        switch difficulty {
+        case .quick:
+            if low.contains("gemini-3") && low.contains("flash") { return 110 }
+            if low.contains("claude-haiku") || low.contains("gpt-5-mini") || low.contains("gemini-2.5-flash") { return 105 }
+            if low.contains("claude-sonnet") || low.contains("qwen") && low.contains("vl") { return 95 }
+        case .normal:
+            if low.contains("claude-sonnet") { return 115 }
+            if low.contains("gpt-5") || low.contains("gpt-6") || low.contains("gemini-3") || low.contains("gemini-2.5-pro") { return 110 }
+            if low.contains("claude-opus") || low.contains("grok-4") || low.contains("kimi-k2") || (low.contains("qwen") && low.contains("vl")) { return 100 }
+        case .hard:
+            if low.contains("claude-opus") || low.contains("claude-fable") { return 120 }
+            if low.contains("gpt-6") || low.contains("gpt-5") || low.contains("claude-sonnet") || low.contains("gemini-3") { return 112 }
+            if low.contains("grok-4") || low.contains("kimi-k2") || (low.contains("qwen") && low.contains("vl")) { return 98 }
+        }
+        if low.contains("claude") || low.contains("gpt-4o") || low.contains("gemini") || low.contains("qwen") || low.contains("pixtral") || low.contains("llama-4") {
+            return 80
+        }
+        return 40
     }
 
     static func freeRoute(thinking: ThinkingLevel, catalogue: [String: ModelInfo]) -> Route {
@@ -323,7 +425,10 @@ public enum ModelRouter {
             label: "Free AIs",
             contextWindow: fullWindow,
             contextBudget: usableInputBudget(contextLength: fullWindow, maxOut: freeInfo?.maxCompletionTokens),
-            maxOutputTokens: freeInfo?.maxCompletionTokens
+            maxOutputTokens: freeInfo?.maxCompletionTokens,
+            readsImages: true,
+            readsPDFs: true,
+            generatesImages: false
         )
     }
 }

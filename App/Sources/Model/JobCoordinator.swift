@@ -149,7 +149,13 @@ final class JobCoordinator {
     }
 
     @discardableResult
-    func start(workflow: WorkflowDefinition, request: String, repo: ChatRepo?) async -> JobRecord? {
+    func start(
+        workflow: WorkflowDefinition,
+        request: String,
+        repo: ChatRepo?,
+        readOnlyRepo: ChatRepo? = nil,
+        openJobsSheet: Bool = true
+    ) async -> JobRecord? {
         if let repo { return await start(request: request, repo: repo, workflow: workflow) }
         guard let app else { return nil }
         guard app.openRouter.isSignedIn else {
@@ -159,14 +165,16 @@ final class JobCoordinator {
         let job = JobRecord(
             status: .running,
             title: workflow.name,
-            state: workflowState(definition: workflow, request: request),
+            state: workflowState(definition: workflow, request: request, readOnlyRepo: readOnlyRepo),
             steps: workflow.steps.flatMap(workflowJobSteps)
         )
         do {
             _ = try await store.create(job)
             jobs = await store.all()
             selectedJobID = job.id
-            app.sheet = .jobs
+            if openJobsSheet {
+                app.sheet = .jobs
+            }
             localRuns[job.id] = Task { [weak self] in
                 await self?.runOnPhone(workflow: workflow, request: request, jobID: job.id)
                 self?.localRuns[job.id] = nil
@@ -187,6 +195,36 @@ final class JobCoordinator {
         let accountState = app.openRouter.accountState
         let login = app.github.login
         let recordStore = store
+        let savedJob = await store.load(jobID)
+        var readOnlyTools: [any AgentTool] = [WebSearchTool(transport: transport), ReadWebPageTool(transport: transport)]
+        var specRepoContext: SystemPrompt.RepoContext?
+        if let encodedRepo = savedJob?.state["readOnlyRepo"],
+           let repoData = try? JSONCoding.encoder().encode(encodedRepo),
+           let specRepo = try? JSONCoding.decoder().decode(ChatRepo.self, from: repoData),
+           let github = app.github.client,
+           let commit = try? await github.resolveCommit(specRepo.ref, ref: specRepo.branch) {
+            let repoWorkspace = RepoWorkspace(repo: specRepo.ref, branch: specRepo.branch, commit: commit, github: github, store: app.snapshots)
+            await repoWorkspace.prefetch()
+            let readChanges = ChangeWorkspace(base: repoWorkspace)
+            let rules = await GitHubChangeService(github: github).resolveRules(in: repoWorkspace, directSaveSetting: false)
+            readOnlyTools.append(contentsOf: [
+                ListFilesTool(workspace: repoWorkspace, changes: readChanges),
+                SearchCodeTool(workspace: repoWorkspace, changes: readChanges),
+                ReadFileTool(workspace: repoWorkspace, changes: readChanges),
+                ReadRepoFileTool(github: github),
+                LoadRepoRulesTool(documents: rules.documents),
+            ])
+            specRepoContext = SystemPrompt.RepoContext(
+                ref: specRepo.ref,
+                branch: specRepo.branch,
+                commit: commit,
+                isPrivate: specRepo.isPrivate,
+                summary: app.github.repo(named: specRepo.ref.fullName)?.summary,
+                ruleDocuments: rules.documents
+            )
+        }
+        let sharedTools = readOnlyTools
+        let sharedRepoContext = specRepoContext
         let runner: AgentExecutor.Runner = { invocation in
             var chat: Chat
             if let value = invocation.resumeState,
@@ -208,20 +246,23 @@ final class JobCoordinator {
                 chat.messages = [.user(completeTask), ChatMessage(body: .assistant(AssistantTurn()))]
             }
             let difficulty: TaskDifficulty = invocation.definition.modelPolicy == .fast ? .quick : invocation.definition.difficulty
+            let effort = invocation.preferredEffort ?? .max
             let route: Route
-            if invocation.definition.modelPolicy == .differentFromPrimary {
-                guard let distinct = ModelRouter.distinctRoute(avoiding: invocation.avoidModel, difficulty: difficulty, thinking: .medium, account: accountState, catalogue: catalogue, openRouterAvailable: hasOpenRouter) else {
+            if let preferredID = invocation.preferredModelID, !preferredID.isEmpty, preferredID != ModelChoice.freeID {
+                route = ModelRouter.route(choice: .model(preferredID), difficulty: difficulty, thinking: effort, account: accountState, catalogue: catalogue, openRouterAvailable: hasOpenRouter)
+            } else if invocation.definition.modelPolicy == .differentFromPrimary {
+                guard let distinct = ModelRouter.distinctRoute(avoiding: invocation.avoidModel, difficulty: difficulty, thinking: effort, account: accountState, catalogue: catalogue, openRouterAvailable: hasOpenRouter) else {
                     throw ToolInputError("A second eligible AI with a different model ID is not available for this review.")
                 }
                 route = distinct
             } else {
-                route = ModelRouter.route(choice: .auto, difficulty: difficulty, thinking: .medium, account: accountState, catalogue: catalogue, openRouterAvailable: hasOpenRouter)
+                route = ModelRouter.route(choice: .auto, difficulty: difficulty, thinking: effort, account: accountState, catalogue: catalogue, openRouterAvailable: hasOpenRouter)
             }
             let input = AgentTurnInput(
                 chat: chat,
                 route: route,
-                systemPrompt: SystemPrompt.make(userLogin: login, repo: nil, agent: invocation.definition, workflowContext: invocation.context),
-                tools: [WebSearchTool(transport: transport), ReadWebPageTool(transport: transport)] + invocation.tools,
+                systemPrompt: SystemPrompt.make(userLogin: login, repo: sharedRepoContext, agent: invocation.definition, workflowContext: invocation.context),
+                tools: sharedTools + invocation.tools,
                 spendLimit: invocation.spendLimit,
                 requiresInitialSpendApproval: !route.isFree,
                 agent: invocation.definition
@@ -248,11 +289,11 @@ final class JobCoordinator {
             )
         }
         let restored = await store.workflowCheckpoint(jobID)
-        let workflowSpendLimit = await store.load(jobID)?.state["spendLimit"]?.doubleValue
+        let workflowSpendLimit = savedJob?.state["spendLimit"]?.doubleValue
         let engine = WorkflowEngine(
             definition: workflow,
             checkpoint: restored,
-            agents: BuiltInAgents.all + app.automations.customAgents.map(\.definition),
+            agents: BuiltInAgents.allIncludingKiroSubagents + app.automations.customAgents.map(\.definition),
             spendLimit: workflowSpendLimit,
             runner: runner,
             checkpointer: { checkpoint in _ = try await recordStore.checkpointWorkflow(jobID, checkpoint: checkpoint) }
@@ -304,11 +345,16 @@ final class JobCoordinator {
         } catch { lastError = ErrorExplainer.explain(error).message }
     }
 
-    private func workflowState(definition: WorkflowDefinition, request: String) -> JSONValue {
+    private func workflowState(definition: WorkflowDefinition, request: String, readOnlyRepo: ChatRepo? = nil) -> JSONValue {
         var value: [String: JSONValue] = ["request": .string(request)]
         if let app, app.settings.spendLimitOn { value["spendLimit"] = .number(app.settings.spendLimit) }
         if let data = try? JSONCoding.encoder().encode(definition), let encoded = JSONValue.parse(data) {
             value["workflowDefinition"] = encoded
+        }
+        if let readOnlyRepo,
+           let repoData = try? JSONCoding.encoder().encode(readOnlyRepo),
+           let encodedRepo = JSONValue.parse(repoData) {
+            value["readOnlyRepo"] = encodedRepo
         }
         return .object(value)
     }

@@ -51,7 +51,7 @@ public struct GitHubClient: Sendable {
         case bearer(String)
     }
 
-    private let transport: any HTTPTransport
+    let transport: any HTTPTransport
     private let tokens: (any GitHubTokenProvider)?
 
     public init(transport: any HTTPTransport, tokens: (any GitHubTokenProvider)?) {

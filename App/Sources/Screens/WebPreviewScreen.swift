@@ -69,6 +69,12 @@ struct WebPreviewScreen: View {
                 NavigationStack {
                     List(app.previews.console, id: \.self) { Text($0).font(.system(.caption, design: .monospaced)) }
                         .navigationTitle("Preview messages")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("Done") { showDetails = false }
+                            }
+                        }
                 }
             }
         }
@@ -120,7 +126,8 @@ struct PreviewWebView: UIViewRepresentable {
         view.navigationDelegate = context.coordinator
         let model = PreviewBrowserModel(); model.webView = view
         DispatchQueue.main.async { browser = model; context.coordinator.browser = model }
-        let entry = URL(string: "maipag-preview://site/\(project.entryPath)")!
+        let encodedEntry = project.entryPath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? project.entryPath
+        let entry = URL(string: "maipag-preview://site/\(encodedEntry)") ?? URL(string: "maipag-preview://site/index.html")!
         let owner = coordinator
         // The page loads once the network block list is in place. If the list can't be built,
         // the page still opens (the preview's content security rules still block outside
@@ -172,8 +179,9 @@ struct PreviewWebView: UIViewRepresentable {
         // Must match the SDK's signature exactly, or WebKit never calls it and the preview could
         // leave its own files.
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
-            guard let url = action.request.url else { decisionHandler(.cancel); return }
-            decisionHandler(url.scheme == "maipag-preview" ? .allow : .cancel)
+            guard let url = action.request.url, let scheme = url.scheme?.lowercased() else { decisionHandler(.cancel); return }
+            let allowedSchemes: Set<String> = ["maipag-preview", "about", "blob", "data"]
+            decisionHandler(allowedSchemes.contains(scheme) ? .allow : .cancel)
         }
     }
 }

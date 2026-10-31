@@ -78,10 +78,13 @@ struct PictureViewer: View {
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
             .task {
                 generated = result
+                if imageModels.isEmpty {
+                    await app.openRouter.loadModels()
+                }
                 if model.isEmpty { model = imageModels.first?.id ?? "" }
                 if PreviewScenes.scene == "picture-generating" {
                     isGenerating = true
-                    progress = "OpenRouter is drawing your picture…"
+                    progress = "Drawing your picture…"
                 } else if PreviewScenes.isActive, result != nil {
                     image = PreviewScenes.pictureImage()
                 } else {
@@ -181,10 +184,11 @@ struct PictureViewer: View {
     }
 
     private var spendMessage: String {
+        let providerLabel = app.openRouter.providerName(forModelID: model)
         if app.settings.spendLimitOn {
-            return "This billed picture is a separate paid operation. Your stop-and-ask amount is \(app.settings.spendLimit.dollars); approve it before OpenRouter starts."
+            return "This billed picture is a separate paid operation. Your stop-and-ask amount is \(app.settings.spendLimit.dollars); approve it before \(providerLabel) starts."
         }
-        return "This picture can use OpenRouter credit."
+        return "This picture can use \(providerLabel) credit."
     }
 
     private func generate() {
@@ -211,9 +215,10 @@ struct PictureViewer: View {
                 else { throw PictureError.noReadableImage }
 
                 // Validate bytes before saving either the attachment or its metadata.
+                let ext = value.mimeType.contains("jpeg") || value.mimeType.contains("jpg") ? "jpg" : (value.mimeType.contains("webp") ? "webp" : "png")
                 let attachment = try await app.attachmentStore.importGeneratedImage(
                     value.data,
-                    name: "picture-\(value.id.uuidString.lowercased()).png",
+                    name: "picture-\(value.id.uuidString.lowercased()).\(ext)",
                     mimeType: value.mimeType
                 )
                 let saved = GeneratedImageResult(

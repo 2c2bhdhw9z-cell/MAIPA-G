@@ -25,7 +25,7 @@ final class PreviewSchemeHandler: NSObject, WKURLSchemeHandler, @unchecked Senda
                   FileManager.default.fileExists(atPath: target.path)
             else { throw WebPreviewError.missingResource(relative) }
             let data = try Data(contentsOf: target, options: .mappedIfSafe)
-            guard data.count <= 25 * 1024 * 1024 else { throw WebPreviewError.missingResource("a resource larger than 25 MB") }
+            guard data.count <= AttachmentStore.maximumAttachmentBytes else { throw WebPreviewError.missingResource("a resource larger than 250 MB") }
             let headers = [
                 "Content-Type": PreviewPath.mimeType(for: relative),
                 "Content-Security-Policy": manifest.contentSecurityPolicy,

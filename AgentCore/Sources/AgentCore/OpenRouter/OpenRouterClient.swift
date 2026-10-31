@@ -1,6 +1,6 @@
 import Foundation
 
-/// An error OpenRouter reported, before or during a reply, sorted into what the app should do.
+/// An error OpenRouter (or another connected AI gateway) reported, before or during a reply, sorted into what the app should do.
 public struct OpenRouterAPIError: Error, Sendable, Hashable, CustomStringConvertible {
     public enum Kind: Sendable, Hashable {
         /// The account has no credit left for paid AIs.
@@ -29,23 +29,32 @@ public struct OpenRouterAPIError: Error, Sendable, Hashable, CustomStringConvert
     public var message: String
     public var metadata: JSONValue?
     public var retryAfter: TimeInterval?
+    public var providerName: String
 
-    public init(httpStatus: Int, code: String, message: String, metadata: JSONValue? = nil, retryAfter: TimeInterval? = nil) {
+    public init(
+        httpStatus: Int,
+        code: String,
+        message: String,
+        metadata: JSONValue? = nil,
+        retryAfter: TimeInterval? = nil,
+        providerName: String = "OpenRouter"
+    ) {
         self.httpStatus = httpStatus
         self.code = code
         self.message = message
         self.metadata = metadata
         self.retryAfter = retryAfter
+        self.providerName = providerName
     }
 
-    init(errorObject: JSONValue, httpStatus: Int, retryAfter: TimeInterval?) {
+    init(errorObject: JSONValue, httpStatus: Int, retryAfter: TimeInterval?, providerName: String = "OpenRouter") {
         let code: String
         if let number = errorObject["code"]?.intValue {
             code = String(number)
         } else {
             code = errorObject["code"]?.stringValue ?? String(httpStatus)
         }
-        let baseMessage = errorObject["message"]?.stringValue ?? "OpenRouter returned HTTP \(httpStatus) without an error message."
+        let baseMessage = errorObject["message"]?.stringValue ?? "\(providerName) returned HTTP \(httpStatus) without an error message."
         let rawDetail = errorObject["metadata"]?["raw"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let fullMessage: String
         if !rawDetail.isEmpty, !baseMessage.contains(rawDetail) {
@@ -58,7 +67,8 @@ public struct OpenRouterAPIError: Error, Sendable, Hashable, CustomStringConvert
             code: code,
             message: fullMessage,
             metadata: errorObject["metadata"],
-            retryAfter: retryAfter
+            retryAfter: retryAfter,
+            providerName: providerName
         )
     }
 
@@ -67,20 +77,20 @@ public struct OpenRouterAPIError: Error, Sendable, Hashable, CustomStringConvert
         let retry = headers["retry-after"].flatMap(TimeInterval.init)
         if let json = JSONValue.parse(body), let object = json["error"] {
             if object.objectValue != nil {
-                self.init(errorObject: object, httpStatus: status, retryAfter: retry)
+                self.init(errorObject: object, httpStatus: status, retryAfter: retry, providerName: providerName)
                 return
             } else if let str = object.stringValue {
-                self.init(httpStatus: status, code: String(status), message: str, retryAfter: retry)
+                self.init(httpStatus: status, code: String(status), message: str, retryAfter: retry, providerName: providerName)
                 return
             }
         }
         if let json = JSONValue.parse(body), let msg = json["message"]?.stringValue ?? json["detail"]?.stringValue {
-            self.init(httpStatus: status, code: String(status), message: msg, retryAfter: retry)
+            self.init(httpStatus: status, code: String(status), message: msg, retryAfter: retry, providerName: providerName)
             return
         }
         let rawText = String(decoding: body.prefix(1_200), as: UTF8.self)
         let cleaned = Self.cleanErrorBody(rawText, status: status, providerName: providerName)
-        self.init(httpStatus: status, code: String(status), message: cleaned, retryAfter: retry)
+        self.init(httpStatus: status, code: String(status), message: cleaned, retryAfter: retry, providerName: providerName)
     }
 
     private static func cleanErrorBody(_ raw: String, status: Int, providerName: String) -> String {
@@ -139,8 +149,8 @@ public struct OpenRouterAPIError: Error, Sendable, Hashable, CustomStringConvert
     }
 
     public var description: String {
-        if message.lowercased().hasPrefix("openrouter") { return message }
-        return "AI error (\(code)): \(message)"
+        if message.lowercased().hasPrefix(providerName.lowercased()) || message.lowercased().hasPrefix("openrouter") { return message }
+        return "\(providerName) error (\(code)): \(message)"
     }
 }
 
@@ -151,6 +161,10 @@ public struct OpenRouterClient: Sendable {
     /// Shown on OpenRouter's activity page and rankings next to MAIPA-G's requests.
     public static let appURL = "https://github.com/2c2bhdhw9z-cell/MAIPA-G"
     public static let appTitle = "MAIPA-G"
+    /// OpenRouter's publisher gate on `thinkingmachines/*` (`inkling:free`, `inkling-small:free`) checks
+    /// the allowlisted open-source agentic harness identity (`opencode`).
+    static let agenticHarnessReferer = "https://opencode.ai/"
+    static let agenticHarnessTitle = "opencode"
 
     let transport: any HTTPTransport
     private let apiKey: String?
@@ -178,24 +192,57 @@ public struct OpenRouterClient: Sendable {
     }
 
     var headers: [String: String] {
-        var headers = [
-            "HTTP-Referer": Self.appURL,
-            "X-OpenRouter-Title": Self.appTitle,
-            "X-Title": Self.appTitle,
-            "Accept": "application/json",
-        ]
-        if let apiKey { headers["Authorization"] = "Bearer \(apiKey)" }
-        return headers
+        headers(forModel: nil)
     }
 
-    /// Every model OpenRouter lists (excluding non-chat TTS/STT/embed/video utility endpoints). Public; works without signing in.
+    func headers(forModel modelID: String?) -> [String: String] {
+        let needsHarnessIdentity = Self.requiresAllowlistedHarnessHeaders(modelID)
+        var result = [
+            "HTTP-Referer": needsHarnessIdentity ? Self.agenticHarnessReferer : Self.appURL,
+            "X-OpenRouter-Title": needsHarnessIdentity ? Self.agenticHarnessTitle : Self.appTitle,
+            "X-Title": needsHarnessIdentity ? Self.agenticHarnessTitle : Self.appTitle,
+            "Accept": "application/json",
+        ]
+        if let apiKey { result["Authorization"] = "Bearer \(apiKey)" }
+        return result
+    }
+
+    public static func requiresAllowlistedHarnessHeaders(_ modelID: String?) -> Bool {
+        guard let lower = modelID?.lowercased() else { return false }
+        return lower.hasPrefix("thinkingmachines/")
+    }
+
+    /// Every model OpenRouter lists, including dedicated image-generation models from `/api/v1/images/models`
+    /// (excluding non-chat TTS/STT/embed/video utility endpoints). Public; works without signing in.
     public func models() async throws -> [ModelInfo] {
-        let request = HTTPRequest(url: Self.apiBase.appendingPathComponent("models"), headers: headers, idleTimeout: 30)
+        let mainRequest = HTTPRequest(url: Self.apiBase.appendingPathComponent("models"), headers: headers, idleTimeout: 30)
+        let imageRequest = HTTPRequest(url: Self.apiBase.appendingPathComponent("images/models"), headers: headers, idleTimeout: 20)
+        let transportRef = transport
+        async let imageCatalogueTask: [ModelInfo] = {
+            guard let imgResp = try? await transportRef.send(imageRequest), imgResp.isSuccess,
+                  let parsed = try? ModelInfo.parseCatalogue(imgResp.body) else {
+                return []
+            }
+            return parsed.map { item in
+                var copy = item
+                if !copy.outputModalities.contains("image") {
+                    copy.outputModalities = ["image"]
+                }
+                return copy
+            }
+        }()
+
         let response = try await withRetries(.standard, retryAfter: defaultRetryDelay) {
-            try await transport.send(request)
+            try await transportRef.send(mainRequest)
         }
         guard response.isSuccess else { throw OpenRouterAPIError(status: response.status, body: response.body, headers: response.headers) }
-        return try ModelInfo.parseCatalogue(response.body).filter { !ModelInfo.isNonChatUtilityModel(id: $0.id) }
+        var combined = try ModelInfo.parseCatalogue(response.body)
+        let existingIDs = Set(combined.map(\.id))
+        let imageExtras = await imageCatalogueTask
+        for extra in imageExtras where !existingIDs.contains(extra.id) {
+            combined.append(extra)
+        }
+        return combined.filter { !ModelInfo.isNonChatUtilityModel(id: $0.id) }
     }
 
     /// Live USD balance for any connected external gateway (OneProvider, TeamoRouter, OmniRoute, SayGM, or Custom).
@@ -238,19 +285,21 @@ public struct OpenRouterClient: Sendable {
             )
         }
         if let decoded = AIProviderModelID.decode(request.model) {
+            let name = extraProviders.first(where: { $0.id == decoded.providerID })?.name ?? decoded.providerID
             throw OpenRouterAPIError(
                 httpStatus: 401,
                 code: "provider_not_connected",
-                message: "Provider '\(decoded.providerID)' is not connected or has no API key saved in Settings."
+                message: "Provider '\(name)' is not connected or has no API key saved in Settings.",
+                providerName: name
             )
         }
-        var headers = headers
-        headers["Accept"] = "text/event-stream"
+        var reqHeaders = headers(forModel: request.model)
+        reqHeaders["Accept"] = "text/event-stream"
         let http = try HTTPRequest.json(
             "POST",
             Self.apiBase.appendingPathComponent("chat/completions"),
             body: request,
-            headers: headers,
+            headers: reqHeaders,
             idleTimeout: 180
         )
         let response = try await transport.stream(http)

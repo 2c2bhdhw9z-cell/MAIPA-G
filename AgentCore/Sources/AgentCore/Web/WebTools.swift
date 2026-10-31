@@ -13,18 +13,32 @@ public struct FreeWebSearch: Sendable {
     public func search(_ query: String) async throws -> [WebSearchResult] {
         var components = URLComponents(string: "https://html.duckduckgo.com/html/")!
         components.queryItems = [URLQueryItem(name: "q", value: query)]
-        let response = try await transport.send(HTTPRequest(url: components.url!, headers: ["Accept": "text/html", "User-Agent": "Mozilla/5.0 MAIPA-G"], idleTimeout: 30))
-        guard response.isSuccess else { throw WebPageError.http(response.status) }
+        let ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+        let response = try await transport.send(HTTPRequest(url: components.url!, headers: ["Accept": "text/html,application/xhtml+xml;q=0.9", "User-Agent": ua], idleTimeout: 30))
+        if response.status == 202 {
+            // DuckDuckGo HTML returns 202 with an empty challenge body under load; try Lite once before failing honestly.
+            var lite = URLComponents(string: "https://lite.duckduckgo.com/lite/")!
+            lite.queryItems = [URLQueryItem(name: "q", value: query)]
+            if let liteResp = try? await transport.send(HTTPRequest(url: lite.url!, headers: ["Accept": "text/html", "User-Agent": ua], idleTimeout: 30)),
+               liteResp.status == 200, liteResp.body.count <= WebPageReader.maxBytes {
+                let parsed = Self.parse(liteResp.text)
+                if !parsed.isEmpty { return parsed }
+            }
+            throw WebPageError.http(202)
+        }
+        guard (200..<300).contains(response.status) else { throw WebPageError.http(response.status) }
         guard response.body.count <= WebPageReader.maxBytes else { throw WebPageError.tooLarge }
         return Self.parse(response.text)
     }
 
     static func parse(_ html: String) -> [WebSearchResult] {
-        guard let regex = try? NSRegularExpression(pattern: #"(?is)<a[^>]*class=[\"'][^\"']*result__a[^\"']*[\"'][^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>(.*?)(?=<a[^>]*class=[\"'][^\"']*result__a|$)"#) else { return [] }
+        let primaryPattern = #"(?is)<a[^>]*class=[\"'][^\"']*(?:result__a|result-link)[^\"']*[\"'][^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>(.*?)(?=<a[^>]*class=[\"'][^\"']*(?:result__a|result-link)|$)"#
+        guard let regex = try? NSRegularExpression(pattern: primaryPattern) else { return [] }
         let matches = regex.matches(in: html, range: NSRange(html.startIndex..., in: html))
         return matches.prefix(10).compactMap { match in
             guard let urlRange = Range(match.range(at: 1), in: html), let titleRange = Range(match.range(at: 2), in: html), let tailRange = Range(match.range(at: 3), in: html) else { return nil }
             var href = WebPageReader.clean(String(html[urlRange]))
+            if href.hasPrefix("//") { href = "https:" + href }
             if let components = URLComponents(string: href), components.host?.contains("duckduckgo.com") == true,
                let target = components.queryItems?.first(where: { $0.name == "uddg" })?.value { href = target }
             guard let url = URL(string: href), WebPageReader.isSafe(url) else { return nil }

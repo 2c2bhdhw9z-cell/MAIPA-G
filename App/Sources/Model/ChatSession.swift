@@ -19,6 +19,8 @@ final class ChatSession: Identifiable {
     private(set) var queuedSteering: [(text: String, attachments: [AttachmentReference])] = []
     private(set) var mergeCheckStatus: String?
     private(set) var mergeWarning: String?
+    var workstationFiles: [AttachmentReference] = []
+    var activeWorkflowRuns: [ActiveWorkflowRunSnapshot] = []
 
     var savedFollowsBottom = true
     var savedAnchorMessageID: UUID?
@@ -26,7 +28,64 @@ final class ChatSession: Identifiable {
     @ObservationIgnored private var run: AgentRun?
     @ObservationIgnored private var workspace: RepoWorkspace?
     @ObservationIgnored private var changeWorkspace: ChangeWorkspace?
+    @ObservationIgnored private var workflowEngines: [String: WorkflowEngine] = [:]
+    @ObservationIgnored private var workflowTasks: [String: Task<Void, Never>] = [:]
     var currentChangeWorkspace: ChangeWorkspace? { changeWorkspace }
+    var hasActiveWorkflowRuns: Bool { activeWorkflowRuns.contains(where: \.isRunning) }
+    var hasInMemoryWorkToPreserve: Bool {
+        changeWorkspace != nil || !workstationFiles.isEmpty || !activeWorkflowRuns.isEmpty
+    }
+
+    func hasUnsavedStagedWork() async -> Bool {
+        await changeWorkspace?.hasStagedChanges() ?? false
+    }
+
+    func adoptSyncedChatMetadataPreservingWorkspace(_ synced: Chat) {
+        chat.title = synced.title
+        chat.titleIsCustom = synced.titleIsCustom
+        chat.groupID = synced.groupID
+        if synced.messages.count > chat.messages.count {
+            chat.messages = synced.messages
+        }
+    }
+
+    func liveModelAndRepoLines() -> [String] {
+        guard let app else { return [] }
+        let catalogue = app.openRouter.modelsByID
+        let route = ModelRouter.route(
+            choice: chat.model,
+            difficulty: .normal,
+            thinking: chat.thinking,
+            account: app.openRouter.accountState,
+            catalogue: catalogue,
+            requiresImageInput: false,
+            openRouterAvailable: app.openRouter.hasOpenRouterKey
+        )
+        let provider = app.openRouter.providerName(forModelID: route.model)
+        let display = app.openRouter.displayName(forModelID: route.model)
+        let info = catalogue[route.model]
+        let ctxLen = info?.contextLength ?? route.contextBudget
+        let maxOut = info?.maxCompletionTokens ?? route.maxOutputTokens ?? 16_384
+        let effortLabel = route.effort?.rawValue ?? chat.thinking.rawValue
+        var lines = [
+            "Resolved model: \(display) (`\(route.model)`) via \(provider)",
+            "Thinking effort: \(effortLabel) · Context window: \(ctxLen) tokens · Max output: \(maxOut) tokens",
+            "Tools supported: \(app.openRouter.supportsTools(chat.model) ? "yes" : "no (text/image-only model)")",
+        ]
+        if let repo = chat.repo {
+            let commitShort = workspace?.commit.prefix(7).description ?? "unloaded"
+            lines.append("Chat repository: \(repo.ref.fullName) on branch \(repo.branch) (commit \(commitShort))")
+        } else {
+            lines.append("Chat repository: none attached")
+        }
+        if !workstationFiles.isEmpty {
+            lines.append("Workstation files in chat: \(workstationFiles.count)")
+        }
+        for wf in activeWorkflowRuns {
+            lines.append("Chat workflow \(wf.definition.name) (\(wf.id)): \(wf.isRunning ? "running" : (wf.checkpoint.pendingQuestion != nil ? "paused" : "stopped/done")) · cost $\(String(format: "%.4f", wf.checkpoint.cumulativeCost))")
+        }
+        return lines
+    }
     /// What MAIPA-G last put on the chat computer, so unchanged staged edits aren't sent again.
     @ObservationIgnored private var lastComputerSync: String?
     @ObservationIgnored private var lastComputerCheck: Date?
@@ -229,15 +288,14 @@ final class ChatSession: Identifiable {
         run?.cancel()
     }
 
-    /// Runs any saved answer again, rewinding messages after it but preserving the preceding user
-    /// message and all tool results that belong to earlier turns.
+    /// Runs any saved answer again, rewinding messages after it while preserving compacted earlier
+    /// session memory whenever the compacted cutoff precedes the retried message.
     func retryAnswer(_ messageID: UUID) {
         guard !isRunning, let index = chat.messages.firstIndex(where: { $0.id == messageID }),
               chat.messages[index].assistantTurn != nil else { return }
         chat.messages.removeSubrange(index...)
         chat.messages.append(ChatMessage(body: .assistant(AssistantTurn())))
-        chat.compactedSummary = nil
-        chat.compactedThroughMessageID = nil
+        pruneInvalidatedCompactionAfterRewind()
         touch()
         start()
     }
@@ -250,10 +308,26 @@ final class ChatSession: Identifiable {
         chat.messages.removeSubrange(index...)
         chat.messages.append(ChatMessage(body: .user(UserMessage(text: clean, attachments: original.attachments))))
         chat.messages.append(ChatMessage(body: .assistant(AssistantTurn())))
-        chat.compactedSummary = nil
-        chat.compactedThroughMessageID = nil
+        pruneInvalidatedCompactionAfterRewind()
         touch()
         start()
+    }
+
+    private func pruneInvalidatedCompactionAfterRewind() {
+        if let compactedID = chat.compactedThroughMessageID,
+           !chat.messages.contains(where: { $0.id == compactedID }) {
+            if let prevID = chat.previousCompactedThroughMessageID,
+               let prevSummary = chat.previousCompactedSummary,
+               chat.messages.contains(where: { $0.id == prevID }) {
+                chat.compactedSummary = prevSummary
+                chat.compactedThroughMessageID = prevID
+            } else {
+                chat.compactedSummary = nil
+                chat.compactedThroughMessageID = nil
+            }
+            chat.previousCompactedSummary = nil
+            chat.previousCompactedThroughMessageID = nil
+        }
     }
 
     private var compactableRangeEndIndex: Int? {
@@ -531,19 +605,31 @@ final class ChatSession: Identifiable {
             try await GitHubChangeService(github: github).throwAway(receipts[index])
             receipts[index].resolution = "discarded"
             chat.saveReceipts = receipts
+            workspace = nil
+            changeSession = nil
             appendNotice("Closed the pull request and removed its side branch.")
-        } catch { appendNotice("Couldn't throw it away: \(error)") }
+        } catch { appendNotice("Couldn't throw it away: \(app.github.describe(error))") }
     }
 
     func undoLastSave() async {
         guard let app, let github = app.github.client, var receipts = chat.saveReceipts,
               let index = receipts.lastIndex(where: { $0.undoneAt == nil }) else { return }
         do {
-            _ = try await GitHubChangeService(github: github).undo(receipts[index])
+            let newCommit = try await GitHubChangeService(github: github).undo(receipts[index])
             receipts[index].undoneAt = Date()
             chat.saveReceipts = receipts
+            if let existingWorkspace = workspace {
+                let advanced = existingWorkspace.advancing(toCommit: newCommit)
+                workspace = advanced
+                if let existingChanges = changeWorkspace {
+                    changeWorkspace = await existingChanges.rebased(onto: advanced)
+                }
+            } else {
+                workspace = nil
+            }
+            changeSession = nil
             appendNotice("Undid MAIPA-G's last save.")
-        } catch { appendNotice("Undo stopped safely: \(error)") }
+        } catch { appendNotice("Undo stopped safely: \(app.github.describe(error))") }
     }
 
     private func appendNotice(_ text: String) {
@@ -590,6 +676,12 @@ final class ChatSession: Identifiable {
         let hasOpenRouter = app.openRouter.hasOpenRouterKey
 
         let lastMessage = chat.messages.last { $0.userText != nil }?.userText ?? ""
+        if case .model(let pickedID) = chat.model,
+           let pickedModel = app.openRouter.modelsByID[pickedID],
+           pickedModel.isPureImageModel {
+            await runPureImageTurn(model: pickedModel, prompt: lastMessage, client: aiClient, app: app)
+            return
+        }
         let changeAuthorization = ChangeAuthorization(request: lastMessage)
         let allAttachments = chat.messages.flatMap { message -> [AttachmentReference] in
             if case .user(let user) = message.body { return user.attachments }
@@ -597,31 +689,70 @@ final class ChatSession: Identifiable {
         }
         var attachmentData: [UUID: Data] = [:]
         for attachment in allAttachments where attachment.kind == .image || attachment.kind == .pdf {
-            guard let raw = try? await app.attachmentStore.data(for: attachment) else { continue }
+            guard attachment.bytes <= 32 * 1_048_576,
+                  let raw = try? await app.attachmentStore.data(for: attachment) else { continue }
             if attachment.kind == .image, raw.count > 420_000 {
                 attachmentData[attachment.id] = Self.compactWireImageData(raw)
             } else {
                 attachmentData[attachment.id] = raw
             }
         }
+        let memoryReloadHook: @Sendable () async -> Void = { [weak app] in
+            await app?.memories.load()
+            await MainActor.run { app?.sync.request() }
+        }
         var tools: [any AgentTool] = webEnabled ? [WebSearchTool(transport: app.transport), ReadWebPageTool(transport: app.transport)] : []
         tools.append(contentsOf: app.connectors.agentTools())
-        tools.append(AddMemoryTool(store: app.memories.store))
-        tools.append(EditMemoryTool(store: app.memories.store))
+        tools.append(AddMemoryTool(store: app.memories.store, onChanged: memoryReloadHook))
+        tools.append(EditMemoryTool(store: app.memories.store, onChanged: memoryReloadHook))
+        tools.append(LiveStatusTool { [weak self, weak app] in
+            await MainActor.run {
+                guard let app else { return "MAIPA-G is no longer open." }
+                return app.liveStatusText(for: self)
+            }
+        })
         if let github = app.github.client {
             tools.append(CreateRepositoryTool(github: github))
             tools.append(ReadOtherRepositoryFileTool(github: github, repositories: app.github.repos))
-            tools.append(LiveStatusTool { [weak app] in
-                await MainActor.run { app?.liveStatusText() ?? "MAIPA-G is no longer open." }
-            })
         }
-        if !allAttachments.filter({ $0.kind == .text }).isEmpty {
+        if !allAttachments.isEmpty {
             tools.append(ReadAttachmentTool(attachments: allAttachments, store: app.attachmentStore))
         }
+        let listWorkstationProvider: @Sendable () async -> [WorkstationFileItem] = { [weak self] in
+            await self?.collectWorkstationItems() ?? []
+        }
+        let readStagedTextProvider: @Sendable (String) async throws -> String? = { [weak self] stagedPath in
+            guard let cw = await MainActor.run(body: { self?.changeWorkspace }) else { return nil }
+            let staged = await cw.stagedChanges()
+            guard case .write(_, let data, _) = staged.first(where: { $0.path == stagedPath }) else { return nil }
+            return TextFileCodec.decode(data)?.text ?? String(data: data, encoding: .utf8)
+        }
+        let listWorkstationTool = ListWorkstationFilesTool(listProvider: listWorkstationProvider)
+        let readWorkstationTool = ReadWorkstationFileTool(
+            store: app.attachmentStore,
+            listProvider: listWorkstationProvider,
+            readStagedText: readStagedTextProvider
+        )
+        let writeWorkstationTool = WriteWorkstationFileTool(store: app.attachmentStore) { [weak self] reference, _ in
+            await MainActor.run {
+                guard let self else { return }
+                self.workstationFiles.removeAll { $0.name.caseInsensitiveCompare(reference.name) == .orderedSame }
+                self.workstationFiles.insert(reference, at: 0)
+            }
+        }
+        tools.append(contentsOf: [listWorkstationTool, readWorkstationTool, writeWorkstationTool])
         var readOnlyHelperTools: [any AgentTool] = webEnabled ? [WebSearchTool(transport: app.transport), ReadWebPageTool(transport: app.transport)] : []
+        readOnlyHelperTools.append(contentsOf: [listWorkstationTool, readWorkstationTool])
+        readOnlyHelperTools.append(LiveStatusTool { [weak self, weak app] in
+            await MainActor.run { app?.liveStatusText(for: self) ?? "MAIPA-G is no longer open." }
+        })
+        if !allAttachments.isEmpty {
+            readOnlyHelperTools.append(ReadAttachmentTool(attachments: allAttachments, store: app.attachmentStore))
+        }
         var repoContext: SystemPrompt.RepoContext?
         var repoHooks: [RepoHook] = []
         var hookProblems: [String] = []
+        var repoLocalAgents: [AgentDefinition] = []
         if let repo = chat.repo {
             guard let github = app.github.client else {
                 fail(.signInNeeded, "Connect GitHub so MAIPA-G can read \(repo.ref.fullName).")
@@ -645,8 +776,17 @@ final class ChatSession: Identifiable {
                 let workspace = workspaceFor(repo: workingRepo, commit: commit, github: github, store: app.snapshots)
                 await workspace.prefetch()
                 let changes: ChangeWorkspace
-                if let existing = changeWorkspace, existing.base.commit == commit {
-                    changes = existing
+                if let existing = changeWorkspace {
+                    if existing.base.commit == commit && existing.base.repo == workspace.repo {
+                        changes = existing
+                    } else if existing.base.repo == workspace.repo {
+                        let rebased = await existing.rebased(onto: workspace)
+                        changes = rebased
+                        changeWorkspace = rebased
+                    } else {
+                        changes = ChangeWorkspace(base: workspace)
+                        changeWorkspace = changes
+                    }
                 } else {
                     changes = ChangeWorkspace(base: workspace)
                     changeWorkspace = changes
@@ -656,6 +796,7 @@ final class ChatSession: Identifiable {
                 let loadedHooks = await RepoHooks.load(from: workspace)
                 repoHooks = loadedHooks.hooks
                 hookProblems = loadedHooks.problems
+                repoLocalAgents = await RepoAgentLoader.loadAgents(from: workspace)
                 let saves = changeSession ?? ChangeSession(receipts: chat.saveReceipts ?? [])
                 changeSession = saves
                 let listTool = ListFilesTool(workspace: workspace, changes: changes)
@@ -667,7 +808,10 @@ final class ChatSession: Identifiable {
                 readOnlyHelperTools.append(contentsOf: helperRepoTools)
                 let repoTools: [any AgentTool] = [
                     listTool, searchTool, readTool, readRefTool, loadRulesTool,
-                    CreateFileTool(workspace: changes, authorization: changeAuthorization, rules: rules), EditFileTool(workspace: changes, authorization: changeAuthorization, rules: rules), DeleteFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
+                    CreateFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
+                    EditFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
+                    AppendFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
+                    DeleteFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
                     SaveChangesTool(workspace: changes, service: service, session: saves, selectedBranch: workingBranch, defaultBranch: repo.defaultBranch, rules: rules),
                 ]
                 tools.append(contentsOf: repoTools)
@@ -708,7 +852,9 @@ final class ChatSession: Identifiable {
             }
         }
         if let control = app.connectors.computerControl(), control.commandTool != nil, app.openRouter.supportsTools(chat.model) {
-            tools.append(ComputerTaskTool(control: control, homePath: repoContext.map { "repos/\($0.ref.owner)/\($0.ref.name)" }))
+            let repoHome = repoContext.map { "repos/\($0.ref.owner)/\($0.ref.name)" }
+            tools.append(RunCommandTool(control: control, homePath: repoHome))
+            tools.append(ComputerTaskTool(control: control, homePath: repoHome))
         }
         tools = HookedTool.wrap(tools, hooks: repoHooks, runCommand: hookRunner)
         for problem in hookProblems {
@@ -725,11 +871,16 @@ final class ChatSession: Identifiable {
             difficulty = judged
         }
         let catalogue = app.openRouter.modelsByID
+        let lastUserAttachments: [AttachmentReference] = {
+            for message in chat.messages.reversed() {
+                if case .user(let user) = message.body { return user.attachments }
+            }
+            return []
+        }()
         if case .model(let modelID) = chat.model,
            let model = catalogue[modelID],
-           (allAttachments.contains(where: { $0.kind == .image }) && !model.acceptsImages ||
-            allAttachments.contains(where: { $0.kind == .pdf }) && !model.acceptsFiles) {
-            fail(.other, "This AI can't read pictures or PDFs. Pick Auto or an AI that accepts them.")
+           lastUserAttachments.contains(where: { $0.kind == .image }) && !model.acceptsImages {
+            fail(.other, "This AI can't read pictures. Pick Auto or a vision AI that accepts pictures.")
             return
         }
         let thinking = chat.thinking
@@ -745,11 +896,19 @@ final class ChatSession: Identifiable {
             openRouterAvailable: hasOpenRouter
         )
         let imagePool = app.openRouter.allSelectableModels.isEmpty ? app.openRouter.models : app.openRouter.allSelectableModels
-        if let imageModel = imagePool.first(where: \.generatesImages) {
+        let preferredImageModel: ModelInfo? = {
+            if let current = catalogue[route.model], current.generatesImages { return current }
+            return imagePool.first(where: \.generatesImages)
+        }()
+        if let imageModel = preferredImageModel {
             tools.append(GenerateImageTool(client: aiClient, store: app.attachmentStore, model: imageModel.id, maySpend: !imageModel.isFree))
         }
         let isExternalRoute = AIProviderModelID.decode(route.model) != nil
-        let fallbackModels = isExternalRoute ? [] : app.openRouter.models.filter { model in
+        let isExplicitPick: Bool = {
+            if case .model = chat.model { return true }
+            return false
+        }()
+        let fallbackModels = (isExternalRoute || isExplicitPick) ? [] : app.openRouter.models.filter { model in
             AIProviderModelID.decode(model.id) == nil
                 && model.id != route.model && model.isChatModel
                 && (!hasRepo || model.supportsTools)
@@ -761,18 +920,38 @@ final class ChatSession: Identifiable {
         let accountState = app.openRouter.accountState
         let userLogin = app.github.login
         let connectedRepoNames = app.github.repos.map(\.fullName)
+
+        let createCustomAgentTool = CreateCustomAgentTool { [weak app] draft in
+            guard let app else { return draft }
+            let saved = await app.automations.saveAgent(CustomAgentRecord(
+                name: draft.name,
+                summary: draft.summary,
+                instructions: draft.instructions,
+                allowedTools: draft.allowedTools,
+                difficulty: draft.difficulty,
+                modelPolicy: draft.modelPolicy,
+                behavior: draft.behavior,
+                maximumHelpers: draft.maximumHelpers
+            ))
+            return await MainActor.run { saved?.definition ?? draft }
+        }
+        tools.append(createCustomAgentTool)
+
         if app.openRouter.supportsTools(chat.model) {
-            let builtInHelpers = BuiltInAgents.all.filter {
+            let builtInHelpers = BuiltInAgents.kiroSubagents + BuiltInAgents.all.filter {
                 ["planner", "designer", "design-checker", "code-checker", "second-opinion", "review-combiner", "investigator"].contains($0.id)
             }
-            let customHelpers = app.automations.customAgents.map(\.definition).filter { custom in
-                !builtInHelpers.contains(where: { $0.id == custom.id })
+            var seenHelperIDs = Set<String>()
+            var helperDefinitions: [AgentDefinition] = []
+            for candidate in builtInHelpers + repoLocalAgents + app.automations.customAgents.map(\.definition) {
+                if seenHelperIDs.insert(candidate.id).inserted {
+                    helperDefinitions.append(candidate)
+                }
             }
-            let helperDefinitions = builtInHelpers + customHelpers
             if let baseLead = BuiltInAgents.named("coder"), !helperDefinitions.isEmpty {
                 var lead = baseLead
-                lead.maximumHelpers = max(lead.maximumHelpers, 6)
-                let helperToolsSnapshot = readOnlyHelperTools
+                lead.maximumHelpers = max(lead.maximumHelpers, 8)
+                let helperToolsSnapshot = readOnlyHelperTools + [createCustomAgentTool]
                 let fullToolsSnapshot = tools
                 let repoContextSnapshot = repoContext
                 let primaryModelID = route.model
@@ -783,21 +962,24 @@ final class ChatSession: Identifiable {
                     spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil
                 ) { invocation in
                     var helperChoice = userChoice
-                    if helperChoice == .auto, invocation.definition.modelPolicy == .differentFromPrimary {
+                    if let explicitModel = invocation.preferredModelID, !explicitModel.isEmpty, explicitModel != ModelChoice.freeID {
+                        helperChoice = .model(explicitModel)
+                    } else if helperChoice == .auto, invocation.definition.modelPolicy == .differentFromPrimary {
                         if let alt = catalogue.values.first(where: { (hasOpenRouter || AIProviderModelID.decode($0.id) != nil) && $0.id != primaryModelID && $0.isChatModel && $0.supportsTools && (!route.isFree || $0.isFree) }) {
                             helperChoice = .model(alt.id)
                         }
                     }
+                    let helperThinking = invocation.preferredEffort ?? thinking
                     let helperRoute = ModelRouter.route(
                         choice: helperChoice,
                         difficulty: invocation.definition.difficulty,
-                        thinking: thinking,
+                        thinking: helperThinking,
                         account: accountState,
                         catalogue: catalogue,
                         requiresImageInput: false,
                         openRouterAvailable: hasOpenRouter
                     )
-                    var helperChat = Chat(model: helperChoice, thinking: thinking)
+                    var helperChat = Chat(model: helperChoice, thinking: helperThinking)
                     helperChat.messages.append(.user(invocation.task))
                     helperChat.messages.append(ChatMessage(body: .assistant(AssistantTurn())))
                     let helperPrompt = SystemPrompt.make(
@@ -807,7 +989,8 @@ final class ChatSession: Identifiable {
                         workflowContext: invocation.context,
                         connectedRepositories: connectedRepoNames
                     )
-                    let allowedPool = (isAutonomousTurn && invocation.definition.behavior == .changesAllowed) ? fullToolsSnapshot : helperToolsSnapshot
+                    let basePool = invocation.definition.behavior == .changesAllowed ? fullToolsSnapshot : helperToolsSnapshot
+                    let allowedPool = basePool.filter { invocation.definition.permits(toolName: $0.name) }
                     let helperInput = AgentTurnInput(
                         chat: helperChat,
                         route: helperRoute,
@@ -827,17 +1010,117 @@ final class ChatSession: Identifiable {
                     )
                     let helperRun = AgentLoop.start(helperInput, environment: helperEnv)
                     var finalTurn: AssistantTurn?
-                    for await event in helperRun.events {
-                        if case .updated(let updated, _) = event { finalTurn = updated }
+                    var lastReportedCount = -1
+                    do {
+                        for await event in helperRun.events {
+                            try Task.checkCancellation()
+                            if case .updated(let updated, _) = event {
+                                finalTurn = updated
+                                let calls = updated.steps.flatMap(\.toolCalls)
+                                if calls.count != lastReportedCount {
+                                    lastReportedCount = calls.count
+                                    invocation.onProgress?(calls.count, calls.last?.summary)
+                                }
+                            }
+                        }
+                    } catch is CancellationError {
+                        await helperRun.cancel()
+                        let calls = finalTurn?.steps.flatMap(\.toolCalls) ?? []
+                        return AgentExecutionResult(
+                            output: "cancelled",
+                            model: finalTurn?.modelsUsed.last ?? helperRoute.model,
+                            cost: finalTurn?.usage.cost ?? 0,
+                            toolCallCount: calls.count,
+                            toolSummaries: calls.map(\.summary),
+                            status: "cancelled"
+                        )
                     }
-                    let text = finalTurn?.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n") ?? "Helper produced no report."
+                    if Task.isCancelled {
+                        await helperRun.cancel()
+                        let calls = finalTurn?.steps.flatMap(\.toolCalls) ?? []
+                        return AgentExecutionResult(
+                            output: "cancelled",
+                            model: finalTurn?.modelsUsed.last ?? helperRoute.model,
+                            cost: finalTurn?.usage.cost ?? 0,
+                            toolCallCount: calls.count,
+                            toolSummaries: calls.map(\.summary),
+                            status: "cancelled"
+                        )
+                    }
+                    let allCalls = finalTurn?.steps.flatMap(\.toolCalls) ?? []
+                    let text = finalTurn?.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n") ?? "Sub-agent completed."
                     let cost = finalTurn?.usage.cost ?? 0
                     let modelUsed = finalTurn?.modelsUsed.last ?? helperRoute.model
-                    return AgentExecutionResult(output: text, model: modelUsed, goalOutcome: AgentGoalOutcome.parse(text), cost: cost)
+                    return AgentExecutionResult(
+                        output: text,
+                        model: modelUsed,
+                        goalOutcome: AgentGoalOutcome.parse(text),
+                        cost: cost,
+                        toolCallCount: allCalls.count,
+                        toolSummaries: allCalls.map(\.summary),
+                        status: "completed"
+                    )
                 }
                 tools.append(LaunchHelpersTool(lead: lead, definitions: helperDefinitions, coordinator: coordinator))
+
+                let knownAgentIDsProvider: @Sendable () async -> Set<String> = { [weak app] in
+                    let custom = await MainActor.run { app?.automations.agents.map(\.id) ?? [] }
+                    return Set(helperDefinitions.map(\.id) + BuiltInAgents.allIncludingKiroSubagents.map(\.id) + custom)
+                }
+                let workflowToolsSnapshot = tools
+                tools.append(SaveWorkflowDefinitionTool(knownAgentIDs: knownAgentIDsProvider) { [weak app] draft in
+                    guard let app else { return draft }
+                    let saved = await app.automations.saveWorkflow(WorkflowRecord(definition: draft))
+                    return await MainActor.run { saved?.definition ?? draft }
+                })
+                tools.append(RunWorkflowTool(
+                    resolveWorkflow: { [weak app] id in
+                        await MainActor.run {
+                            app?.automations.workflows.first(where: { $0.id == id || $0.name.caseInsensitiveCompare(id) == .orderedSame })
+                        }
+                    },
+                    knownAgentIDs: knownAgentIDsProvider,
+                    executeHandler: { [weak self] definition, prompt, progress in
+                        guard let self else {
+                            return ActiveWorkflowRunSnapshot(id: definition.id, definition: definition, checkpoint: WorkflowCheckpoint(workflowID: definition.id, request: prompt), isRunning: false)
+                        }
+                        return await self.executeChatWorkflow(
+                            definition: definition,
+                            prompt: prompt,
+                            defaultModelID: route.model,
+                            allAgents: helperDefinitions,
+                            toolPool: workflowToolsSnapshot,
+                            repoContext: repoContextSnapshot,
+                            progress: progress
+                        )
+                    }
+                ))
+                tools.append(InspectWorkflowTool { [weak self, weak app] query in
+                    await MainActor.run {
+                        guard let self else { return "Chat closed." }
+                        return self.inspectWorkflowsReport(query: query, app: app)
+                    }
+                })
+                tools.append(UpdateWorkflowTool { [weak self] runID, replacementSteps in
+                    guard let self else { throw ToolInputError("Chat is no longer open.") }
+                    return try await self.replaceRemainingWorkflowSteps(runID: runID, steps: replacementSteps)
+                })
             }
         }
+
+        let routeModelInfo = catalogue[route.model]
+        let activeModelSummary = SystemPrompt.ActiveModelSummary(
+            modelName: app.openRouter.displayName(forModelID: route.model),
+            modelID: route.model,
+            providerName: app.openRouter.providerName(forModelID: route.model),
+            effort: route.effort?.rawValue ?? chat.thinking.rawValue,
+            contextLength: routeModelInfo?.contextLength ?? route.contextBudget,
+            maxOutputTokens: routeModelInfo?.maxCompletionTokens ?? route.maxOutputTokens ?? 16_384,
+            supportsVision: routeModelInfo?.acceptsImages ?? true,
+            supportsPDF: true,
+            generatesImages: routeModelInfo?.generatesImages ?? false,
+            supportsTools: app.openRouter.supportsTools(chat.model)
+        )
         let input = AgentTurnInput(
             chat: chat,
             route: route,
@@ -845,6 +1128,7 @@ final class ChatSession: Identifiable {
                 userLogin: app.github.login,
                 repo: repoContext,
                 computer: computer,
+                activeModel: activeModelSummary,
                 memories: chat.memoryContext,
                 connectedRepositories: app.github.repos.map(\.fullName),
                 isAutonomous: isAutonomousTurn
@@ -853,17 +1137,27 @@ final class ChatSession: Identifiable {
             allowTools: app.openRouter.supportsTools(chat.model),
             spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil,
             attachmentData: attachmentData,
-            serverTools: webEnabled && !route.isFree && !isExternalRoute && app.openRouter.accountState.paidAllowed() ? OpenRouterWebTools.paid : [],
+            serverTools: [],
             fallbackModels: fallbackModels,
             requiresInitialSpendApproval: false
         )
         let account = app.openRouter
+        let attachmentStore = app.attachmentStore
         var environment = AgentEnvironment(
             openRouter: aiClient,
             freeRoute: {
                 ModelRouter.route(choice: .free, difficulty: judgedDifficulty, thinking: thinking, account: AccountState(), catalogue: catalogue, requiresImageInput: hasImageInput, openRouterAvailable: hasOpenRouter)
             },
-            onOutOfCredits: { await account.markOutOfCredits() }
+            onOutOfCredits: { await account.markOutOfCredits() },
+            saveInlineGeneratedImage: { data, mimeType, prompt, modelID in
+                let ext = mimeType.contains("jpeg") || mimeType.contains("jpg") ? "jpg" : (mimeType.contains("webp") ? "webp" : "png")
+                guard let ref = try? await attachmentStore.importGeneratedImage(data, name: "picture-\(UUID().uuidString.lowercased()).\(ext)", mimeType: mimeType) else {
+                    return nil
+                }
+                let result = GeneratedImageResult(attachment: ref, prompt: prompt, model: modelID, aspectRatio: ImageAspectRatio.square.rawValue, quality: ImageQuality.standard.rawValue, cost: nil)
+                try? await attachmentStore.saveGeneratedMetadata(result)
+                return result
+            }
         )
         environment.onModelRestricted = { model in await account.markRestricted(model) }
 
@@ -880,8 +1174,17 @@ final class ChatSession: Identifiable {
         if let saves = changeSession {
             let receipts = await saves.receipts()
             var existing = Set((chat.saveReceipts ?? []).map(\.id))
+            var newestReceipt: SaveReceipt?
             for receipt in receipts where existing.insert(receipt.id).inserted {
                 chat.saveReceipts = (chat.saveReceipts ?? []) + [receipt]
+                newestReceipt = receipt
+            }
+            if let newest = newestReceipt {
+                if let cwBase = changeWorkspace?.base {
+                    workspace = cwBase
+                } else if let existingWorkspace = workspace {
+                    workspace = existingWorkspace.advancing(toCommit: newest.commit, branch: newest.branch)
+                }
             }
         }
         flush()
@@ -1151,5 +1454,461 @@ final class ChatSession: Identifiable {
             return jpeg
         }
         return raw
+    }
+
+    // MARK: Pure Image-Generation Model Turns, Workstation Files, & Kiro Chat Workflows
+
+    private func runPureImageTurn(
+        model: ModelInfo,
+        prompt: String,
+        client: OpenRouterClient,
+        app: AppModel
+    ) async {
+        let cleanPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanPrompt.isEmpty else {
+            fail(.other, "Describe the picture you want \(model.shortName) to generate.")
+            return
+        }
+        if var turn = lastTurn {
+            turn.status = .running
+            var runningStep = AssistantStep()
+            runningStep.model = model.id
+            runningStep.text = "Generating picture with \(model.shortName)…"
+            turn.steps = [runningStep]
+            replaceLastTurn(turn)
+        }
+        do {
+            let generated = try await client.generateImages(
+                prompt: cleanPrompt,
+                model: model.id,
+                options: ImageGenerationOptions(aspectRatio: .square, quality: .standard),
+                catalogueByID: app.openRouter.modelsByID,
+                progress: { _ in }
+            )
+            var savedResults: [GeneratedImageResult] = []
+            for image in generated {
+                let ext = image.mimeType.contains("jpeg") || image.mimeType.contains("jpg") ? "jpg" : (image.mimeType.contains("webp") ? "webp" : "png")
+                let ref = try await app.attachmentStore.importGeneratedImage(
+                    image.data,
+                    name: "picture-\(image.id.uuidString.lowercased()).\(ext)",
+                    mimeType: image.mimeType
+                )
+                let item = GeneratedImageResult(
+                    attachment: ref,
+                    prompt: image.prompt,
+                    model: image.model,
+                    aspectRatio: ImageAspectRatio.square.rawValue,
+                    quality: ImageQuality.standard.rawValue,
+                    cost: image.cost
+                )
+                try? await app.attachmentStore.saveGeneratedMetadata(item)
+                savedResults.append(item)
+            }
+            var turn = lastTurn ?? AssistantTurn()
+            var finishedStep = AssistantStep()
+            finishedStep.model = model.id
+            finishedStep.text = savedResults.isEmpty ? "No picture was returned by \(model.shortName)." : "Generated with **\(model.shortName)**."
+            finishedStep.generatedImages = savedResults.isEmpty ? nil : savedResults
+            finishedStep.finishedAt = Date()
+            turn.steps = [finishedStep]
+            turn.status = .done
+            replaceLastTurn(turn)
+            chat.updatedAt = Date()
+            await nameChatIfNeeded()
+        } catch let apiErr as OpenRouterAPIError where apiErr.kind == .outOfCredits {
+            app.openRouter.markOutOfCredits()
+            fail(.outOfCredits, app.openRouter.describe(apiErr))
+        } catch {
+            fail(.other, app.openRouter.describe(error))
+        }
+    }
+
+    func collectWorkstationItems() async -> [WorkstationFileItem] {
+        var items: [WorkstationFileItem] = []
+        var seen = Set<String>()
+
+        for ref in workstationFiles {
+            let key = ref.id.uuidString.lowercased()
+            if seen.insert(key).inserted {
+                items.append(WorkstationFileItem(
+                    id: key,
+                    name: ref.name,
+                    mimeType: ref.mimeType,
+                    byteCount: ref.bytes,
+                    source: "workstation",
+                    attachment: ref
+                ))
+            }
+        }
+        for message in chat.messages {
+            switch message.body {
+            case .user(let u):
+                for ref in u.attachments {
+                    let key = ref.id.uuidString.lowercased()
+                    if seen.insert(key).inserted {
+                        items.append(WorkstationFileItem(
+                            id: key,
+                            name: ref.name,
+                            mimeType: ref.mimeType,
+                            byteCount: ref.bytes,
+                            source: "chat_attachment",
+                            attachment: ref
+                        ))
+                    }
+                }
+            case .assistant(let turn):
+                for img in turn.steps.flatMap({ $0.generatedImages ?? [] }) {
+                    let ref = img.attachment
+                    let key = ref.id.uuidString.lowercased()
+                    if seen.insert(key).inserted {
+                        items.append(WorkstationFileItem(
+                            id: key,
+                            name: ref.name,
+                            mimeType: ref.mimeType,
+                            byteCount: ref.bytes,
+                            source: "generated_image",
+                            attachment: ref
+                        ))
+                    }
+                }
+            }
+        }
+        if let cw = changeWorkspace {
+            let staged = await cw.stagedChanges()
+            for change in staged {
+                guard case .write(let path, let data, _) = change else { continue }
+                let id = "staged:\(path)"
+                if seen.insert(id).inserted {
+                    items.append(WorkstationFileItem(
+                        id: id,
+                        name: path,
+                        mimeType: "text/plain",
+                        byteCount: data.count,
+                        source: "staged_repo_file",
+                        stagedPath: path
+                    ))
+                }
+            }
+        }
+        return items
+    }
+
+    func executeChatWorkflow(
+        definition: WorkflowDefinition,
+        prompt: String,
+        defaultModelID: String,
+        allAgents: [AgentDefinition],
+        toolPool: [any AgentTool],
+        repoContext: SystemPrompt.RepoContext?,
+        progress: @escaping @Sendable (String) -> Void
+    ) async -> ActiveWorkflowRunSnapshot {
+        guard let app else {
+            return ActiveWorkflowRunSnapshot(
+                id: definition.id,
+                definition: definition,
+                checkpoint: WorkflowCheckpoint(workflowID: definition.id, request: prompt),
+                isRunning: false,
+                errorMessage: "App closed."
+            )
+        }
+        let runID = "wf-\(UUID().uuidString.prefix(8).lowercased())"
+        let resolvedDefaultModel = defaultModelID == ModelChoice.freeID ? ModelChoice.autoID : defaultModelID
+        let defaultEffort: ThinkingLevel = .max
+        let aiClient = app.openRouter.client
+        let catalogue = app.openRouter.modelsByID
+        let accountState = app.openRouter.accountState
+        let hasOpenRouter = app.openRouter.hasOpenRouterKey
+        let userLogin = app.github.login
+        let connectedRepoNames = app.github.repos.map(\.fullName)
+        let spendLimit = app.settings.spendLimitOn ? app.settings.spendLimit : nil
+
+        var approvedDef = definition
+        approvedDef.isApproved = true
+
+        let initialCheckpoint = WorkflowCheckpoint(
+            workflowID: approvedDef.id,
+            request: prompt,
+            defaultModelID: resolvedDefaultModel,
+            defaultEffort: defaultEffort
+        )
+        upsertWorkflowSnapshot(ActiveWorkflowRunSnapshot(
+            id: runID,
+            definition: approvedDef,
+            checkpoint: initialCheckpoint,
+            isRunning: true
+        ))
+
+        let engine = WorkflowEngine(
+            definition: approvedDef,
+            checkpoint: initialCheckpoint,
+            agents: allAgents + BuiltInAgents.allIncludingKiroSubagents,
+            defaultModelID: resolvedDefaultModel,
+            defaultEffort: defaultEffort,
+            spendLimit: spendLimit,
+            onMessage: { [weak self] msg in
+                progress("\(msg.title): \(msg.message)")
+                await MainActor.run {
+                    self?.refreshWorkflowSnapshotFromMessage(runID: runID, event: msg)
+                }
+            },
+            runner: { invocation in
+                let chosenModelID: String = {
+                    if let override = invocation.preferredModelID, !override.isEmpty, override != ModelChoice.freeID {
+                        return override
+                    }
+                    return resolvedDefaultModel
+                }()
+                let stepChoice: ModelChoice = chosenModelID == ModelChoice.autoID ? .auto : .model(chosenModelID)
+                let stepEffort = invocation.preferredEffort ?? defaultEffort
+                let stepRoute = ModelRouter.route(
+                    choice: stepChoice,
+                    difficulty: invocation.definition.difficulty,
+                    thinking: stepEffort,
+                    account: accountState,
+                    catalogue: catalogue,
+                    requiresImageInput: false,
+                    openRouterAvailable: hasOpenRouter
+                )
+                var stepChat = Chat(model: stepChoice, thinking: stepEffort)
+                stepChat.messages.append(.user(invocation.task))
+                stepChat.messages.append(ChatMessage(body: .assistant(AssistantTurn())))
+                let stepPrompt = SystemPrompt.make(
+                    userLogin: userLogin,
+                    repo: repoContext,
+                    agent: invocation.definition,
+                    workflowContext: invocation.context,
+                    connectedRepositories: connectedRepoNames
+                )
+                let extraTools = invocation.tools
+                let mergedPool = (toolPool + extraTools).filter { invocation.definition.permits(toolName: $0.name) || $0.name == "send_message" }
+                let stepInput = AgentTurnInput(
+                    chat: stepChat,
+                    route: stepRoute,
+                    systemPrompt: stepPrompt,
+                    tools: mergedPool,
+                    allowTools: true,
+                    spendLimit: invocation.spendLimit,
+                    requiresInitialSpendApproval: false,
+                    agent: invocation.definition
+                )
+                let stepEnv = AgentEnvironment(
+                    openRouter: aiClient,
+                    freeRoute: {
+                        ModelRouter.route(choice: .free, difficulty: .normal, thinking: .default, account: AccountState(), catalogue: catalogue, openRouterAvailable: hasOpenRouter)
+                    },
+                    onOutOfCredits: {}
+                )
+                let stepRun = AgentLoop.start(stepInput, environment: stepEnv)
+                var finalTurn: AssistantTurn?
+                do {
+                    for await event in stepRun.events {
+                        try Task.checkCancellation()
+                        if case .updated(let updated, _) = event {
+                            finalTurn = updated
+                        }
+                    }
+                } catch is CancellationError {
+                    await stepRun.cancel()
+                    throw CancellationError()
+                }
+                let allCalls = finalTurn?.steps.flatMap(\.toolCalls) ?? []
+                let text = finalTurn?.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n") ?? "Step completed."
+                return AgentExecutionResult(
+                    output: text,
+                    model: finalTurn?.modelsUsed.last ?? stepRoute.model,
+                    goalOutcome: AgentGoalOutcome.parse(text),
+                    cost: finalTurn?.usage.cost ?? 0,
+                    toolCallCount: allCalls.count,
+                    toolSummaries: allCalls.map(\.summary),
+                    status: "completed"
+                )
+            },
+            checkpointer: { [weak self] cp in
+                await MainActor.run {
+                    guard let self, let idx = self.activeWorkflowRuns.firstIndex(where: { $0.id == runID }) else { return }
+                    self.activeWorkflowRuns[idx].checkpoint = cp
+                }
+            }
+        )
+        workflowEngines[runID] = engine
+        progress("Running workflow \(approvedDef.name)…")
+        let outcome = await engine.run(request: prompt)
+        let currentDef = await engine.definition
+        let finalSnapshot: ActiveWorkflowRunSnapshot
+        switch outcome {
+        case .completed(let cp):
+            finalSnapshot = ActiveWorkflowRunSnapshot(id: runID, definition: currentDef, checkpoint: cp, isRunning: false)
+        case .waiting(let cp, _):
+            finalSnapshot = ActiveWorkflowRunSnapshot(id: runID, definition: currentDef, checkpoint: cp, isRunning: false)
+        case .cancelled(let cp):
+            finalSnapshot = ActiveWorkflowRunSnapshot(id: runID, definition: currentDef, checkpoint: cp, isRunning: false)
+        case .failed(let cp, let err):
+            finalSnapshot = ActiveWorkflowRunSnapshot(id: runID, definition: currentDef, checkpoint: cp, isRunning: false, errorMessage: err)
+        }
+        upsertWorkflowSnapshot(finalSnapshot)
+        return finalSnapshot
+    }
+
+    private func upsertWorkflowSnapshot(_ snapshot: ActiveWorkflowRunSnapshot) {
+        if let idx = activeWorkflowRuns.firstIndex(where: { $0.id == snapshot.id }) {
+            activeWorkflowRuns[idx] = snapshot
+        } else {
+            activeWorkflowRuns.insert(snapshot, at: 0)
+        }
+    }
+
+    private func refreshWorkflowSnapshotFromMessage(runID: String, event: WorkflowMessageEvent) {
+        guard let idx = activeWorkflowRuns.firstIndex(where: { $0.id == runID }) else { return }
+        if !activeWorkflowRuns[idx].checkpoint.sentMessages.contains(where: { $0.id == event.id }) {
+            activeWorkflowRuns[idx].checkpoint.sentMessages.append(event)
+        }
+    }
+
+    func inspectWorkflowsReport(query: String?, app: AppModel?) -> String {
+        if let q = query?.trimmingCharacters(in: .whitespacesAndNewlines), !q.isEmpty {
+            if let run = activeWorkflowRuns.first(where: { $0.id == q || $0.definition.id == q || $0.definition.name.caseInsensitiveCompare(q) == .orderedSame }) {
+                return run.formattedTreeSummary()
+            }
+            if let def = app?.automations.workflows.first(where: { $0.id == q || $0.name.caseInsensitiveCompare(q) == .orderedSame }) {
+                let stepLines = def.steps.map { "- \($0.title) (`\($0.id)`, \($0.kind.rawValue))" }.joined(separator: "\n")
+                return "Saved workflow: \(def.name) (`\(def.id)`)\nSummary: \(def.summary)\nSteps:\n\(stepLines)"
+            }
+            return "No active workflow run or saved workflow matches `\(q)`."
+        }
+        var sections: [String] = []
+        if !activeWorkflowRuns.isEmpty {
+            sections.append("## Active / Recent Workflow Runs in This Chat\n" + activeWorkflowRuns.map { $0.formattedTreeSummary() }.joined(separator: "\n\n"))
+        } else {
+            sections.append("No workflow runs in this chat yet.")
+        }
+        if let workflows = app?.automations.workflows, !workflows.isEmpty {
+            let list = workflows.map { "- `\($0.id)` — \($0.name): \($0.summary)" }.joined(separator: "\n")
+            sections.append("## Available Workflows\n\(list)")
+        }
+        return sections.joined(separator: "\n\n")
+    }
+
+    func replaceRemainingWorkflowSteps(runID: String?, steps: [WorkflowNode]) async throws -> String {
+        let targetID = runID ?? activeWorkflowRuns.first?.id
+        guard let targetID, let engine = workflowEngines[targetID] else {
+            throw ToolInputError("No active workflow run found to update.")
+        }
+        let updated = try await engine.replaceRemainingSteps(steps)
+        let cp = await engine.state
+        if let idx = activeWorkflowRuns.firstIndex(where: { $0.id == targetID }) {
+            activeWorkflowRuns[idx].definition = updated
+            activeWorkflowRuns[idx].checkpoint = cp
+        }
+        return "Updated workflow `\(updated.name)` (`\(targetID)`): now \(updated.steps.count) total top-level steps."
+    }
+
+    // UI Controls for Inline `ACTIVE WORKFLOWS` Tree Card & `Workstation` `Workflows` Tab
+
+    func pauseWorkflowRun(_ runID: String) {
+        guard let engine = workflowEngines[runID] else { return }
+        Task { await engine.requestPause() }
+    }
+
+    func stopWorkflowRun(_ runID: String) {
+        workflowTasks[runID]?.cancel()
+        workflowTasks[runID] = nil
+        guard let engine = workflowEngines[runID] else { return }
+        Task {
+            await engine.cancel()
+            let cp = await engine.state
+            let def = await engine.definition
+            await MainActor.run {
+                self.upsertWorkflowSnapshot(ActiveWorkflowRunSnapshot(id: runID, definition: def, checkpoint: cp, isRunning: false))
+            }
+        }
+    }
+
+    func steerWorkflowRun(_ runID: String, note: String) {
+        let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let engine = workflowEngines[runID] else { return }
+        Task {
+            try? await engine.steer(trimmed)
+            let cp = await engine.state
+            await MainActor.run {
+                if let idx = self.activeWorkflowRuns.firstIndex(where: { $0.id == runID }) {
+                    self.activeWorkflowRuns[idx].checkpoint = cp
+                }
+            }
+        }
+    }
+
+    func setWorkflowRunModel(_ runID: String, modelID: String, effort: ThinkingLevel? = nil) {
+        guard modelID != ModelChoice.freeID, let engine = workflowEngines[runID] else { return }
+        Task {
+            try? await engine.setDefaultModel(modelID, effort: effort)
+            let cp = await engine.state
+            await MainActor.run {
+                if let idx = self.activeWorkflowRuns.firstIndex(where: { $0.id == runID }) {
+                    self.activeWorkflowRuns[idx].checkpoint = cp
+                }
+            }
+        }
+    }
+
+    func resumeWorkflowRun(_ runID: String, answer: String? = nil) {
+        guard let engine = workflowEngines[runID],
+              let idx = activeWorkflowRuns.firstIndex(where: { $0.id == runID }),
+              !activeWorkflowRuns[idx].isRunning else { return }
+        activeWorkflowRuns[idx].isRunning = true
+        activeWorkflowRuns[idx].errorMessage = nil
+        let pendingNodeID = activeWorkflowRuns[idx].checkpoint.pendingQuestion?.nodeID
+        workflowTasks[runID] = Task { [weak self] in
+            if let pendingNodeID {
+                try? await engine.answer(nodeID: pendingNodeID, answer: answer ?? "Resume")
+            }
+            let outcome = await engine.run()
+            let def = await engine.definition
+            await MainActor.run {
+                guard let self else { return }
+                self.workflowTasks[runID] = nil
+                switch outcome {
+                case .completed(let cp):
+                    self.upsertWorkflowSnapshot(ActiveWorkflowRunSnapshot(id: runID, definition: def, checkpoint: cp, isRunning: false))
+                case .waiting(let cp, _):
+                    self.upsertWorkflowSnapshot(ActiveWorkflowRunSnapshot(id: runID, definition: def, checkpoint: cp, isRunning: false))
+                case .cancelled(let cp):
+                    self.upsertWorkflowSnapshot(ActiveWorkflowRunSnapshot(id: runID, definition: def, checkpoint: cp, isRunning: false))
+                case .failed(let cp, let err):
+                    self.upsertWorkflowSnapshot(ActiveWorkflowRunSnapshot(id: runID, definition: def, checkpoint: cp, isRunning: false, errorMessage: err))
+                }
+            }
+        }
+    }
+
+    func retryWorkflowRun(_ runID: String) {
+        guard let snap = activeWorkflowRuns.first(where: { $0.id == runID }), !snap.isRunning, let app else { return }
+        let catalogue = app.openRouter.modelsByID
+        let route = ModelRouter.route(
+            choice: chat.model,
+            difficulty: .normal,
+            thinking: .max,
+            account: app.openRouter.accountState,
+            catalogue: catalogue,
+            requiresImageInput: false,
+            openRouterAvailable: app.openRouter.hasOpenRouterKey
+        )
+        let defaultModel = snap.checkpoint.defaultModelID ?? route.model
+        let prompt = snap.checkpoint.request
+        let def = snap.definition
+        activeWorkflowRuns.removeAll { $0.id == runID }
+        workflowEngines[runID] = nil
+        let tools: [any AgentTool] = webEnabled ? [WebSearchTool(transport: app.transport), ReadWebPageTool(transport: app.transport)] : []
+        Task { [weak self] in
+            guard let self else { return }
+            _ = await self.executeChatWorkflow(
+                definition: def,
+                prompt: prompt,
+                defaultModelID: defaultModel,
+                allAgents: app.automations.agents,
+                toolPool: tools + app.connectors.agentTools(),
+                repoContext: nil,
+                progress: { _ in }
+            )
+        }
     }
 }
