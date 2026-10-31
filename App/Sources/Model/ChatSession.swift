@@ -1027,7 +1027,7 @@ final class ChatSession: Identifiable {
                             }
                         }
                     } catch is CancellationError {
-                        await helperRun.cancel()
+                        helperRun.cancel()
                         let calls = finalTurn?.steps.flatMap(\.toolCalls) ?? []
                         return AgentExecutionResult(
                             output: "cancelled",
@@ -1039,7 +1039,7 @@ final class ChatSession: Identifiable {
                         )
                     }
                     if Task.isCancelled {
-                        await helperRun.cancel()
+                        helperRun.cancel()
                         let calls = finalTurn?.steps.flatMap(\.toolCalls) ?? []
                         return AgentExecutionResult(
                             output: "cancelled",
@@ -1710,7 +1710,7 @@ final class ChatSession: Identifiable {
                         }
                     }
                 } catch is CancellationError {
-                    await stepRun.cancel()
+                    stepRun.cancel()
                     throw CancellationError()
                 }
                 let allCalls = finalTurn?.steps.flatMap(\.toolCalls) ?? []

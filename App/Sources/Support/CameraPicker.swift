@@ -44,7 +44,14 @@ struct CameraPicker: UIViewControllerRepresentable {
             owner.isPresented = false
             guard let capturedImage else { return }
             let box = UncheckedImageBox(image: capturedImage)
-            Task.detached(priority: .userInitiated) {
+            Task { @MainActor in
+                guard let data = await Self.encodeCameraJPEG(box) else { return }
+                callback(data)
+            }
+        }
+
+        nonisolated private static func encodeCameraJPEG(_ box: UncheckedImageBox) async -> Data? {
+            await Task.detached(priority: .userInitiated) {
                 let maxDim: CGFloat = 2_048
                 let size = box.image.size
                 let scale = min(1.0, maxDim / max(max(size.width, size.height), 1))
@@ -56,11 +63,8 @@ struct CameraPicker: UIViewControllerRepresentable {
                         box.image.draw(in: CGRect(origin: .zero, size: targetSize))
                     }
                     : box.image
-                guard let data = scaled.jpegData(compressionQuality: 0.86) else { return }
-                await MainActor.run {
-                    callback(data)
-                }
-            }
+                return scaled.jpegData(compressionQuality: 0.86)
+            }.value
         }
     }
 
