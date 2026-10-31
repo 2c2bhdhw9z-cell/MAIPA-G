@@ -1,7 +1,7 @@
 # MAIPA-G plan
 
-**Status (31 October 2026, 2:39 AM ET): Build 69 (`build-69-f41ce25`, 7.22 MB, PR #20) is the latest
-installable build: 0.1.0 (69), iPhone arm64, built from commit `af0bb40` (merged to `main` as `f41ce25`),
+**Status (31 October 2026, 6:15 AM ET): Build 75 (`build-75-cbdf191`, 7.47 MB, PR #21) is the latest
+installable build: 0.1.0 (75), iPhone arm64, built from commit `41d6286` (merged to `main` as `cbdf191`),
 checked by the AgentCore tests on Linux and macOS and an independent IPA inspection.
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
@@ -91,6 +91,24 @@ Built since then:
   Registry` tab; lowered top bar pills slightly and fixed Light Mode icon contrast; fixed the `↓`
   scroll-to-bottom button, `Add it / Throw away` bottom-bar overlap, closed `SideMenu` landscape
   bleed, direct computer wake commands, and streaming/thumbnail/scroll performance.
+- Build 75 (PR #21): gave every top-bar button (`MenuButton`, Workstation, Context ring, `+` New
+  chat), the `↓` jump-to-bottom pill, and every Workstation Canvas button full 44×44 tap targets
+  without iOS 26 container-level interactive Liquid Glass eating child taps; added a frosted header
+  backdrop on `ChatScreen` and iOS 18 `ScrollPosition(edge: .bottom)` + two-pass anchor scrolling
+  so one tap on `↓` reaches the bottom of long replies; made Workstation Canvas `+` (`Add files`)
+  and embedded `PhotosPicker` work whether Workstation is opened from Home or inside a chat;
+  replaced `Fit all` with `Arrange` (auto-arranges cards into a readable grid) and `Center`;
+  switched Canvas/Files image previews to `ZoomableImageCanvas` starting fitted at `1×` (`1×–5×`
+  pinch/double-tap zoom); prevented Cloudflare `413 Payload Too Large` and raw HTML error dumps via
+  `1600px` JPEG wire compression, a `9 MB` `Transcript.fit` wire-byte cap that trims older turns'
+  inline media first, automatic `413` shrink-and-retry, and plain-English HTML error sanitization;
+  replaced the broken `api.githubcopilot.com/mcp/` GitHub connector (`404` / raw Keychain JSON bug)
+  with direct `builtin:github` tools (`search` + `api_request` against `https://api.github.com`)
+  backed by the signed-in GitHub App session or a Personal Access Token; and added full end-to-end
+  multi-provider AI gateway support alongside OpenRouter for `OneProvider`, `SayGM`, `TeamoRouter`,
+  `OmniRoute` (`Cheaper Inference` + self-hosted URLs), and custom OpenAI/Anthropic-compatible
+  gateways across Settings, Model Picker (with official provider logos), Chat, Image generation,
+  Health Check, and Autonomous cloud runs.
 
 Still not done: Stability 11 (about 250 silent `try?` failures remain), necessary item 4 (sandbox
 for downloaded connectors blocks all network, so npx/uvx connectors can't install), and necessary
