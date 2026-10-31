@@ -119,6 +119,7 @@ private struct Runner {
     let requiresInitialSpendApproval: Bool
     let environment: AgentEnvironment
     let continuation: AsyncStream<AgentEvent>.Continuation
+    var maxPayloadBytes = Transcript.defaultMaxPayloadBytes
     var switchedToFree = false
     var lastEmit = Date.distantPast
 
@@ -136,6 +137,14 @@ private struct Runner {
             for tool in input.tools where input.agent?.permits(tool: tool.name) ?? true {
                 byName[tool.name] = tool
                 localSpecs.append(tool.spec)
+            }
+            if AIProviderModelID.decode(input.route.model) != nil,
+               input.serverTools.contains(where: { $0.type == "openrouter:web_search" }) {
+                for extraTool: any AgentTool in [WebSearchTool(transport: environment.openRouter.transport), ReadWebPageTool(transport: environment.openRouter.transport)]
+                where byName[extraTool.name] == nil && (input.agent?.permits(tool: extraTool.name) ?? true) {
+                    byName[extraTool.name] = extraTool
+                    localSpecs.append(extraTool.spec)
+                }
             }
         }
         tools = byName
@@ -235,18 +244,33 @@ private struct Runner {
         while true {
             attempt += 1
             chat.messages[chat.messages.count - 1].assistantTurn = turn
-            let (messages, trimmed) = Transcript.fit(Transcript.messages(for: chat, systemPrompt: systemPrompt, attachmentData: attachmentData), budget: route.contextBudget)
+            let (messages, trimmed) = Transcript.fit(
+                Transcript.messages(for: chat, systemPrompt: systemPrompt, attachmentData: attachmentData),
+                budget: route.contextBudget,
+                maxPayloadBytes: maxPayloadBytes
+            )
+            let isExternalProvider = AIProviderModelID.decode(route.model) != nil
+            var effectiveSpecs = specs
+            if isExternalProvider {
+                let hadOpenRouterWeb = effectiveSpecs.contains { $0.type == "openrouter:web_search" }
+                effectiveSpecs.removeAll { $0.type.hasPrefix("openrouter:") }
+                if hadOpenRouterWeb, !effectiveSpecs.contains(where: { $0.function.name == WebSearchTool.name }) {
+                    let ws = WebSearchTool(transport: environment.openRouter.transport)
+                    let fp = ReadWebPageTool(transport: environment.openRouter.transport)
+                    effectiveSpecs.append(contentsOf: [ws.spec, fp.spec])
+                }
+            }
             let request = ChatCompletionRequest(
                 model: route.model,
                 // OpenRouter refuses the whole request (400) when this list, the chosen AI
                 // included, has more than 3 entries.
-                models: fallbackModels.isEmpty ? nil : Array(([route.model] + fallbackModels).prefix(ChatCompletionRequest.maxModels)),
+                models: (isExternalProvider || fallbackModels.isEmpty) ? nil : Array(([route.model] + fallbackModels).prefix(ChatCompletionRequest.maxModels)),
                 messages: messages,
-                tools: specs,
+                tools: effectiveSpecs,
                 reasoningEffort: route.effort,
-                plugins: route.plugins,
-                sessionID: chat.id.uuidString,
-                automaticCaching: route.automaticCaching
+                plugins: isExternalProvider ? [] : route.plugins,
+                sessionID: isExternalProvider ? nil : chat.id.uuidString,
+                automaticCaching: isExternalProvider ? false : route.automaticCaching
             )
             if trimmed, !turn.notices.contains(Self.trimmedNotice) { turn.notices.append(Self.trimmedNotice) }
 
@@ -303,6 +327,7 @@ private struct Runner {
                     continue
                 case .shrinkContext:
                     route.contextBudget = max(8_000, route.contextBudget / 2)
+                    maxPayloadBytes = max(1_500_000, maxPayloadBytes / 2)
                     continue
                 case .simplifyRequest:
                     if route.effort == .xhigh || route.effort == .max {
@@ -327,7 +352,9 @@ private struct Runner {
         step.reasoning = accumulator.reasoning
         step.reasoningDetails = accumulator.reasoningDetails
         step.model = accumulator.model ?? step.model
-        if let actual = accumulator.model, actual != route.model,
+        if !fallbackModels.isEmpty,
+           AIProviderModelID.decode(route.model) == nil,
+           let actual = accumulator.model, actual != route.model,
            !turn.notices.contains(where: { $0.contains("switched to fallback AI") }) {
             turn.notices.append("OpenRouter switched to fallback AI \(actual) because the first AI was unavailable.")
         }

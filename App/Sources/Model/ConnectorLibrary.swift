@@ -30,7 +30,28 @@ final class ConnectorLibrary {
         if let data = try? Data(contentsOf: cacheURL), let saved = try? JSONCoding.decoder().decode([RegistryServer].self, from: data) {
             catalog = saved.sorted(by: MCPRegistryClient.catalogOrder)
         }
-        connected = await store.loadAll().compactMap(Self.configuration).sorted { $0.displayName < $1.displayName }
+        var loaded = await store.loadAll().compactMap(Self.configuration)
+        for index in loaded.indices {
+            let item = loaded[index]
+            if item.serverID == "mcp:github" || item.endpoint?.host?.lowercased() == "api.githubcopilot.com" {
+                let migrated = ConnectorConfiguration(
+                    id: item.id,
+                    serverID: "builtin:github",
+                    displayName: "GitHub",
+                    kind: .builtin,
+                    endpoint: URL(string: "https://api.github.com"),
+                    launchValues: ["provider": "github", "base_url": "https://api.github.com", "auth_style": "bearer"],
+                    secretNames: ["api_key"],
+                    disabledTools: item.disabledTools
+                )
+                loaded[index] = migrated
+                if let data = try? JSONCoding.encoder().encode(migrated), let json = JSONValue.parse(data) {
+                    let record = ConnectorRecord(id: migrated.id, serverID: migrated.serverID, displayName: migrated.displayName, configuration: json)
+                    try? await store.save(record)
+                }
+            }
+        }
+        connected = loaded.sorted { $0.displayName < $1.displayName }
         for configuration in connected { await restore(configuration) }
         if !PreviewScenes.isActive, app?.settings.chatComputerOff == false,
            let control = computerControl(),
@@ -359,7 +380,8 @@ final class ConnectorLibrary {
             let needsSecret = configuration.secretNames.contains("api_key")
             let provider = configuration.launchValues["provider"] ?? ""
             let optionalSecretProviders: Set<String> = ["whatsapp", "loom", "jina", "jina_reader"]
-            if !needsSecret || hasStoredBuiltinSecret(configuration) || optionalSecretProviders.contains(provider) {
+            let githubAccountReady = (provider == "github" && app?.github.isConnected == true)
+            if !needsSecret || hasStoredBuiltinSecret(configuration) || optionalSecretProviders.contains(provider) || githubAccountReady {
                 states[configuration.id] = .connected
                 errors[configuration.id] = nil
             } else {
@@ -479,6 +501,10 @@ final class ConnectorLibrary {
                 }
             }
         }
+        if let providers = app?.openRouter.readyExternalProviders, !providers.isEmpty,
+           let providerData = try? JSONCoding.encoder().encode(providers) {
+            values["__ai_providers_json"] = String(decoding: providerData, as: UTF8.self)
+        }
         guard !values.isEmpty, let data = try? JSONEncoder().encode(values) else { return nil }
         return String(decoding: data, as: UTF8.self)
     }
@@ -507,8 +533,24 @@ final class ConnectorLibrary {
             case .apple:
                 return AppleDeviceIntegrations.tools(for: configuration)
             case .builtin, .webhook:
-                let secret = Keychain.data(account: builtinSecretKey(configuration.id)).map { String(decoding: $0, as: UTF8.self) }
-                return BuiltinIntegrationFactory.tools(for: configuration, secret: secret, transport: transport, computer: control)
+                let storedSecret = Keychain.data(account: builtinSecretKey(configuration.id)).map { String(decoding: $0, as: UTF8.self) }
+                let provider = configuration.launchValues["provider"] ?? ""
+                if provider == "github", (storedSecret == nil || storedSecret?.isEmpty == true || storedSecret == "__maipag_github_app__") {
+                    let ghSession = app?.github.session
+                    let fallbackUserToken = Keychain.value(GitHubUserToken.self, for: .githubUserToken)?.accessToken
+                    let baseDefs = BuiltinIntegrationFactory.tools(for: configuration, secret: nil, transport: transport, computer: control)
+                    return baseDefs.map { baseTool in
+                        DynamicGitHubConnectorTool(
+                            base: baseTool,
+                            configuration: configuration,
+                            transport: transport,
+                            computer: control,
+                            session: ghSession,
+                            fallbackUserToken: fallbackUserToken
+                        )
+                    }
+                }
+                return BuiltinIntegrationFactory.tools(for: configuration, secret: storedSecret, transport: transport, computer: control)
             case .stdio:
                 var envSecrets: [String: String] = [:]
                 for name in configuration.secretNames {
@@ -615,10 +657,82 @@ final class ConnectorLibrary {
         return try? JSONCoding.decoder().decode(ConnectorConfiguration.self, from: data)
     }
 
+    func clearBuiltinSecret(for configuration: ConnectorConfiguration) async {
+        Keychain.remove(account: builtinSecretKey(configuration.id))
+        await restore(configuration)
+    }
+
     func preview(authNeeded: Bool = false) {
-        let item = ConnectorConfiguration(serverID: "com.github/github-mcp", displayName: "GitHub", endpoint: URL(string: "https://api.githubcopilot.com/mcp")!)
+        let item = ConnectorConfiguration(
+            serverID: "builtin:github",
+            displayName: "GitHub",
+            kind: .builtin,
+            endpoint: URL(string: "https://api.github.com"),
+            launchValues: ["provider": "github", "base_url": "https://api.github.com", "auth_style": "bearer"],
+            secretNames: ["api_key"]
+        )
         connected = [item]; states[item.id] = authNeeded ? .authorizationNeeded : .connected
-        toolDefinitions[item.id] = [ConnectorToolDefinition(serverID: item.serverID, serverName: item.displayName, originalName: "search_repositories", title: "Search repositories", description: "Search GitHub repositories")]
-        catalog = [RegistryServer(name: item.serverID, displayName: "GitHub", description: "Work with repositories, issues, and pull requests.", version: "latest", remotes: [.init(type: "streamable-http", url: item.endpoint!)])]
+        toolDefinitions[item.id] = BuiltinIntegrationFactory.definitions(for: item)
     }
 }
+
+private struct DynamicGitHubConnectorTool: AgentTool {
+    let base: any AgentTool
+    let configuration: ConnectorConfiguration
+    let transport: any HTTPTransport
+    let computer: ComputerControl?
+    let session: GitHubAppSession?
+    let fallbackUserToken: String?
+
+    var name: String { base.name }
+    var spec: ToolSpec { base.spec }
+    var bringsOutsideContent: Bool { base.bringsOutsideContent }
+
+    func runningSummary(for arguments: JSONValue) -> String {
+        base.runningSummary(for: arguments)
+    }
+
+    func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
+        await base.approvalRequest(for: arguments)
+    }
+
+    func approvalAfterOutsideContent(for arguments: JSONValue) async -> ToolApprovalRequest? {
+        await base.approvalAfterOutsideContent(for: arguments)
+    }
+
+    func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        try await invoke(arguments: arguments, approved: false, progress: progress)
+    }
+
+    func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        try await invoke(arguments: arguments, approved: true, progress: progress)
+    }
+
+    private func invoke(arguments: JSONValue, approved: Bool, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        var resolvedToken: String?
+        if let session {
+            resolvedToken = try? await session.installationToken()
+            if resolvedToken == nil {
+                resolvedToken = try? await session.userToken()
+            }
+        }
+        if resolvedToken == nil {
+            resolvedToken = fallbackUserToken
+        }
+        let freshTools = BuiltinIntegrationFactory.tools(
+            for: configuration,
+            secret: resolvedToken,
+            transport: transport,
+            computer: computer
+        )
+        guard let matching = freshTools.first(where: { $0.name == base.name }) else {
+            return approved
+                ? try await base.runApproved(arguments: arguments, progress: progress)
+                : try await base.run(arguments: arguments, progress: progress)
+        }
+        return approved
+            ? try await matching.runApproved(arguments: arguments, progress: progress)
+            : try await matching.run(arguments: arguments, progress: progress)
+    }
+}
+

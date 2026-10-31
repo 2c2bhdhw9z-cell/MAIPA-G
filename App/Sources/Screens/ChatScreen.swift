@@ -9,6 +9,7 @@ struct ChatScreen: View {
     @Bindable var session: ChatSession
 
     @State private var followsBottom = true
+    @State private var scrollPosition = ScrollPosition(edge: .bottom)
     @State private var renaming = false
     @State private var newTitle = ""
     @State private var editingMessageID: UUID?
@@ -32,6 +33,7 @@ struct ChatScreen: View {
                 .padding(.bottom, 8)
                 .animation(theme.messagesSlideIn ? .snappy : nil, value: session.chat.messages.count)
             }
+            .scrollPosition($scrollPosition)
             .scrollDismissesKeyboard(.interactively)
             .modifier(BottomScrollTrackingModifier(followsBottom: $followsBottom))
             .onAppear {
@@ -99,19 +101,22 @@ struct ChatScreen: View {
                     }
                 }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .frame(maxWidth: 220)
+                .padding(.vertical, 8)
+                .frame(maxWidth: 220, minHeight: 40)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityHint("Rename this chat")
 
             Spacer(minLength: 4)
 
-            HStack(spacing: 12) {
+            HStack(spacing: 4) {
                 if let cost = session.chat.totalUsage.cost {
                     Text(cost.dollars)
                         .font(.caption.weight(.medium).monospacedDigit())
                         .foregroundStyle(Theme.secondaryText)
+                        .padding(.leading, 8)
+                        .padding(.trailing, 2)
                 }
 
                 Button {
@@ -120,13 +125,14 @@ struct ChatScreen: View {
                     Image(systemName: "square.on.square.dashed")
                         .font(.body.weight(.semibold))
                         .foregroundStyle(theme.accent)
-                        .frame(width: 28, height: 28)
+                        .frame(width: 40, height: 40)
+                        .contentShape(Rectangle())
                         .overlay(alignment: .topTrailing) {
                             if hasPendingSave {
                                 Circle()
                                     .fill(theme.accent)
                                     .frame(width: 7, height: 7)
-                                    .offset(x: 2, y: 1)
+                                    .offset(x: -5, y: 6)
                             }
                         }
                 }
@@ -139,26 +145,29 @@ struct ChatScreen: View {
                     Image(systemName: "square.and.pencil")
                         .font(.body.weight(.semibold))
                         .foregroundStyle(theme.accent)
-                        .frame(width: 28, height: 28)
+                        .frame(width: 40, height: 40)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("New chat")
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .glassPanel(cornerRadius: 20, interactive: true)
+            .padding(.horizontal, 4)
+            .glassPanel(cornerRadius: 22, interactive: false)
         }
         .padding(.horizontal, 14)
         .padding(.top, 6)
-        .padding(.bottom, 4)
-        .background(
-            LinearGradient(
-                colors: [Theme.background, Theme.background.opacity(0.86), Theme.background.opacity(0)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
-        )
+        .padding(.bottom, 6)
+        .background {
+            ZStack(alignment: .bottom) {
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+                Theme.background.opacity(0.82)
+                Rectangle()
+                    .fill(Theme.stroke)
+                    .frame(height: 0.5)
+            }
+            .ignoresSafeArea(edges: .top)
+        }
     }
 
     private var hasPendingSave: Bool {
@@ -179,11 +188,13 @@ struct ChatScreen: View {
                         Image(systemName: "arrow.down")
                             .font(.subheadline.weight(.bold))
                             .foregroundStyle(.primary)
-                            .frame(width: 40, height: 40)
-                            .glassPanel(cornerRadius: 20, interactive: true)
+                            .frame(width: 44, height: 44)
+                            .glassPanel(cornerRadius: 22, interactive: false)
+                            .contentShape(Circle())
                             .shadow(color: .black.opacity(0.16), radius: 8, y: 3)
                     }
                     .buttonStyle(.plain)
+                    .contentShape(Circle())
                     .padding(.trailing, 16)
                     .accessibilityLabel("Jump to the newest")
                 }
@@ -321,16 +332,15 @@ struct ChatScreen: View {
         Haptics.selection()
         followsBottom = true
         withAnimation(.snappy(duration: 0.25)) {
-            if let lastID = session.chat.messages.last?.id {
-                proxy.scrollTo(lastID, anchor: .bottom)
-            }
+            scrollPosition.scrollTo(edge: .bottom)
             proxy.scrollTo(bottomID, anchor: .bottom)
         }
         // Second pass after LazyVStack settles offscreen row heights so one tap always lands flush at bottom.
         Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 130_000_000)
+            try? await Task.sleep(nanoseconds: 120_000_000)
             guard followsBottom else { return }
             withAnimation(.snappy(duration: 0.16)) {
+                scrollPosition.scrollTo(edge: .bottom)
                 proxy.scrollTo(bottomID, anchor: .bottom)
             }
         }
@@ -340,6 +350,7 @@ struct ChatScreen: View {
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
+            scrollPosition.scrollTo(edge: .bottom)
             proxy.scrollTo(bottomID, anchor: .bottom)
         }
     }

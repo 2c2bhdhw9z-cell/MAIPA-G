@@ -6,6 +6,17 @@ public enum Transcript {
     static let unansweredQuestions = "The person did not answer these questions and wrote a new message instead."
     static let trimmedToolResult = "[Earlier tool output removed to save space. Run the tool again if you need it.]"
 
+    private static func detectedMimeType(for data: Data, fallback: String) -> String {
+        let header = [UInt8](data.prefix(12))
+        if header.count >= 3, header[0] == 0xFF, header[1] == 0xD8, header[2] == 0xFF { return "image/jpeg" }
+        if header.count >= 4, header[0] == 0x89, header[1] == 0x50, header[2] == 0x4E, header[3] == 0x47 { return "image/png" }
+        if header.count >= 4, header[0] == 0x47, header[1] == 0x49, header[2] == 0x46, header[3] == 0x38 { return "image/gif" }
+        if header.count >= 12, header[0] == 0x52, header[1] == 0x49, header[2] == 0x46, header[3] == 0x46,
+           header[8] == 0x57, header[9] == 0x45, header[10] == 0x42, header[11] == 0x50 { return "image/webp" }
+        if header.count >= 4, header[0] == 0x25, header[1] == 0x50, header[2] == 0x44, header[3] == 0x46 { return "application/pdf" }
+        return fallback
+    }
+
     /// The messages for the next request: the system prompt, then the whole conversation.
     ///
     /// Every tool call gets a result, because the API rejects a call left without one: calls that
@@ -47,7 +58,8 @@ public enum Transcript {
                 if !effectiveText.isEmpty { parts.append(["type": "text", "text": .string(effectiveText)]) }
                 for attachment in user.attachments {
                     guard let data = attachmentData[attachment.id] else { continue }
-                    let encoded = "data:\(attachment.mimeType);base64,\(data.base64EncodedString())"
+                    let mime = detectedMimeType(for: data, fallback: attachment.mimeType)
+                    let encoded = "data:\(mime);base64,\(data.base64EncodedString())"
                     switch attachment.kind {
                     case .image:
                         parts.append(["type": "image_url", "image_url": ["url": .string(encoded)]])
@@ -118,14 +130,113 @@ public enum Transcript {
         return tokens
     }
 
-    /// Shrinks the list until it fits `budget` tokens. Old tool output goes first (the AI can run
-    /// the tool again); then, if still too long, the oldest exchanges, never the system prompt or
-    /// the latest user message and what followed it.
-    public static func fit(_ messages: [APIMessage], budget: Int) -> (messages: [APIMessage], trimmed: Bool) {
+    public static let defaultMaxPayloadBytes = 7_500_000
+
+    /// Approximate JSON wire bytes of `messages`, including full base64 lengths of inline images and PDFs.
+    public static func estimatedWireBytes(_ messages: [APIMessage]) -> Int {
+        var bytes = 256
+        for message in messages {
+            bytes += (message.content?.utf8.count ?? 0) + 48
+            for part in message.contentParts ?? [] {
+                if part["type"]?.stringValue == "image_url", let u = part["image_url"]?["url"]?.stringValue {
+                    bytes += u.utf8.count + 48
+                } else if part["type"]?.stringValue == "file", let d = part["file"]?["file_data"]?.stringValue {
+                    bytes += d.utf8.count + 64
+                } else {
+                    bytes += part.jsonString().utf8.count + 16
+                }
+            }
+            if let calls = message.toolCalls {
+                for call in calls {
+                    bytes += call.function.name.utf8.count + call.function.arguments.utf8.count + 64
+                }
+            }
+        }
+        return bytes
+    }
+
+    /// Shrinks the list until it fits `budget` tokens AND `maxPayloadBytes` HTTP upload bytes.
+    /// Old inline attachments and tool output go first; then oldest exchanges; never the system prompt.
+    public static func fit(
+        _ messages: [APIMessage],
+        budget: Int,
+        maxPayloadBytes: Int = defaultMaxPayloadBytes
+    ) -> (messages: [APIMessage], trimmed: Bool) {
         var messages = messages
-        guard estimatedTokens(messages) > budget else { return (messages, false) }
-        let protectedFrom = messages.lastIndex { $0.role == .user } ?? messages.count
         var changed = false
+        let protectedFrom = messages.lastIndex { $0.role == .user } ?? messages.count
+
+        // 1. Keep HTTP upload under Cloudflare / gateway limits (~7.5 MB) by stripping base64
+        // images/PDFs from older user turns first while preserving all text and the latest turn's attachments.
+        if estimatedWireBytes(messages) > maxPayloadBytes {
+            for index in messages.indices where index < protectedFrom && messages[index].role == .user {
+                guard let parts = messages[index].contentParts, !parts.isEmpty else { continue }
+                var keptText: [String] = []
+                var droppedCount = 0
+                for part in parts {
+                    let kind = part["type"]?.stringValue ?? ""
+                    if kind == "image_url" || kind == "file" {
+                        droppedCount += 1
+                    } else if let t = part["text"]?.stringValue, !t.isEmpty {
+                        keptText.append(t)
+                    }
+                }
+                if droppedCount > 0 {
+                    keptText.append("[Earlier attached media (\(droppedCount) item\(droppedCount == 1 ? "" : "s")) omitted so this request stays within upload limits.]")
+                    messages[index].contentParts = nil
+                    messages[index].content = keptText.joined(separator: "\n\n")
+                    changed = true
+                }
+                if estimatedWireBytes(messages) <= maxPayloadBytes { break }
+            }
+        }
+
+        // If older tool outputs still push wire bytes above `maxPayloadBytes`, trim them next.
+        if estimatedWireBytes(messages) > maxPayloadBytes {
+            for index in messages.indices where index < protectedFrom && messages[index].role == .tool {
+                if (messages[index].content?.count ?? 0) > trimmedToolResult.count {
+                    messages[index].content = trimmedToolResult
+                    changed = true
+                }
+                if estimatedWireBytes(messages) <= maxPayloadBytes { break }
+            }
+        }
+
+        // If the latest user message alone still exceeds `maxPayloadBytes` (e.g. 20 huge files attached at once),
+        // keep as many inline attachments as fit inside the byte ceiling and note the rest cleanly.
+        if estimatedWireBytes(messages) > maxPayloadBytes,
+           let lastUser = messages.lastIndex(where: { $0.role == .user }),
+           let parts = messages[lastUser].contentParts, !parts.isEmpty {
+            let baseBytesWithoutLatest = estimatedWireBytes(messages.enumerated().compactMap { $0.offset == lastUser ? nil : $0.element })
+            let budgetForLatest = max(512_000, maxPayloadBytes - baseBytesWithoutLatest)
+            var used = 0
+            var kept: [JSONValue] = []
+            var omittedMedia = 0
+            for part in parts {
+                let kind = part["type"]?.stringValue ?? ""
+                let partBytes: Int
+                if kind == "image_url", let u = part["image_url"]?["url"]?.stringValue {
+                    partBytes = u.utf8.count + 48
+                } else if kind == "file", let d = part["file"]?["file_data"]?.stringValue {
+                    partBytes = d.utf8.count + 64
+                } else {
+                    partBytes = part.jsonString().utf8.count + 16
+                }
+                if (kind == "image_url" || kind == "file"), used + partBytes > budgetForLatest, kept.contains(where: { ($0["type"]?.stringValue ?? "") == "image_url" || ($0["type"]?.stringValue ?? "") == "file" }) {
+                    omittedMedia += 1
+                } else {
+                    kept.append(part)
+                    used += partBytes
+                }
+            }
+            if omittedMedia > 0 {
+                kept.append(["type": "text", "text": .string("[\(omittedMedia) additional attached file\(omittedMedia == 1 ? " was" : "s were") omitted from inline upload to avoid HTTP 413 Payload Too Large.]")])
+                messages[lastUser].contentParts = kept
+                changed = true
+            }
+        }
+
+        guard estimatedTokens(messages) > budget else { return (messages, changed) }
         for index in messages.indices where index < protectedFrom && messages[index].role == .tool {
             if (messages[index].content?.count ?? 0) > trimmedToolResult.count {
                 messages[index].content = trimmedToolResult

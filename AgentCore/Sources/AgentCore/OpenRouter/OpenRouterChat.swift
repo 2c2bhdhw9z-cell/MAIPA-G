@@ -246,6 +246,39 @@ public struct StreamChunk: Sendable {
         public var id: String?
         public var name: String?
         public var arguments: String?
+
+        public init(index: Int? = nil, id: String? = nil, name: String? = nil, arguments: String? = nil) {
+            self.index = index
+            self.id = id
+            self.name = name
+            self.arguments = arguments
+        }
+    }
+
+    public init(
+        id: String? = nil,
+        model: String? = nil,
+        provider: String? = nil,
+        contentDelta: String? = nil,
+        reasoningDelta: String? = nil,
+        reasoningDetails: [JSONValue] = [],
+        toolCallDeltas: [ToolCallDelta] = [],
+        finishReason: String? = nil,
+        usage: Usage? = nil,
+        error: OpenRouterAPIError? = nil,
+        citations: [SourceCitation] = []
+    ) {
+        self.id = id
+        self.model = model
+        self.provider = provider
+        self.contentDelta = contentDelta
+        self.reasoningDelta = reasoningDelta
+        self.reasoningDetails = reasoningDetails
+        self.toolCallDeltas = toolCallDeltas
+        self.finishReason = finishReason
+        self.usage = usage
+        self.error = error
+        self.citations = citations
     }
 
     public init(json: JSONValue) {

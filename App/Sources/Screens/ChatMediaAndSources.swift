@@ -376,13 +376,9 @@ struct AttachmentDataPreviewBody: View {
     let data: Data
 
     var body: some View {
-        if kind == .image, let image = ImageDownsampler.image(from: data, maxPixelSize: 2_048) {
-            ScrollView([.horizontal, .vertical]) {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .padding()
-            }
+        if kind == .image, let image = ImageDownsampler.image(from: data, maxPixelSize: 2_400) {
+            ZoomableImageCanvas(image: image)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if kind == .pdf || name.lowercased().hasSuffix(".pdf") {
             PDFInlineReaderView(data: data)
         } else if let text = Self.readableText(from: data, name: name) {
@@ -426,6 +422,106 @@ struct AttachmentDataPreviewBody: View {
         if binaryExts.contains(ext) { return nil }
         guard let str = String(data: data.prefix(250_000), encoding: .utf8), !str.contains("\0") else { return nil }
         return str
+    }
+}
+
+/// Fitted, centered UIScrollView image viewer (`1.0×` fit on open, pinch `1.0×–5.0×`, double-tap zoom).
+struct ZoomableImageCanvas: UIViewRepresentable {
+    let image: UIImage
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> FittingZoomScrollView {
+        let scroll = FittingZoomScrollView()
+        scroll.delegate = context.coordinator
+        scroll.minimumZoomScale = 1.0
+        scroll.maximumZoomScale = 5.0
+        scroll.bouncesZoom = true
+        scroll.showsHorizontalScrollIndicator = false
+        scroll.showsVerticalScrollIndicator = false
+        scroll.backgroundColor = .clear
+
+        let imageView = UIImageView(image: image)
+        imageView.contentMode = .scaleAspectFit
+        imageView.clipsToBounds = true
+        scroll.imageView = imageView
+        scroll.addSubview(imageView)
+        context.coordinator.imageView = imageView
+
+        let doubleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleDoubleTap(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        scroll.addGestureRecognizer(doubleTap)
+        return scroll
+    }
+
+    func updateUIView(_ uiView: FittingZoomScrollView, context: Context) {
+        if uiView.imageView?.image !== image {
+            uiView.imageView?.image = image
+            uiView.zoomScale = 1.0
+            uiView.setNeedsLayout()
+        }
+    }
+
+    final class FittingZoomScrollView: UIScrollView {
+        weak var imageView: UIImageView?
+        private var lastBoundsSize: CGSize = .zero
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            guard let imageView, bounds.width > 0, bounds.height > 0 else { return }
+            if bounds.size != lastBoundsSize {
+                lastBoundsSize = bounds.size
+                zoomScale = 1.0
+                let inset: CGFloat = 12
+                let targetFrame = CGRect(
+                    x: inset,
+                    y: inset,
+                    width: max(1, bounds.width - inset * 2),
+                    height: max(1, bounds.height - inset * 2)
+                )
+                imageView.frame = targetFrame
+                contentSize = bounds.size
+            }
+            centerContent()
+        }
+
+        func centerContent() {
+            guard let imageView else { return }
+            let offsetX = max((bounds.width - contentSize.width) * 0.5, 0)
+            let offsetY = max((bounds.height - contentSize.height) * 0.5, 0)
+            imageView.center = CGPoint(
+                x: contentSize.width * 0.5 + offsetX,
+                y: contentSize.height * 0.5 + offsetY
+            )
+        }
+    }
+
+    final class Coordinator: NSObject, UIScrollViewDelegate {
+        weak var imageView: UIImageView?
+
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+            imageView
+        }
+
+        func scrollViewDidZoom(_ scrollView: UIScrollView) {
+            (scrollView as? FittingZoomScrollView)?.centerContent()
+        }
+
+        @objc func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
+            guard let scroll = recognizer.view as? FittingZoomScrollView, let imageView else { return }
+            if scroll.zoomScale > 1.05 {
+                scroll.setZoomScale(1.0, animated: true)
+            } else {
+                let point = recognizer.location(in: imageView)
+                let targetScale: CGFloat = 2.5
+                let w = scroll.bounds.width / targetScale
+                let h = scroll.bounds.height / targetScale
+                let rect = CGRect(x: point.x - w * 0.5, y: point.y - h * 0.5, width: w, height: h)
+                scroll.zoom(to: rect, animated: true)
+            }
+        }
     }
 }
 

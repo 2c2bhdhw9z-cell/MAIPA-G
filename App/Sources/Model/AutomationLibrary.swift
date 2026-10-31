@@ -109,17 +109,19 @@ final class AutomationLibrary {
     }
 
     func makeWorkflow(description: String) async -> WorkflowRecord? {
-        guard !isMakingWorkflow, let app, let apiKey = app.openRouter.apiKey,
+        guard !isMakingWorkflow, let app, app.openRouter.isSignedIn,
               let maker = BuiltInAgents.named("workflow-maker") else { return nil }
         isMakingWorkflow = true
         lastError = nil
         defer { isMakingWorkflow = false }
+        let aiClient = app.openRouter.client
+        let hasOpenRouter = app.openRouter.hasOpenRouterKey
         let definitions = agents
         let prompt = WorkflowDraftBuilder.generationPrompt(description: description, agents: definitions)
         var chat = Chat(title: "Workflow maker")
         chat.messages = [.user(prompt), ChatMessage(body: .assistant(AssistantTurn()))]
         let catalogue = app.openRouter.modelsByID
-        let route = ModelRouter.route(choice: .free, difficulty: .hard, thinking: .medium, account: app.openRouter.accountState, catalogue: catalogue)
+        let route = ModelRouter.route(choice: .free, difficulty: .hard, thinking: .medium, account: app.openRouter.accountState, catalogue: catalogue, openRouterAvailable: hasOpenRouter)
         let input = AgentTurnInput(
             chat: chat, route: route,
             systemPrompt: SystemPrompt.make(userLogin: app.github.login, repo: nil, agent: maker),
@@ -128,8 +130,8 @@ final class AutomationLibrary {
             agent: maker
         )
         let environment = AgentEnvironment(
-            openRouter: OpenRouterClient(transport: app.transport, apiKey: apiKey),
-            freeRoute: { ModelRouter.route(choice: .free, difficulty: .hard, thinking: .medium, account: AccountState(), catalogue: catalogue) },
+            openRouter: aiClient,
+            freeRoute: { ModelRouter.route(choice: .free, difficulty: .hard, thinking: .medium, account: AccountState(), catalogue: catalogue, openRouterAvailable: hasOpenRouter) },
             onOutOfCredits: {}
         )
         var final: AssistantTurn?

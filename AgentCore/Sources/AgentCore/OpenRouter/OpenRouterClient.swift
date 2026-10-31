@@ -62,15 +62,45 @@ public struct OpenRouterAPIError: Error, Sendable, Hashable, CustomStringConvert
         )
     }
 
-    /// Reads an error response body. Falls back to the raw text when it is not OpenRouter's JSON.
-    public init(status: Int, body: Data, headers: [String: String]) {
+    /// Reads an error response body. Strips raw HTML (like Cloudflare 413/502 pages) into plain English.
+    public init(status: Int, body: Data, headers: [String: String], providerName: String = "OpenRouter") {
         let retry = headers["retry-after"].flatMap(TimeInterval.init)
         if let json = JSONValue.parse(body), let object = json["error"] {
-            self.init(errorObject: object, httpStatus: status, retryAfter: retry)
-        } else {
-            let text = String(decoding: body.prefix(400), as: UTF8.self)
-            self.init(httpStatus: status, code: String(status), message: text.isEmpty ? "HTTP \(status)" : text, retryAfter: retry)
+            if object.objectValue != nil {
+                self.init(errorObject: object, httpStatus: status, retryAfter: retry)
+                return
+            } else if let str = object.stringValue {
+                self.init(httpStatus: status, code: String(status), message: str, retryAfter: retry)
+                return
+            }
         }
+        if let json = JSONValue.parse(body), let msg = json["message"]?.stringValue ?? json["detail"]?.stringValue {
+            self.init(httpStatus: status, code: String(status), message: msg, retryAfter: retry)
+            return
+        }
+        let rawText = String(decoding: body.prefix(1_200), as: UTF8.self)
+        let cleaned = Self.cleanErrorBody(rawText, status: status, providerName: providerName)
+        self.init(httpStatus: status, code: String(status), message: cleaned, retryAfter: retry)
+    }
+
+    private static func cleanErrorBody(_ raw: String, status: Int, providerName: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if status == 413 || trimmed.lowercased().contains("413 payload too large") || trimmed.lowercased().contains("request entity too large") {
+            return "The message history or attached files were too large to upload in one request (HTTP 413)."
+        }
+        if trimmed.contains("<html") || trimmed.contains("<!DOCTYPE") || trimmed.contains("<head>") || trimmed.contains("<body") {
+            if let titleRange = trimmed.range(of: #"<title[^>]*>(.*?)</title>"#, options: [.regularExpression, .caseInsensitive]) {
+                let rawTitle = String(trimmed[titleRange])
+                    .replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !rawTitle.isEmpty {
+                    return "\(providerName) returned \(rawTitle)."
+                }
+            }
+            return "\(providerName) returned HTTP \(status)."
+        }
+        let oneLine = String(trimmed.prefix(320))
+        return oneLine.isEmpty ? "HTTP \(status)" : oneLine
     }
 
     public var kind: Kind {
@@ -91,13 +121,16 @@ public struct OpenRouterAPIError: Error, Sendable, Hashable, CustomStringConvert
         case 429:
             if lowered.contains("per-day") || lowered.contains("per day") || lowered.contains("daily") { return .freeDailyLimit }
             return .rateLimited
-        case 400, 413:
-            if lowered.contains("context") && (lowered.contains("length") || lowered.contains("too long") || lowered.contains("maximum")) {
+        case 413:
+            return .contextTooLong
+        case 400:
+            if (lowered.contains("context") || lowered.contains("token") || lowered.contains("payload"))
+                && (lowered.contains("length") || lowered.contains("too long") || lowered.contains("too large") || lowered.contains("maximum") || lowered.contains("exceed")) {
                 return .contextTooLong
             }
             return .badRequest
         case 404: return .noModelAvailable
-        case 408, 502, 504: return .providerFailed
+        case 408, 502, 504, 520, 522, 524: return .providerFailed
         case 503: return .noModelAvailable
         default:
             if code == "server_error" || lowered.contains("provider") { return .providerFailed }
@@ -105,10 +138,13 @@ public struct OpenRouterAPIError: Error, Sendable, Hashable, CustomStringConvert
         }
     }
 
-    public var description: String { "OpenRouter \(code): \(message)" }
+    public var description: String {
+        if message.lowercased().hasPrefix("openrouter") { return message }
+        return "AI error (\(code)): \(message)"
+    }
 }
 
-/// Talks to OpenRouter: the model catalogue, the signed-in key, sign-in, and streamed replies.
+/// Talks to OpenRouter and any connected external AI gateways (OneProvider, SayGM, TeamoRouter, OmniRoute, Custom).
 public struct OpenRouterClient: Sendable {
     public static let apiBase = URL(string: "https://openrouter.ai/api/v1")!
     public static let signInBase = URL(string: "https://openrouter.ai/auth")!
@@ -118,10 +154,20 @@ public struct OpenRouterClient: Sendable {
 
     let transport: any HTTPTransport
     private let apiKey: String?
+    public let extraProviders: [AIProviderEndpoint]
 
-    public init(transport: any HTTPTransport, apiKey: String?) {
+    public init(transport: any HTTPTransport, apiKey: String?, extraProviders: [AIProviderEndpoint] = []) {
         self.transport = transport
         self.apiKey = apiKey
+        self.extraProviders = extraProviders
+    }
+
+    public func providerEndpoint(for modelID: String) -> (endpoint: AIProviderEndpoint, rawModelID: String)? {
+        guard let decoded = AIProviderModelID.decode(modelID),
+              let endpoint = extraProviders.first(where: { $0.id == decoded.providerID && $0.isReady }) else {
+            return nil
+        }
+        return (endpoint, decoded.rawModelID)
     }
 
     var headers: [String: String] {
@@ -170,6 +216,21 @@ public struct OpenRouterClient: Sendable {
     /// Sends a chat request and returns its reply as it streams in. Errors before the reply starts
     /// are thrown here; errors during it arrive as a chunk with `error` set.
     public func stream(_ request: ChatCompletionRequest) async throws -> AsyncThrowingStream<StreamChunk, Error> {
+        if let routed = providerEndpoint(for: request.model) {
+            return try await AIProviderGateway.stream(
+                request,
+                rawModelID: routed.rawModelID,
+                endpoint: routed.endpoint,
+                transport: transport
+            )
+        }
+        if let decoded = AIProviderModelID.decode(request.model) {
+            throw OpenRouterAPIError(
+                httpStatus: 401,
+                code: "provider_not_connected",
+                message: "Provider '\(decoded.providerID)' is not connected or has no API key saved in Settings."
+            )
+        }
         var headers = headers
         headers["Accept"] = "text/event-stream"
         let http = try HTTPRequest.json(

@@ -101,18 +101,49 @@ public enum ModelRouter {
         account: AccountState,
         catalogue: [String: ModelInfo],
         requiresImageInput: Bool = false,
+        openRouterAvailable: Bool = true,
         now: Date = Date()
     ) -> Route {
+        // When OpenRouter has no key connected, pick from the user's connected external AI gateways
+        // whenever Auto, Free, or an unreachable OpenRouter-only model was left selected.
+        if !openRouterAvailable {
+            let needsExternalFallback: Bool = switch choice {
+            case .auto, .free: true
+            case .model(let id): AIProviderModelID.decode(id) == nil
+            }
+            if needsExternalFallback,
+               let fallback = externalGatewayAutoModel(
+                   in: catalogue,
+                   difficulty: difficulty,
+                   requiresImageInput: requiresImageInput,
+                   freeOnly: choice == .free
+               ) {
+                var routed = route(
+                    choice: .model(fallback.id),
+                    difficulty: difficulty,
+                    thinking: thinking,
+                    account: account,
+                    catalogue: catalogue,
+                    requiresImageInput: false,
+                    openRouterAvailable: true,
+                    now: now
+                )
+                routed.isAuto = true
+                routed.label = "Auto · \(fallback.shortName)"
+                return routed
+            }
+        }
+
         if requiresImageInput {
             switch choice {
             case .auto:
                 let paid = account.paidAllowed(at: now)
-                if let model = imageInputModel(in: catalogue, freeOnly: !paid) {
-                    return route(choice: .model(model.id), difficulty: difficulty, thinking: thinking, account: account, catalogue: catalogue, requiresImageInput: false, now: now)
+                if let model = imageInputModel(in: catalogue, freeOnly: !paid, openRouterAvailable: openRouterAvailable) {
+                    return route(choice: .model(model.id), difficulty: difficulty, thinking: thinking, account: account, catalogue: catalogue, requiresImageInput: false, openRouterAvailable: openRouterAvailable, now: now)
                 }
             case .free:
-                if let model = imageInputModel(in: catalogue, freeOnly: true) {
-                    return route(choice: .model(model.id), difficulty: difficulty, thinking: thinking, account: account, catalogue: catalogue, requiresImageInput: false, now: now)
+                if let model = imageInputModel(in: catalogue, freeOnly: true, openRouterAvailable: openRouterAvailable) {
+                    return route(choice: .model(model.id), difficulty: difficulty, thinking: thinking, account: account, catalogue: catalogue, requiresImageInput: false, openRouterAvailable: openRouterAvailable, now: now)
                 }
             case .model:
                 break
@@ -160,22 +191,68 @@ public enum ModelRouter {
         difficulty: TaskDifficulty,
         thinking: ThinkingLevel,
         account: AccountState,
-        catalogue: [String: ModelInfo]
+        catalogue: [String: ModelInfo],
+        openRouterAvailable: Bool = true
     ) -> Route? {
-        let freeOnly = !account.paidAllowed()
+        let freeOnly = openRouterAvailable && !account.paidAllowed()
         let candidates = catalogue.values.filter {
-            $0.id != modelID && $0.isChatModel && $0.supportsTools && !$0.isRouter && (!freeOnly || $0.isFree)
+            (openRouterAvailable || AIProviderModelID.decode($0.id) != nil)
+                && $0.id != modelID && $0.isChatModel && $0.supportsTools && !$0.isRouter && (!freeOnly || $0.isFree)
         }.sorted {
             if $0.isFree != $1.isFree { return freeOnly ? $0.isFree : !$0.isFree }
             if ($0.created ?? .distantPast) != ($1.created ?? .distantPast) { return ($0.created ?? .distantPast) > ($1.created ?? .distantPast) }
             return $0.id < $1.id
         }
         guard let selected = candidates.first else { return nil }
-        return route(choice: .model(selected.id), difficulty: difficulty, thinking: thinking, account: account, catalogue: catalogue)
+        return route(choice: .model(selected.id), difficulty: difficulty, thinking: thinking, account: account, catalogue: catalogue, openRouterAvailable: openRouterAvailable)
     }
 
-    static func imageInputModel(in catalogue: [String: ModelInfo], freeOnly: Bool) -> ModelInfo? {
-        catalogue.values.filter { $0.isChatModel && $0.acceptsImages && $0.supportsTools && (!freeOnly || $0.isFree) }
+    private static func externalGatewayAutoModel(
+        in catalogue: [String: ModelInfo],
+        difficulty: TaskDifficulty,
+        requiresImageInput: Bool,
+        freeOnly: Bool
+    ) -> ModelInfo? {
+        let external = catalogue.values.filter {
+            AIProviderModelID.decode($0.id) != nil
+                && $0.isChatModel
+                && $0.supportsTools
+                && (!requiresImageInput || $0.acceptsImages)
+                && (!freeOnly || $0.isFree)
+        }
+        guard !external.isEmpty else { return nil }
+        if !requiresImageInput, let omniAuto = external.first(where: { AIProviderModelID.rawModelID($0.id) == "auto" }) {
+            return omniAuto
+        }
+        return external.sorted { a, b in
+            let sa = externalScore(a, difficulty: difficulty)
+            let sb = externalScore(b, difficulty: difficulty)
+            if sa != sb { return sa > sb }
+            return a.id < b.id
+        }.first
+    }
+
+    private static func externalScore(_ model: ModelInfo, difficulty: TaskDifficulty) -> Int {
+        let low = AIProviderModelID.rawModelID(model.id).lowercased()
+        switch difficulty {
+        case .quick:
+            if low.contains("flash") || low.contains("haiku") || low.contains("mini") || low.contains("nano") { return 100 }
+            if low.contains("sonnet") || low.contains("deepseek") || low.contains("glm") { return 80 }
+            return 50
+        case .normal:
+            if low.contains("sonnet") || low.contains("gpt-5") || low.contains("gpt-6") || low.contains("deepseek") || low.contains("glm-5") || low.contains("kimi") || low.contains("gemini-3") { return 100 }
+            return 60
+        case .hard:
+            if low.contains("opus") || low.contains("fable") || low.contains("gpt-6") || low.contains("gpt-5.6") || low.contains("sonnet") || low.contains("gemini-4") { return 100 }
+            return 60
+        }
+    }
+
+    static func imageInputModel(in catalogue: [String: ModelInfo], freeOnly: Bool, openRouterAvailable: Bool = true) -> ModelInfo? {
+        catalogue.values.filter {
+            (openRouterAvailable || AIProviderModelID.decode($0.id) != nil)
+                && $0.isChatModel && $0.acceptsImages && $0.supportsTools && (!freeOnly || $0.isFree)
+        }
             .sorted {
                 if $0.isFree != $1.isFree { return freeOnly ? $0.isFree : !$0.isFree }
                 if ($0.created ?? .distantPast) != ($1.created ?? .distantPast) { return ($0.created ?? .distantPast) > ($1.created ?? .distantPast) }

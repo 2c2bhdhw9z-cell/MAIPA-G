@@ -17,6 +17,7 @@ struct SettingsScreen: View {
     @State private var exporting = false
     @State private var exportMessage: String?
     @State private var confirmUnsafeUpdate = false
+    @State private var providerConnectSheet: AIProviderConnectSheet?
 
     var body: some View {
         NavigationStack {
@@ -44,6 +45,7 @@ struct SettingsScreen: View {
                 }
 
                 accounts
+                aiProvidersSection
                 Section {
                     NavigationLink { HealthCheckScreen(embedded: true) } label: {
                         Label("Check everything", systemImage: "checkmark.shield")
@@ -63,8 +65,12 @@ struct SettingsScreen: View {
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
+            .scrollDismissesKeyboard(.interactively)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+            .sheet(item: $providerConnectSheet) { sheet in
+                sheet
             }
             .onAppear {
                 if !loaded {
@@ -159,12 +165,20 @@ struct SettingsScreen: View {
                     Label(app.github.phase == .needsInstall ? "Finish connecting GitHub" : "Connect GitHub", systemImage: "link")
                 }
             }
+        }
+    }
 
-            if app.openRouter.isSignedIn {
-                VStack(alignment: .leading, spacing: 4) {
-                    Label("OpenRouter: signed in", systemImage: "sparkles")
-                    if let info = app.openRouter.keyInfo {
-                        Text(moneyLine(info)).font(.footnote).foregroundStyle(Theme.secondaryText)
+    private var aiProvidersSection: some View {
+        Section {
+            // 1. OpenRouter
+            if app.openRouter.hasOpenRouterKey {
+                HStack(spacing: 12) {
+                    AIProviderIcon(assetName: "ProviderOpenRouter", fallbackTitle: "OR", size: 28)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("OpenRouter: signed in").font(.subheadline.weight(.semibold))
+                        if let info = app.openRouter.keyInfo {
+                            Text(moneyLine(info)).font(.footnote).foregroundStyle(Theme.secondaryText)
+                        }
                     }
                 }
                 Button("Add credit on OpenRouter") { openURL(OpenRouterClient.creditsURL) }
@@ -173,9 +187,97 @@ struct SettingsScreen: View {
                 Button {
                     app.sheet = .signInOpenRouter
                 } label: {
-                    Label("Sign in with OpenRouter", systemImage: "sparkles")
+                    HStack(spacing: 12) {
+                        AIProviderIcon(assetName: "ProviderOpenRouter", fallbackTitle: "OR", size: 28)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("OpenRouter").font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
+                            Text("One-tap sign-in + free AIs").font(.caption).foregroundStyle(Theme.secondaryText)
+                        }
+                        Spacer()
+                        Text("Sign in").font(.caption.weight(.semibold)).foregroundStyle(theme.accent)
+                    }
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
             }
+
+            // 2. Built-in Gateways: OneProvider, SayGM, TeamoRouter, OmniRoute
+            ForEach(AIProviderPreset.builtIn) { preset in
+                let saved = app.openRouter.endpoint(for: preset.id)
+                let count = app.openRouter.externalModelCounts[preset.id]
+                let err = app.openRouter.externalErrors[preset.id]
+                Button {
+                    providerConnectSheet = AIProviderConnectSheet(mode: .preset(preset))
+                } label: {
+                    HStack(spacing: 12) {
+                        AIProviderIcon(assetName: preset.assetName, fallbackTitle: preset.name, size: 28)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(preset.name)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            if let err {
+                                Text(err).font(.caption).foregroundStyle(Theme.danger).lineLimit(1)
+                            } else if let saved {
+                                Text(saved.isEnabled ? "Connected\(count.map { " · \($0) models" } ?? "")" : "Paused")
+                                    .font(.caption)
+                                    .foregroundStyle(saved.isEnabled ? .green : Theme.secondaryText)
+                            } else {
+                                Text(preset.subtitle)
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.secondaryText)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Spacer()
+                        Text(saved == nil ? "Connect" : "Edit")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(saved?.isReady == true ? .green : theme.accent)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            // 3. Any user-added Custom AI Providers
+            ForEach(app.openRouter.externalProviders.filter { AIProviderPreset.matching($0.id) == nil }) { custom in
+                let count = app.openRouter.externalModelCounts[custom.id]
+                Button {
+                    providerConnectSheet = AIProviderConnectSheet(mode: .existing(custom))
+                } label: {
+                    HStack(spacing: 12) {
+                        AIProviderIcon(assetName: nil, fallbackTitle: custom.name, size: 28)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(custom.name).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
+                            Text(custom.isEnabled ? "Connected\(count.map { " · \($0) models" } ?? "")" : "Paused")
+                                .font(.caption)
+                                .foregroundStyle(custom.isEnabled ? .green : Theme.secondaryText)
+                        }
+                        Spacer()
+                        Text("Edit").font(.caption.weight(.semibold)).foregroundStyle(theme.accent)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            Button {
+                providerConnectSheet = AIProviderConnectSheet(mode: .customNew)
+            } label: {
+                Label("Add custom AI provider…", systemImage: "plus.circle")
+            }
+
+            if app.openRouter.isSignedIn {
+                Button {
+                    Task { await app.openRouter.loadModels(force: true) }
+                } label: {
+                    Label(app.openRouter.isLoadingModels ? "Refreshing models…" : "Refresh all AI models", systemImage: "arrow.clockwise")
+                }
+                .disabled(app.openRouter.isLoadingModels)
+            }
+        } header: {
+            Text("AI Providers")
+        } footer: {
+            Text("Connect OpenRouter, OneProvider, SayGM, TeamoRouter, OmniRoute, or any compatible /v1 gateway. All connected models appear together in the AI selector.")
         }
     }
 
@@ -554,8 +656,8 @@ struct SettingsScreen: View {
                 detail("GitHub app", app.github.credentials.map { "\($0.slug) (id \($0.appID))" } ?? "none")
                 detail("Installation", app.github.installationID.map(String.init) ?? "none")
                 detail("Data repo", app.sync.repo?.fullName ?? "none")
-                detail("AIs listed", "\(app.openRouter.models.count)")
-                detail("OpenRouter key", app.openRouter.keyInfo?.label ?? (app.openRouter.isSignedIn ? "signed in" : "none"))
+                detail("AIs listed", "\(app.openRouter.allSelectableModels.count)")
+                detail("AI providers", app.openRouter.activeProviderSummary)
                 detail("iPhone's own AI", OnDeviceAI.status)
                 detail("Repo copies", copiesSize.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "…")
                 detail("Free iPhone storage", freeSpace.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "…")

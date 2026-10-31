@@ -126,7 +126,8 @@ struct PictureViewer: View {
     }
 
     private var imageModels: [ModelInfo] {
-        app.openRouter.models.filter(\.generatesImages).sorted { $0.shortName < $1.shortName }
+        let pool = app.openRouter.allSelectableModels.isEmpty ? app.openRouter.models : app.openRouter.allSelectableModels
+        return pool.filter(\.generatesImages).sorted { $0.shortName < $1.shortName }
     }
 
     @ViewBuilder

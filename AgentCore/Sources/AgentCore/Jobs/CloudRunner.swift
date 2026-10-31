@@ -174,7 +174,49 @@ public struct CloudRunner: Sendable {
     public init(configuration: CloudRunnerConfiguration, transport: any HTTPTransport = URLSessionTransport()) {
         self.configuration = configuration
         self.transport = transport
-        logger = RedactingLogger(secrets: [configuration.targetToken, configuration.dataToken, configuration.openRouterKey] + Array(configuration.connectorSecrets.values))
+        let extraProviders = Self.decodeExtraProviders(from: configuration.connectorSecrets)
+        logger = RedactingLogger(
+            secrets: [configuration.targetToken, configuration.dataToken, configuration.openRouterKey]
+                + Array(configuration.connectorSecrets.values)
+                + extraProviders.map(\.apiKey)
+        )
+    }
+
+    private static func decodeExtraProviders(from secrets: [String: String]) -> [AIProviderEndpoint] {
+        guard let raw = secrets["__ai_providers_json"], let data = raw.data(using: .utf8),
+              let endpoints = try? JSONCoding.decoder().decode([AIProviderEndpoint].self, from: data) else {
+            return []
+        }
+        return endpoints.filter(\.isReady)
+    }
+
+    private func makeAIContext() async -> (client: OpenRouterClient, catalogue: [String: ModelInfo], hasOpenRouter: Bool, accountState: AccountState) {
+        let hasOpenRouter = !configuration.openRouterKey.isEmpty && configuration.openRouterKey != "__external_only__"
+        var endpoints = Self.decodeExtraProviders(from: configuration.connectorSecrets)
+        var catalogue: [String: ModelInfo] = [:]
+        if hasOpenRouter {
+            let baseClient = OpenRouterClient(transport: transport, apiKey: configuration.openRouterKey)
+            for m in (try? await baseClient.models()) ?? [] {
+                catalogue[m.id] = m
+            }
+        }
+        for idx in endpoints.indices {
+            if let fetched = try? await AIProviderGateway.fetchModels(for: endpoints[idx], transport: transport) {
+                endpoints[idx].modelWireHints.merge(fetched.wireHints) { _, new in new }
+                for m in fetched.models {
+                    catalogue[m.id] = m
+                }
+            }
+        }
+        let client = OpenRouterClient(
+            transport: transport,
+            apiKey: hasOpenRouter ? configuration.openRouterKey : nil,
+            extraProviders: endpoints
+        )
+        let accountState: AccountState = hasOpenRouter
+            ? ((try? await client.keyInfo()).map { AccountState(isFreeTier: $0.isFreeTier) } ?? AccountState())
+            : AccountState(isFreeTier: false)
+        return (client, catalogue, hasOpenRouter, accountState)
     }
 
     public func run() async throws {
@@ -233,12 +275,15 @@ public struct CloudRunner: Sendable {
                     }
                 }
             }
+            let ai = await makeAIContext()
+            let chosenModel: ModelChoice = job.state["modelChoice"].flatMap { try? decode(ModelChoice.self, from: $0) } ?? .auto
             let route = ModelRouter.route(
-                choice: .auto,
+                choice: chosenModel,
                 difficulty: .hard,
                 thinking: .medium,
-                account: AccountState(isFreeTier: false),
-                catalogue: [:]
+                account: ai.accountState,
+                catalogue: ai.catalogue,
+                openRouterAvailable: ai.hasOpenRouter
             )
             let input = AgentTurnInput(
                 chat: chat,
@@ -249,8 +294,8 @@ public struct CloudRunner: Sendable {
                 requiresInitialSpendApproval: !route.isFree
             )
             let environment = AgentEnvironment(
-                openRouter: OpenRouterClient(transport: transport, apiKey: configuration.openRouterKey),
-                freeRoute: { ModelRouter.route(choice: .free, difficulty: .hard, thinking: .medium, account: AccountState(), catalogue: [:]) },
+                openRouter: ai.client,
+                freeRoute: { ModelRouter.route(choice: .free, difficulty: .hard, thinking: .medium, account: AccountState(), catalogue: ai.catalogue, openRouterAvailable: ai.hasOpenRouter) },
                 onOutOfCredits: {}
             )
             let run = AgentLoop.start(input, environment: environment)
@@ -354,12 +399,14 @@ public struct CloudRunner: Sendable {
             summary: nil,
             ruleDocuments: writeRules.documents
         )
-        let openRouter = OpenRouterClient(transport: transport, apiKey: configuration.openRouterKey)
-        let catalogue = Dictionary(uniqueKeysWithValues: ((try? await openRouter.models()) ?? []).map { ($0.id, $0) })
-        let accountState = (try? await openRouter.keyInfo()).map { AccountState(isFreeTier: $0.isFreeTier) } ?? AccountState()
+        let ai = await makeAIContext()
+        let openRouter = ai.client
+        let catalogue = ai.catalogue
+        let accountState = ai.accountState
+        let hasOpenRouter = ai.hasOpenRouter
         let environment = AgentEnvironment(
             openRouter: openRouter,
-            freeRoute: { ModelRouter.route(choice: .free, difficulty: .hard, thinking: .medium, account: AccountState(), catalogue: catalogue) },
+            freeRoute: { ModelRouter.route(choice: .free, difficulty: .hard, thinking: .medium, account: AccountState(), catalogue: catalogue, openRouterAvailable: hasOpenRouter) },
             onOutOfCredits: {}
         )
         let workflowTools = tools
@@ -385,12 +432,12 @@ public struct CloudRunner: Sendable {
             }
             let route: Route
             if invocation.definition.modelPolicy == .differentFromPrimary {
-                guard let distinct = ModelRouter.distinctRoute(avoiding: invocation.avoidModel, difficulty: invocation.definition.difficulty, thinking: .medium, account: accountState, catalogue: catalogue) else {
+                guard let distinct = ModelRouter.distinctRoute(avoiding: invocation.avoidModel, difficulty: invocation.definition.difficulty, thinking: .medium, account: accountState, catalogue: catalogue, openRouterAvailable: hasOpenRouter) else {
                     throw CloudRunnerError.noDifferentModel
                 }
                 route = distinct
             } else {
-                route = ModelRouter.route(choice: .auto, difficulty: invocation.definition.difficulty, thinking: .medium, account: accountState, catalogue: catalogue)
+                route = ModelRouter.route(choice: .auto, difficulty: invocation.definition.difficulty, thinking: .medium, account: accountState, catalogue: catalogue, openRouterAvailable: hasOpenRouter)
             }
             let input = AgentTurnInput(
                 chat: chat, route: route,

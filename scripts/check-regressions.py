@@ -119,9 +119,46 @@ def check_oct31_build67_workstation_photos_sources_and_models() -> None:
         failures.append("OCT31-06: ChatScreen is missing reliable jumpToBottom scroll wiring")
 
 
+def check_oct31_build70_buttons_github_and_ai_providers() -> None:
+    """Build 70: 44pt button hit shapes, fitted ZoomableImageCanvas, Arrange+Center, ScrollPosition ↓, working GitHub connector, and 5 real AI provider logos."""
+    assets = ROOT / "App/Resources/Assets.xcassets"
+    for provider_asset in ("ProviderOpenRouter", "ProviderOneProvider", "ProviderSayGM", "ProviderTeamoRouter", "ProviderOmniRoute"):
+        iset = assets / f"{provider_asset}.imageset"
+        if not iset.is_dir():
+            failures.append(f"OCT31-07: missing bundled logo asset {provider_asset}.imageset")
+            continue
+        contents = json.loads((iset / "Contents.json").read_text())
+        for img in contents.get("images", []):
+            fn = img.get("filename")
+            if fn and (iset / fn).read_bytes()[:8] != b"\x89PNG\r\n\x1a\n":
+                failures.append(f"OCT31-07: {provider_asset}/{fn} is not a valid PNG")
+
+    media = (ROOT / "App/Sources/Screens/ChatMediaAndSources.swift").read_text()
+    if "struct ZoomableImageCanvas" not in media or "ScrollView([.horizontal, .vertical])" in media:
+        failures.append("OCT31-08: AttachmentDataPreviewBody must use fitted ZoomableImageCanvas instead of unbounded 2D ScrollView")
+
+    workstation = (ROOT / "App/Sources/Screens/WorkstationScreen.swift").read_text()
+    if "arrangeAllCards" not in workstation or "centerOnCards" not in workstation:
+        failures.append("OCT31-09: WorkstationScreen must offer Arrange + Center canvas actions")
+
+    home = (ROOT / "App/Sources/Screens/HomeScreen.swift").read_text()
+    menu_btn = body_of(home, "MenuButton")
+    if ".contentShape(Circle())" not in menu_btn:
+        failures.append("OCT31-10: MenuButton must define a full Circle() hit target")
+
+    chat = (ROOT / "App/Sources/Screens/ChatScreen.swift").read_text()
+    if "scrollPosition.scrollTo(edge: .bottom)" not in chat:
+        failures.append("OCT31-11: ChatScreen ↓ button must drive ScrollPosition(edge: .bottom)")
+
+    builtin = (ROOT / "AgentCore/Sources/AgentCore/MCP/BuiltinIntegrationTools.swift").read_text()
+    if "api.githubcopilot.com" in builtin:
+        failures.append("OCT31-12: GitHub connector regressed to broken api.githubcopilot.com OAuth URL")
+
+
 check_oct29_01_real_connector_logos()
 check_oct29_04_tool_bars_hug_their_content()
 check_oct31_build67_workstation_photos_sources_and_models()
+check_oct31_build70_buttons_github_and_ai_providers()
 if failures:
     raise SystemExit("\n".join(failures))
-print("UI regression checks passed (OCT29-01, OCT29-04, OCT31-01..06)")
+print("UI regression checks passed (OCT29-01, OCT29-04, OCT31-01..12)")
