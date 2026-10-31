@@ -1123,7 +1123,7 @@ private struct GitHubSearchConnectorTool: BuiltinDescribedTool {
         if let secret, !secret.isEmpty, secret != "__maipag_github_app__" {
             headers["Authorization"] = secret.lowercased().hasPrefix("bearer ") ? secret : "Bearer \(secret)"
         }
-        let resp = try await transport.send(HTTPRequest(url: comp.url!, headers: headers, followRedirects: false, idleTimeout: 25))
+        let resp = try await transport.send(HTTPRequest(url: comp.url!, headers: headers, idleTimeout: 25, followsRedirects: false))
         guard resp.isSuccess else {
             throw ToolInputError("GitHub search returned HTTP \(resp.status): \(String(resp.text.prefix(240)))")
         }

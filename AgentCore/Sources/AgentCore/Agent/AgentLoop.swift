@@ -254,9 +254,9 @@ private struct Runner {
             if isExternalProvider {
                 let hadOpenRouterWeb = effectiveSpecs.contains { $0.type == "openrouter:web_search" }
                 effectiveSpecs.removeAll { $0.type.hasPrefix("openrouter:") }
-                if hadOpenRouterWeb, !effectiveSpecs.contains(where: { $0.function.name == WebSearchTool.name }) {
-                    let ws = WebSearchTool(transport: environment.openRouter.transport)
-                    let fp = ReadWebPageTool(transport: environment.openRouter.transport)
+                let ws = WebSearchTool(transport: environment.openRouter.transport)
+                let fp = ReadWebPageTool(transport: environment.openRouter.transport)
+                if hadOpenRouterWeb, !effectiveSpecs.contains(where: { $0.function.name == ws.name }) {
                     effectiveSpecs.append(contentsOf: [ws.spec, fp.spec])
                 }
             }
