@@ -114,14 +114,7 @@ struct UserBubble: View {
             }
 
             if !otherAttachments.isEmpty {
-                HStack {
-                    Spacer(minLength: 40)
-                    FlowLayout(spacing: 6, lineSpacing: 6) {
-                        ForEach(otherAttachments) { attachment in
-                            ChatFileAttachmentPill(attachment: attachment)
-                        }
-                    }
-                }
+                CollapsibleUserAttachmentGroup(attachments: otherAttachments)
             }
 
             if !message.text.isEmpty {
@@ -555,8 +548,8 @@ struct ActivityTimelineCard: View {
                 ScrollViewReader { timelineProxy in
                     ScrollView(.vertical, showsIndicators: items.count > 5) {
                         VStack(alignment: .leading, spacing: 8) {
-                            ForEach(items) { item in
-                                ActivityTimelineRow(item: item)
+                            ForEach(Array(items.enumerated()), id: \.element.id) { idx, item in
+                                ActivityTimelineRow(item: item, wasRecovered: isRecoveredItem(at: idx))
                                     .id(item.id)
                             }
                         }
@@ -577,6 +570,17 @@ struct ActivityTimelineCard: View {
         }
     }
 
+    private func isRecoveredItem(at index: Int) -> Bool {
+        guard items.indices.contains(index),
+              case .tool(let call) = items[index],
+              call.status == .failed
+        else { return false }
+        return items.dropFirst(index + 1).contains { later in
+            if case .tool(let nextCall) = later { return nextCall.status == .done }
+            return false
+        }
+    }
+
     private var toolItems: [ToolCallRecord] {
         items.compactMap { if case .tool(let call) = $0 { return call }; return nil }
     }
@@ -586,11 +590,13 @@ struct ActivityTimelineCard: View {
     }
 
     private var hasFailure: Bool {
-        toolItems.contains { $0.status == .failed }
+        // Only flag the collapsed header if the final tool action in this block ended in an unrecovered failure.
+        toolItems.last?.status == .failed
     }
 
     private var headerIcon: String {
         if hasFailure { return "exclamationmark.triangle" }
+        if toolItems.contains(where: { $0.name == "launch_helpers" }) { return "person.2.wave.2" }
         if isActive { return "sparkles" }
         if !thoughtSteps.isEmpty && !toolItems.isEmpty { return "sparkles" }
         if !toolItems.isEmpty { return "wrench.and.screwdriver" }
@@ -643,6 +649,7 @@ struct ActivityTimelineCard: View {
 
 private struct ActivityTimelineRow: View {
     var item: ActivityItem
+    var wasRecovered: Bool = false
     @Environment(\.theme) private var theme
 
     var body: some View {
@@ -663,7 +670,7 @@ private struct ActivityTimelineRow: View {
             case .thought(let step, let isLive):
                 ThoughtsView(step: step, isLive: isLive)
             case .tool(let call):
-                ToolLine(call: call)
+                ToolLine(call: call, wasRecovered: wasRecovered)
             }
         }
     }
@@ -674,9 +681,62 @@ private struct ActivityTimelineRow: View {
             return isLive ? theme.accent : Theme.secondaryText.opacity(0.6)
         case .tool(let call):
             switch call.status {
-            case .failed: return Theme.danger
+            case .failed: return wasRecovered ? Theme.secondaryText.opacity(0.55) : Theme.danger
             case .running, .waitingForUser: return theme.accent
             case .done: return .green.opacity(0.75)
+            }
+        }
+    }
+}
+
+private struct CollapsibleUserAttachmentGroup: View {
+    let attachments: [AttachmentReference]
+    @State private var expanded = false
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 6) {
+            if attachments.count > 4 {
+                Button {
+                    withAnimation(.snappy(duration: 0.22)) { expanded.toggle() }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "paperclip")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(theme.accent)
+                        Text(expanded ? "Hide \(attachments.count) files" : "\(attachments.count) attached files")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.primary)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(Theme.secondaryText)
+                            .rotationEffect(.degrees(expanded ? 90 : 0))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Theme.surface, in: Capsule())
+                    .overlay(Capsule().strokeBorder(Theme.stroke))
+                }
+                .buttonStyle(.plain)
+            }
+            if attachments.count <= 4 || expanded {
+                HStack {
+                    Spacer(minLength: 40)
+                    FlowLayout(spacing: 6, lineSpacing: 6) {
+                        ForEach(attachments) { attachment in
+                            ChatFileAttachmentPill(attachment: attachment)
+                        }
+                    }
+                }
+            } else {
+                HStack {
+                    Spacer(minLength: 40)
+                    FlowLayout(spacing: 6, lineSpacing: 6) {
+                        ForEach(attachments.prefix(3)) { attachment in
+                            ChatFileAttachmentPill(attachment: attachment)
+                        }
+                    }
+                }
             }
         }
     }
@@ -874,7 +934,7 @@ struct ToolCallsFold: View {
     private var commandCount: Int { calls.filter { $0.name == "run_shell" }.count }
     private var toolCount: Int { calls.count - commandCount }
     private var isRunning: Bool { calls.contains { $0.status == .running } }
-    private var hasFailure: Bool { calls.contains { $0.status == .failed } }
+    private var hasFailure: Bool { calls.last?.status == .failed }
 
     private var title: String {
         if let running = calls.last(where: { $0.status == .running }) { return running.summary }
@@ -890,6 +950,7 @@ struct ToolCallsFold: View {
 /// One thing the AI did, as a short line that opens to show more.
 struct ToolLine: View {
     var call: ToolCallRecord
+    var wasRecovered: Bool = false
     @State private var open = false
     @Environment(\.theme) private var theme
 
@@ -932,7 +993,7 @@ struct ToolLine: View {
         HStack(spacing: 8) {
             Image(systemName: icon)
                 .font(.footnote.weight(.semibold))
-                .foregroundStyle(call.status == .failed ? Theme.danger : theme.accent)
+                .foregroundStyle(call.status == .failed ? (wasRecovered ? Theme.secondaryText : Theme.danger) : theme.accent)
                 .frame(width: 18)
             Text(call.summary)
                 .font(.subheadline)
@@ -961,7 +1022,9 @@ struct ToolLine: View {
     }
 
     private var icon: String {
-        if call.status == .failed { return "exclamationmark.triangle" }
+        if call.status == .failed {
+            return wasRecovered ? "arrow.triangle.2.circlepath" : "exclamationmark.triangle"
+        }
         switch call.name {
         case "read_file": return "doc.text"
         case "search_code": return "magnifyingglass"
@@ -974,6 +1037,7 @@ struct ToolLine: View {
         case "read_attachment": return "paperclip"
         case "add_memory", "edit_memory": return "brain"
         case "generate_image": return "paintbrush"
+        case "launch_helpers": return "person.2.wave.2"
         case "run_shell": return "terminal"
         case let name where name.hasPrefix("mcp_"): return "puzzlepiece.extension"
         case AskUserTool.name: return "questionmark.bubble"

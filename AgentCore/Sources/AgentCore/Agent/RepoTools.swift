@@ -216,7 +216,12 @@ public actor RepoWorkspace {
         var path = path.trimmingCharacters(in: .whitespacesAndNewlines)
         while path.hasPrefix("./") { path.removeFirst(2) }
         while path.hasPrefix("/") { path.removeFirst() }
+        while path.hasSuffix("/.") { path.removeLast(2) }
         while path.hasSuffix("/") { path.removeLast() }
+        while path.contains("/./") {
+            path = path.replacingOccurrences(of: "/./", with: "/")
+        }
+        if path == "." { return "" }
         return path
     }
 
@@ -257,7 +262,7 @@ public struct ListFilesTool: AgentTool {
     public let workspace: RepoWorkspace
     public let changes: ChangeWorkspace?
     public let name = "list_files"
-    static let maxLines = 400
+    static let maxLines = 2_000
 
     public init(workspace: RepoWorkspace, changes: ChangeWorkspace? = nil) {
         self.workspace = workspace
@@ -268,21 +273,27 @@ public struct ListFilesTool: AgentTool {
         ToolSpec(
             name: name,
             description: """
-            List the files and folders in the repository. Give a folder to look inside it, and a depth to \
-            see deeper. Give a pattern (like "*.swift" or "src/**/*.ts") to find files by name anywhere.
+            List the files and folders in the repository. Give a folder to look inside it (leave empty or "." \
+            for the repository root), and a depth to see deeper. Give a pattern (like "*.swift" or "src/**/*.ts") \
+            to find files by name anywhere. Set count_lines to true to count exact line totals across matching text files in one step.
             """,
             parameters: [
                 "type": "object",
                 "properties": [
-                    "path": ["type": "string", "description": "Folder to list. Leave empty for the top of the repository."],
-                    "depth": ["type": "integer", "minimum": 1, "maximum": 8, "description": "How many folder levels to show. Default 2."],
-                    "pattern": ["type": "string", "description": "Optional file-name pattern, such as \"*.md\" or \"App/**/*.swift\"."],
+                    "path": ["type": "string", "description": "Folder to list. Leave empty or \".\" for the top of the repository."],
+                    "depth": ["type": "integer", "minimum": 1, "maximum": 12, "description": "How many folder levels to show. Default 3."],
+                    "pattern": ["type": "string", "description": "Optional file-name pattern, such as \"*.swift\" or \"App/**/*.swift\"."],
+                    "count_lines": ["type": "boolean", "description": "When true, counts exact lines in every matching text file and reports per-file + total line counts."],
                 ],
             ]
         )
     }
 
     public func runningSummary(for arguments: JSONValue) -> String {
+        if arguments.optionalBool("count_lines") == true {
+            let pat = arguments.optionalString("pattern") ?? "repo files"
+            return "Counting lines in \(pat)…"
+        }
         if let pattern = arguments.optionalString("pattern") { return "Looking for \(Format.quote(pattern))…" }
         if let path = arguments.optionalString("path").map(RepoWorkspace.normalize), !path.isEmpty { return "Looking in \(path)…" }
         return "Looking through the repo…"
@@ -290,7 +301,8 @@ public struct ListFilesTool: AgentTool {
 
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let folder = RepoWorkspace.normalize(arguments.optionalString("path") ?? "")
-        let depth = min(max(arguments.optionalInt("depth") ?? 2, 1), 8)
+        let depth = min(max(arguments.optionalInt("depth") ?? 3, 1), 12)
+        let shouldCountLines = arguments.optionalBool("count_lines") ?? false
         let tree = if let changes { try await changes.mergedTree() } else { try await workspace.tree() }
         let prefix = folder.isEmpty ? "" : folder + "/"
         let inside = tree.entries.filter { folder.isEmpty || $0.path.hasPrefix(prefix) }
@@ -301,6 +313,60 @@ public struct ListFilesTool: AgentTool {
             }
             let suggestions = RepoWorkspace.suggestions(for: folder, in: tree)
             throw ToolInputError("There is no folder \(folder)." + (suggestions.isEmpty ? "" : " Did you mean: " + suggestions.joined(separator: ", ") + "?"))
+        }
+
+        if shouldCountLines {
+            let pattern = arguments.optionalString("pattern")
+            let glob = pattern.map { Glob($0) }
+            let matchingFiles = inside.filter { $0.isFile && (glob?.matches($0.path) ?? true) }
+            let copy = try await workspace.localCopy { update in
+                switch update {
+                case .downloading(let bytes): progress("Downloading repo snapshot · \(Format.bytes(Int(bytes)))")
+                case .unpacking(let files): progress("Unpacking · \(files) files")
+                case .updating(let changed): progress("Updating · \(changed) file\(changed == 1 ? "" : "s")")
+                }
+            }
+            var stagedMap: [String: StagedChange] = [:]
+            if let changes {
+                for sc in await changes.stagedChanges() { stagedMap[sc.path] = sc }
+            }
+            var totalLines = 0
+            var totalBytes = 0
+            var textFileCount = 0
+            var perFile: [(path: String, lines: Int, bytes: Int)] = []
+            for entry in matchingFiles {
+                let data: Data?
+                if let sc = stagedMap[entry.path] {
+                    switch sc {
+                    case .write(_, let d, _): data = d
+                    case .delete: data = nil
+                    }
+                } else {
+                    data = copy.contents(of: entry.path)
+                }
+                guard let data, let doc = TextFileCodec.decode(data) else { continue }
+                var split = doc.text.split(separator: "\n", omittingEmptySubsequences: false)
+                if split.last == "" { split.removeLast() }
+                let count = split.count
+                totalLines += count
+                totalBytes += data.count
+                textFileCount += 1
+                perFile.append((entry.path, count, data.count))
+            }
+            perFile.sort { $0.lines != $1.lines ? $0.lines > $1.lines : $0.path < $1.path }
+            let label = pattern ?? (folder.isEmpty ? "all text files" : folder)
+            var outLines = ["Line count for \(label): \(totalLines) total lines across \(textFileCount) text file\(textFileCount == 1 ? "" : "s") (\(Format.bytes(totalBytes)))"]
+            for item in perFile.prefix(Self.maxLines) {
+                outLines.append("\(item.lines)\t\(item.path)  (\(Format.bytes(item.bytes)))")
+            }
+            if perFile.count > Self.maxLines {
+                outLines.append("…and \(perFile.count - Self.maxLines) smaller files (already included in the \(totalLines)-line total above).")
+            }
+            return ToolOutput(
+                forModel: outLines.joined(separator: "\n"),
+                summary: "Counted \(totalLines) lines across \(textFileCount) file\(textFileCount == 1 ? "" : "s")",
+                detail: outLines.prefix(60).joined(separator: "\n")
+            )
         }
 
         if let pattern = arguments.optionalString("pattern") {
@@ -375,9 +441,10 @@ public struct ReadFileTool: AgentTool {
     public let workspace: RepoWorkspace
     public let changes: ChangeWorkspace?
     public let name = "read_file"
-    static let maxLines = 600
-    static let maxCharacters = 60_000
-    static let maxLineLength = 1_000
+    static let defaultLines = 1_500
+    static let maxLines = 4_000
+    static let maxCharacters = 250_000
+    static let maxLineLength = 4_000
 
     public init(workspace: RepoWorkspace, changes: ChangeWorkspace? = nil) {
         self.workspace = workspace
@@ -438,8 +505,10 @@ public struct ReadFileTool: AgentTool {
                 return ToolOutput(forModel: "\(path) is empty.", summary: "Read \(path) · empty")
             }
             let start = min(max(arguments.optionalInt("start_line") ?? 1, 1), total)
-            let requestedEnd = arguments.optionalInt("end_line").map { max($0, start) } ?? total
-            var end = min(requestedEnd, total, start + Self.maxLines - 1)
+            let explicitEnd = arguments.optionalInt("end_line")
+            let requestedEnd = explicitEnd.map { max($0, start) } ?? total
+            let lineWindow = explicitEnd != nil ? Self.maxLines : Self.defaultLines
+            var end = min(requestedEnd, total, start + lineWindow - 1)
             var body: [String] = []
             var characters = 0
             for number in start...end {
@@ -497,7 +566,7 @@ public struct SearchCodeTool: AgentTool {
                     "regex": ["type": "boolean", "description": "Treat query as a regular expression. Default false."],
                     "case_sensitive": ["type": "boolean", "description": "Match upper and lower case exactly. Default false."],
                     "path_glob": ["type": "string", "description": "Only search files whose path matches this pattern."],
-                    "max_results": ["type": "integer", "minimum": 1, "maximum": 200, "description": "Most matching lines to return. Default 80."],
+                    "max_results": ["type": "integer", "minimum": 1, "maximum": 500, "description": "Most matching lines to return. Default 120."],
                 ],
                 "required": ["query"],
             ]
@@ -514,7 +583,7 @@ public struct SearchCodeTool: AgentTool {
             isRegex: arguments.optionalBool("regex") ?? false,
             caseSensitive: arguments.optionalBool("case_sensitive") ?? false,
             pathGlob: arguments.optionalString("path_glob"),
-            maxResults: min(max(arguments.optionalInt("max_results") ?? 80, 1), 200)
+            maxResults: min(max(arguments.optionalInt("max_results") ?? 120, 1), 500)
         )
         let copy = try await workspace.localCopy { update in
             switch update {

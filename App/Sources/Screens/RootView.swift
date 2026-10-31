@@ -98,11 +98,14 @@ struct RootView: View {
     }
 
     private func closeDrag(width: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 8)
-            .onChanged { value in drag = min(0, value.translation.width) }
+        DragGesture(minimumDistance: 8, coordinateSpace: .global)
+            .onChanged { value in
+                guard app.isMenuOpen else { return }
+                drag = max(-width, min(0, value.translation.width))
+            }
             .onEnded { value in
-                withAnimation(.snappy(duration: 0.3)) {
-                    app.isMenuOpen = !(value.translation.width < -width * 0.25 || value.predictedEndTranslation.width < -width * 0.4)
+                withAnimation(.snappy(duration: 0.28)) {
+                    app.isMenuOpen = !(value.translation.width < -width * 0.22 || value.predictedEndTranslation.width < -width * 0.35)
                     drag = 0
                 }
             }

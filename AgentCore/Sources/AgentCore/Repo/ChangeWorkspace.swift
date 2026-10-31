@@ -45,6 +45,15 @@ public actor ChangeWorkspace {
     public func stagedChanges() -> [StagedChange] { changes.values.sorted { $0.path < $1.path } }
     public func discardAll() { changes.removeAll() }
 
+    public func stagedData(for rawPath: String) -> Data? {
+        let normalized = RepoWorkspace.normalize(rawPath)
+        guard let change = changes[normalized] else { return nil }
+        switch change {
+        case .write(_, let data, _): return data
+        case .delete: return nil
+        }
+    }
+
     public func read(_ rawPath: String) async throws -> FileRead {
         let path = try Self.safe(rawPath)
         switch try await readDecoded(path) {

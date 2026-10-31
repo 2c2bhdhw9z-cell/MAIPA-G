@@ -83,8 +83,36 @@ public struct Route: Sendable, Hashable {
     public var isAuto: Bool
     /// Words for the chat, such as "Auto · medium".
     public var label: String
-    /// The most tokens the conversation may use in one request.
+    /// The full context window reported by the selected model (for display and full-capacity tracking).
+    public var contextWindow: Int
+    /// The most prompt tokens the conversation may send in one request (full context minus completion reserve).
     public var contextBudget: Int
+    /// The maximum completion tokens supported by this model, if known.
+    public var maxOutputTokens: Int?
+
+    public init(
+        model: String,
+        plugins: [JSONValue],
+        effort: ThinkingLevel?,
+        automaticCaching: Bool,
+        isFree: Bool,
+        isAuto: Bool,
+        label: String,
+        contextWindow: Int? = nil,
+        contextBudget: Int,
+        maxOutputTokens: Int? = nil
+    ) {
+        self.model = model
+        self.plugins = plugins
+        self.effort = effort
+        self.automaticCaching = automaticCaching
+        self.isFree = isFree
+        self.isAuto = isAuto
+        self.label = label
+        self.contextWindow = contextWindow ?? contextBudget
+        self.contextBudget = contextBudget
+        self.maxOutputTokens = maxOutputTokens
+    }
 }
 
 public enum ModelRouter {
@@ -151,7 +179,9 @@ public enum ModelRouter {
         }
         switch choice {
         case .auto where account.paidAllowed(at: now):
-            let routerLevels = catalogue[ModelChoice.autoID]?.thinkingLevels ?? [.low, .medium, .high]
+            let routerInfo = catalogue[ModelChoice.autoID]
+            let routerLevels = routerInfo?.thinkingLevels ?? [.low, .medium, .high]
+            let fullWindow = routerInfo?.contextLength ?? 200_000
             return Route(
                 model: ModelChoice.autoID,
                 plugins: [["id": "auto-router", "cost_tier": .string(difficulty.costTier)]],
@@ -160,7 +190,9 @@ public enum ModelRouter {
                 isFree: false,
                 isAuto: true,
                 label: "Auto · \(difficulty.costTier)",
-                contextBudget: 150_000
+                contextWindow: fullWindow,
+                contextBudget: usableInputBudget(contextLength: fullWindow, maxOut: routerInfo?.maxCompletionTokens),
+                maxOutputTokens: routerInfo?.maxCompletionTokens
             )
         case .auto:
             var route = freeRoute(thinking: thinking, catalogue: catalogue)
@@ -172,18 +204,35 @@ public enum ModelRouter {
         case .model(let id):
             let info = catalogue[id]
             let levels = info?.thinkingLevels ?? []
-            let context = info?.contextLength ?? 128_000
+            let context = info?.contextLength ?? AIProviderGateway.inferredContextLength(for: AIProviderModelID.rawModelID(id).lowercased())
+            let maxOut = info?.maxCompletionTokens
+            // Preserve explicit user choice (including .xhigh / .max) whenever the model supports reasoning.
+            let resolvedEffort: ThinkingLevel? = {
+                if levels.isEmpty { return nil }
+                return thinking.nearest(in: levels)
+            }()
             return Route(
                 model: id,
                 plugins: [],
-                effort: levels.isEmpty ? nil : thinking.nearest(in: levels),
-                automaticCaching: id.hasPrefix("anthropic/"),
-                isFree: info?.isFree ?? id.hasSuffix(":free"),
+                effort: resolvedEffort,
+                automaticCaching: id.hasPrefix("anthropic/") || AIProviderGateway.isClaudeModel(id.lowercased()),
+                isFree: info?.isFree ?? (id.hasSuffix(":free") || id.hasSuffix("-free")),
                 isAuto: false,
                 label: info?.shortName ?? id,
-                contextBudget: min(Int(Double(context) * 0.75), 300_000)
+                contextWindow: context,
+                contextBudget: usableInputBudget(contextLength: context, maxOut: maxOut),
+                maxOutputTokens: maxOut
             )
         }
+    }
+
+    /// Computes full usable prompt budget without arbitrary 60K/150K/300K/0.75x ceilings — reserves only practical completion headroom.
+    public static func usableInputBudget(contextLength: Int, maxOut: Int?) -> Int {
+        guard contextLength > 16_384 else { return max(4_096, contextLength - 2_048) }
+        // Reserve enough room for a substantial reply/tool step without throwing away 25–70% of 200K–2M context windows.
+        let desiredReserve = min(maxOut ?? 16_384, 32_768)
+        let cappedReserve = min(desiredReserve, contextLength / 8)
+        return max(8_192, contextLength - cappedReserve)
     }
 
     public static func distinctRoute(
@@ -261,7 +310,9 @@ public enum ModelRouter {
     }
 
     static func freeRoute(thinking: ThinkingLevel, catalogue: [String: ModelInfo]) -> Route {
-        let levels = catalogue[ModelChoice.freeID]?.thinkingLevels ?? [.low, .medium, .high]
+        let freeInfo = catalogue[ModelChoice.freeID]
+        let levels = freeInfo?.thinkingLevels ?? [.low, .medium, .high]
+        let fullWindow = freeInfo?.contextLength ?? 131_072
         return Route(
             model: ModelChoice.freeID,
             plugins: [],
@@ -270,8 +321,9 @@ public enum ModelRouter {
             isFree: true,
             isAuto: false,
             label: "Free AIs",
-            // Free models vary; many hold 32,000 to 128,000 tokens.
-            contextBudget: 60_000
+            contextWindow: fullWindow,
+            contextBudget: usableInputBudget(contextLength: fullWindow, maxOut: freeInfo?.maxCompletionTokens),
+            maxOutputTokens: freeInfo?.maxCompletionTokens
         )
     }
 }

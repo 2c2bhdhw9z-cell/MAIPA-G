@@ -305,6 +305,7 @@ final class AppModel {
             library.resumePausedChats()
             Task {
                 await openRouter.refreshKeyInfo()
+                await connectors.reconnectIfNeeded()
                 await updates.check(using: github.publicClient)
                 sync.request(after: 1)
             }

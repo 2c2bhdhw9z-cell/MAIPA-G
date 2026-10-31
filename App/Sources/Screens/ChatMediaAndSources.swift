@@ -383,11 +383,15 @@ struct AttachmentDataPreviewBody: View {
             PDFInlineReaderView(data: data)
         } else if let text = Self.readableText(from: data, name: name) {
             ScrollView {
-                if name.lowercased().hasSuffix(".md") {
-                    MarkdownView(text: String(text.prefix(80_000)))
+                let lowerName = name.lowercased()
+                if lowerName.hasSuffix(".md") {
+                    MarkdownView(text: String(text.prefix(120_000)))
+                        .padding(16)
+                } else if lowerName.hasSuffix(".mmd") || lowerName.hasSuffix(".mermaid") {
+                    MermaidBlockView(code: String(text.prefix(60_000)))
                         .padding(16)
                 } else {
-                    CodeBlockView(language: (name as NSString).pathExtension, code: String(text.prefix(80_000)))
+                    CodeBlockView(language: (name as NSString).pathExtension, code: String(text.prefix(120_000)))
                         .padding(16)
                 }
             }
@@ -552,15 +556,39 @@ struct TurnSourceItem: Identifiable, Hashable {
         var seen: Set<String> = []
         var items: [TurnSourceItem] = []
 
+        func isGenuineWebSource(url parsed: URL, host cleanHost: String, raw: String) -> Bool {
+            if raw.contains("{") || raw.contains("}") || raw.contains("<") || raw.contains(">") || raw.contains("$") || raw.contains("*") {
+                return false
+            }
+            let ignoredHosts: Set<String> = [
+                "localhost", "127.0.0.1", "0.0.0.0", "::1",
+                "example.com", "example.org", "example.net", "test.com", "foo.bar", "your-domain.com",
+                "w3.org", "schemas.openxmlformats.org", "schemas.microsoft.com", "ns.adobe.com",
+                "api.openai.com", "api.anthropic.com", "openrouter.ai"
+            ]
+            if ignoredHosts.contains(cleanHost) { return false }
+            if cleanHost.hasSuffix(".local") || cleanHost.hasSuffix(".internal") || cleanHost.hasSuffix(".example") || cleanHost.hasSuffix(".invalid") || cleanHost.hasSuffix(".test") {
+                return false
+            }
+            if cleanHost == "apple.com" && parsed.path.lowercased().contains("/dtds/") { return false }
+            let lowerPath = parsed.path.lowercased()
+            if lowerPath.hasPrefix("/v1/") || lowerPath == "/v1" || lowerPath.hasPrefix("/api/v1/") {
+                return false
+            }
+            return true
+        }
+
         func add(url rawURL: String, title: String?) {
-            let trimmed = rawURL.trimmingCharacters(in: CharacterSet(charactersIn: " \t\n\r\"'()[]<>.,;"))
+            let trimmed = rawURL.trimmingCharacters(in: CharacterSet(charactersIn: " \t\n\r\"'()[]<>.,;`"))
             guard let parsed = URL(string: trimmed),
                   let scheme = parsed.scheme?.lowercased(),
                   (scheme == "https" || scheme == "http"),
                   let host = parsed.host?.lowercased(),
-                  !host.isEmpty
+                  !host.isEmpty,
+                  host.contains(".")
             else { return }
             let cleanHost = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+            guard isGenuineWebSource(url: parsed, host: cleanHost, raw: trimmed) else { return }
             let canonical = parsed.absoluteString
             guard !seen.contains(canonical) else { return }
             seen.insert(canonical)
@@ -574,26 +602,33 @@ struct TurnSourceItem: Identifiable, Hashable {
             items.append(TurnSourceItem(title: displayTitle, url: canonical, domain: cleanHost))
         }
 
+        let excludedLocalTools: Set<String> = [
+            "search_code", "read_file", "list_files", "create_file", "edit_file", "delete_file",
+            "save_changes", "run_shell", "read_attachment", "generate_image", "launch_helpers"
+        ]
+
         for step in turn.steps {
             for citation in step.citations ?? [] {
                 add(url: citation.url, title: citation.title)
             }
             for call in step.toolCalls {
                 let lowerName = call.name.lowercased()
-                let isSourceTool = lowerName.contains("web")
-                    || lowerName.contains("search")
-                    || lowerName.contains("url")
+                guard !excludedLocalTools.contains(lowerName) else { continue }
+                let isSourceTool = lowerName == "web_search"
+                    || lowerName == "openrouter:web_search"
+                    || lowerName == "read_web_page"
+                    || lowerName == "fetch_page"
+                    || lowerName.contains("web_search")
                     || lowerName.contains("wikipedia")
                     || lowerName.contains("arxiv")
-                    || lowerName.contains("hacker")
+                    || lowerName.contains("hackernews")
                     || lowerName.contains("reddit")
                     || lowerName.contains("jina")
                     || lowerName.contains("brave")
                     || lowerName.contains("perplexity")
                     || lowerName.contains("tavily")
-                    || lowerName.contains("exa")
+                    || lowerName.contains("exa_")
                     || lowerName.contains("firecrawl")
-                    || lowerName.contains("news")
                 guard isSourceTool else { continue }
                 extractURLs(from: call.arguments).forEach { add(url: $0, title: nil) }
                 if let res = call.result {

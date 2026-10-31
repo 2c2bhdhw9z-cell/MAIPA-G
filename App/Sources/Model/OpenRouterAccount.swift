@@ -14,6 +14,7 @@ final class OpenRouterAccount {
     /// External gateways configured by the user (API keys live exclusively in Keychain, never on disk).
     private(set) var externalProviders: [AIProviderEndpoint] = []
     private(set) var externalModelCounts: [String: Int] = [:]
+    private(set) var externalBalances: [String: Double] = [:]
     private(set) var externalErrors: [String: String] = [:]
 
     private(set) var models: [ModelInfo] = []
@@ -59,12 +60,31 @@ final class OpenRouterAccount {
     }
 
     var client: OpenRouterClient {
-        OpenRouterClient(transport: transport, apiKey: apiKey, extraProviders: readyExternalProviders)
+        OpenRouterClient(
+            transport: transport,
+            apiKey: apiKey,
+            extraProviders: readyExternalProviders,
+            catalogueByID: modelsByID
+        )
     }
 
     /// Free-AI requests left today, when OpenRouter reports it.
     var freeRequestsLeft: Int? { keyInfo?.freeRequestsLeftToday }
     var balance: Double? { credits?.balance ?? keyInfo?.limitRemaining }
+
+    /// Live USD balances across OpenRouter and all connected external AI gateways that report wallet credit.
+    var providerBalanceItems: [(id: String, name: String, balance: Double)] {
+        var items: [(id: String, name: String, balance: Double)] = []
+        if hasOpenRouterKey, let b = balance {
+            items.append(("openrouter", "OpenRouter", b))
+        }
+        for endpoint in readyExternalProviders {
+            if let b = externalBalances[endpoint.id] {
+                items.append((endpoint.id, endpoint.name, b))
+            }
+        }
+        return items
+    }
 
     var activeProviderSummary: String {
         var names: [String] = []
@@ -74,14 +94,18 @@ final class OpenRouterAccount {
     }
 
     func contextLimit(for choice: ModelChoice, lastModelID: String? = nil) -> Int? {
-        let id: String?
         switch choice {
-        case .model(let selected): id = selected
-        case .auto, .free: id = lastModelID
+        case .model(let selected):
+            return modelsByID[selected]?.contextLength
+                ?? modelsByID[selected.replacingOccurrences(of: ":free", with: "")]?.contextLength
+                ?? AIProviderGateway.inferredContextLength(for: AIProviderModelID.rawModelID(selected).lowercased())
+        case .auto:
+            if let lastModelID, let exact = modelsByID[lastModelID]?.contextLength { return exact }
+            return modelsByID[ModelChoice.autoID]?.contextLength ?? 200_000
+        case .free:
+            if let lastModelID, let exact = modelsByID[lastModelID]?.contextLength { return exact }
+            return modelsByID[ModelChoice.freeID]?.contextLength ?? 131_072
         }
-        guard let id else { return nil }
-        return modelsByID[id]?.contextLength
-            ?? modelsByID[id.replacingOccurrences(of: ":free", with: "")]?.contextLength
     }
 
     private func providerKeychainAccount(_ id: String) -> String {
@@ -173,6 +197,9 @@ final class OpenRouterAccount {
         externalCatalogCache[id] = fetched.models
         externalModelCounts[id] = fetched.models.count
         externalErrors[id] = nil
+        if let usd = await AIProviderGateway.fetchBalance(for: candidate, transport: transport) {
+            externalBalances[id] = usd
+        }
         persistExternalProviders()
         rebuildMergedModels()
         persistMergedCatalog()
@@ -199,6 +226,7 @@ final class OpenRouterAccount {
         externalProviders.removeAll { $0.id == id }
         externalCatalogCache[id] = nil
         externalModelCounts[id] = nil
+        externalBalances[id] = nil
         externalErrors[id] = nil
         persistExternalProviders()
         rebuildMergedModels()
@@ -295,20 +323,28 @@ final class OpenRouterAccount {
     // MARK: Money
 
     func refreshKeyInfo() async {
-        guard hasOpenRouterKey, !PreviewScenes.isActive else { return }
-        do {
-            let info = try await client.keyInfo()
-            keyInfo = info
-            credits = try? await client.credits()
-            if accountState.isFreeTier != info.isFreeTier {
-                accountState.isFreeTier = info.isFreeTier
-                saveState()
+        guard !PreviewScenes.isActive else { return }
+        if hasOpenRouterKey {
+            do {
+                let info = try await client.keyInfo()
+                keyInfo = info
+                credits = try? await client.credits()
+                if accountState.isFreeTier != info.isFreeTier {
+                    accountState.isFreeTier = info.isFreeTier
+                    saveState()
+                }
+            } catch let error as OpenRouterAPIError where error.kind == .invalidKey {
+                lastError = "OpenRouter no longer accepts MAIPA-G's sign-in. Sign in again."
+                signOut()
+            } catch {
+                // Offline or busy: keep what we knew.
             }
-        } catch let error as OpenRouterAPIError where error.kind == .invalidKey {
-            lastError = "OpenRouter no longer accepts MAIPA-G's sign-in. Sign in again."
-            signOut()
-        } catch {
-            // Offline or busy: keep what we knew.
+        }
+        // Also refresh live USD balances for all connected external gateways (OneProvider, TeamoRouter, OmniRoute, SayGM, Custom).
+        for endpoint in readyExternalProviders {
+            if let usd = await AIProviderGateway.fetchBalance(for: endpoint, transport: transport) {
+                externalBalances[endpoint.id] = usd
+            }
         }
     }
 
@@ -425,18 +461,38 @@ final class OpenRouterAccount {
         case .auto: return "Auto"
         case .free: return "Free AIs"
         case .model(let id):
-            if let info = modelsByID[id] { return info.shortName }
-            let raw = AIProviderModelID.rawModelID(id)
-            return raw.split(separator: "/").last.map(String.init) ?? raw
+            return displayName(forModelID: id)
         }
+    }
+
+    func displayName(forModelID id: String) -> String {
+        if let info = modelsByID[id] { return info.shortName }
+        if let decoded = AIProviderModelID.decode(id) {
+            if let match = allSelectableModels.first(where: { $0.id == id || AIProviderModelID.rawModelID($0.id) == decoded.rawModelID }) {
+                return match.shortName
+            }
+            return AIProviderGateway.prettifyModelSlug(decoded.rawModelID)
+        }
+        if let match = allSelectableModels.first(where: { AIProviderModelID.rawModelID($0.id) == id }) {
+            return match.shortName
+        }
+        return AIProviderGateway.prettifyModelSlug(id)
     }
 
     /// The thinking levels to offer for a choice. Empty means the AI doesn't think in levels.
     func thinkingLevels(for choice: ModelChoice) -> [ThinkingLevel] {
         switch choice {
-        case .auto: return modelsByID[ModelChoice.autoID]?.thinkingLevels ?? [.low, .medium, .high]
-        case .free: return modelsByID[ModelChoice.freeID]?.thinkingLevels ?? [.low, .medium, .high]
-        case .model(let id): return modelsByID[id]?.thinkingLevels ?? []
+        case .auto:
+            if !hasOpenRouterKey, let firstExt = readyExternalProviders.first,
+               let extModels = externalCatalogCache[firstExt.id],
+               extModels.contains(where: { !$0.thinkingLevels.isEmpty }) {
+                return [.low, .medium, .high, .xhigh, .max]
+            }
+            return modelsByID[ModelChoice.autoID]?.thinkingLevels ?? [.low, .medium, .high]
+        case .free:
+            return modelsByID[ModelChoice.freeID]?.thinkingLevels ?? [.low, .medium, .high]
+        case .model(let id):
+            return modelsByID[id]?.thinkingLevels ?? []
         }
     }
 

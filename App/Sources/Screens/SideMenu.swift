@@ -451,8 +451,13 @@ struct SideMenu: View {
 
     private var openRouterStatus: String? {
         guard app.openRouter.isSignedIn else { return nil }
+        let balances = app.openRouter.providerBalanceItems
         var items: [String] = []
-        if let balance = app.openRouter.balance { items.append(balance.dollars) }
+        if balances.count == 1 {
+            items.append(balances[0].balance.dollars)
+        } else if balances.count > 1 {
+            items.append(contentsOf: balances.prefix(3).map { "\($0.name) \($0.balance.dollars)" })
+        }
         if let free = app.openRouter.freeRequestsLeft { items.append("\(free) free") }
         if items.isEmpty, !app.openRouter.readyExternalProviders.isEmpty {
             items.append(app.openRouter.readyExternalProviders.map(\.name).joined(separator: " · "))

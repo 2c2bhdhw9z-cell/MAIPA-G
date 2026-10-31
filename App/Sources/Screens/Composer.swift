@@ -48,7 +48,10 @@ struct Composer: View {
     var onFiles: (() -> Void)? = nil
     var onWorkstation: (() -> Void)? = nil
     var canCompact = false
+    var isCompacting = false
+    var canRestoreMemory = false
     var onCompact: (() -> Void)? = nil
+    var onRestoreMemory: (() -> Void)? = nil
 
     private static let pasteAttachmentThreshold = 20_000
 
@@ -59,34 +62,98 @@ struct Composer: View {
     @State private var choosingPhoto = false
     @State private var takingPhoto = false
     @State private var importError: String?
+    @State private var attachmentsExpanded = false
+
+    private var hasSendableContent: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+    }
 
     private var canSend: Bool {
-        (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) && !isRunning
+        hasSendableContent
     }
 
     var body: some View {
         VStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 10) {
                 if !attachments.isEmpty {
-                    ScrollView(.vertical, showsIndicators: attachments.count > 4) {
-                        LazyVGrid(
-                            columns: [
-                                GridItem(.flexible(minimum: 110), spacing: 7),
-                                GridItem(.flexible(minimum: 110), spacing: 7)
-                            ],
-                            spacing: 7
-                        ) {
-                            ForEach(attachments) { attachment in
-                                ArenaComposerAttachmentChip(attachment: attachment) {
-                                    attachments.removeAll { $0.id == attachment.id }
+                    VStack(alignment: .leading, spacing: 6) {
+                        if attachments.count > 4 {
+                            HStack(spacing: 8) {
+                                Button {
+                                    withAnimation(.snappy(duration: 0.22)) { attachmentsExpanded.toggle() }
+                                } label: {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: "paperclip")
+                                            .font(.caption2.weight(.bold))
+                                            .foregroundStyle(theme.accent)
+                                        Text("\(attachments.count) attachments")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.primary)
+                                        Image(systemName: "chevron.right")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .foregroundStyle(Theme.secondaryText)
+                                            .rotationEffect(.degrees(attachmentsExpanded ? 90 : 0))
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                Spacer()
+                                Button("Clear all") {
+                                    withAnimation(.snappy(duration: 0.2)) {
+                                        attachments.removeAll()
+                                        attachmentsExpanded = false
+                                    }
+                                }
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(Theme.secondaryText)
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 4)
+                        }
+                        if attachments.count <= 4 || attachmentsExpanded {
+                            ScrollView(.vertical, showsIndicators: attachments.count > 4) {
+                                LazyVGrid(
+                                    columns: [
+                                        GridItem(.flexible(minimum: 110), spacing: 7),
+                                        GridItem(.flexible(minimum: 110), spacing: 7)
+                                    ],
+                                    spacing: 7
+                                ) {
+                                    ForEach(attachments) { attachment in
+                                        ArenaComposerAttachmentChip(attachment: attachment) {
+                                            attachments.removeAll { $0.id == attachment.id }
+                                        }
+                                    }
+                                }
+                                .padding(.vertical, 1)
+                            }
+                            .frame(maxHeight: attachments.count > 4 ? 148 : nil)
+                        } else {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 6) {
+                                    ForEach(attachments.prefix(3)) { attachment in
+                                        ArenaComposerAttachmentChip(attachment: attachment) {
+                                            attachments.removeAll { $0.id == attachment.id }
+                                        }
+                                        .frame(width: 145)
+                                    }
+                                    Button {
+                                        withAnimation(.snappy(duration: 0.22)) { attachmentsExpanded = true }
+                                    } label: {
+                                        Text("+\(attachments.count - 3) more")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(theme.accent)
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 8)
+                                            .background(Theme.raised.opacity(0.95), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Theme.stroke))
+                                    }
+                                    .buttonStyle(.plain)
                                 }
                             }
                         }
-                        .padding(.vertical, 1)
                     }
-                    .frame(maxHeight: attachments.count > 4 ? 104 : nil)
                 }
-                TextField("Ask anything…", text: $text, axis: .vertical)
+                TextField(isRunning ? "Steer or add a follow-up…" : "Ask anything…", text: $text, axis: .vertical)
                     .font(.body)
                     .lineLimit(1...8)
                     .focused($focused)
@@ -101,10 +168,13 @@ struct Composer: View {
                     ContextMeter(
                         used: contextUsedTokens,
                         limit: contextLimitTokens,
-                        balance: app.openRouter.balance,
+                        providerBalances: app.openRouter.providerBalanceItems,
                         freeRequestsLeft: app.openRouter.freeRequestsLeft,
                         canCompact: canCompact,
-                        onCompact: onCompact
+                        isCompacting: isCompacting,
+                        canRestoreMemory: canRestoreMemory,
+                        onCompact: onCompact,
+                        onRestoreMemory: onRestoreMemory
                     )
                     sendButton
                 }
@@ -310,10 +380,16 @@ struct Composer: View {
                 }
                 if let onCompact {
                     Button(action: onCompact) {
-                        Label("Compact older messages", systemImage: "rectangle.compress.vertical")
-                        Text(canCompact ? "Frees AI memory" : "Chat is still short")
+                        Label(isCompacting ? "Compacting older messages…" : "Compact older messages", systemImage: "rectangle.compress.vertical")
+                        Text(isCompacting ? "Summarizing with AI…" : (canCompact ? "Summarizes earlier turns with AI" : "Up to date"))
                     }
-                    .disabled(!canCompact)
+                    .disabled(!canCompact || isCompacting)
+                }
+                if canRestoreMemory, let onRestoreMemory {
+                    Button(action: onRestoreMemory) {
+                        Label("Restore full memory", systemImage: "arrow.uturn.backward.circle")
+                        Text("Undo compaction")
+                    }
                 }
             }
 
@@ -397,45 +473,51 @@ struct Composer: View {
 
     @ViewBuilder
     private var sendButton: some View {
-        if isRunning && canStop {
-            Button(action: onStop) {
-                Image(systemName: "stop.fill")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(.primary)
-                    .frame(width: 36, height: 36)
-                    .background(Theme.raised, in: Circle())
-                    .overlay(Circle().strokeBorder(Theme.stroke))
+        HStack(spacing: 6) {
+            if isRunning && canStop {
+                Button(action: onStop) {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 36, height: 36)
+                        .background(Theme.raised, in: Circle())
+                        .overlay(Circle().strokeBorder(Theme.stroke))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Stop")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Stop")
-        } else {
-            Button {
-                guard canSend else { return }
-                focused = false
-                onSend()
-            } label: {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(Color.black.opacity(canSend ? 0.85 : 0.4))
-                    .frame(width: 36, height: 36)
-                    .background(theme.gradient.opacity(canSend ? 1 : 0.35), in: Circle())
+            if !isRunning || hasSendableContent {
+                Button {
+                    guard canSend else { return }
+                    focused = false
+                    onSend()
+                } label: {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(Color.black.opacity(canSend ? 0.85 : 0.4))
+                        .frame(width: 36, height: 36)
+                        .background(theme.gradient.opacity(canSend ? 1 : 0.35), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSend)
+                .accessibilityLabel(isRunning ? "Steer running reply" : "Send")
             }
-            .buttonStyle(.plain)
-            .disabled(!canSend)
-            .accessibilityLabel("Send")
         }
     }
 }
 
 /// Kiro-style context ring: how much of the selected AI's working memory this chat currently uses.
-/// Tap it for the exact OpenRouter token count, model limit, and remaining OpenRouter credit.
+/// Tap it for exact token usage, full model capacity, connected provider credit, and AI compaction / restore.
 private struct ContextMeter: View {
     var used: Int
     var limit: Int?
-    var balance: Double?
+    var providerBalances: [(id: String, name: String, balance: Double)] = []
     var freeRequestsLeft: Int?
     var canCompact = false
+    var isCompacting = false
+    var canRestoreMemory = false
     var onCompact: (() -> Void)? = nil
+    var onRestoreMemory: (() -> Void)? = nil
     @State private var showsDetails = false
     @Environment(\.theme) private var theme
 
@@ -451,8 +533,9 @@ private struct ContextMeter: View {
     }
 
     private var creditLine: String? {
-        var parts: [String] = []
-        if let balance { parts.append("Credit: \(balance.dollars)") }
+        var parts: [String] = providerBalances.map { item in
+            providerBalances.count == 1 ? "Credit: \(item.balance.dollars)" : "\(item.name): \(item.balance.dollars)"
+        }
         if let freeRequestsLeft { parts.append("\(freeRequestsLeft) free left today") }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
@@ -461,11 +544,15 @@ private struct ContextMeter: View {
         Button { showsDetails = true } label: {
             ZStack {
                 Circle().stroke(Theme.stroke, lineWidth: 3)
-                Circle()
-                    .trim(from: 0, to: max(fraction, used > 0 ? 0.025 : 0))
-                    .stroke(colour, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                Circle().fill(colour.opacity(0.18)).padding(6)
+                if isCompacting {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Circle()
+                        .trim(from: 0, to: max(fraction, used > 0 ? 0.025 : 0))
+                        .stroke(colour, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                    Circle().fill(colour.opacity(0.18)).padding(6)
+                }
             }
             .frame(width: 28, height: 28)
             .contentShape(Circle())
@@ -473,32 +560,63 @@ private struct ContextMeter: View {
         .buttonStyle(.plain)
         .accessibilityLabel(accessibilityText)
         .popover(isPresented: $showsDetails) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Context").font(.headline)
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    Text("Context").font(.headline)
+                    Spacer()
+                    if canRestoreMemory {
+                        Text("Compacted")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(theme.accent)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(theme.accent.opacity(0.14), in: Capsule())
+                    }
+                }
                 Text(detailText).font(.subheadline.monospacedDigit())
                 if let creditLine {
                     Text(creditLine)
                         .font(.footnote.monospacedDigit())
                         .foregroundStyle(Theme.secondaryText)
                 }
-                Text("Context is everything this AI can keep in mind for its next answer. The ring fills as this chat grows.")
+                Text("Includes system instructions, active tool schemas, and conversation history up to the selected AI's full context window.")
                     .font(.footnote)
                     .foregroundStyle(Theme.secondaryText)
-                if let onCompact {
-                    Button {
-                        showsDetails = false
-                        onCompact()
-                    } label: {
-                        Label("Compact older messages", systemImage: "rectangle.compress.vertical")
-                            .font(.footnote.weight(.semibold))
+                if isCompacting {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Summarizing older turns with AI…")
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(Theme.secondaryText)
                     }
-                    .buttonStyle(.bordered)
-                    .disabled(!canCompact)
                     .padding(.top, 2)
+                } else {
+                    if let onCompact {
+                        Button {
+                            showsDetails = false
+                            onCompact()
+                        } label: {
+                            Label(canCompact ? "Compact older messages" : "Older messages already compact", systemImage: "rectangle.compress.vertical")
+                                .font(.footnote.weight(.semibold))
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!canCompact)
+                        .padding(.top, 2)
+                    }
+                    if canRestoreMemory, let onRestoreMemory {
+                        Button {
+                            showsDetails = false
+                            onRestoreMemory()
+                        } label: {
+                            Label("Restore full memory", systemImage: "arrow.uturn.backward.circle")
+                                .font(.footnote.weight(.semibold))
+                        }
+                        .buttonStyle(.bordered)
+                    }
                 }
             }
             .padding(18)
-            .frame(width: 290)
+            .frame(width: 304)
             .presentationCompactAdaptation(.popover)
         }
     }

@@ -84,6 +84,9 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
     /// summary in later model requests.
     public var compactedSummary: String?
     public var compactedThroughMessageID: UUID?
+    /// Previous compaction snapshot before the latest `compact()`, enabling one-tap Undo / Restore full memory.
+    public var previousCompactedSummary: String?
+    public var previousCompactedThroughMessageID: UUID?
 
     public init(
         id: UUID = UUID(),
@@ -114,12 +117,15 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         self.memoryContext = memoryContext
         self.compactedSummary = nil
         self.compactedThroughMessageID = nil
+        self.previousCompactedSummary = nil
+        self.previousCompactedThroughMessageID = nil
     }
 
     enum CodingKeys: String, CodingKey {
         case format, id, title, titleIsCustom, createdAt, updatedAt, repo, model, thinking, messages
         case groupID, saveReceipts, activeJobID, workflowID, specID, memoryContext
         case compactedSummary, compactedThroughMessageID
+        case previousCompactedSummary, previousCompactedThroughMessageID
     }
 
     public init(from decoder: Decoder) throws {
@@ -142,6 +148,8 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         memoryContext = try c.decodeIfPresent([String].self, forKey: .memoryContext) ?? []
         compactedSummary = try c.decodeIfPresent(String.self, forKey: .compactedSummary)
         compactedThroughMessageID = try c.decodeIfPresent(UUID.self, forKey: .compactedThroughMessageID)
+        previousCompactedSummary = try c.decodeIfPresent(String.self, forKey: .previousCompactedSummary)
+        previousCompactedThroughMessageID = try c.decodeIfPresent(UUID.self, forKey: .previousCompactedThroughMessageID)
     }
 
     /// Everything the chat has cost so far, in dollars, as OpenRouter reported it.
@@ -376,6 +384,8 @@ public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
     public var id: UUID
     public var startedAt: Date
     public var finishedAt: Date?
+    /// Timestamp when reasoning finished and visible text/tool output began, for accurate "Thought for Ns".
+    public var reasoningFinishedAt: Date?
     /// The AI that actually answered (for Auto, the one it picked).
     public var model: String?
     public var text: String
@@ -394,6 +404,7 @@ public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
         self.id = id
         self.startedAt = startedAt
         self.finishedAt = nil
+        self.reasoningFinishedAt = nil
         self.model = nil
         self.text = ""
         self.reasoning = ""
@@ -407,8 +418,8 @@ public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
 
     /// How long the model thought, when it shared its thinking.
     public var thinkingSeconds: Int? {
-        guard !reasoning.isEmpty, let finishedAt else { return nil }
-        return max(1, Int(finishedAt.timeIntervalSince(startedAt).rounded()))
+        guard !reasoning.isEmpty, let end = reasoningFinishedAt ?? finishedAt else { return nil }
+        return max(1, Int(end.timeIntervalSince(startedAt).rounded()))
     }
 }
 

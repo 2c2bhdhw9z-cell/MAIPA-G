@@ -219,7 +219,8 @@ public struct LaunchHelpersTool: AgentTool {
     }
 
     public var spec: ToolSpec {
-        ToolSpec(name: name, description: "Launch independent helper agents side by side, wait for all of them, and return their reports in the requested order. At most \(lead.maximumHelpers) helpers may be launched for this agent step.", parameters: [
+        let roster = definitions.prefix(24).map { "\($0.id) (\($0.name): \($0.summary))" }.joined(separator: "; ")
+        return ToolSpec(name: name, description: "Launch independent helper agents side by side in parallel, wait for all of them, and return their reports in the requested order. At most \(lead.maximumHelpers) helpers may be launched per step. Available agents: \(roster)", parameters: [
             "type": "object",
             "properties": [
                 "helpers": [
@@ -238,18 +239,24 @@ public struct LaunchHelpersTool: AgentTool {
         ])
     }
 
-    public func runningSummary(for arguments: JSONValue) -> String { "Running helper agents…" }
+    public func runningSummary(for arguments: JSONValue) -> String {
+        let ids = (arguments["helpers"]?.arrayValue ?? []).compactMap { $0["agent_id"]?.stringValue }
+        guard !ids.isEmpty else { return "Running helper agents…" }
+        let names = ids.map { id in definitions.first(where: { $0.id == id })?.name ?? id }
+        return "Running \(names.joined(separator: ", "))…"
+    }
 
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         guard let values = arguments["helpers"]?.arrayValue else { throw ToolInputError("launch_helpers needs a helpers list.") }
         let requests = try values.map { value -> (String, String) in
             (try value.requiredString("agent_id"), try value.requiredString("task"))
         }
-        progress("Running \(requests.count) helper agent\(requests.count == 1 ? "" : "s")…")
+        let names = requests.map { id, _ in definitions.first(where: { $0.id == id })?.name ?? id }
+        progress("Running \(names.joined(separator: ", ")) in parallel…")
         let results = try await coordinator.launch(requests.map { (agentID: $0.0, task: $0.1) })
         let detail = results.enumerated().map { index, result in
             "Helper \(index + 1) (\(result.name), \(result.model ?? "model not reported")):\n\(result.output)"
         }.joined(separator: "\n\n")
-        return ToolOutput(forModel: detail, summary: "Finished \(results.count) helper agent\(results.count == 1 ? "" : "s")", detail: detail, billedCost: results.reduce(0) { $0 + $1.cost })
+        return ToolOutput(forModel: detail, summary: "Finished \(names.joined(separator: ", "))", detail: detail, billedCost: results.reduce(0) { $0 + $1.cost })
     }
 }
