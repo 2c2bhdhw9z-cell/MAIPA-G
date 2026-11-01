@@ -178,12 +178,26 @@ public struct HookedTool: AgentTool {
         }
     }
 
+    public func runLive(arguments: JSONValue, callID: String, existingSubagents: [SubagentRunItem]?, update: @escaping @Sendable (ToolLiveUpdate) -> Void) async throws -> ToolOutput {
+        let output = try await inner.runLive(arguments: arguments, callID: callID, existingSubagents: existingSubagents, update: update)
+        return try await afterwards(output, arguments: arguments) { msg in
+            update(ToolLiveUpdate(summary: msg, detail: output.detail, subagents: output.subagents))
+        }
+    }
+
     public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         try await afterwards(try await inner.runApproved(arguments: arguments, progress: progress), arguments: arguments, progress: progress)
     }
 
     public func runApprovedLive(arguments: JSONValue, update: @escaping @Sendable (ToolLiveUpdate) -> Void) async throws -> ToolOutput {
         let output = try await inner.runApprovedLive(arguments: arguments, update: update)
+        return try await afterwards(output, arguments: arguments) { msg in
+            update(ToolLiveUpdate(summary: msg, detail: output.detail, subagents: output.subagents))
+        }
+    }
+
+    public func runApprovedLive(arguments: JSONValue, callID: String, existingSubagents: [SubagentRunItem]?, update: @escaping @Sendable (ToolLiveUpdate) -> Void) async throws -> ToolOutput {
+        let output = try await inner.runApprovedLive(arguments: arguments, callID: callID, existingSubagents: existingSubagents, update: update)
         return try await afterwards(output, arguments: arguments) { msg in
             update(ToolLiveUpdate(summary: msg, detail: output.detail, subagents: output.subagents))
         }

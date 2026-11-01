@@ -302,6 +302,8 @@ public actor AgentHelperCoordinator {
 
     public func launch(
         _ requests: [(agentID: String, task: String)],
+        callID: String = "subagent",
+        existingSubagents: [SubagentRunItem]? = nil,
         onProgress: (@Sendable (String) -> Void)? = nil,
         onLiveUpdate: (@Sendable (ToolLiveUpdate) -> Void)? = nil
     ) async throws -> [AgentHelperResult] {
@@ -312,7 +314,6 @@ public actor AgentHelperCoordinator {
         let batchOffset = launched
         launched += requests.count
         let priorCost = records.reduce(0) { $0 + $1.cost }
-        let operationLimit = spendLimit.map { max(0.000_001, $0 - priorCost) / Double(requests.count) }
         let resolved = try requests.map { request -> (AgentDefinition, String) in
             guard let definition = definitions[request.agentID] else { throw AgentExecutorError.unknownAgent(request.agentID) }
             let task = request.task.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -320,13 +321,44 @@ public actor AgentHelperCoordinator {
             return (definition, task)
         }
 
-        let liveTracker = LiveHelperProgressTracker(batchOffset: batchOffset, resolved: resolved)
+        let completedExisting: [Int: SubagentRunItem] = {
+            guard let existingSubagents else { return [:] }
+            var map: [Int: SubagentRunItem] = [:]
+            for (idx, item) in existingSubagents.enumerated() where idx < resolved.count && item.status == .completed && !item.output.isEmpty {
+                map[idx] = item
+            }
+            return map
+        }()
+        let remainingCount = max(1, resolved.count - completedExisting.count)
+        let resumedPriorCost = completedExisting.values.reduce(0) { $0 + $1.cost }
+        let operationLimit = spendLimit.map { max(0.000_001, $0 - priorCost - resumedPriorCost) / Double(remainingCount) }
+
+        let liveTracker = LiveHelperProgressTracker(
+            batchOffset: batchOffset,
+            callID: callID,
+            resolved: resolved,
+            completedExisting: completedExisting
+        )
         let initialSnapshot = liveTracker.currentUpdate()
         onProgress?(initialSnapshot.summary)
         onLiveUpdate?(initialSnapshot)
 
         let collected: [Int: AgentExecutionResult] = await withTaskGroup(of: (Int, AgentExecutionResult).self) { group in
             for (index, item) in resolved.enumerated() {
+                if let done = completedExisting[index] {
+                    group.addTask {
+                        let cached = AgentExecutionResult(
+                            output: done.output,
+                            model: done.model,
+                            cost: done.cost,
+                            toolCallCount: done.toolCallCount,
+                            toolSummaries: done.toolSummaries,
+                            status: "completed"
+                        )
+                        return (index, cached)
+                    }
+                    continue
+                }
                 group.addTask {
                     let invocation = AgentInvocation(
                         definition: item.0,
@@ -405,10 +437,20 @@ private final class LiveHelperProgressTracker: @unchecked Sendable {
     private let lock = NSLock()
     private var items: [SubagentRunItem]
 
-    init(batchOffset: Int, resolved: [(AgentDefinition, String)]) {
+    init(
+        batchOffset: Int,
+        callID: String,
+        resolved: [(AgentDefinition, String)],
+        completedExisting: [Int: SubagentRunItem] = [:]
+    ) {
         self.items = resolved.enumerated().map { index, pair in
-            SubagentRunItem(
-                id: "subagent-\(batchOffset + index + 1)",
+            let stableID = "\(callID)-sub-\(batchOffset + index + 1)"
+            if var done = completedExisting[index] {
+                done.id = stableID
+                return done
+            }
+            return SubagentRunItem(
+                id: stableID,
                 agentID: pair.0.id,
                 name: pair.0.name,
                 task: pair.1,
@@ -700,6 +742,15 @@ public struct LaunchHelpersTool: AgentTool {
     }
 
     public func runLive(arguments: JSONValue, update: @escaping @Sendable (ToolLiveUpdate) -> Void) async throws -> ToolOutput {
+        try await runLive(arguments: arguments, callID: "subagent", existingSubagents: nil, update: update)
+    }
+
+    public func runLive(
+        arguments: JSONValue,
+        callID: String,
+        existingSubagents: [SubagentRunItem]?,
+        update: @escaping @Sendable (ToolLiveUpdate) -> Void
+    ) async throws -> ToolOutput {
         guard let values = arguments["helpers"]?.arrayValue else { throw ToolInputError("launch_helpers needs a helpers list.") }
         let requests = try values.map { value -> (String, String) in
             (try value.requiredString("agent_id"), try value.requiredString("task"))
@@ -707,6 +758,8 @@ public struct LaunchHelpersTool: AgentTool {
         let names = requests.map { id, _ in definitions.first(where: { $0.id == id })?.name ?? id }
         let results = try await coordinator.launch(
             requests.map { (agentID: $0.0, task: $0.1) },
+            callID: callID,
+            existingSubagents: existingSubagents,
             onLiveUpdate: { live in update(live) }
         )
         let totalTools = results.reduce(0) { $0 + $1.toolCallCount }
@@ -738,7 +791,7 @@ public struct LaunchHelpersTool: AgentTool {
                 }
             }()
             return SubagentRunItem(
-                id: "subagent-final-\(index + 1)",
+                id: "\(callID)-sub-\(index + 1)",
                 agentID: result.agentID,
                 name: result.name,
                 task: result.task,

@@ -87,6 +87,8 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
     /// Previous compaction snapshot before the latest `compact()`, enabling one-tap Undo / Restore full memory.
     public var previousCompactedSummary: String?
     public var previousCompactedThroughMessageID: UUID?
+    /// Durable Kiro-style Queue follow-ups waiting to run sequentially after the active turn finishes.
+    public var queuedFollowUps: [QueuedFollowUp]?
 
     public init(
         id: UUID = UUID(),
@@ -119,6 +121,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         self.compactedThroughMessageID = nil
         self.previousCompactedSummary = nil
         self.previousCompactedThroughMessageID = nil
+        self.queuedFollowUps = nil
     }
 
     enum CodingKeys: String, CodingKey {
@@ -126,6 +129,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         case groupID, saveReceipts, activeJobID, workflowID, specID, memoryContext
         case compactedSummary, compactedThroughMessageID
         case previousCompactedSummary, previousCompactedThroughMessageID
+        case queuedFollowUps
     }
 
     public init(from decoder: Decoder) throws {
@@ -150,6 +154,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         compactedThroughMessageID = try c.decodeIfPresent(UUID.self, forKey: .compactedThroughMessageID)
         previousCompactedSummary = try c.decodeIfPresent(String.self, forKey: .previousCompactedSummary)
         previousCompactedThroughMessageID = try c.decodeIfPresent(UUID.self, forKey: .previousCompactedThroughMessageID)
+        queuedFollowUps = try c.decodeIfPresent([QueuedFollowUp].self, forKey: .queuedFollowUps)
     }
 
     /// Everything the chat has cost so far, in dollars, as OpenRouter reported it.
@@ -365,6 +370,21 @@ public struct SourceCitation: Codable, Sendable, Hashable, Identifiable {
     public init(url: String, title: String? = nil) { self.url = url; self.title = title }
 }
 
+/// Durable follow-up message queued via Kiro's `Queue` mode to run sequentially after the active turn completes.
+public struct QueuedFollowUp: Codable, Sendable, Hashable, Identifiable {
+    public var id: UUID
+    public var text: String
+    public var attachments: [AttachmentReference]
+    public var createdAt: Date
+
+    public init(id: UUID = UUID(), text: String, attachments: [AttachmentReference] = [], createdAt: Date = Date()) {
+        self.id = id
+        self.text = text
+        self.attachments = attachments
+        self.createdAt = createdAt
+    }
+}
+
 public struct GeneratedImageResult: Codable, Sendable, Hashable, Identifiable {
     public var id: UUID { attachment.id }
     public var attachment: AttachmentReference
@@ -399,8 +419,10 @@ public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
     public var citations: [SourceCitation]?
     /// Real generated media saved under media/, retained through chat sync.
     public var generatedImages: [GeneratedImageResult]?
+    /// Live mid-turn Kiro steering notes folded into this step without stopping the running turn.
+    public var steeredMessages: [String]?
 
-    public init(id: UUID = UUID(), startedAt: Date = Date()) {
+    public init(id: UUID = UUID(), startedAt: Date = Date(), steeredMessages: [String]? = nil) {
         self.id = id
         self.startedAt = startedAt
         self.finishedAt = nil
@@ -414,6 +436,7 @@ public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
         self.finishReason = nil
         self.citations = nil
         self.generatedImages = nil
+        self.steeredMessages = steeredMessages
     }
 
     /// How long the model thought, when it shared its thinking.

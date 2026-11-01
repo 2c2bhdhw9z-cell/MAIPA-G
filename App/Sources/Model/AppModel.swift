@@ -307,11 +307,16 @@ final class AppModel {
         guard !PreviewScenes.isActive else { return }
         switch phase {
         case .background:
-            backgroundJobs.schedule(hasActiveJobs: jobs.activeCount > 0)
+            backgroundJobs.schedule(
+                hasActiveJobs: jobs.activeCount > 0,
+                hasActiveChats: library.hasActiveWork,
+                chatSubtitle: library.activeWorkSummary
+            )
             // iOS 17–25 keep the established short grace period. It also safely covers a final
             // save if iOS 26 declines a continued-processing request.
             let grace = BackgroundGrace(name: "MAIPA-G save") {}
             Task {
+                await library.checkpointActiveSessions()
                 await sync.syncNow()
                 await jobs.refresh()
                 await specs.refreshJobs()

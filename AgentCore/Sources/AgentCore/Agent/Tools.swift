@@ -76,10 +76,12 @@ public protocol AgentTool: Sendable {
     func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest?
     func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput
     func runLive(arguments: JSONValue, update: @escaping @Sendable (ToolLiveUpdate) -> Void) async throws -> ToolOutput
+    func runLive(arguments: JSONValue, callID: String, existingSubagents: [SubagentRunItem]?, update: @escaping @Sendable (ToolLiveUpdate) -> Void) async throws -> ToolOutput
     /// Called after the person approves this exact tool call. Most tools run identically; shell
     /// tools use the flag to accept a workspace delta that could only be known after execution.
     func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput
     func runApprovedLive(arguments: JSONValue, update: @escaping @Sendable (ToolLiveUpdate) -> Void) async throws -> ToolOutput
+    func runApprovedLive(arguments: JSONValue, callID: String, existingSubagents: [SubagentRunItem]?, update: @escaping @Sendable (ToolLiveUpdate) -> Void) async throws -> ToolOutput
     /// True when this tool's results come from outside the person's own words: web pages and web
     /// search, connectors, and repository files anyone could have written.
     var bringsOutsideContent: Bool { get }
@@ -99,6 +101,9 @@ public extension AgentTool {
             update(ToolLiveUpdate(summary: message))
         }
     }
+    func runLive(arguments: JSONValue, callID: String, existingSubagents: [SubagentRunItem]?, update: @escaping @Sendable (ToolLiveUpdate) -> Void) async throws -> ToolOutput {
+        try await runLive(arguments: arguments, update: update)
+    }
     func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         try await run(arguments: arguments, progress: progress)
     }
@@ -106,6 +111,9 @@ public extension AgentTool {
         try await runApproved(arguments: arguments) { message in
             update(ToolLiveUpdate(summary: message))
         }
+    }
+    func runApprovedLive(arguments: JSONValue, callID: String, existingSubagents: [SubagentRunItem]?, update: @escaping @Sendable (ToolLiveUpdate) -> Void) async throws -> ToolOutput {
+        try await runApprovedLive(arguments: arguments, update: update)
     }
 }
 

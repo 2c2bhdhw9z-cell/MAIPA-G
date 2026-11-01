@@ -227,33 +227,91 @@ struct ChatScreen: View {
             }
 
             VStack(spacing: 8) {
-                if !session.queuedSteering.isEmpty {
-                    HStack(spacing: 8) {
-                        Image(systemName: "arrow.turn.down.right")
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(theme.accent)
-                        Text("Queued next: \(session.queuedSteering.last?.text ?? "Attachment")")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                        Spacer(minLength: 4)
-                        Button("Send now") {
-                            session.interruptWithQueuedSteering()
+                if !session.pendingSteers.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(session.pendingSteers.enumerated()), id: \.offset) { idx, steerText in
+                            HStack(spacing: 8) {
+                                Image(systemName: "arrow.turn.down.right")
+                                    .font(.caption.weight(.bold))
+                                    .foregroundStyle(theme.accent)
+                                Text("Steering active reply: \(steerText)")
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(2)
+                                Spacer(minLength: 4)
+                                Button {
+                                    session.cancelPendingSteer(at: idx)
+                                    Haptics.selection()
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(Theme.secondaryText)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Edit or cancel live steer")
+                            }
                         }
-                        .font(.caption.weight(.semibold))
-                        .buttonStyle(.borderedProminent)
-                        .buttonBorderShape(.capsule)
-                        Button {
-                            session.clearQueuedSteering()
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(Theme.secondaryText)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Cancel queued message")
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 7)
+                    .background(theme.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(theme.accent.opacity(0.32)))
+                    .padding(.horizontal, 12)
+                }
+
+                if !session.queuedSteering.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "text.append")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(theme.accent)
+                            Text(session.queuedSteering.count == 1 ? "Queued for after this reply" : "Queue (\(session.queuedSteering.count))")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(Theme.secondaryText)
+                            Spacer(minLength: 4)
+                            if session.queuedSteering.count > 1 {
+                                Button("Clear all") {
+                                    session.clearQueuedSteering()
+                                    Haptics.selection()
+                                }
+                                .font(.caption2.weight(.semibold))
+                                .buttonStyle(.plain)
+                                .foregroundStyle(Theme.secondaryText)
+                            }
+                        }
+                        ForEach(session.queuedSteering) { queued in
+                            HStack(spacing: 8) {
+                                Text(queued.text.isEmpty ? "\(queued.attachments.count) attachment(s)" : queued.text)
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                if !queued.attachments.isEmpty && !queued.text.isEmpty {
+                                    Text("+\(queued.attachments.count)")
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(Theme.secondaryText)
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 2)
+                                        .background(Theme.raised, in: Capsule())
+                                }
+                                Spacer(minLength: 4)
+                                Button {
+                                    session.cancelQueuedFollowUp(queued.id)
+                                    Haptics.selection()
+                                } label: {
+                                    HStack(spacing: 3) {
+                                        Text("Edit")
+                                            .font(.caption2.weight(.semibold))
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.caption)
+                                    }
+                                    .foregroundStyle(Theme.secondaryText)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Cancel queued message and restore to input box")
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
                     .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.stroke))
                     .padding(.horizontal, 12)
@@ -304,6 +362,7 @@ struct ChatScreen: View {
                     attachments: $session.draftAttachments,
                     webEnabled: $session.webEnabled,
                     autonomous: $session.autonomous,
+                    busySendMode: $session.busySendMode,
                     modelLabel: app.openRouter.label(for: session.chat.model),
                     supportsTools: app.openRouter.supportsTools(session.chat.model),
                     isImageOnlyModel: app.openRouter.isImageOnlyModel(session.chat.model),

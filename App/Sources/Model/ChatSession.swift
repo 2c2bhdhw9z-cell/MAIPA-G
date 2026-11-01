@@ -8,15 +8,25 @@ import UIKit
 @MainActor
 @Observable
 final class ChatSession: Identifiable {
+    enum BusySendMode: String, CaseIterable, Sendable {
+        case steer
+        case queue
+    }
+
     let id: UUID
     private(set) var chat: Chat
     var draft = "" { didSet { scheduleDraftSave() } }
     var draftAttachments: [AttachmentReference] = [] { didSet { scheduleDraftSave() } }
     var webEnabled = true
     var autonomous = false
+    /// Kiro-style mid-turn delivery mode (remembered per chat session, defaults to non-stopping `Steer`).
+    var busySendMode: BusySendMode = .steer
     private(set) var isRunning = false
     private(set) var isCompacting = false
-    private(set) var queuedSteering: [(text: String, attachments: [AttachmentReference])] = []
+    /// Unconsumed live steering notes waiting for the active run's next safe step boundary.
+    private(set) var pendingSteers: [String] = []
+    /// Durable follow-up messages queued via `Queue` mode to run sequentially after the active turn finishes.
+    private(set) var queuedSteering: [QueuedFollowUp] = []
     private(set) var mergeCheckStatus: String?
     private(set) var mergeWarning: String?
     var workstationFiles: [AttachmentReference] = []
@@ -96,6 +106,7 @@ final class ChatSession: Identifiable {
     @ObservationIgnored private var draftSaveTask: Task<Void, Never>?
     @ObservationIgnored private var lastSaved = Date()
     @ObservationIgnored private var pausedInBackground = false
+    @ObservationIgnored private var userStoppedExplicitly = false
 
     init(chat: Chat, app: AppModel?, draft: ComposerDraft? = nil) {
         self.id = chat.id
@@ -103,6 +114,34 @@ final class ChatSession: Identifiable {
         self.app = app
         self.draft = draft?.text ?? ""
         self.draftAttachments = draft?.attachments ?? []
+        self.queuedSteering = chat.queuedFollowUps ?? []
+    }
+
+    var backgroundStatusSubtitle: String {
+        if let subs = lastTurn?.steps.reversed().flatMap({ $0.toolCalls.reversed() }).compactMap(\.subagents).first, !subs.isEmpty {
+            let runningCount = subs.filter { $0.status == .running }.count
+            let totalActions = subs.reduce(0) { $0 + $1.toolCallCount }
+            let actionWord = totalActions == 1 ? "1 action" : "\(totalActions) actions"
+            return runningCount > 0
+                ? "Sub-agents (\(runningCount)/\(subs.count) running) · \(actionWord)"
+                : "Sub-agents finishing · \(actionWord)"
+        }
+        if hasActiveWorkflowRuns {
+            return "Running workflow in \(chat.title.isEmpty ? "chat" : chat.title)"
+        }
+        return chat.title.isEmpty ? "Finishing reply" : "Working in \(chat.title)"
+    }
+
+    func checkpointNow() async {
+        flush()
+        guard let app else { return }
+        lastSaved = Date()
+        await app.library.save(chat)
+    }
+
+    private func syncQueuedFollowUpsToChat() {
+        chat.queuedFollowUps = queuedSteering.isEmpty ? nil : queuedSteering
+        saveSoon()
     }
 
     private func scheduleDraftSave() {
@@ -188,16 +227,21 @@ final class ChatSession: Identifiable {
         let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty || !attachments.isEmpty else { return }
         if isRunning {
-            // Live mid-run steering: if attachments are empty, inject directly into the active AgentRun
-            // AND record a queued follow-up if the turn was already wrapping up, or gracefully finish
-            // the current step so chronological chat bubbles stay in order!
-            queuedSteering.append((text: message, attachments: attachments))
-            if let activeRun = run {
-                Task { await activeRun.finishAfterCurrentStep() }
+            // Kiro-style mid-turn controls:
+            // - `Steer` (default for text): folds guidance into the active turn at the next safe boundary
+            //   WITHOUT calling `finishAfterCurrentStep()` or cancelling any running stream/sub-agent/tool!
+            // - `Queue` (or attachments): holds follow-up on disk to run sequentially after the active turn finishes naturally.
+            if busySendMode == .steer, attachments.isEmpty, let activeRun = run {
+                pendingSteers.append(message)
+                Task { await activeRun.steer(message) }
+            } else {
+                queuedSteering.append(QueuedFollowUp(text: message, attachments: attachments))
+                syncQueuedFollowUpsToChat()
             }
             return
         }
         pausedInBackground = false
+        userStoppedExplicitly = false
         settleWaitingTurn()
         chat.messages.append(.user(message, attachments: attachments))
         chat.messages.append(ChatMessage(body: .assistant(AssistantTurn())))
@@ -208,14 +252,43 @@ final class ChatSession: Identifiable {
         start()
     }
 
-    /// Cancels the in-flight step immediately and sends the queued steering message right now.
-    func interruptWithQueuedSteering() {
-        guard isRunning, !queuedSteering.isEmpty else { return }
-        run?.cancel()
+    /// Cancels a pending unconsumed steer before the next step boundary consumes it and restores it to the composer.
+    func cancelPendingSteer(at index: Int) {
+        guard pendingSteers.indices.contains(index) else { return }
+        let removed = pendingSteers.remove(at: index)
+        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            draft = removed
+        } else {
+            draft = draft + "\n" + removed
+        }
+        if let activeRun = run {
+            Task { _ = await activeRun.removeSteering(removed) }
+        }
+    }
+
+    /// Cancels a queued follow-up item and restores its text and attachments back to the composer for editing.
+    func cancelQueuedFollowUp(_ id: UUID) {
+        guard let idx = queuedSteering.firstIndex(where: { $0.id == id }) else { return }
+        let item = queuedSteering.remove(at: idx)
+        syncQueuedFollowUpsToChat()
+        if !item.text.isEmpty {
+            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                draft = item.text
+            } else {
+                draft = draft + "\n" + item.text
+            }
+        }
+        if !item.attachments.isEmpty {
+            let existingIDs = Set(draftAttachments.map(\.id))
+            for att in item.attachments where !existingIDs.contains(att.id) {
+                draftAttachments.append(att)
+            }
+        }
     }
 
     func clearQueuedSteering() {
         queuedSteering.removeAll()
+        syncQueuedFollowUpsToChat()
     }
 
     func resumeInterruptedTurn() {
@@ -314,7 +387,8 @@ final class ChatSession: Identifiable {
 
     func stop() {
         pausedInBackground = false
-        queuedSteering.removeAll()
+        userStoppedExplicitly = true
+        pendingSteers.removeAll()
         guard isRunning else {
             settleWaitingTurn()
             return
@@ -322,9 +396,19 @@ final class ChatSession: Identifiable {
         run?.cancel()
     }
 
+    func suspendForBackgroundIfNeeded() {
+        guard isRunning else { return }
+        if app?.backgroundJobs.isContinuedProcessingActive == true {
+            return
+        }
+        suspendForBackground()
+    }
+
     private func suspendForBackground() {
         guard isRunning else { return }
         pausedInBackground = true
+        flush()
+        saveSoon(immediately: true)
         run?.cancel()
     }
 
@@ -684,17 +768,20 @@ final class ChatSession: Identifiable {
     private func start() {
         app?.notifications.requestIfNeeded(enabled: app?.settings.notificationsOn == true)
         isRunning = true
-        let grace = BackgroundGrace(name: "MAIPA-G reply") { [weak self] in self?.suspendForBackground() }
+        userStoppedExplicitly = false
+        let grace = BackgroundGrace(name: "MAIPA-G reply") { [weak self] in self?.suspendForBackgroundIfNeeded() }
         Task { [weak self] in
             await self?.runTurn()
             grace.end()
             await MainActor.run {
-                guard let self, !self.isRunning, !self.queuedSteering.isEmpty else { return }
-                let nextItems = self.queuedSteering
-                self.queuedSteering.removeAll()
-                let combinedText = nextItems.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n")
-                let combinedAttachments = nextItems.flatMap(\.attachments)
-                self.send(combinedText, attachments: combinedAttachments)
+                guard let self,
+                      !self.isRunning,
+                      !self.pausedInBackground,
+                      !self.queuedSteering.isEmpty,
+                      self.lastTurn?.status != .waitingForUser else { return }
+                let next = self.queuedSteering.removeFirst()
+                self.syncQueuedFollowUpsToChat()
+                self.send(next.text, attachments: next.attachments)
             }
         }
     }
@@ -1082,18 +1169,24 @@ final class ChatSession: Identifiable {
                             if case .updated(let updated, _) = event {
                                 finalTurn = updated
                                 let calls = updated.steps.flatMap(\.toolCalls)
+                                let completedCalls = calls.filter { $0.status == .done || $0.status == .failed }.count
                                 let summaries = calls.map(\.summary)
                                 let runningToolSummary = calls.last(where: { $0.status == .running })?.summary
                                 let latestReasoning = updated.steps.reversed().compactMap { $0.reasoning.isEmpty ? nil : $0.reasoning }.first
-                                let liveThought = latestReasoning.map { String($0.suffix(600)) }
+                                let liveThought = latestReasoning.map { String($0.suffix(900)) }
                                 let partialOutput = updated.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n")
+                                let latestNotice = updated.notices.last
+                                let actionSuffix = completedCalls > 0 ? " (\(completedCalls) done)" : ""
                                 let latestActivity: String = {
                                     if let runningToolSummary, !runningToolSummary.isEmpty { return runningToolSummary }
-                                    if !partialOutput.isEmpty { return "Writing findings…" }
-                                    if liveThought != nil { return "Thinking…" }
+                                    if let latestNotice, latestNotice.localizedCaseInsensitiveContains("retry") || latestNotice.localizedCaseInsensitiveContains("wait") {
+                                        return latestNotice
+                                    }
+                                    if !partialOutput.isEmpty { return "Writing findings…\(actionSuffix)" }
+                                    if liveThought != nil { return "Thinking…\(actionSuffix)" }
                                     return summaries.last ?? "Working…"
                                 }()
-                                let signature = "\(calls.count)|\(latestActivity)|\(partialOutput.count)|\((liveThought ?? "").count)"
+                                let signature = "\(calls.count)|\(completedCalls)|\(latestActivity)|\(partialOutput.count)|\(latestReasoning?.count ?? 0)|\(latestNotice ?? "")"
                                 if signature != lastLiveSignature {
                                     lastLiveSignature = signature
                                     invocation.onLiveProgress?(AgentLiveProgress(
@@ -1285,6 +1378,16 @@ final class ChatSession: Identifiable {
             guard case .updated(let turn, let milestone) = event else { continue }
             receive(turn, milestone: milestone)
         }
+        // `KiroCrew#20549`: If a live steer arrived right as the turn finished without another step boundary,
+        // promote it immediately so the model answers it instead of stranding it!
+        if !userStoppedExplicitly, !pausedInBackground {
+            let unconsumed = await run.drainUnconsumedSteering()
+            if !unconsumed.isEmpty {
+                queuedSteering.insert(QueuedFollowUp(text: unconsumed.joined(separator: "\n\n")), at: 0)
+                syncQueuedFollowUpsToChat()
+            }
+        }
+        pendingSteers.removeAll()
         if lastTurn?.steps.flatMap(\.toolCalls).contains(where: { $0.name == "add_memory" || $0.name == "edit_memory" }) == true {
             await app.memories.load()
             app.sync.request()
@@ -1316,6 +1419,12 @@ final class ChatSession: Identifiable {
 
     /// Streamed updates are drawn at most every 45 ms; finished steps and tools at once.
     private func receive(_ turn: AssistantTurn, milestone: Bool) {
+        if !pendingSteers.isEmpty {
+            let consumed = Set(turn.steps.flatMap { $0.steeredMessages ?? [] })
+            if !consumed.isEmpty {
+                pendingSteers.removeAll { consumed.contains($0) }
+            }
+        }
         if milestone {
             pendingTurn = nil
             replaceLastTurn(turn)
@@ -1337,6 +1446,10 @@ final class ChatSession: Identifiable {
         if let turn = pendingTurn {
             pendingTurn = nil
             replaceLastTurn(turn)
+            if Date().timeIntervalSince(lastSaved) >= 4.0 {
+                chat.updatedAt = Date()
+                saveSoon()
+            }
         }
     }
 

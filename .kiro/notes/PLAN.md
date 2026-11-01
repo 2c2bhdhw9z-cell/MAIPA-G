@@ -1,16 +1,20 @@
 # MAIPA-G plan
 
-**Status (31 October 2026, 9:12 PM ET): Shipping Build 81 (PR #24) to replace Build 80 (`build-80-eb1dec3`)
-with: (1) first-class Kiro Sub-Agent Cards (`SubagentCardsGroupView` & `SubagentItemCard`) in chat —
-individually tappable from millisecond zero across running, stopped, failed, and finished states to
-inspect each sub-agent's exact Task, numbered live Actions, live Thinking, and Report; (2) full-power
-`Context Gatherer` (`difficulty: .hard`, `modelPolicy: .automatic`, `maxSteps: 400`, zero `.prefix(8)`
-truncation, and strict line-1-to-EOF reading rules without skimming); and (3) complete crash &
-cold-launch startup-loop fixes (`[Int: Result]` by-value task-group collection eliminating the
-`0x4d69d4` `values[index]!` force-unwrap and actor-isolated outer-`var` mutations across
-`AgentExecutor` & `WorkflowEngine`, `settleInterruptedTurnOnLaunch()` preventing cold-launch auto-rerun
-crash loops, and `nonisolated` system callback isolation in `BackgroundJobs`, `Notifications`, and
-`PictureViewer`).
+**Status (31 October 2026, 10:25 PM ET): Shipping Build 83 (PR #25) to replace Build 82 (`build-82-1d5648c`)
+with: (1) true Kiro non-stopping `Steer` / `Queue` / `Stop` mid-turn controls (`Steer` folds guidance
+into the running turn without cancelling or stopping streams/tools/sub-agents, persists `steeredMessages`
+on `AssistantStep` + `Transcript` across multi-step turns and reloads, renders inline `↳ Steered:`
+banners, and drains end-of-turn steer races; `Queue` persists follow-ups on disk to run sequentially
+after the active turn finishes, restoring text + attachments on `Edit`/cancel; only explicit `Stop`
+cancels the active turn); (2) extended iOS 26 `BGContinuedProcessingTask` background continuation for
+active chats/sub-agents + 4-second periodic checkpoints + durable `existingSubagents` resume so
+completed sub-agents are never wiped back to `0` if interrupted; (3) real-time unthrottled sub-agent
+card updates (full reasoning signature past 600 chars, immediate structural `emit` on every action/status
+change, stable card IDs across start -> live -> done so expanded cards never slam shut, and single-tree
+`SubagentItemCard` rendering with `LazyVStack` instead of `ViewThatFits`); (4) automatic API key paste
+sanitization + eye reveal toggle across all providers (`OpenRouter`, `OneProvider`, `SayGM`,
+`TeamoRouter`, `OmniRoute`, `Custom`); and (5) stale `.running` chat settlement inside
+`ChatLibrary.reloadFromDisk()`.
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
 saving works (Settings and the side menu showed "Saved just now", and the 173 MB Continuum .ipa is
@@ -169,6 +173,21 @@ Built since then:
   settle cleanly to `"stopped"` instead of auto-looping on startup; and isolated `BGTaskScheduler`,
   `UNUserNotificationCenter`, and `PHPhotoLibrary` callbacks into `nonisolated` static helpers to
   eliminate Swift 6 `@MainActor` background-queue `SIGTRAP` crashes.
+- Build 83 (PR #25): implemented true Kiro non-stopping `Steer` / `Queue` / `Stop` mid-turn controls
+  (`Steer` injects guidance into the active `AgentRun` without `finishAfterCurrentStep()` or `cancel()`,
+  persists `AssistantStep.steeredMessages` in `Transcript.messages` across multi-step turns, renders
+  inline `Steered:` banners, and handles end-of-turn steer races via `drainUnconsumedSteering()`;
+  `Queue` persists `QueuedFollowUp` items on disk to run sequentially after the active turn finishes and
+  restores text + attachments to `Composer` on cancel/edit; explicit `Stop` cancels the active turn);
+  wired iOS 26 `BGContinuedProcessingTask` (`dev.maipag.app.autonomous`) for active chats/sub-agents,
+  guarded `BackgroundGrace` expiry with `Thread.isMainThread` and `isContinuedProcessingActive`, added
+  4-second periodic `ChatSession` saves, and preserved completed `SubagentRunItem`s across `AgentLoop`
+  -> `HookedTool` -> `LaunchHelpersTool` resume instead of wiping finished sub-agents back to `0`;
+  kept full parallel sub-agent execution completely unthrottled while fixing the 600-char live-thought
+  signature freeze, immediate structural `emit` on every action/status change, stable `\(callID)-sub-N`
+  card IDs from start to finish, and single-tree `SubagentItemCard` layout (`LazyVStack`, zero
+  `ViewThatFits`); added `AIProviderEndpoint.sanitizeAPIKey` + eye reveal toggle across all providers;
+  and settled stale `.running` synced chats in `ChatLibrary.reloadFromDisk()`.
 
 Still not done: Stability 11 (about 250 silent `try?` failures remain), necessary item 4 (sandbox
 for downloaded connectors blocks all network, so npx/uvx connectors can't install), and necessary

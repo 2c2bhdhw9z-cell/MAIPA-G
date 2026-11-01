@@ -122,7 +122,7 @@ final class OpenRouterAccount {
             externalProviders = saved.map { item in
                 var hydrated = item
                 if let keyData = Keychain.data(account: providerKeychainAccount(item.id)) {
-                    hydrated.apiKey = String(decoding: keyData, as: UTF8.self)
+                    hydrated.apiKey = AIProviderEndpoint.sanitizeAPIKey(String(decoding: keyData, as: UTF8.self))
                 }
                 return hydrated
             }
@@ -165,7 +165,7 @@ final class OpenRouterAccount {
         isEnabled: Bool = true
     ) async throws -> Int {
         let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleanKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanKey = AIProviderEndpoint.sanitizeAPIKey(rawKey)
         let normalizedURL = AIProviderEndpoint.normalizeBaseURL(baseURL)
         guard !cleanName.isEmpty else {
             throw OpenRouterAPIError(httpStatus: 400, code: "missing_name", message: "Enter a name for this AI provider.")
@@ -270,7 +270,7 @@ final class OpenRouterAccount {
     }
 
     func saveOpenRouterAPIKey(_ rawKey: String) async throws {
-        let clean = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let clean = AIProviderEndpoint.sanitizeAPIKey(rawKey)
         guard !clean.isEmpty else {
             throw OpenRouterAPIError(httpStatus: 400, code: "missing_key", message: "Paste your OpenRouter API key.")
         }
@@ -530,8 +530,13 @@ final class OpenRouterAccount {
         if let error = error as? OpenRouterAPIError {
             _ = ErrorExplainer.explain(error, file: file, function: function)
             switch error.kind {
-            case .invalidKey: return "That \(error.providerName) API key wasn't accepted. Double-check it and try again."
-            default: return error.message
+            case .invalidKey:
+                if error.providerName == "TeamoRouter" {
+                    return "That TeamoRouter API key wasn't accepted. Copy your full API key starting with sk-teamo- from teamorouter.com → API Keys and try again."
+                }
+                return "That \(error.providerName) API key wasn't accepted. Copy the full API key from your \(error.providerName) dashboard and try again."
+            default:
+                return error.message
             }
         }
         if let error = error as? HTTPError, error.isOffline { return "You're offline." }

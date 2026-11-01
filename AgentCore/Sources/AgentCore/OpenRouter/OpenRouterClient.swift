@@ -178,7 +178,12 @@ public struct OpenRouterClient: Sendable {
         catalogueByID: [String: ModelInfo] = [:]
     ) {
         self.transport = transport
-        self.apiKey = apiKey
+        if let apiKey {
+            let cleaned = AIProviderEndpoint.sanitizeAPIKey(apiKey)
+            self.apiKey = cleaned.isEmpty ? apiKey.trimmingCharacters(in: .whitespacesAndNewlines) : cleaned
+        } else {
+            self.apiKey = nil
+        }
         self.extraProviders = extraProviders
         self.catalogueByID = catalogueByID
     }

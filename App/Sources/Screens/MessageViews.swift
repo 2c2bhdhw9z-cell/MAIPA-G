@@ -266,6 +266,8 @@ struct AssistantTurnView: View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach(segments) { segment in
                 switch segment {
+                case .steered(_, let steeredMessages):
+                    SteeredInlineBanner(messages: steeredMessages)
                 case .activity(let id, let items, let isActive):
                     ActivityTimelineCard(id: id, items: items, isActive: isActive)
                 case .subagents(let call):
@@ -288,7 +290,8 @@ struct AssistantTurnView: View {
             } else if turn.status == .stopped, isLatest {
                 StoppedLine(onContinue: actions.keepGoing)
             }
-            ForEach(turn.notices, id: \.self) { notice in
+            let hasInlineSteers = turn.steps.contains { !($0.steeredMessages ?? []).isEmpty }
+            ForEach(turn.notices.filter { !hasInlineSteers || !$0.hasPrefix("Steered mid-run:") }, id: \.self) { notice in
                 Label(notice, systemImage: "info.circle")
                     .font(.footnote)
                     .foregroundStyle(Theme.secondaryText)
@@ -342,6 +345,10 @@ struct AssistantTurnView: View {
         }
 
         for (index, step) in turn.steps.enumerated() {
+            if let steered = step.steeredMessages, !steered.isEmpty {
+                flushBuffer(isActive: false)
+                output.append(.steered(stepID: step.id, messages: steered))
+            }
             let isLastStep = step.id == lastStepID
             let stepIsLive = turn.status == .running && isLastStep && step.finishedAt == nil
             let hasVisibleContent = !step.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -453,16 +460,48 @@ struct AssistantTurnView: View {
 }
 
 enum TurnSegment: Identifiable {
+    case steered(stepID: UUID, messages: [String])
     case activity(id: String, items: [ActivityItem], isActive: Bool)
     case subagents(ToolCallRecord)
     case content(AssistantStep, isLive: Bool)
 
     var id: String {
         switch self {
+        case .steered(let stepID, _): return "steered-\(stepID.uuidString)"
         case .activity(let id, _, _): return "activity-\(id)"
         case .subagents(let call): return "subagents-\(call.id)"
         case .content(let step, _): return "content-\(step.id.uuidString)"
         }
+    }
+}
+
+private struct SteeredInlineBanner: View {
+    let messages: [String]
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(messages.enumerated()), id: \.offset) { _, note in
+                HStack(alignment: .top, spacing: 7) {
+                    Image(systemName: "arrow.turn.down.right")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(theme.accent)
+                        .padding(.top, 2)
+                    Text("Steered: \(note)")
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(.primary.opacity(0.92))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .background(theme.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(theme.accent.opacity(0.30))
+        )
     }
 }
 
@@ -561,40 +600,50 @@ struct ActivityTimelineCard: View {
             }
 
             if isOpen {
-                ViewThatFits(in: .vertical) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(Array(items.enumerated()), id: \.element.id) { idx, item in
-                            ActivityTimelineRow(item: item, wasRecovered: isRecoveredItem(at: idx))
-                        }
-                    }
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Theme.surface.opacity(0.45), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.stroke.opacity(0.8)))
-
-                    ScrollViewReader { timelineProxy in
-                        ScrollView(.vertical, showsIndicators: true) {
-                            VStack(alignment: .leading, spacing: 8) {
-                                ForEach(Array(items.enumerated()), id: \.element.id) { idx, item in
-                                    ActivityTimelineRow(item: item, wasRecovered: isRecoveredItem(at: idx))
-                                        .id(item.id)
+                Group {
+                    if timelineNeedsScroll {
+                        ScrollViewReader { timelineProxy in
+                            ScrollView(.vertical, showsIndicators: true) {
+                                LazyVStack(alignment: .leading, spacing: 8) {
+                                    ForEach(Array(items.enumerated()), id: \.element.id) { idx, item in
+                                        ActivityTimelineRow(item: item, wasRecovered: isRecoveredItem(at: idx))
+                                            .id(item.id)
+                                    }
+                                }
+                                .padding(10)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(height: 240)
+                            .background(Theme.surface.opacity(0.45), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.stroke.opacity(0.8)))
+                            .onChange(of: items.count) { _, _ in
+                                if isActive, let lastID = items.last?.id {
+                                    withAnimation(.snappy) { timelineProxy.scrollTo(lastID, anchor: .bottom) }
                                 }
                             }
-                            .padding(10)
-                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .frame(height: 240)
-                        .background(Theme.surface.opacity(0.45), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.stroke.opacity(0.8)))
-                        .onChange(of: items.count) { _, _ in
-                            if isActive, let lastID = items.last?.id {
-                                withAnimation(.snappy) { timelineProxy.scrollTo(lastID, anchor: .bottom) }
+                    } else {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(Array(items.enumerated()), id: \.element.id) { idx, item in
+                                ActivityTimelineRow(item: item, wasRecovered: isRecoveredItem(at: idx))
                             }
                         }
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Theme.surface.opacity(0.45), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.stroke.opacity(0.8)))
                     }
                 }
                 .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .topLeading)))
             }
+        }
+    }
+
+    private var timelineNeedsScroll: Bool {
+        if items.count > 6 { return true }
+        return items.contains { item in
+            if case .thought(let step, _) = item { return step.reasoning.count > 600 }
+            return false
         }
     }
 
@@ -1006,17 +1055,7 @@ struct ToolLine: View {
             }
 
             if open, let detail = call.detail ?? call.result {
-                ViewThatFits(in: .vertical) {
-                    ScrollView(.horizontal) {
-                        Text(detail)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(Theme.secondaryText)
-                            .textSelection(.enabled)
-                            .fixedSize()
-                            .padding(10)
-                    }
-                    .background(Theme.codeBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-
+                if detail.count > 600 || detail.filter({ $0 == "\n" }).count >= 10 {
                     ScrollView([.horizontal, .vertical]) {
                         Text(detail)
                             .font(.system(.caption, design: .monospaced))
@@ -1026,6 +1065,16 @@ struct ToolLine: View {
                             .padding(10)
                     }
                     .frame(height: 220)
+                    .background(Theme.codeBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                } else {
+                    ScrollView(.horizontal) {
+                        Text(detail)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(Theme.secondaryText)
+                            .textSelection(.enabled)
+                            .fixedSize()
+                            .padding(10)
+                    }
                     .background(Theme.codeBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
             }
@@ -1687,16 +1736,7 @@ private struct SubagentItemCard: View {
                                 .font(.caption2.weight(.bold))
                                 .tracking(0.5)
                                 .foregroundStyle(Theme.secondaryText)
-                            ViewThatFits(in: .vertical) {
-                                Text(item.task)
-                                    .font(.caption)
-                                    .foregroundStyle(.primary.opacity(0.9))
-                                    .textSelection(.enabled)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(8)
-                                    .background(Theme.raised.opacity(0.55), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-
+                            if taskNeedsScroll {
                                 ScrollView(.vertical, showsIndicators: true) {
                                     Text(item.task)
                                         .font(.caption)
@@ -1705,8 +1745,17 @@ private struct SubagentItemCard: View {
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                         .padding(8)
                                 }
-                                .frame(height: 130)
+                                .frame(height: 125)
                                 .background(Theme.raised.opacity(0.55), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            } else {
+                                Text(item.task)
+                                    .font(.caption)
+                                    .foregroundStyle(.primary.opacity(0.9))
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(8)
+                                    .background(Theme.raised.opacity(0.55), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                             }
                         }
                     }
@@ -1718,17 +1767,17 @@ private struct SubagentItemCard: View {
                                 .tracking(0.5)
                                 .foregroundStyle(Theme.secondaryText)
 
-                            ViewThatFits(in: .vertical) {
+                            if item.toolSummaries.count > 6 {
+                                ScrollView(.vertical, showsIndicators: true) {
+                                    lazyActionsListView
+                                        .padding(8)
+                                }
+                                .frame(height: 175)
+                                .background(Theme.codeBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            } else {
                                 actionsListView
                                     .padding(8)
                                     .background(Theme.codeBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-
-                                ScrollView(.vertical, showsIndicators: true) {
-                                    actionsListView
-                                        .padding(8)
-                                }
-                                .frame(height: 170)
-                                .background(Theme.codeBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                             }
                         }
                     }
@@ -1744,7 +1793,7 @@ private struct SubagentItemCard: View {
                             Text(thought)
                                 .font(.caption)
                                 .foregroundStyle(Theme.secondaryText)
-                                .lineLimit(6)
+                                .lineLimit(8)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(8)
                                 .background(Theme.raised.opacity(0.45), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -1772,12 +1821,7 @@ private struct SubagentItemCard: View {
                         }
 
                         if !cleanedOutput.isEmpty {
-                            ViewThatFits(in: .vertical) {
-                                MarkdownView(text: cleanedOutput, isStreaming: item.status == .running)
-                                    .padding(10)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(Theme.raised.opacity(0.45), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-
+                            if outputNeedsScroll {
                                 ScrollView(.vertical, showsIndicators: true) {
                                     MarkdownView(text: cleanedOutput, isStreaming: item.status == .running)
                                         .padding(10)
@@ -1785,6 +1829,11 @@ private struct SubagentItemCard: View {
                                 }
                                 .frame(height: 280)
                                 .background(Theme.raised.opacity(0.45), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            } else {
+                                MarkdownView(text: cleanedOutput, isStreaming: item.status == .running)
+                                    .padding(10)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(Theme.raised.opacity(0.45), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                             }
                         } else {
                             Text(emptyOutputPlaceholder)
@@ -1806,27 +1855,48 @@ private struct SubagentItemCard: View {
         )
     }
 
-    private var actionsListView: some View {
-        VStack(alignment: .leading, spacing: 5) {
+    private var taskNeedsScroll: Bool {
+        item.task.count > 260 || item.task.filter({ $0 == "\n" }).count >= 4
+    }
+
+    private var outputNeedsScroll: Bool {
+        cleanedOutput.count > 700 || cleanedOutput.filter({ $0 == "\n" }).count >= 12
+    }
+
+    private var lazyActionsListView: some View {
+        LazyVStack(alignment: .leading, spacing: 5) {
             ForEach(Array(item.toolSummaries.enumerated()), id: \.offset) { idx, summary in
-                HStack(alignment: .top, spacing: 6) {
-                    Text("\(idx + 1).")
-                        .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(Theme.secondaryText)
-                        .frame(width: 22, alignment: .trailing)
-                    Image(systemName: actionIcon(for: summary))
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(theme.accent)
-                        .padding(.top, 2)
-                    Text(summary)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.primary.opacity(0.88))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                actionRow(index: idx, summary: summary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var actionsListView: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(Array(item.toolSummaries.enumerated()), id: \.offset) { idx, summary in
+                actionRow(index: idx, summary: summary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func actionRow(index idx: Int, summary: String) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Text("\(idx + 1).")
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(Theme.secondaryText)
+                .frame(width: 24, alignment: .trailing)
+            Image(systemName: actionIcon(for: summary))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(theme.accent)
+                .padding(.top, 2)
+            Text(summary)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.primary.opacity(0.88))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     @ViewBuilder

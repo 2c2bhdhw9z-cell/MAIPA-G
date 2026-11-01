@@ -176,6 +176,7 @@ struct AIProviderConnectSheet: View, Identifiable {
     @State private var name = ""
     @State private var baseURL = ""
     @State private var apiKey = ""
+    @State private var showingAPIKey = false
     @State private var isEnabled = true
     @State private var isSaving = false
     @State private var errorMessage: String?
@@ -226,9 +227,25 @@ struct AIProviderConnectSheet: View, Identifiable {
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
-                    SecureField(preset?.keyPlaceholder ?? "API key (sk-...)", text: $apiKey)
+                    HStack(spacing: 8) {
+                        Group {
+                            if showingAPIKey {
+                                TextField(preset?.keyPlaceholder ?? "API key (sk-...)", text: $apiKey)
+                            } else {
+                                SecureField(preset?.keyPlaceholder ?? "API key (sk-...)", text: $apiKey)
+                            }
+                        }
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        Button {
+                            showingAPIKey.toggle()
+                        } label: {
+                            Image(systemName: showingAPIKey ? "eye.slash" : "eye")
+                                .foregroundStyle(Theme.secondaryText)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(showingAPIKey ? "Hide API key" : "Show API key")
+                    }
 
                     if existingEndpoint != nil {
                         Toggle("Enabled in model picker", isOn: $isEnabled)
@@ -236,7 +253,11 @@ struct AIProviderConnectSheet: View, Identifiable {
                 } header: {
                     Text("Connection")
                 } footer: {
-                    Text("Your API key is stored only in this iPhone's Keychain. MAIPA-G automatically routes OpenAI (/v1/chat/completions, /v1/responses), Anthropic (/v1/messages), and Gemini models.")
+                    if preset?.id == "teamorouter" {
+                        Text("Paste your TeamoRouter API key (starts with sk-teamo- from teamorouter.com → API Keys). Extra quotes or Bearer prefixes are cleaned automatically, and your key stays only in this iPhone's Keychain.")
+                    } else {
+                        Text("Your API key is stored only in this iPhone's Keychain (extra quotes or Bearer prefixes are cleaned automatically). MAIPA-G routes OpenAI (/v1/chat/completions, /v1/responses), Anthropic (/v1/messages), and Gemini models.")
+                    }
                 }
 
                 if let errorMessage {
@@ -261,7 +282,7 @@ struct AIProviderConnectSheet: View, Identifiable {
                             Spacer()
                         }
                     }
-                    .disabled(isSaving || apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(isSaving || AIProviderEndpoint.sanitizeAPIKey(apiKey).isEmpty || baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                     if let existing = existingEndpoint {
                         Button("Remove \(existing.name)", role: .destructive) {
