@@ -1,8 +1,15 @@
 # MAIPA-G plan
 
-**Status (31 October 2026, 7:44 PM ET): Build 80 (`build-80-eb1dec3`, 7.95 MB, PR #23) is the latest
-installable build: 0.1.0 (80), iPhone arm64, built from commit `e97a3ec` (merged to `main` as `eb1dec3`),
-checked by the AgentCore tests on Linux and macOS (178 tests) and an independent IPA inspection.
+**Status (31 October 2026, 8:10 PM ET): Build 80 (`build-80-eb1dec3`, 7.95 MB, PR #23) is the latest
+installable build, but has a confirmed crash on the owner's iPhone (`MAIPA-G + 0x4d69d4`, 9 identical
+MetricKit crash reports in `MAIPA-G-data` starting at 7:54 PM ET): when `"System Prompt Explained"`
+ran 2 sub-agents in parallel (`launch_helpers`), `AgentHelperCoordinator.launch` hit a force-unwrap
+crash (`values[index]!`), and because that chat stayed saved as `"running"` on disk, reopening the
+app automatically restarts that chat in the background and crashes again ~30–45 seconds later. Next
+hotfix batch (waiting for the owner's OK): return sub-agent and workflow task-group results directly
+by value with zero force-unwraps, add a one-strike launch crash guard so an interrupted `"running"`
+chat never auto-loops on startup after a crash, and fix background-queue `@MainActor` closure traps
+in `BackgroundJobs`, `Notifications`, and `PictureViewer`.
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
 saving works (Settings and the side menu showed "Saved just now", and the 173 MB Continuum .ipa is
