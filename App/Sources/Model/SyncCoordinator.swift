@@ -32,6 +32,9 @@ final class SyncCoordinator {
     @ObservationIgnored private var activeSyncTask: Task<DataRepoSync.Report, Error>?
     @ObservationIgnored private var isRunning = false
     @ObservationIgnored private var runAgain = false
+    /// When the first request in the current burst arrived. Repeated saves during a long turn
+    /// must not push the backup out forever, so the delay is clamped against this.
+    @ObservationIgnored private var burstStartedAt: Date?
     private let paths: AppPaths
 
     private struct SyncTimeoutError: LocalizedError {
@@ -56,11 +59,16 @@ final class SyncCoordinator {
     func request(after seconds: Double = 4.5) {
         guard engine != nil else { return }
         if pendingPaths.isEmpty { pendingPaths = ["Changes on this phone"] }
+        let now = Date()
+        if burstStartedAt == nil { burstStartedAt = now }
+        // Hard ceiling: however many saves arrive during a long turn, the backup still runs.
+        let maxWait: TimeInterval = 30
+        let elapsed = now.timeIntervalSince(burstStartedAt ?? now)
+        let delay = min(max(0, seconds), max(0, maxWait - elapsed))
         scheduled?.cancel()
-        let clampedDelay = max(0, seconds)
         scheduled = Task { [weak self] in
-            if clampedDelay > 0 {
-                do { try await Task.sleep(nanoseconds: UInt64(clampedDelay * 1_000_000_000)) }
+            if delay > 0 {
+                do { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
                 catch { return }
             }
             guard !Task.isCancelled else { return }
@@ -72,6 +80,7 @@ final class SyncCoordinator {
         // Clear the cancellable delay handle before syncing. Later edits may schedule another
         // save, but can no longer cancel a sync that is already uploading files.
         scheduled = nil
+        burstStartedAt = nil
         await syncNow()
     }
 

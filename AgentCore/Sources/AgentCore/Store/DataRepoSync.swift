@@ -66,7 +66,6 @@ public actor DataRepoSync {
     private let github: GitHubClient
     private let dataDirectory: URL
     private let stateURL: URL
-    private let blobCacheURL: URL
     public private(set) var state: State
     /// Attachments and media at least this big are too large to go through Git. They are stored
     /// whole, by SHA-256, as assets of MAIPA-G-data's private "MAIPA-G files" draft release, and
@@ -81,16 +80,11 @@ public actor DataRepoSync {
         self.github = github
         self.dataDirectory = dataDirectory
         self.stateURL = stateURL
-        self.blobCacheURL = stateURL.deletingLastPathComponent().appendingPathComponent("sync-blob-cache.json")
         self.largeFileThreshold = largeFileThreshold
         if let data = try? Data(contentsOf: stateURL), let saved = try? JSONCoding.decoder().decode(State.self, from: data) {
             state = saved
         } else {
             state = State()
-        }
-        if let cacheData = try? Data(contentsOf: blobCacheURL),
-           let savedCache = try? JSONCoding.decoder().decode([String: CachedBlobHash].self, from: cacheData) {
-            blobHashes = savedCache
         }
     }
 
@@ -104,7 +98,6 @@ public actor DataRepoSync {
     private func saveState() {
         try? FileManager.default.createDirectory(at: stateURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? JSONCoding.encoder(pretty: true).encode(state).write(to: stateURL, options: .atomic)
-        try? JSONCoding.encoder().encode(blobHashes).write(to: blobCacheURL, options: .atomic)
     }
 
     /// Finds the user's MAIPA-G-data repo, making it (private) the first time.
@@ -502,14 +495,6 @@ public actor DataRepoSync {
                 }
                 if let cached = blobHashes[path], cached.size == size, abs(cached.modified - modStamp) < 0.001 {
                     scan.files[path] = cached.blobID
-                    continue
-                }
-                if Self.managedBlobPrefixes.contains(where: path.hasPrefix),
-                   let agreedBlob = state.files[path],
-                   let lastSync = state.lastSyncAt,
-                   modDate < lastSync.addingTimeInterval(-10) {
-                    blobHashes[path] = CachedBlobHash(size: size, modified: modStamp, blobID: agreedBlob)
-                    scan.files[path] = agreedBlob
                     continue
                 }
                 let data = try Data(contentsOf: url)
