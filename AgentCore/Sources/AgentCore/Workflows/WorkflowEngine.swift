@@ -537,10 +537,9 @@ public actor WorkflowEngine {
         }
         let runner = executor
         let operationBudget = remainingBudget.map { $0 / Double(max(resolved.count, 1)) }
-        var results = Array<Result<AgentExecutionResult, Error>?>(repeating: nil, count: resolved.count)
         let primaryIndexes = resolved.indices.filter { resolved[$0].1.modelPolicy != .differentFromPrimary }
 
-        await withTaskGroup(of: (Int, Result<AgentExecutionResult, Error>).self) { group in
+        let primaryOutcomes: [Int: Result<AgentExecutionResult, Error>] = await withTaskGroup(of: (Int, Result<AgentExecutionResult, Error>).self) { group in
             for index in primaryIndexes {
                 let item = resolved[index]
                 let stepTools: [any AgentTool] = [
@@ -573,14 +572,18 @@ public actor WorkflowEngine {
                     }
                 }
             }
+            var collected: [Int: Result<AgentExecutionResult, Error>] = [:]
+            collected.reserveCapacity(primaryIndexes.count)
             for await (index, outcome) in group {
-                results[index] = outcome
+                collected[index] = outcome
                 if joinPolicy == .any, case .success = outcome {
                     group.cancelAll()
                     break
                 }
             }
+            return collected
         }
+        var results: [Result<AgentExecutionResult, Error>?] = resolved.indices.map { primaryOutcomes[$0] }
 
         let primaryModel = primaryIndexes.compactMap { idx -> String? in
             if case .success(let r)? = results[idx] { return r.model }

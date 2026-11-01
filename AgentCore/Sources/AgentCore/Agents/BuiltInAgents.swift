@@ -35,16 +35,16 @@ public enum BuiltInAgents {
         agent("feedback-answerer", "Feedback answerer", "Handles review comments and verifies each resulting change.", "Read every unresolved review comment, determine whether it is valid, make focused fixes when needed, rerun relevant checks, reply with evidence, and leave disputed feedback clearly explained.", change + ["read_pull_request_comments", "reply_to_review_comment"], .hard, .automatic, .feedback, 3),
     ]
 
-    /// Kiro's 5 first-class sub-agents for fast parallel delegation inside chat and workflows.
+    /// Kiro's 5 first-class sub-agents for parallel and thorough delegation inside chat and workflows.
     public static let kiroSubagents: [AgentDefinition] = [
         agent(
             "context-gatherer",
             "Context Gatherer",
-            "Explores repositories, files, attachments, and web docs in parallel to gather exact context.",
-            "Quickly locate relevant files, symbols, call sites, rules, and documentation for the assigned question. Batch read/search calls in parallel and return a concise, high-signal report with exact file:line references. Never modify files or run mutating commands.",
+            "Explores repositories, files, attachments, and web docs thoroughly in parallel to gather exact context.",
+            "Explore repositories, files, attachments, and web docs thoroughly to gather exact, verified context for the assigned task. Match the depth requested: for targeted questions, batch search/read calls in parallel and cite exact `path:line` locations; when asked to read an entire file, directory, module, or every single line of code, first enumerate every file with `list_files` and read every assigned file completely from line 1 to its final line (continuing with `start_line` whenever a file has remaining lines) — never skim, sample, or stop early. Return a complete, structured report with exact `path:line` citations. Never modify files or run mutating commands.",
             inspectToolNames,
-            .quick,
-            .fast,
+            .hard,
+            .automatic,
             .reportOnly,
             0
         ),
@@ -52,9 +52,9 @@ public enum BuiltInAgents {
             "general-task-execution",
             "General Task Execution",
             "Executes a self-contained implementation, analysis, or verification task end to end.",
-            "Complete the assigned task thoroughly in your isolated context window. Read relevant files first, make surgical edits or run needed checks when permitted by the parent chat, verify your work, and return a clear summary of what changed and what was verified.",
+            "Complete the assigned task thoroughly in your isolated context window. Read relevant files completely first, make surgical edits or run needed checks when permitted by the parent chat, verify your work, and return a clear summary of what changed and what was verified.",
             generalExecutionToolNames,
-            .normal,
+            .hard,
             .automatic,
             .changesAllowed,
             0
@@ -76,8 +76,8 @@ public enum BuiltInAgents {
             "Inspects MAIPA-G's live model, provider balances, repo, computer, connectors, and active jobs.",
             "Call `introspect` (and `inspect_workflow` when relevant) to check MAIPA-G's exact live state — selected AI model, provider, thinking effort, limits, USD balances across connected providers, GitHub repo/branch/commit, Linux computer status, connectors, and jobs — and report clearly without exposing secrets.",
             ["introspect", "inspect_workflow", "list_workstation_files"],
-            .quick,
-            .fast,
+            .normal,
+            .automatic,
             .reportOnly,
             0
         ),

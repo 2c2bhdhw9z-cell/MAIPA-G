@@ -279,7 +279,7 @@ struct PictureViewer: View {
 
             let data = try await app.attachmentStore.data(for: generated.attachment)
             guard ImageDownsampler.image(from: data) != nil else { throw PictureError.storedImageUnreadable }
-            try await addPhoto(data)
+            try await Self.addPhoto(data)
             saveState = .saved
         } catch {
             saveState = .failed(message: "Couldn’t save the picture: \(userMessage(for: error))", canOpenSettings: false)
@@ -287,22 +287,18 @@ struct PictureViewer: View {
     }
 
     private func photoAuthorization() async -> PHAuthorizationStatus {
-        let current = PHPhotoLibrary.authorizationStatus(for: .addOnly)
-        guard current == .notDetermined else { return current }
-        return await withCheckedContinuation { continuation in
-            PHPhotoLibrary.requestAuthorization(for: .addOnly) { continuation.resume(returning: $0) }
-        }
+        await Self.requestPhotoAuthorization()
     }
 
-    private func addPhoto(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            PHPhotoLibrary.shared().performChanges {
-                PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: nil)
-            } completionHandler: { success, error in
-                if let error { continuation.resume(throwing: error) }
-                else if success { continuation.resume() }
-                else { continuation.resume(throwing: PictureError.storedImageUnreadable) }
-            }
+    nonisolated private static func requestPhotoAuthorization() async -> PHAuthorizationStatus {
+        let current = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+        guard current == .notDetermined else { return current }
+        return await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+    }
+
+    nonisolated private static func addPhoto(_ data: Data) async throws {
+        try await PHPhotoLibrary.shared().performChanges {
+            PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: nil)
         }
     }
 

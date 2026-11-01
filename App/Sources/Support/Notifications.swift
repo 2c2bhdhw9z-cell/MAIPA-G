@@ -8,8 +8,13 @@ final class Notifications {
     func requestIfNeeded(enabled: Bool) {
         guard enabled, !asked, !PreviewScenes.isActive else { return }
         asked = true
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+        UNUserNotificationCenter.current().requestAuthorization(
+            options: [.alert, .sound, .badge],
+            completionHandler: Self.ignoreAuthorizationResult
+        )
     }
+
+    nonisolated private static func ignoreAuthorizationResult(_ granted: Bool, _ error: (any Error)?) {}
 
     func post(title: String, body: String, enabled: Bool) {
         guard enabled, !PreviewScenes.isActive else { return }

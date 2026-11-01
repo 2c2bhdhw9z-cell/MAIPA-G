@@ -1,15 +1,16 @@
 # MAIPA-G plan
 
-**Status (31 October 2026, 8:10 PM ET): Build 80 (`build-80-eb1dec3`, 7.95 MB, PR #23) is the latest
-installable build, but has a confirmed crash on the owner's iPhone (`MAIPA-G + 0x4d69d4`, 9 identical
-MetricKit crash reports in `MAIPA-G-data` starting at 7:54 PM ET): when `"System Prompt Explained"`
-ran 2 sub-agents in parallel (`launch_helpers`), `AgentHelperCoordinator.launch` hit a force-unwrap
-crash (`values[index]!`), and because that chat stayed saved as `"running"` on disk, reopening the
-app automatically restarts that chat in the background and crashes again ~30–45 seconds later. Next
-hotfix batch (waiting for the owner's OK): return sub-agent and workflow task-group results directly
-by value with zero force-unwraps, add a one-strike launch crash guard so an interrupted `"running"`
-chat never auto-loops on startup after a crash, and fix background-queue `@MainActor` closure traps
-in `BackgroundJobs`, `Notifications`, and `PictureViewer`.
+**Status (31 October 2026, 9:12 PM ET): Shipping Build 81 (PR #24) to replace Build 80 (`build-80-eb1dec3`)
+with: (1) first-class Kiro Sub-Agent Cards (`SubagentCardsGroupView` & `SubagentItemCard`) in chat —
+individually tappable from millisecond zero across running, stopped, failed, and finished states to
+inspect each sub-agent's exact Task, numbered live Actions, live Thinking, and Report; (2) full-power
+`Context Gatherer` (`difficulty: .hard`, `modelPolicy: .automatic`, `maxSteps: 400`, zero `.prefix(8)`
+truncation, and strict line-1-to-EOF reading rules without skimming); and (3) complete crash &
+cold-launch startup-loop fixes (`[Int: Result]` by-value task-group collection eliminating the
+`0x4d69d4` `values[index]!` force-unwrap and actor-isolated outer-`var` mutations across
+`AgentExecutor` & `WorkflowEngine`, `settleInterruptedTurnOnLaunch()` preventing cold-launch auto-rerun
+crash loops, and `nonisolated` system callback isolation in `BackgroundJobs`, `Notifications`, and
+`PictureViewer`).
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
 saving works (Settings and the side menu showed "Saved just now", and the 173 MB Continuum .ipa is
@@ -153,6 +154,21 @@ Built since then:
   text-only model switches, vision `read_file` on repo images, authenticated `.ipa` downloads in
   `JobsScreen`, and child-sheet navigation fixes across `ConnectorsScreen`, `FilesScreen`, and
   `WorkstationScreen`.
+- Build 81 (PR #24): added dedicated Kiro Sub-Agent Cards (`SubagentCardsGroupView` / `SubagentItemCard`
+  + `SubagentRunItem` + `ToolLiveUpdate` streaming in `AgentLoop` / `LaunchHelpersTool`) directly in
+  chat so every sub-agent is tappable immediately while running, after stopping, on error, and after
+  completing (showing its role, model, status, live action counter, exact `TASK`, full numbered
+  `ACTIONS` list without `.prefix(8)` truncation, live `THINKING`, and `LIVE OUTPUT` / `REPORT` with
+  backward-compatible fallback for Build 80 `launch_helpers` turns); upgraded `Context Gatherer` and
+  `General Task Execution` from `.quick`/`.fast` skim policies to `.hard`/`.automatic` (`maxSteps: 400`,
+  `allowAskUser: false`, wired `ReadOtherRepositoryFileTool` + `InspectWorkflowTool`, and explicit
+  line-1-to-EOF non-skimming instructions); eliminated the `0x4d69d4` `values[index]!` force-unwrap
+  crash and outer-`var` task-group mutations across `AgentExecutor` and `WorkflowEngine` plus sibling
+  error isolation so one failed sub-agent never crashes or drops completed siblings; replaced cold-launch
+  `resumeInterruptedTurn()` with `settleInterruptedTurnOnLaunch()` so crashed/closed `"running"` chats
+  settle cleanly to `"stopped"` instead of auto-looping on startup; and isolated `BGTaskScheduler`,
+  `UNUserNotificationCenter`, and `PHPhotoLibrary` callbacks into `nonisolated` static helpers to
+  eliminate Swift 6 `@MainActor` background-queue `SIGTRAP` crashes.
 
 Still not done: Stability 11 (about 250 silent `try?` failures remain), necessary item 4 (sandbox
 for downloaded connectors blocks all network, so npx/uvx connectors can't install), and necessary

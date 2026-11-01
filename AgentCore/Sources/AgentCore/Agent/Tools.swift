@@ -14,6 +14,19 @@ public struct ToolInlineImage: Sendable, Hashable {
     }
 }
 
+/// Live incremental update emitted by tools (such as `launch_helpers`) while still running.
+public struct ToolLiveUpdate: Sendable, Hashable {
+    public var summary: String
+    public var detail: String?
+    public var subagents: [SubagentRunItem]?
+
+    public init(summary: String, detail: String? = nil, subagents: [SubagentRunItem]? = nil) {
+        self.summary = summary
+        self.detail = detail
+        self.subagents = subagents
+    }
+}
+
 /// What a tool hands back: text for the model, and short words for the chat.
 public struct ToolOutput: Sendable, Hashable {
     public var forModel: String
@@ -27,6 +40,8 @@ public struct ToolOutput: Sendable, Hashable {
     public var inlineImages: [ToolInlineImage]
     /// Cost incurred by a tool outside the chat-completion request, such as image generation.
     public var billedCost: Double
+    /// Structured per-sub-agent records for `launch_helpers`.
+    public var subagents: [SubagentRunItem]?
 
     public init(
         forModel: String,
@@ -35,7 +50,8 @@ public struct ToolOutput: Sendable, Hashable {
         isError: Bool = false,
         generatedImages: [GeneratedImageResult] = [],
         inlineImages: [ToolInlineImage] = [],
-        billedCost: Double = 0
+        billedCost: Double = 0,
+        subagents: [SubagentRunItem]? = nil
     ) {
         self.forModel = forModel
         self.summary = summary
@@ -44,6 +60,7 @@ public struct ToolOutput: Sendable, Hashable {
         self.generatedImages = generatedImages
         self.inlineImages = inlineImages
         self.billedCost = billedCost
+        self.subagents = subagents
     }
 }
 
@@ -53,12 +70,16 @@ public protocol AgentTool: Sendable {
     var spec: ToolSpec { get }
     /// The line shown while the tool runs, such as "Reading README.md…".
     func runningSummary(for arguments: JSONValue) -> String
+    /// Optional structured sub-agent placeholders populated immediately before the tool starts.
+    func initialSubagents(for arguments: JSONValue, callID: String) -> [SubagentRunItem]?
     /// A destructive or build-setup change can pause for explicit approval before it runs.
     func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest?
     func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput
+    func runLive(arguments: JSONValue, update: @escaping @Sendable (ToolLiveUpdate) -> Void) async throws -> ToolOutput
     /// Called after the person approves this exact tool call. Most tools run identically; shell
     /// tools use the flag to accept a workspace delta that could only be known after execution.
     func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput
+    func runApprovedLive(arguments: JSONValue, update: @escaping @Sendable (ToolLiveUpdate) -> Void) async throws -> ToolOutput
     /// True when this tool's results come from outside the person's own words: web pages and web
     /// search, connectors, and repository files anyone could have written.
     var bringsOutsideContent: Bool { get }
@@ -70,10 +91,21 @@ public protocol AgentTool: Sendable {
 
 public extension AgentTool {
     var bringsOutsideContent: Bool { false }
+    func initialSubagents(for arguments: JSONValue, callID: String) -> [SubagentRunItem]? { nil }
     func approvalAfterOutsideContent(for arguments: JSONValue) async -> ToolApprovalRequest? { nil }
     func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? { nil }
+    func runLive(arguments: JSONValue, update: @escaping @Sendable (ToolLiveUpdate) -> Void) async throws -> ToolOutput {
+        try await run(arguments: arguments) { message in
+            update(ToolLiveUpdate(summary: message))
+        }
+    }
     func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         try await run(arguments: arguments, progress: progress)
+    }
+    func runApprovedLive(arguments: JSONValue, update: @escaping @Sendable (ToolLiveUpdate) -> Void) async throws -> ToolOutput {
+        try await runApproved(arguments: arguments) { message in
+            update(ToolLiveUpdate(summary: message))
+        }
     }
 }
 

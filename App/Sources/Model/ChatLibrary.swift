@@ -62,13 +62,20 @@ final class ChatLibrary {
 
     func load() async {
         let chats = await store.loadAll()
-        summaries = chats.map(ChatSummary.init).sorted { $0.updatedAt > $1.updatedAt }
-        isLoaded = true
-        for chat in chats where chat.lastAssistantTurn?.status == .running {
-            let session = ChatSession(chat: chat, app: app, draft: await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: chat.id.uuidString.lowercased())))
+        var loadedSummaries = chats.map(ChatSummary.init)
+        for index in chats.indices where chats[index].lastAssistantTurn?.status == .running {
+            let chat = chats[index]
+            let session = ChatSession(
+                chat: chat,
+                app: app,
+                draft: await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: chat.id.uuidString.lowercased()))
+            )
+            session.settleInterruptedTurnOnLaunch()
             sessions[chat.id] = session
-            session.resumeInterruptedTurn()
+            loadedSummaries[index] = ChatSummary(session.chat)
         }
+        summaries = loadedSummaries.sorted { $0.updatedAt > $1.updatedAt }
+        isLoaded = true
     }
 
     /// After a save brought chats from GitHub: refreshes the list, and any open chat that isn't busy
@@ -86,6 +93,7 @@ final class ChatLibrary {
                     let savedDraft = await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: chat.id.uuidString.lowercased()))
                     let mergedDraft = existingDraft.isEmpty ? savedDraft : existingDraft
                     let fresh = ChatSession(chat: chat, app: app, draft: mergedDraft)
+                    fresh.settleInterruptedTurnOnLaunch()
                     fresh.workstationFiles = session.workstationFiles
                     fresh.activeWorkflowRuns = session.activeWorkflowRuns
                     sessions[chat.id] = fresh
@@ -112,6 +120,7 @@ final class ChatLibrary {
         guard let chat = await store.load(id) else { return }
         let draft = await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: id.uuidString.lowercased()))
         let session = ChatSession(chat: chat, app: app, draft: draft)
+        session.settleInterruptedTurnOnLaunch()
         sessions[id] = session
         openSession = session
         dropIdleSessions()
