@@ -129,7 +129,7 @@ struct SideMenu: View {
                 .accessibilityLabel("Build workflow")
             } else if tab == .specs {
                 Button {
-                    app.sheet = .specs(activeSidebarRepo)
+                    app.sheet = .specs(activeSidebarRepo, startCreating: true)
                     app.isMenuOpen = false
                 } label: {
                     Image(systemName: "plus")

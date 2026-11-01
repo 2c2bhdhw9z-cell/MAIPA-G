@@ -501,7 +501,10 @@ public struct SubagentRunItem: Codable, Sendable, Hashable, Identifiable {
     /// and for older saved chats that predate structured `subagents` persistence.
     public static func resolvedItems(for call: ToolCallRecord) -> [SubagentRunItem] {
         if let stored = call.subagents, !stored.isEmpty {
-            guard call.status != .running && call.status != .waitingForUser else { return stored }
+            let isBackgroundActive = call.result?.contains("running_in_background") == true
+            guard call.status != .running && call.status != .waitingForUser && !isBackgroundActive else {
+                return stored
+            }
             return stored.map { item in
                 guard item.status == .running else { return item }
                 var copy = item
@@ -551,8 +554,8 @@ public struct SubagentRunItem: Codable, Sendable, Hashable, Identifiable {
     }
 
     private static func fallbackTerminalStatus(for call: ToolCallRecord) -> Status {
-        let combined = "\(call.summary) \(call.detail ?? "")".lowercased()
-        if combined.contains("cancel") || combined.contains("stopped") || combined.contains("interrupted") {
+        let combined = "\(call.summary) \(call.detail ?? "") \(call.result ?? "")".lowercased()
+        if combined.contains("cancel") || combined.contains("stopped") || combined.contains("interrupted") || combined.contains("paused") {
             return .cancelled
         }
         if call.detail == nil && call.result == nil {

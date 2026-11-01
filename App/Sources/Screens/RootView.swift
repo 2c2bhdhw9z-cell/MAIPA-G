@@ -167,7 +167,7 @@ struct SheetContent: View {
         case .memoryEditor(let id):
             NavigationStack { MemoryEditorScreen(record: id.flatMap { value in app.memories.memories.first { $0.id == value } }) }
         case .groups(let target): GroupPicker(target: target)
-        case .specs(let repo): SpecsScreen(repo: repo)
+        case .specs(let repo, let startCreating): SpecsScreen(repo: repo, startCreating: startCreating)
         case .specReview(let id): NavigationStack { SpecReviewScreen(specID: id) }
         case .connectors: ConnectorsScreen()
         case .connectorDetail(let id): ConnectorDetailScreen(connectorID: id, serverID: nil)

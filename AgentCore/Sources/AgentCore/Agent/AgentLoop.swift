@@ -404,6 +404,10 @@ private struct Runner {
                     }
                     if let subs = patch.update.subagents {
                         turn.steps[sIdx].toolCalls[cIdx].subagents = subs
+                        if !subs.contains(where: { $0.status == .running }),
+                           turn.steps[sIdx].toolCalls[cIdx].result?.contains("running_in_background") == true {
+                            turn.steps[sIdx].toolCalls[cIdx].result = patch.update.detail ?? patch.update.summary
+                        }
                     }
                     changed = true
                 }

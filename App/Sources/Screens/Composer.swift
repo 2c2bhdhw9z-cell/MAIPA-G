@@ -466,12 +466,10 @@ struct Composer: View {
                     }
                 }
 
-                Divider().padding(.vertical, 4)
-
-                plusPopoverRow("Specs", icon: "list.clipboard") {
-                    showingPlusMenu = false
-                    onSpec()
+                if repo != nil || !app.jobs.jobs.isEmpty {
+                    Divider().padding(.vertical, 3)
                 }
+
                 if repo != nil {
                     if let onFiles {
                         plusPopoverRow("Repo files", icon: "folder") {
@@ -491,7 +489,7 @@ struct Composer: View {
                     }
                 }
             }
-            .padding(.vertical, 8)
+            .padding(.vertical, 6)
             .padding(.horizontal, 8)
             .frame(width: 268)
             .background(Theme.raised.opacity(0.98))
@@ -527,7 +525,7 @@ struct Composer: View {
                 }
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .padding(.vertical, 6.5)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

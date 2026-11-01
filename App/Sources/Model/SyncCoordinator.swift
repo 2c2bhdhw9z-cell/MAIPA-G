@@ -105,7 +105,7 @@ final class SyncCoordinator {
                     return try await engine.sync()
                 }
                 activeSyncTask = worker
-                let report = try await Self.awaitWithTimeout(seconds: 35, task: worker)
+                let report = try await Self.awaitWithTimeout(seconds: 180, task: worker)
                 activeSyncTask = nil
                 if repo == nil {
                     repo = await engine.state.repo ?? RepoRef(owner: owner, name: DataRepoSync.repoName)

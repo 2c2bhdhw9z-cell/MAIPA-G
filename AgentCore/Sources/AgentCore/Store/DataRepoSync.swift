@@ -57,9 +57,16 @@ public actor DataRepoSync {
         case repoNotVisible
     }
 
+    private struct CachedBlobHash: Codable, Sendable, Hashable {
+        var size: Int
+        var modified: Double
+        var blobID: String
+    }
+
     private let github: GitHubClient
     private let dataDirectory: URL
     private let stateURL: URL
+    private let blobCacheURL: URL
     public private(set) var state: State
     /// Attachments and media at least this big are too large to go through Git. They are stored
     /// whole, by SHA-256, as assets of MAIPA-G-data's private "MAIPA-G files" draft release, and
@@ -68,16 +75,22 @@ public actor DataRepoSync {
     public static let defaultLargeFileThreshold = 20 * 1024 * 1024
     public static let pointerSuffix = ".maipa-g-file.json"
     private var largeHashes: [String: (size: Int, modified: Date, sha256: String)] = [:]
+    private var blobHashes: [String: CachedBlobHash] = [:]
 
     public init(github: GitHubClient, dataDirectory: URL, stateURL: URL, largeFileThreshold: Int = DataRepoSync.defaultLargeFileThreshold) {
         self.github = github
         self.dataDirectory = dataDirectory
         self.stateURL = stateURL
+        self.blobCacheURL = stateURL.deletingLastPathComponent().appendingPathComponent("sync-blob-cache.json")
         self.largeFileThreshold = largeFileThreshold
         if let data = try? Data(contentsOf: stateURL), let saved = try? JSONCoding.decoder().decode(State.self, from: data) {
             state = saved
         } else {
             state = State()
+        }
+        if let cacheData = try? Data(contentsOf: blobCacheURL),
+           let savedCache = try? JSONCoding.decoder().decode([String: CachedBlobHash].self, from: cacheData) {
+            blobHashes = savedCache
         }
     }
 
@@ -91,6 +104,7 @@ public actor DataRepoSync {
     private func saveState() {
         try? FileManager.default.createDirectory(at: stateURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? JSONCoding.encoder(pretty: true).encode(state).write(to: stateURL, options: .atomic)
+        try? JSONCoding.encoder().encode(blobHashes).write(to: blobCacheURL, options: .atomic)
     }
 
     /// Finds the user's MAIPA-G-data repo, making it (private) the first time.
@@ -137,6 +151,7 @@ public actor DataRepoSync {
     /// Forgets which repo and files were in sync, for signing out.
     public func reset() {
         state = State()
+        blobHashes = [:]
         saveState()
     }
 
@@ -317,6 +332,7 @@ public actor DataRepoSync {
         var successfulUploads: [String] = []
         var store: LargeFileStore?
         for path in uploads {
+            try Task.checkCancellation()
             let url = dataDirectory.appendingPathComponent(path)
             do {
                 let data: Data
@@ -431,16 +447,33 @@ public actor DataRepoSync {
                 guard values.isRegularFile == true else { continue }
                 // A pointer file never lives on the phone; one that does is ignored.
                 if Self.isPointer(path) { continue }
-                if let size = values.fileSize, size >= largeFileThreshold, Self.managedBlobPrefixes.contains(where: path.hasPrefix) {
-                    let large = try largeFile(at: url, path: path, size: size, modified: values.contentModificationDate ?? .distantPast)
+                let size = values.fileSize ?? 0
+                let modDate = values.contentModificationDate ?? .distantPast
+                let modStamp = modDate.timeIntervalSince1970
+                if size >= largeFileThreshold, Self.managedBlobPrefixes.contains(where: path.hasPrefix) {
+                    let large = try largeFile(at: url, path: path, size: size, modified: modDate)
                     let pointerPath = path + Self.pointerSuffix
                     scan.files[pointerPath] = Hashing.gitBlobID(large.pointer)
                     scan.largeFiles[pointerPath] = large
                     scan.largeRealPaths.insert(path)
                     continue
                 }
+                if let cached = blobHashes[path], cached.size == size, abs(cached.modified - modStamp) < 0.001 {
+                    scan.files[path] = cached.blobID
+                    continue
+                }
+                if Self.managedBlobPrefixes.contains(where: path.hasPrefix),
+                   let agreedBlob = state.files[path],
+                   let lastSync = state.lastSyncAt,
+                   modDate < lastSync.addingTimeInterval(-10) {
+                    blobHashes[path] = CachedBlobHash(size: size, modified: modStamp, blobID: agreedBlob)
+                    scan.files[path] = agreedBlob
+                    continue
+                }
                 let data = try Data(contentsOf: url)
-                scan.files[path] = Hashing.gitBlobID(data)
+                let blobID = Hashing.gitBlobID(data)
+                blobHashes[path] = CachedBlobHash(size: size, modified: modStamp, blobID: blobID)
+                scan.files[path] = blobID
             } catch where Self.isMissingFile(error) {
                 // Gone between listing and reading: deleted, not unreadable.
                 continue

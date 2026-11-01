@@ -378,20 +378,24 @@ public enum AIProviderGateway {
             "Authorization": "Bearer \(cleanKey)",
         ]
         let host = base.host?.lowercased() ?? ""
-        let candidatePaths: [String]
-        if endpoint.id == "oneprovider" || host.contains("oneprovider") {
-            candidatePaths = ["dashboard/balance", "dashboard/billing/credit_grants", "dashboard/billing/subscription"]
+        var candidateURLs: [URL] = []
+        if endpoint.id == "saygm" || host.contains("saygm") {
+            candidateURLs = ["credits", "billing/balance", "account/balance"].map { base.appendingPathComponent($0) }
+        } else if endpoint.id == "oneprovider" || host.contains("oneprovider") {
+            candidateURLs = ["dashboard/balance", "dashboard/billing/credit_grants", "dashboard/billing/subscription"].map { base.appendingPathComponent($0) }
         } else if endpoint.id == "teamorouter" || host.contains("teamorouter") {
-            candidatePaths = ["billing/balance", "dashboard/balance"]
+            candidateURLs = ["billing/balance", "dashboard/balance"].map { base.appendingPathComponent($0) }
         } else if endpoint.id == "omniroute" || host.contains("cheaperinference") || host.contains("omniroute") {
-            candidatePaths = ["account/balance", "dashboard/balance", "billing/balance"]
+            if host == "platform.cheaperinference.com", let apiURL = URL(string: "https://api.cheaperinference.com/v1/account/balance") {
+                candidateURLs.append(apiURL)
+            }
+            candidateURLs.append(contentsOf: ["account/balance", "dashboard/balance", "billing/balance"].map { base.appendingPathComponent($0) })
         } else {
-            candidatePaths = ["account/balance", "billing/balance", "dashboard/balance", "dashboard/billing/credit_grants", "credits"]
+            candidateURLs = ["credits", "account/balance", "billing/balance", "dashboard/balance", "dashboard/billing/credit_grants"].map { base.appendingPathComponent($0) }
         }
 
-        for rel in candidatePaths {
-            let url = base.appendingPathComponent(rel)
-            guard let resp = try? await transport.send(HTTPRequest(url: url, headers: headers, idleTimeout: 12)),
+        for url in candidateURLs {
+            guard let resp = try? await transport.send(HTTPRequest(url: url, headers: headers, idleTimeout: 10)),
                   resp.isSuccess,
                   let json = JSONValue.parse(resp.body),
                   let usd = parseBalanceJSON(json) else { continue }
@@ -401,6 +405,13 @@ public enum AIProviderGateway {
     }
 
     public static func parseBalanceJSON(_ json: JSONValue) -> Double? {
+        // SayGM: `{"object": "credit_balance", "balance": {"usd": "12.345678901", "nano_usd": 12345678901}}`
+        if let v = numberFromJSON(json["balance"]?["usd"]) ?? numberFromJSON(json["data"]?["balance"]?["usd"]) {
+            return max(0, v)
+        }
+        if let nano = numberFromJSON(json["balance"]?["nano_usd"]) ?? numberFromJSON(json["data"]?["balance"]?["nano_usd"]) ?? numberFromJSON(json["nano_usd"]) {
+            return max(0, nano / 1_000_000_000.0)
+        }
         // OmniRoute: `available_usd` (preferred over `balance_usd`)
         if let v = numberFromJSON(json["available_usd"]) ?? numberFromJSON(json["data"]?["available_usd"]) {
             return max(0, v)

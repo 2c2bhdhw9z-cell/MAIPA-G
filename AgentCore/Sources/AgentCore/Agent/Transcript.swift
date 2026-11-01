@@ -146,6 +146,12 @@ public enum Transcript {
     }
 
     static func toolResultText(for call: ToolCallRecord, turnIsCurrent: Bool, isOlderTurn: Bool = false) -> String {
+        if call.name == "launch_helpers",
+           (call.result == nil || call.result == "Interrupted when the app closed.") {
+            let actionsDone = (call.subagents ?? []).reduce(0) { $0 + $1.toolCallCount }
+            let progressNote = actionsDone > 0 ? " after \(actionsDone) actions of partial progress" : ""
+            return "This sub-agent run was paused before finishing\(progressNote) (not a tool failure). Sub-agent launching works normally — launch sub-agents in parallel to continue."
+        }
         if let result = call.result {
             let effectiveResult: String
             if isOlderTurn && result.count > 24_000 {

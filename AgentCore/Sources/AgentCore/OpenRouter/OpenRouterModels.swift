@@ -119,6 +119,23 @@ public struct ModelInfo: Codable, Sendable, Hashable, Identifiable {
         id.hasSuffix(":free") || (promptPrice == 0 && completionPrice == 0)
     }
 
+    /// Re-normalizes synthetic ~75–100% context-window output caps (such as `943,718` on `1,048,576` or `235,929` on `262,144`)
+    /// even when loading a previously cached `catalogue.json` from disk.
+    public var sanitized: ModelInfo {
+        var copy = self
+        let rawSlug = AIProviderModelID.rawModelID(id).lowercased()
+        let normalized = AIProviderGateway.normalizeReportedMaxOutputTokens(
+            reported: maxCompletionTokens,
+            contextLength: contextLength,
+            lowerID: rawSlug
+        )
+        copy.maxCompletionTokens = normalized.cap
+        if normalized.wasSynthetic {
+            copy.hadSyntheticMaxOutput = true
+        }
+        return copy
+    }
+
     public var isRouter: Bool { id.hasPrefix("openrouter/") }
     public var supportsTools: Bool { supportedParameters.contains("tools") }
     public var acceptsImages: Bool { inputModalities.contains("image") }

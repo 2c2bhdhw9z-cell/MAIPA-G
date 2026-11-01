@@ -341,4 +341,118 @@ struct Build85Tests {
         #expect(toolRecord.result?.contains("not a tool failure") == true)
         #expect(toolRecord.subagents?.first?.status == .cancelled)
     }
+
+    @Test("SayGM /v1/credits (balance.usd + balance.nano_usd) and OmniRoute api.cheaperinference.com balance parsing")
+    func saygmAndOmniRouteBalanceParsing() async throws {
+        // 1. SayGM CreditBalanceResponse schema (`balance.usd` decimal string + `balance.nano_usd`)
+        let saygmJSON = try #require(JSONValue.parse(Data(#"{"object":"credit_balance","balance":{"usd":"12.345678901","nano_usd":12345678901},"spent":{"usd":"1.200000000","nano_usd":1200000000}}"#.utf8)))
+        let saygmUSD = try #require(AIProviderGateway.parseBalanceJSON(saygmJSON))
+        #expect(abs(saygmUSD - 12.345678901) < 0.000_001)
+
+        // SayGM nano_usd-only fallback
+        let saygmNanoOnly = try #require(JSONValue.parse(Data(#"{"object":"credit_balance","balance":{"nano_usd":5500000000}}"#.utf8)))
+        let nanoUSD = try #require(AIProviderGateway.parseBalanceJSON(saygmNanoOnly))
+        #expect(abs(nanoUSD - 5.5) < 0.000_001)
+
+        // 2. OmniRoute with legacy `platform.cheaperinference.com/v1` baseURL still resolves balance via `api.cheaperinference.com/v1/account/balance`
+        final class BalanceTransport: HTTPTransport, @unchecked Sendable {
+            func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+                if request.url.host == "api.cheaperinference.com" && request.url.path == "/v1/account/balance" {
+                    return HTTPResponse(status: 200, headers: [:], body: Data(#"{"available_usd":8.75,"balance_usd":10.00,"reserved_usd":1.25}"#.utf8))
+                }
+                return HTTPResponse(status: 404, headers: [:], body: Data("Not Found".utf8))
+            }
+            func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse {
+                HTTPStreamResponse(status: 404, headers: [:], body: AsyncThrowingStream { $0.finish() })
+            }
+        }
+        let legacyOmni = AIProviderEndpoint(
+            id: "omniroute",
+            name: "OmniRoute",
+            baseURL: "https://platform.cheaperinference.com/v1",
+            apiKey: "ci_live_test",
+            isEnabled: true
+        )
+        let omniBalance = try #require(await AIProviderGateway.fetchBalance(for: legacyOmni, transport: BalanceTransport()))
+        #expect(abs(omniBalance - 8.75) < 0.000_001)
+    }
+
+    @Test("ModelInfo.sanitized normalizes cached catalogue models (943,718 -> 65,536 and 235,929 -> 65,536)")
+    func cachedModelSanitizedNormalizesSyntheticOutputCaps() throws {
+        let staleKimiK31 = ModelInfo(
+            id: "moonshotai/kimi-k3.1-pro",
+            name: "MoonshotAI: Kimi K3.1 Pro",
+            contextLength: 1_048_576,
+            maxCompletionTokens: 943_718,
+            supportedParameters: ["tools", "reasoning"]
+        ).sanitized
+        #expect(staleKimiK31.maxCompletionTokens == 65_536)
+        #expect(staleKimiK31.hadSyntheticMaxOutput == true)
+        #expect(ModelInfo.formattedTokenCount(try #require(staleKimiK31.maxCompletionTokens)) == "64K")
+
+        let staleKimiK27 = ModelInfo(
+            id: "moonshotai/kimi-k2.7-code",
+            name: "MoonshotAI: Kimi K2.7 Code",
+            contextLength: 262_144,
+            maxCompletionTokens: 235_929,
+            supportedParameters: ["tools"]
+        ).sanitized
+        #expect(staleKimiK27.maxCompletionTokens == 65_536)
+        #expect(staleKimiK27.hadSyntheticMaxOutput == true)
+    }
+
+    @Test("SubagentRunItem.resolvedItems keeps detached background sub-agents running and marks legacy app-closed runs stopped instead of failed")
+    func subagentResolvedItemsBackgroundAndLegacyInterrupted() {
+        // 1. Detached background sub-agent (`call.status == .done`, `result` contains `running_in_background`) stays `.running`!
+        var detachedCall = ToolCallRecord(
+            id: "call-bg",
+            name: "launch_helpers",
+            arguments: #"{"helpers":[{"agent_id":"verification-subagent","task":"Verify repo"}]}"#,
+            summary: "1 sub-agent running in background (14 actions)",
+            status: .done,
+            subagents: [
+                SubagentRunItem(
+                    id: "call-bg-sub-0",
+                    agentID: "verification-subagent",
+                    name: "Verification Sub-Agent",
+                    task: "Verify repo",
+                    model: "nvidia/nemotron:free",
+                    status: .running,
+                    toolCallCount: 14,
+                    latestActivity: "Reading ChatSession.swift"
+                )
+            ]
+        )
+        detachedCall.detail = "Reading files"
+        detachedCall.result = #"{"status":"running_in_background","running_subagents":1}"#
+        let detachedResolved = SubagentRunItem.resolvedItems(for: detachedCall)
+        #expect(detachedResolved.first?.status == .running)
+
+        // 2. Legacy Build 84 chat (`status == .failed`, `result == "Interrupted when the app closed."`) resolves to `.cancelled` and emits neutral transcript text!
+        var legacyCall = ToolCallRecord(
+            id: "call-legacy",
+            name: "launch_helpers",
+            arguments: #"{"helpers":[{"agent_id":"verification-subagent","task":"Audit"}]}"#,
+            summary: "Sub-agents running (25 actions)",
+            status: .failed,
+            subagents: [
+                SubagentRunItem(
+                    id: "call-legacy-sub-0",
+                    agentID: "verification-subagent",
+                    name: "Verification Sub-Agent",
+                    task: "Audit",
+                    status: .running,
+                    toolCallCount: 25
+                )
+            ]
+        )
+        legacyCall.detail = "### Verification Sub-Agent\nPartial notes"
+        legacyCall.result = "Interrupted when the app closed."
+        let legacyResolved = SubagentRunItem.resolvedItems(for: legacyCall)
+        #expect(legacyResolved.first?.status == .cancelled)
+
+        let transcriptNote = Transcript.toolResultText(for: legacyCall, turnIsCurrent: false)
+        #expect(transcriptNote.contains("not a tool failure"))
+        #expect(!transcriptNote.contains("This tool did not finish"))
+    }
 }

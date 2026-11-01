@@ -6,9 +6,11 @@ struct SpecsScreen: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
     var repo: ChatRepo?
+    var startCreating: Bool = false
     @State private var title = ""
     @State private var request = ""
     @State private var showingNew = false
+    @State private var didAutoOpenNew = false
     @State private var draftRepo: ChatRepo?
     @State private var availableBranches: [GitHubBranch] = []
     @State private var loadingBranches = false
@@ -57,6 +59,13 @@ struct SpecsScreen: View {
                 }
             }
             .task {
+                if startCreating && !didAutoOpenNew {
+                    didAutoOpenNew = true
+                    if canCreateSpec {
+                        seedDraftRepo()
+                        showingNew = true
+                    }
+                }
                 await app.specs.load(discovering: repo)
                 await app.specs.refreshJobs()
             }

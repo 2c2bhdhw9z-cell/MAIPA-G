@@ -31,7 +31,7 @@ enum AppSheet: Identifiable, Hashable {
     case unreadableFiles
     case memoryEditor(UUID?)
     case groups(ComposerTarget)
-    case specs(ChatRepo?)
+    case specs(ChatRepo?, startCreating: Bool = false)
     case specReview(UUID)
     case connectors
     case connectorDetail(UUID)
@@ -64,7 +64,7 @@ enum AppSheet: Identifiable, Hashable {
         case .unreadableFiles: return "unreadable-files"
         case .memoryEditor(let id): return "memory-editor-\(id?.uuidString ?? "new")"
         case .groups(let target): return "groups-\(target)"
-        case .specs(let repo): return "specs-\(repo?.ref.fullName ?? "all")"
+        case .specs(let repo, let startCreating): return "specs-\(repo?.ref.fullName ?? "all")-\(startCreating)"
         case .specReview(let id): return "spec-review-\(id.uuidString)"
         case .connectors: return "connectors"
         case .connectorDetail(let id): return "connector-\(id.uuidString)"

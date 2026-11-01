@@ -231,9 +231,11 @@ final class ChatSession: Identifiable {
             // - `Steer` (default for text): folds guidance into the active turn at the next safe boundary
             //   WITHOUT calling `finishAfterCurrentStep()` or cancelling any running stream/sub-agent/tool!
             // - `Queue` (or attachments): holds follow-up on disk to run sequentially after the active turn finishes naturally.
-            if busySendMode == .steer, attachments.isEmpty, let activeRun = run {
+            if busySendMode == .steer, attachments.isEmpty {
                 pendingSteers.append(message)
-                Task { await activeRun.steer(message) }
+                if let activeRun = run {
+                    Task { await activeRun.steer(message) }
+                }
             } else {
                 queuedSteering.append(QueuedFollowUp(text: message, attachments: attachments))
                 syncQueuedFollowUpsToChat()
@@ -332,7 +334,7 @@ final class ChatSession: Identifiable {
                         return copy
                     }
                 }
-                if record.result == nil {
+                if record.result == nil || record.result?.contains("running_in_background") == true {
                     if record.name == "launch_helpers" {
                         let actionsDone = (record.subagents ?? []).reduce(0) { $0 + $1.toolCallCount }
                         let progressNote = actionsDone > 0 ? " after \(actionsDone) actions of partial progress" : ""
@@ -1392,6 +1394,12 @@ final class ChatSession: Identifiable {
 
         let run = AgentLoop.start(input, environment: environment)
         self.run = run
+        if !pendingSteers.isEmpty {
+            let earlySteers = pendingSteers
+            for steerMsg in earlySteers {
+                await run.steer(steerMsg)
+            }
+        }
         for await event in run.events {
             guard case .updated(let turn, let milestone) = event else { continue }
             receive(turn, milestone: milestone)

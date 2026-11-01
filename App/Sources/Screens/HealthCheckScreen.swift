@@ -177,7 +177,7 @@ struct HealthCheckScreen: View {
             let detail = app.connectors.errors[connector.id] ?? state.rawValue
             let isGitHubMCP = connector.displayName.caseInsensitiveCompare("GitHub") == .orderedSame
                 || connector.serverID.lowercased().contains("github")
-            let connectorTitle = isGitHubMCP ? "GitHub MCP Connector" : "\(connector.displayName) MCP Connector"
+            let connectorTitle = isGitHubMCP ? "GitHub MCP Connector" : connector.displayName
             items.append(Item(
                 id: "connector-\(connector.id)", title: connectorTitle, detail: detail,
                 nextStep: state == .connected ? nil : "Open Connectors and reconnect this service.",

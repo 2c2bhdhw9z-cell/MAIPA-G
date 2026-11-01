@@ -474,6 +474,8 @@ struct ModelPicker: View {
             if let selectedMaker, model.maker != selectedMaker { continue }
             // When actively typing a search query and filter == .pinned, don't trap the user in an empty pinned view.
             let activeFilter = (!tokens.isEmpty && filter == .pinned) ? .all : filter
+            // Exclude pure image-generation models (`Image gen only`) from default chat model lists unless `Images` is active or searching by name.
+            if activeFilter != .images, tokens.isEmpty, model.isPureImageModel { continue }
             switch activeFilter {
             case .all: break
             case .pinned: if !app.openRouter.isPinned(model.id) { continue }

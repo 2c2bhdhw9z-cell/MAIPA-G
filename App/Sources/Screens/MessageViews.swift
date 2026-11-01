@@ -683,11 +683,18 @@ struct ActivityTimelineCard: View {
         }
     }
 
+    fileprivate static func isLegacyInterruptedLaunchHelpers(_ call: ToolCallRecord) -> Bool {
+        guard call.name == "launch_helpers" else { return false }
+        let noChildFailed = !(call.subagents ?? []).contains(where: { $0.status == .failed })
+        return noChildFailed && (call.result == nil || call.result == "Interrupted when the app closed.")
+    }
+
     private func isRecoveredItem(at index: Int) -> Bool {
         guard items.indices.contains(index),
               case .tool(let call) = items[index],
               call.status == .failed
         else { return false }
+        if Self.isLegacyInterruptedLaunchHelpers(call) { return true }
         return items.dropFirst(index + 1).contains { later in
             if case .tool(let nextCall) = later { return nextCall.status == .done }
             return false
@@ -704,7 +711,8 @@ struct ActivityTimelineCard: View {
 
     private var hasFailure: Bool {
         // Only flag the collapsed header if the final tool action in this block ended in an unrecovered failure.
-        toolItems.last?.status == .failed
+        guard let last = toolItems.last, last.status == .failed else { return false }
+        return !Self.isLegacyInterruptedLaunchHelpers(last)
     }
 
     private var headerIcon: String {
@@ -781,7 +789,16 @@ private struct ActivityTimelineRow: View {
 
             switch item {
             case .thought(let step, let isLive):
-                ThoughtsView(step: step, isLive: isLive)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(isLive ? "Thinking…" : (step.thinkingSeconds.map { "Thought for \($0)s" } ?? "Thoughts"))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(isLive ? theme.accent : Theme.secondaryText)
+                    Text(step.reasoning)
+                        .font(.footnote)
+                        .foregroundStyle(Theme.secondaryText)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             case .tool(let call):
                 if call.name == "launch_helpers", !SubagentRunItem.resolvedItems(for: call).isEmpty {
                     SubagentCardsGroupView(call: call, modelName: { $0 })
