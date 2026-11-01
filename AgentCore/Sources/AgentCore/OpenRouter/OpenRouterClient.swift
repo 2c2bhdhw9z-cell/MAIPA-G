@@ -298,12 +298,23 @@ public struct OpenRouterClient: Sendable {
                 providerName: name
             )
         }
-        var reqHeaders = headers(forModel: request.model)
+        let openRouterCatalogueModel = catalogueByID[request.model]
+        var outbound = request
+        if let safeMax = AIProviderGateway.safeOutgoingMaxTokens(
+            requested: request.maxTokens,
+            catalogueModel: openRouterCatalogueModel,
+            rawModelID: request.model,
+            messages: request.messages,
+            tools: request.tools
+        ) {
+            outbound.maxTokens = safeMax
+        }
+        var reqHeaders = headers(forModel: outbound.model)
         reqHeaders["Accept"] = "text/event-stream"
         let http = try HTTPRequest.json(
             "POST",
             Self.apiBase.appendingPathComponent("chat/completions"),
-            body: request,
+            body: outbound,
             headers: reqHeaders,
             idleTimeout: 180
         )

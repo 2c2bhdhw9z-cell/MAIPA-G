@@ -307,14 +307,14 @@ final class ChatSession: Identifiable {
         guard !isRunning, var turn = lastTurn, turn.status == .running else { return }
         let finishedAt = Date()
         for stepIdx in turn.steps.indices {
-            for callIdx in turn.steps[stepIdx].toolCalls.indices where turn.steps[stepIdx].toolCalls[callIdx].status == .running {
-                var record = turn.steps[stepIdx].toolCalls[callIdx]
-                record.status = .failed
+            for callIdx in turn.steps[stepIdx].toolCalls.indices {
+                let existing = turn.steps[stepIdx].toolCalls[callIdx]
+                let hasRunningSubagents = existing.subagents?.contains(where: { $0.status == .running }) == true
+                guard existing.status == .running || hasRunningSubagents else { continue }
+                var record = existing
+                record.status = .done
                 if record.detail == nil || record.detail?.isEmpty == true {
-                    record.detail = "Interrupted when the app closed"
-                }
-                if record.result == nil {
-                    record.result = "Interrupted when the app closed."
+                    record.detail = "Paused when the app closed"
                 }
                 if var subs = record.subagents {
                     for sIdx in subs.indices where subs[sIdx].status == .running {
@@ -332,7 +332,22 @@ final class ChatSession: Identifiable {
                         return copy
                     }
                 }
-                record.finishedAt = finishedAt
+                if record.result == nil {
+                    if record.name == "launch_helpers" {
+                        let actionsDone = (record.subagents ?? []).reduce(0) { $0 + $1.toolCallCount }
+                        let progressNote = actionsDone > 0 ? " after \(actionsDone) actions of partial progress" : ""
+                        record.result = "Paused when the app closed\(progressNote) (not a tool failure). Sub-agent launching works normally — launch sub-agents in parallel to continue."
+                    } else {
+                        record.result = "Paused when the app closed."
+                    }
+                }
+                let baseSummary = record.summary.replacingOccurrences(of: "…", with: "").trimmingCharacters(in: .whitespaces)
+                if !baseSummary.lowercased().contains("stopped"), !baseSummary.lowercased().contains("paused") {
+                    record.summary = baseSummary.isEmpty ? "Paused" : "\(baseSummary) · paused"
+                }
+                if record.finishedAt == nil {
+                    record.finishedAt = finishedAt
+                }
                 turn.steps[stepIdx].toolCalls[callIdx] = record
             }
             if turn.steps[stepIdx].finishedAt == nil {
@@ -1070,9 +1085,10 @@ final class ChatSession: Identifiable {
         }
         tools.append(createCustomAgentTool)
 
+        let turnSteering = SteeringInbox()
         if app.openRouter.supportsTools(chat.model) {
             let builtInHelpers = BuiltInAgents.kiroSubagents + BuiltInAgents.all.filter {
-                ["planner", "designer", "design-checker", "code-checker", "second-opinion", "review-combiner", "investigator"].contains($0.id)
+                ["planner", "designer", "design-checker", "design-reviewer", "code-checker", "second-opinion", "review-combiner", "investigator"].contains($0.id)
             }
             var seenHelperIDs = Set<String>()
             var builtHelpers: [AgentDefinition] = []
@@ -1084,7 +1100,7 @@ final class ChatSession: Identifiable {
             let helperDefinitions = builtHelpers
             if let baseLead = BuiltInAgents.named("coder"), !helperDefinitions.isEmpty {
                 var lead = baseLead
-                lead.maximumHelpers = max(lead.maximumHelpers, 8)
+                lead.maximumHelpers = max(lead.maximumHelpers, 16)
                 let inspectWorkflowTool = InspectWorkflowTool { [weak self, weak app] query in
                     await MainActor.run {
                         guard let self else { return "Chat closed." }
@@ -1104,7 +1120,8 @@ final class ChatSession: Identifiable {
                     lead: lead,
                     definitions: helperDefinitions,
                     context: lastMessage,
-                    spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil
+                    spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil,
+                    steering: turnSteering
                 ) { invocation in
                     var helperChoice = userChoice
                     if let explicitModel = invocation.preferredModelID, !explicitModel.isEmpty, explicitModel != ModelChoice.freeID {
@@ -1350,7 +1367,8 @@ final class ChatSession: Identifiable {
             attachmentData: attachmentData,
             serverTools: [],
             fallbackModels: fallbackModels,
-            requiresInitialSpendApproval: false
+            requiresInitialSpendApproval: false,
+            steering: turnSteering
         )
         let account = app.openRouter
         let attachmentStore = app.attachmentStore

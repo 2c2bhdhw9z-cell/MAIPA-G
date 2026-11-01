@@ -218,7 +218,10 @@ final class ChatLibrary {
             return
         }
         upsert(chat)
-        app?.sync.request()
+        // Local disk is saved immediately; while a turn is actively streaming, debounce remote GitHub
+        // commits so MAIPA-G-data isn't hammered every 4 seconds (and doesn't hold Saving… continuously).
+        let isActivelyStreaming = sessions[chat.id]?.isRunning == true
+        app?.sync.request(after: isActivelyStreaming ? 25 : 3.5)
     }
 
     private func upsert(_ chat: Chat) {

@@ -132,22 +132,45 @@ private struct WorkflowStepEditor: View {
 
 struct WorkflowMakerScreen: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.theme) private var theme
     @State private var description = ""
     @State private var draft: WorkflowRecord?
+
+    private var canMakeDraft: Bool {
+        !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !app.automations.isMakingWorkflow
+    }
 
     var body: some View {
         Form {
             Section("Describe it") {
-                TextField("Example: Plan and build a feature, then have two AIs review it", text: $description, axis: .vertical).lineLimit(4...10)
+                TextField("Example: Plan and build a feature, then have two AIs review it", text: $description, axis: .vertical)
+                    .lineLimit(4...10)
+            }
+            Section {
                 Button {
                     Task { draft = await app.automations.makeWorkflow(description: description) }
                 } label: {
-                    if app.automations.isMakingWorkflow { ProgressView() }
-                    else { Text("Make draft") }
+                    HStack(spacing: 8) {
+                        if app.automations.isMakingWorkflow {
+                            ProgressView().tint(.white)
+                            Text("Making draft…").fontWeight(.semibold)
+                        } else {
+                            Image(systemName: "wand.and.stars")
+                            Text("Make draft").fontWeight(.semibold)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .foregroundStyle(.white)
+                    .background(canMakeDraft ? theme.accent : Theme.secondaryText.opacity(0.35), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
-                .disabled(description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || app.automations.isMakingWorkflow)
+                .buttonStyle(.plain)
+                .disabled(!canMakeDraft)
+                .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                .listRowBackground(Color.clear)
+            } footer: {
+                Text("Workflow maker turns your words into typed steps. You can edit every step, then you must approve the saved draft before its first run.")
             }
-            Section { Text("Workflow maker turns your words into typed steps. You can edit every step, then you must approve the saved draft before its first run.").font(.caption).foregroundStyle(Theme.secondaryText) }
             if let error = app.automations.lastError { Section { Text(error).foregroundStyle(Theme.danger) } }
             if let draft { Section("Draft") { NavigationLink("Review and edit \(draft.name)") { WorkflowEditorScreen(record: draft) } } }
         }

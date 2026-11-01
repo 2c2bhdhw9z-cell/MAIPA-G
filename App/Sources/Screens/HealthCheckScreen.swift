@@ -142,12 +142,12 @@ struct HealthCheckScreen: View {
 
         await app.github.refresh()
         if app.github.isConnected, app.github.reposError == nil {
-            items.append(Item(id: "github", title: "GitHub", detail: "Connected as \(app.github.login ?? "your account").", state: .good))
+            items.append(Item(id: "github", title: "GitHub App", detail: "Connected as \(app.github.login ?? "your account").", state: .good))
         } else {
-            items.append(Item(id: "github", title: "GitHub", detail: app.github.reposError ?? "Not connected.", nextStep: "Connect or sign in again in Settings.", state: .failed, action: .github))
+            items.append(Item(id: "github", title: "GitHub App", detail: app.github.reposError ?? "Not connected.", nextStep: "Connect or sign in again in Settings.", state: .failed, action: .github))
         }
 
-        await app.openRouter.refreshKeyInfo()
+        await app.openRouter.refreshKeyInfo(force: true)
         if app.openRouter.hasOpenRouterKey, app.openRouter.keyInfo != nil {
             let balance = app.openRouter.balance.map { " Balance \($0.dollars)." } ?? ""
             let extras = app.openRouter.readyExternalProviders.isEmpty ? "" : " Extra gateways: \(app.openRouter.readyExternalProviders.map(\.name).joined(separator: ", "))."
@@ -175,8 +175,11 @@ struct HealthCheckScreen: View {
             await app.connectors.recheck(connector)
             let state = app.connectors.states[connector.id] ?? .disconnected
             let detail = app.connectors.errors[connector.id] ?? state.rawValue
+            let isGitHubMCP = connector.displayName.caseInsensitiveCompare("GitHub") == .orderedSame
+                || connector.serverID.lowercased().contains("github")
+            let connectorTitle = isGitHubMCP ? "GitHub MCP Connector" : "\(connector.displayName) MCP Connector"
             items.append(Item(
-                id: "connector-\(connector.id)", title: connector.displayName, detail: detail,
+                id: "connector-\(connector.id)", title: connectorTitle, detail: detail,
                 nextStep: state == .connected ? nil : "Open Connectors and reconnect this service.",
                 state: state == .connected ? .good : (state == .connecting ? .warning : .failed),
                 action: state == .connected ? nil : .connector(connector.id)

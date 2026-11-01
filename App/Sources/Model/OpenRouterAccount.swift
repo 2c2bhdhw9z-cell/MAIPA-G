@@ -322,8 +322,17 @@ final class OpenRouterAccount {
 
     // MARK: Money
 
-    func refreshKeyInfo() async {
+    @ObservationIgnored private var lastKeyInfoRefreshAt: Date?
+
+    func refreshKeyInfo(force: Bool = false) async {
         guard !PreviewScenes.isActive else { return }
+        if !force,
+           let last = lastKeyInfoRefreshAt,
+           Date().timeIntervalSince(last) < 30,
+           (keyInfo != nil || !hasOpenRouterKey) {
+            return
+        }
+        lastKeyInfoRefreshAt = Date()
         if hasOpenRouterKey {
             do {
                 let info = try await client.keyInfo()

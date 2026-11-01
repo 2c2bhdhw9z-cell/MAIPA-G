@@ -600,8 +600,44 @@ struct ActivityTimelineCard: View {
             }
 
             if isOpen {
+                let isThoughtOnlyCard = !items.contains {
+                    if case .tool = $0 { return true }
+                    return false
+                }
                 Group {
-                    if timelineNeedsScroll {
+                    if isThoughtOnlyCard {
+                        let thoughtBody = VStack(alignment: .leading, spacing: 10) {
+                            ForEach(Array(items.enumerated()), id: \.element.id) { idx, item in
+                                if case .thought(let step, _) = item {
+                                    if items.count > 1 {
+                                        Text(step.thinkingSeconds.map { "Step \(idx + 1) · \($0)s" } ?? "Step \(idx + 1)")
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(theme.accent)
+                                    }
+                                    Text(step.reasoning)
+                                        .font(.footnote)
+                                        .foregroundStyle(Theme.secondaryText)
+                                        .textSelection(.enabled)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        if timelineNeedsScroll {
+                            ScrollView(.vertical, showsIndicators: true) {
+                                thoughtBody
+                            }
+                            .frame(height: 240)
+                            .background(Theme.surface.opacity(0.45), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.stroke.opacity(0.8)))
+                        } else {
+                            thoughtBody
+                                .background(Theme.surface.opacity(0.45), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.stroke.opacity(0.8)))
+                        }
+                    } else if timelineNeedsScroll {
                         ScrollViewReader { timelineProxy in
                             ScrollView(.vertical, showsIndicators: true) {
                                 LazyVStack(alignment: .leading, spacing: 8) {

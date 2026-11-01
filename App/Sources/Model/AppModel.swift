@@ -420,8 +420,8 @@ final class AppModel {
     }
 
     func turnFinished(in session: ChatSession) {
-        Task { await openRouter.refreshKeyInfo() }
-        sync.request()
+        Task { await openRouter.refreshKeyInfo(force: true) }
+        sync.request(after: 2.5)
         if session.lastTurn?.status == .done || session.lastTurn?.status == .waitingForUser {
             Haptics.success()
             let needsAnswer = session.lastTurn?.status == .waitingForUser

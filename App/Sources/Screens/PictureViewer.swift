@@ -232,8 +232,9 @@ struct PictureViewer: View {
                 try await app.attachmentStore.saveGeneratedMetadata(saved)
                 generated = saved
                 image = decoded
+                app.openRouter.recordRecent(.model(model))
                 app.sync.request()
-                await app.openRouter.refreshKeyInfo()
+                await app.openRouter.refreshKeyInfo(force: true)
             } catch {
                 self.error = userMessage(for: error)
             }

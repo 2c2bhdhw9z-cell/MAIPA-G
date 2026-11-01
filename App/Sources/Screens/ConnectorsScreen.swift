@@ -57,12 +57,54 @@ struct ConnectorsScreen: View {
                 case .mine: myApps
                 case .discover: discoverApps
                 }
+
+                Section {
+                    Color.clear
+                        .frame(height: 28)
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                }
             }
             .listStyle(.plain)
             .scrollDismissesKeyboard(.interactively)
             .scrollContentBackground(.hidden)
             .background(Theme.background)
-            .searchable(text: $connectors.query, prompt: "Search 81 working apps & integrations")
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(spacing: 0) {
+                    Divider().opacity(0.75)
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(Theme.secondaryText)
+                        TextField("Search 81 working apps & integrations", text: $connectors.query)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        if !connectors.query.isEmpty {
+                            Button {
+                                connectors.query = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(Theme.secondaryText)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 11)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Theme.stroke))
+                    .padding(.horizontal, 16)
+                    .padding(.top, 10)
+                    .padding(.bottom, 10)
+                }
+                .background {
+                    ZStack {
+                        Theme.background.opacity(0.95)
+                        Rectangle().fill(.regularMaterial)
+                    }
+                    .ignoresSafeArea(edges: .bottom)
+                }
+            }
             .navigationTitle("Connectors")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

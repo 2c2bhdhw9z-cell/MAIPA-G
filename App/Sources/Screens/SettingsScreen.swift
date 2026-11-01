@@ -306,7 +306,7 @@ struct SettingsScreen: View {
             .pickerStyle(.segmented)
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Colour")
+                Text("Color")
                 HStack(spacing: 12) {
                     ForEach(AccentChoice.allCases) { choice in
                         let (accent, partner) = Palette.colors(for: choice)
@@ -414,8 +414,17 @@ struct SettingsScreen: View {
             }
             if !draft.chatComputerOff {
                 LabeledContent("Approximate cost per hour") {
-                    TextField("0.10", value: $draft.chatComputerHourlyCost, format: .number.precision(.fractionLength(0...3)))
-                        .multilineTextAlignment(.trailing).keyboardType(.decimalPad)
+                    HStack(spacing: 2) {
+                        Text("$")
+                            .foregroundStyle(Theme.secondaryText)
+                        TextField("0.10", value: $draft.chatComputerHourlyCost, format: .number.precision(.fractionLength(2...3)))
+                            .multilineTextAlignment(.trailing)
+                            .keyboardType(.decimalPad)
+                            .fixedSize()
+                        Text("/hr")
+                            .foregroundStyle(Theme.secondaryText)
+                    }
+                    .monospacedDigit()
                 }
                 LabeledContent("Machine name") {
                     TextField(AppSettings.defaultChatComputerMachine, text: $draft.chatComputerMachine)
@@ -512,17 +521,22 @@ struct SettingsScreen: View {
     }
 
     private var repoSaving: some View {
-        Section {
-            if app.github.repos.isEmpty {
-                Text("Your repos appear here after GitHub connects.").foregroundStyle(Theme.secondaryText)
+        let enabledCount = app.github.repos.filter { draft.directSaveRepos[$0.fullName] == true }.count
+        return Section {
+            NavigationLink {
+                DirectSaveReposScreen(directSaveRepos: $draft.directSaveRepos, repos: app.github.repos)
+            } label: {
+                HStack {
+                    Text("Save straight to branch")
+                    Spacer()
+                    Text(enabledCount == 0 ? "Off" : (enabledCount == 1 ? "1 repo" : "\(enabledCount) repos"))
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.secondaryText)
+                }
             }
-            ForEach(app.github.repos) { repo in
-                Toggle(repo.fullName, isOn: Binding(
-                    get: { draft.directSaveRepos[repo.fullName] ?? false },
-                    set: { draft.directSaveRepos[repo.fullName] = $0 }
-                ))
-            }
-        } header: { Text("Save straight to branch") } footer: {
+        } header: {
+            Text("Repository saving")
+        } footer: {
             Text("Off uses a side branch and pull request. A repo's own rules always win.")
         }
     }
@@ -697,5 +711,42 @@ struct SettingsScreen: View {
                 .multilineTextAlignment(.trailing)
                 .textSelection(.enabled)
         }
+    }
+}
+
+private struct DirectSaveReposScreen: View {
+    @Binding var directSaveRepos: [String: Bool]
+    let repos: [GitHubRepo]
+    @State private var query = ""
+
+    private var filteredRepos: [GitHubRepo] {
+        let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return repos }
+        return repos.filter { $0.fullName.localizedCaseInsensitiveContains(clean) }
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                if repos.isEmpty {
+                    Text("Your repos appear here after GitHub connects.")
+                        .foregroundStyle(Theme.secondaryText)
+                } else if filteredRepos.isEmpty {
+                    Text("No repos match \"\(query)\".")
+                        .foregroundStyle(Theme.secondaryText)
+                }
+                ForEach(filteredRepos) { repo in
+                    Toggle(repo.fullName, isOn: Binding(
+                        get: { directSaveRepos[repo.fullName] ?? false },
+                        set: { directSaveRepos[repo.fullName] = $0 }
+                    ))
+                }
+            } footer: {
+                Text("Off uses a side branch and pull request. A repo's own branch protection rules always win.")
+            }
+        }
+        .searchable(text: $query, prompt: "Search repositories")
+        .navigationTitle("Save straight to branch")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

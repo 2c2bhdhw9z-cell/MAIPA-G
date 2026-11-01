@@ -289,14 +289,23 @@ public actor AgentHelperCoordinator {
     private let context: String
     private let spendLimit: Double?
     private let runner: AgentExecutor.Runner
+    private let steering: SteeringInbox?
     private var launched = 0
     private var records: [AgentHelperResult] = []
 
-    public init(lead: AgentDefinition, definitions: [AgentDefinition], context: String, spendLimit: Double?, runner: @escaping AgentExecutor.Runner) {
+    public init(
+        lead: AgentDefinition,
+        definitions: [AgentDefinition],
+        context: String,
+        spendLimit: Double?,
+        steering: SteeringInbox? = nil,
+        runner: @escaping AgentExecutor.Runner
+    ) {
         self.lead = lead
         self.definitions = Dictionary(definitions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         self.context = context
         self.spendLimit = spendLimit
+        self.steering = steering
         self.runner = runner
     }
 
@@ -311,7 +320,6 @@ public actor AgentHelperCoordinator {
         guard launched + requests.count <= lead.maximumHelpers else {
             throw AgentExecutorError.tooManyHelpers(maximum: lead.maximumHelpers)
         }
-        let batchOffset = launched
         launched += requests.count
         let priorCost = records.reduce(0) { $0 + $1.cost }
         let resolved = try requests.map { request -> (AgentDefinition, String) in
@@ -334,7 +342,6 @@ public actor AgentHelperCoordinator {
         let operationLimit = spendLimit.map { max(0.000_001, $0 - priorCost - resumedPriorCost) / Double(remainingCount) }
 
         let liveTracker = LiveHelperProgressTracker(
-            batchOffset: batchOffset,
             callID: callID,
             resolved: resolved,
             completedExisting: completedExisting
@@ -342,6 +349,135 @@ public actor AgentHelperCoordinator {
         let initialSnapshot = liveTracker.currentUpdate()
         onProgress?(initialSnapshot.summary)
         onLiveUpdate?(initialSnapshot)
+
+        let runnerFn = self.runner
+        let contextCopy = self.context
+        let steeringBox = self.steering
+
+        if let steeringBox {
+            let batchState = DetachableHelperBatchState(totalCount: resolved.count)
+            for (index, item) in resolved.enumerated() {
+                if let done = completedExisting[index] {
+                    let cached = AgentExecutionResult(
+                        output: done.output,
+                        model: done.model,
+                        cost: done.cost,
+                        toolCallCount: done.toolCallCount,
+                        toolSummaries: done.toolSummaries,
+                        status: "completed"
+                    )
+                    _ = await batchState.recordCompletion(index: index, result: cached)
+                    continue
+                }
+                let taskID = UUID()
+                let helperTask = Task<Void, Never> {
+                    let emitLive: @Sendable (ToolLiveUpdate) -> Void = { live in
+                        onProgress?(live.summary)
+                        onLiveUpdate?(live)
+                        Task {
+                            if await batchState.isDetached(index: index) {
+                                await steeringBox.recordBackgroundCardPatch(BackgroundSubagentCardPatch(callID: callID, update: live))
+                            }
+                        }
+                    }
+                    let invocation = AgentInvocation(
+                        definition: item.0,
+                        task: item.1,
+                        context: contextCopy,
+                        spendLimit: operationLimit,
+                        onProgress: { toolCount, latest in
+                            emitLive(liveTracker.updateBasic(index: index, toolCount: toolCount, latest: latest))
+                        },
+                        onLiveProgress: { progress in
+                            emitLive(liveTracker.updateRich(index: index, progress: progress))
+                        }
+                    )
+                    let finalOutcome: AgentExecutionResult
+                    do {
+                        finalOutcome = try await runnerFn(invocation)
+                    } catch is CancellationError {
+                        finalOutcome = liveTracker.cancelledResult(at: index)
+                    } catch {
+                        finalOutcome = Task.isCancelled
+                            ? liveTracker.cancelledResult(at: index)
+                            : liveTracker.failedResult(at: index, error: error)
+                    }
+                    let finalLive = liveTracker.finish(index: index, result: finalOutcome)
+                    onProgress?(finalLive.summary)
+                    onLiveUpdate?(finalLive)
+                    let wasDetached = await batchState.recordCompletion(index: index, result: finalOutcome)
+                    if wasDetached {
+                        let reportText: String? = {
+                            guard finalOutcome.status != "cancelled" else { return nil }
+                            let badge = finalOutcome.toolCallCount == 1 ? "1 action" : "\(finalOutcome.toolCallCount) actions"
+                            let statusSuffix = finalOutcome.status == "failed" ? " · failed" : ""
+                            return "Sub-agent (\(item.0.name) · \(badge) · \(finalOutcome.model ?? "model not reported")\(statusSuffix)) — Task: \(item.1)\n\(finalOutcome.output)"
+                        }()
+                        await steeringBox.completeBackgroundTask(
+                            taskID,
+                            report: reportText,
+                            finalPatch: BackgroundSubagentCardPatch(callID: callID, update: finalLive)
+                        )
+                    }
+                }
+                await batchState.storeTask(index: index, taskID: taskID, task: helperTask)
+            }
+
+            await withTaskCancellationHandler {
+                await withTaskGroup(of: Void.self) { race in
+                    race.addTask { await batchState.waitAllCompleted() }
+                    race.addTask { await steeringBox.waitForSteer() }
+                    _ = await race.next()
+                    race.cancelAll()
+                }
+            } onCancel: {
+                Task { await batchState.cancelAll() }
+            }
+
+            if Task.isCancelled {
+                await batchState.cancelAll()
+                await batchState.waitAllCompleted()
+            } else if !(await batchState.allCompleted()) {
+                let detachedTasks = await batchState.detachRemaining()
+                for entry in detachedTasks {
+                    await steeringBox.registerBackgroundTask(entry.taskID, task: entry.task)
+                }
+            }
+
+            let snapshotResults = await batchState.snapshotResults()
+            let currentItems = liveTracker.snapshotItems()
+            let launchedRecords = resolved.enumerated().map { index, item -> AgentHelperResult in
+                if let finished = snapshotResults[index] {
+                    return AgentHelperResult(
+                        agentID: item.0.id,
+                        name: item.0.name,
+                        task: item.1,
+                        output: finished.output,
+                        model: finished.model,
+                        cost: finished.cost,
+                        toolCallCount: finished.toolCallCount,
+                        toolSummaries: finished.toolSummaries,
+                        status: finished.status
+                    )
+                }
+                let liveItem = currentItems.indices.contains(index) ? currentItems[index] : nil
+                let count = liveItem?.toolCallCount ?? 0
+                let latest = liveItem?.latestActivity ?? "Working…"
+                return AgentHelperResult(
+                    agentID: item.0.id,
+                    name: item.0.name,
+                    task: item.1,
+                    output: "Continuing in the background (\(count) \(count == 1 ? "action" : "actions") so far: \(latest)) — full report will be delivered automatically when finished.",
+                    model: liveItem?.model,
+                    cost: liveItem?.cost ?? 0,
+                    toolCallCount: count,
+                    toolSummaries: liveItem?.toolSummaries ?? [],
+                    status: "running_in_background"
+                )
+            }
+            records += launchedRecords
+            return launchedRecords
+        }
 
         let collected: [Int: AgentExecutionResult] = await withTaskGroup(of: (Int, AgentExecutionResult).self) { group in
             for (index, item) in resolved.enumerated() {
@@ -433,18 +569,94 @@ public actor AgentHelperCoordinator {
     public func results() -> [AgentHelperResult] { records }
 }
 
+private actor DetachableHelperBatchState {
+    private let totalCount: Int
+    private var completed: [Int: AgentExecutionResult] = [:]
+    private var tasks: [Int: (taskID: UUID, task: Task<Void, Never>)] = [:]
+    private var detachedIndices: Set<Int> = []
+    private var completionWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+
+    init(totalCount: Int) {
+        self.totalCount = totalCount
+    }
+
+    func storeTask(index: Int, taskID: UUID, task: Task<Void, Never>) {
+        if completed[index] == nil {
+            tasks[index] = (taskID, task)
+        }
+    }
+
+    func isDetached(index: Int) -> Bool {
+        detachedIndices.contains(index)
+    }
+
+    func recordCompletion(index: Int, result: AgentExecutionResult) -> Bool {
+        completed[index] = result
+        tasks.removeValue(forKey: index)
+        let wasDetached = detachedIndices.contains(index)
+        if completed.count >= totalCount {
+            let waiters = Array(completionWaiters.values)
+            completionWaiters.removeAll()
+            for w in waiters { w.resume() }
+        }
+        return wasDetached
+    }
+
+    func allCompleted() -> Bool {
+        completed.count >= totalCount
+    }
+
+    func waitAllCompleted() async {
+        if completed.count >= totalCount || Task.isCancelled { return }
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                if completed.count >= totalCount || Task.isCancelled {
+                    cont.resume()
+                } else {
+                    completionWaiters[id] = cont
+                }
+            }
+        } onCancel: {
+            Task { await self.removeWaiter(id) }
+        }
+    }
+
+    private func removeWaiter(_ id: UUID) {
+        completionWaiters.removeValue(forKey: id)?.resume()
+    }
+
+    func detachRemaining() -> [(index: Int, taskID: UUID, task: Task<Void, Never>)] {
+        var result: [(index: Int, taskID: UUID, task: Task<Void, Never>)] = []
+        for (idx, entry) in tasks where completed[idx] == nil {
+            detachedIndices.insert(idx)
+            result.append((idx, entry.taskID, entry.task))
+        }
+        return result
+    }
+
+    func cancelAll() {
+        for entry in tasks.values {
+            entry.task.cancel()
+        }
+    }
+
+    func snapshotResults() -> [Int: AgentExecutionResult] {
+        completed
+    }
+}
+
 private final class LiveHelperProgressTracker: @unchecked Sendable {
     private let lock = NSLock()
     private var items: [SubagentRunItem]
 
     init(
-        batchOffset: Int,
         callID: String,
         resolved: [(AgentDefinition, String)],
         completedExisting: [Int: SubagentRunItem] = [:]
     ) {
         self.items = resolved.enumerated().map { index, pair in
-            let stableID = "\(callID)-sub-\(batchOffset + index + 1)"
+            let stableID = "\(callID)-sub-\(index + 1)"
             if var done = completedExisting[index] {
                 done.id = stableID
                 return done
@@ -458,6 +670,12 @@ private final class LiveHelperProgressTracker: @unchecked Sendable {
                 latestActivity: "Starting…"
             )
         }
+    }
+
+    func snapshotItems() -> [SubagentRunItem] {
+        lock.lock()
+        defer { lock.unlock() }
+        return items
     }
 
     func currentUpdate() -> ToolLiveUpdate {
@@ -765,10 +983,15 @@ public struct LaunchHelpersTool: AgentTool {
         let totalTools = results.reduce(0) { $0 + $1.toolCallCount }
         let allCancelled = !results.isEmpty && results.allSatisfy { $0.status == "cancelled" }
         let allFailed = !results.isEmpty && results.allSatisfy { $0.status == "failed" }
+        let hasBackgroundRunning = results.contains { $0.status == "running_in_background" }
 
         let modelReport = results.enumerated().map { index, result in
             if result.status == "cancelled" {
                 return "Sub-agent \(index + 1) (\(result.name)): cancelled"
+            }
+            if result.status == "running_in_background" {
+                let toolBadge = result.toolCallCount == 1 ? "1 action so far" : "\(result.toolCallCount) actions so far"
+                return "Sub-agent \(index + 1) (\(result.name) · \(toolBadge)): STILL RUNNING IN THE BACKGROUND (not stopped). Its complete report will arrive automatically when it finishes. Respond right now to the user's new live steering message — you may also call `launch_helpers` to start additional sub-agents in parallel without interrupting this running sub-agent."
             }
             let toolBadge = result.toolCallCount == 1 ? "1 action" : "\(result.toolCallCount) actions"
             let statusTag = result.status == "failed" ? " · failed" : ""
@@ -779,15 +1002,29 @@ public struct LaunchHelpersTool: AgentTool {
             let toolBadge = result.toolCallCount == 1 ? "1 action" : "\(result.toolCallCount) actions"
             let modelBadge = result.model.map { " · \($0)" } ?? ""
             let stepsLine = result.toolSummaries.isEmpty ? "" : "\nActions:\n" + result.toolSummaries.map { "- \($0)" }.joined(separator: "\n")
-            return "### Sub-agent: \(result.name) (\(toolBadge)\(modelBadge))\nTask: \(result.task)\nStatus: \(result.status)\(stepsLine)\n\n\(result.output)"
+            let statusLabel = result.status == "running_in_background" ? "running" : result.status
+            return "### Sub-agent: \(result.name) (\(toolBadge)\(modelBadge))\nTask: \(result.task)\nStatus: \(statusLabel)\(stepsLine)\n\n\(result.output)"
         }.joined(separator: "\n\n---\n\n")
 
         let finalSubagents: [SubagentRunItem] = results.enumerated().map { index, result in
             let itemStatus: SubagentRunItem.Status = {
                 switch result.status {
+                case "running_in_background": return .running
                 case "cancelled": return .cancelled
                 case "failed": return .failed
                 default: return .completed
+                }
+            }()
+            let latestText: String = {
+                switch itemStatus {
+                case .running:
+                    return result.toolSummaries.last ?? "Running in background…"
+                case .completed:
+                    return "Completed"
+                case .cancelled:
+                    return "Stopped"
+                case .failed:
+                    return "Failed"
                 }
             }()
             return SubagentRunItem(
@@ -798,9 +1035,9 @@ public struct LaunchHelpersTool: AgentTool {
                 model: result.model,
                 status: itemStatus,
                 toolCallCount: result.toolCallCount,
-                latestActivity: itemStatus == .completed ? "Completed" : (itemStatus == .cancelled ? "Stopped" : "Failed"),
+                latestActivity: latestText,
                 toolSummaries: result.toolSummaries,
-                output: result.output,
+                output: itemStatus == .running ? "" : result.output,
                 cost: result.cost
             )
         }
@@ -808,6 +1045,11 @@ public struct LaunchHelpersTool: AgentTool {
         let summaryLine: String
         if allCancelled {
             summaryLine = names.count == 1 ? "Sub-agent: \(names[0]) · stopped" : "Sub-agents · stopped"
+        } else if hasBackgroundRunning {
+            let tWord = totalTools == 1 ? "1 action" : "\(totalTools) actions"
+            summaryLine = names.count == 1
+                ? "Sub-agent: \(names[0]) · running (\(tWord))"
+                : "Sub-agents (\(names.count)): \(names.joined(separator: ", ")) · running (\(tWord))"
         } else if names.count == 1 {
             let tWord = totalTools == 1 ? "1 action" : "\(totalTools) actions"
             summaryLine = "Sub-agent: \(names[0]) · \(tWord)"

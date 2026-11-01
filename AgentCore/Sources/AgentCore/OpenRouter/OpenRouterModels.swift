@@ -42,6 +42,9 @@ public struct ModelInfo: Codable, Sendable, Hashable, Identifiable {
     public var summary: String?
     public var contextLength: Int?
     public var maxCompletionTokens: Int?
+    /// True when the upstream catalog reported a synthetic ~80–100% context-fraction fallback (e.g. `943,718` on `1,048,576`)
+    /// so outgoing chat payloads explicitly cap `max_tokens` against real headroom instead of letting the gateway inject the bogus cap.
+    public var hadSyntheticMaxOutput: Bool?
     /// US dollars per token. nil when the price is variable (the routers) or unknown.
     public var promptPrice: Double?
     public var completionPrice: Double?
@@ -59,6 +62,7 @@ public struct ModelInfo: Codable, Sendable, Hashable, Identifiable {
         summary: String? = nil,
         contextLength: Int? = nil,
         maxCompletionTokens: Int? = nil,
+        hadSyntheticMaxOutput: Bool? = nil,
         promptPrice: Double? = nil,
         completionPrice: Double? = nil,
         cacheReadPrice: Double? = nil,
@@ -74,6 +78,7 @@ public struct ModelInfo: Codable, Sendable, Hashable, Identifiable {
         self.summary = summary
         self.contextLength = contextLength
         self.maxCompletionTokens = maxCompletionTokens
+        self.hadSyntheticMaxOutput = hadSyntheticMaxOutput
         self.promptPrice = promptPrice
         self.completionPrice = completionPrice
         self.cacheReadPrice = cacheReadPrice
@@ -83,6 +88,31 @@ public struct ModelInfo: Codable, Sendable, Hashable, Identifiable {
         self.supportedParameters = supportedParameters
         self.reasoning = reasoning
         self.created = created
+    }
+
+    /// Formats token limits using binary KiB/MiB math (`131,072` -> `"128K"`, `1,048,576` -> `"1M"`) when evenly
+    /// divisible by `1,024` (and not a round decimal multiple of `1,000`), while keeping round decimal caps like `128,000` -> `"128K"`.
+    public static func formattedTokenCount(_ count: Int) -> String {
+        if count >= 1_000_000 {
+            if count % 1_048_576 == 0 {
+                return "\(count / 1_048_576)M"
+            }
+            if count % 524_288 == 0 {
+                let binaryMillions = Double(count) / 1_048_576.0
+                let text = String(format: "%.1f", binaryMillions)
+                return (text.hasSuffix(".0") ? String(text.dropLast(2)) : text) + "M"
+            }
+            let millions = Double(count) / 1_000_000.0
+            let text = String(format: "%.1f", millions)
+            return (text.hasSuffix(".0") ? String(text.dropLast(2)) : text) + "M"
+        }
+        if count >= 1_000, count % 1_000 == 0 {
+            return "\(count / 1_000)K"
+        }
+        if count >= 1_024, count % 1_024 == 0 {
+            return "\(count / 1_024)K"
+        }
+        return "\(max(1, count / 1_000))K"
     }
 
     public var isFree: Bool {
@@ -215,12 +245,20 @@ extension ModelInfo {
             if rhs.contains("audio") { list.append("audio") }
             return list.isEmpty ? ["text"] : list
         }()
+        let parsedContext = entry["context_length"]?.intValue ?? entry["top_provider"]?["context_length"]?.intValue
+        let rawMaxOut = entry["top_provider"]?["max_completion_tokens"]?.intValue ?? entry["max_completion_tokens"]?.intValue
+        let normalizedOut = AIProviderGateway.normalizeReportedMaxOutputTokens(
+            reported: rawMaxOut,
+            contextLength: parsedContext,
+            lowerID: id.lowercased()
+        )
         self.init(
             id: id,
             name: entry["name"]?.stringValue ?? id,
             summary: entry["description"]?.stringValue,
-            contextLength: entry["context_length"]?.intValue ?? entry["top_provider"]?["context_length"]?.intValue,
-            maxCompletionTokens: entry["top_provider"]?["max_completion_tokens"]?.intValue ?? entry["max_completion_tokens"]?.intValue,
+            contextLength: parsedContext,
+            maxCompletionTokens: normalizedOut.cap,
+            hadSyntheticMaxOutput: normalizedOut.wasSynthetic ? true : nil,
             promptPrice: price("prompt"),
             completionPrice: price("completion"),
             cacheReadPrice: price("input_cache_read"),
