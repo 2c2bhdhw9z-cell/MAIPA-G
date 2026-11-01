@@ -1004,11 +1004,13 @@ final class ChatSession: Identifiable {
                         return self.inspectWorkflowsReport(query: query, app: app)
                     }
                 }
-                var helperToolsSnapshot: [any AgentTool] = readOnlyHelperTools
-                helperToolsSnapshot.append(inspectWorkflowTool)
-                helperToolsSnapshot.append(createCustomAgentTool)
-                var fullToolsSnapshot: [any AgentTool] = tools
-                fullToolsSnapshot.append(inspectWorkflowTool)
+                var extraHelperTools: [any AgentTool] = readOnlyHelperTools
+                extraHelperTools.append(inspectWorkflowTool)
+                extraHelperTools.append(createCustomAgentTool)
+                let helperToolsSnapshot = extraHelperTools
+                var allHelperTools: [any AgentTool] = tools
+                allHelperTools.append(inspectWorkflowTool)
+                let fullToolsSnapshot = allHelperTools
                 let repoContextSnapshot = repoContext
                 let primaryModelID = route.model
                 let coordinator = AgentHelperCoordinator(

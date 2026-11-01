@@ -13,8 +13,8 @@ private struct BGTaskBox<T>: @unchecked Sendable {
 @MainActor
 @Observable
 final class BackgroundJobs {
-    static let refreshIdentifier = "dev.maipag.app.refresh"
-    static let continuedIdentifier = "dev.maipag.app.autonomous"
+    nonisolated static let refreshIdentifier = "dev.maipag.app.refresh"
+    nonisolated static let continuedIdentifier = "dev.maipag.app.autonomous"
 
     weak var app: AppModel?
     private(set) var lastFailure: String?
