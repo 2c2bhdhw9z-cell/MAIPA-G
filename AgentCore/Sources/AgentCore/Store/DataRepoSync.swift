@@ -57,9 +57,16 @@ public actor DataRepoSync {
         case repoNotVisible
     }
 
+    private struct CachedBlobHash: Codable, Sendable, Hashable {
+        var size: Int
+        var modified: Double
+        var blobID: String
+    }
+
     private let github: GitHubClient
     private let dataDirectory: URL
     private let stateURL: URL
+    private let blobCacheURL: URL
     public private(set) var state: State
     /// Attachments and media at least this big are too large to go through Git. They are stored
     /// whole, by SHA-256, as assets of MAIPA-G-data's private "MAIPA-G files" draft release, and
@@ -68,16 +75,22 @@ public actor DataRepoSync {
     public static let defaultLargeFileThreshold = 20 * 1024 * 1024
     public static let pointerSuffix = ".maipa-g-file.json"
     private var largeHashes: [String: (size: Int, modified: Date, sha256: String)] = [:]
+    private var blobHashes: [String: CachedBlobHash] = [:]
 
     public init(github: GitHubClient, dataDirectory: URL, stateURL: URL, largeFileThreshold: Int = DataRepoSync.defaultLargeFileThreshold) {
         self.github = github
         self.dataDirectory = dataDirectory
         self.stateURL = stateURL
+        self.blobCacheURL = stateURL.deletingLastPathComponent().appendingPathComponent("sync-blob-cache.json")
         self.largeFileThreshold = largeFileThreshold
         if let data = try? Data(contentsOf: stateURL), let saved = try? JSONCoding.decoder().decode(State.self, from: data) {
             state = saved
         } else {
             state = State()
+        }
+        if let cacheData = try? Data(contentsOf: blobCacheURL),
+           let savedCache = try? JSONCoding.decoder().decode([String: CachedBlobHash].self, from: cacheData) {
+            blobHashes = savedCache
         }
     }
 
@@ -91,6 +104,7 @@ public actor DataRepoSync {
     private func saveState() {
         try? FileManager.default.createDirectory(at: stateURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? JSONCoding.encoder(pretty: true).encode(state).write(to: stateURL, options: .atomic)
+        try? JSONCoding.encoder().encode(blobHashes).write(to: blobCacheURL, options: .atomic)
     }
 
     /// Finds the user's MAIPA-G-data repo, making it (private) the first time.
@@ -137,7 +151,15 @@ public actor DataRepoSync {
     /// Forgets which repo and files were in sync, for signing out.
     public func reset() {
         state = State()
+        blobHashes = [:]
         saveState()
+    }
+
+    private static func isRefConflict(_ error: GitHubAPIError) -> Bool {
+        if error.status == 409 { return true }
+        guard error.status == 422 else { return false }
+        let lower = error.message.lowercased()
+        return lower.contains("fast forward") || lower.contains("fast-forward") || lower.contains("reference")
     }
 
     /// Brings the phone and GitHub into line. Safe to call often; does nothing when nothing changed.
@@ -148,8 +170,9 @@ public actor DataRepoSync {
             attempt += 1
             do {
                 return try await syncOnce()
-            } catch let error as GitHubAPIError where error.status == 422 && attempt < 4 {
-                // The branch moved while we were working: someone else saved. Start over.
+            } catch let error as GitHubAPIError where Self.isRefConflict(error) && attempt < 4 {
+                // The branch moved while we were working: someone else saved. Start over after brief backoff.
+                try? await Task.sleep(nanoseconds: UInt64(attempt) * 120_000_000)
                 continue
             }
         }
@@ -234,16 +257,20 @@ public actor DataRepoSync {
             }
         }
 
-        // GitHub to phone. Each fetch and write is isolated. A file the phone changed while this
-        // sync was running is left alone so the next sync can reconcile it.
+        // GitHub to phone. Each fetch and write is isolated (up to 6 blobs fetched concurrently).
+        // A file the phone changed while this sync was running is left alone so the next sync can reconcile it.
         var fetched = conflictContents
-        for path in downloads where conflictContents[path] == nil && !skipped.contains(path) {
-            guard let sha = remote[path] else { continue }
-            do {
-                fetched[path] = try await github.blob(repo, sha: sha)
-            } catch {
-                skipped.insert(path)
-                report.problems.append(FileProblem(path: path, stage: .download, message: error.localizedDescription))
+        let remainingDownloads = downloads.filter { conflictContents[$0] == nil && !skipped.contains($0) && remote[$0] != nil }
+        if !remainingDownloads.isEmpty {
+            let outcomes = await fetchBlobsIsolated(repo, paths: remainingDownloads, ids: remote)
+            for (path, outcome) in outcomes {
+                switch outcome {
+                case .success(let blobData):
+                    fetched[path] = blobData
+                case .failure(let error):
+                    skipped.insert(path)
+                    report.problems.append(FileProblem(path: path, stage: .download, message: error.localizedDescription))
+                }
             }
         }
         var downloadedSuccessfully: [String] = []
@@ -307,9 +334,23 @@ public actor DataRepoSync {
         report.deletedHere = deletedHereSuccessfully.sorted()
 
         // What both sides now agree on. Skipped paths keep their old agreed version, so the next
-        // sync still sees them as pending.
+        // sync still sees them as pending. If a downloaded chat contained a secret that was redacted
+        // locally, record the local redacted blob hash only after uploading or leave base so local wins cleanly.
         var agreed = remote
         for path in skipped { agreed[path] = base[path] }
+        for path in downloadedSuccessfully where path.hasPrefix("chats/") {
+            let localURL = dataDirectory.appendingPathComponent(path)
+            if let diskBytes = try? Data(contentsOf: localURL) {
+                let diskBlob = Hashing.gitBlobID(diskBytes)
+                if let vals = try? localURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) {
+                    blobHashes[path] = CachedBlobHash(
+                        size: vals.fileSize ?? diskBytes.count,
+                        modified: (vals.contentModificationDate ?? Date()).timeIntervalSince1970,
+                        blobID: diskBlob
+                    )
+                }
+            }
+        }
 
         // Phone to GitHub. Read/blob failures are isolated; every successful file and deletion is
         // still committed together, while failed paths remain pending for the next sync.
@@ -317,6 +358,7 @@ public actor DataRepoSync {
         var successfulUploads: [String] = []
         var store: LargeFileStore?
         for path in uploads {
+            try Task.checkCancellation()
             let url = dataDirectory.appendingPathComponent(path)
             do {
                 let data: Data
@@ -325,7 +367,23 @@ public actor DataRepoSync {
                     try await store?.ensure(large)
                     data = large.pointer
                 } else {
-                    data = try Data(contentsOf: url)
+                    let raw = try Data(contentsOf: url)
+                    if path.hasPrefix("chats/") {
+                        let safe = (try? SensitiveDataRedactor().redactJSON(raw)) ?? raw
+                        if safe != raw {
+                            try? safe.write(to: url, options: .atomic)
+                            if let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) {
+                                blobHashes[path] = CachedBlobHash(
+                                    size: vals.fileSize ?? safe.count,
+                                    modified: (vals.contentModificationDate ?? Date()).timeIntervalSince1970,
+                                    blobID: Hashing.gitBlobID(safe)
+                                )
+                            }
+                        }
+                        data = safe
+                    } else {
+                        data = raw
+                    }
                 }
                 let blob = try await github.createBlob(repo, contents: data)
                 changes.append(GitHubClient.TreeChange(path: path, blobSHA: blob))
@@ -431,16 +489,33 @@ public actor DataRepoSync {
                 guard values.isRegularFile == true else { continue }
                 // A pointer file never lives on the phone; one that does is ignored.
                 if Self.isPointer(path) { continue }
-                if let size = values.fileSize, size >= largeFileThreshold, Self.managedBlobPrefixes.contains(where: path.hasPrefix) {
-                    let large = try largeFile(at: url, path: path, size: size, modified: values.contentModificationDate ?? .distantPast)
+                let size = values.fileSize ?? 0
+                let modDate = values.contentModificationDate ?? .distantPast
+                let modStamp = modDate.timeIntervalSince1970
+                if size >= largeFileThreshold, Self.managedBlobPrefixes.contains(where: path.hasPrefix) {
+                    let large = try largeFile(at: url, path: path, size: size, modified: modDate)
                     let pointerPath = path + Self.pointerSuffix
                     scan.files[pointerPath] = Hashing.gitBlobID(large.pointer)
                     scan.largeFiles[pointerPath] = large
                     scan.largeRealPaths.insert(path)
                     continue
                 }
+                if let cached = blobHashes[path], cached.size == size, abs(cached.modified - modStamp) < 0.001 {
+                    scan.files[path] = cached.blobID
+                    continue
+                }
+                if Self.managedBlobPrefixes.contains(where: path.hasPrefix),
+                   let agreedBlob = state.files[path],
+                   let lastSync = state.lastSyncAt,
+                   modDate < lastSync.addingTimeInterval(-10) {
+                    blobHashes[path] = CachedBlobHash(size: size, modified: modStamp, blobID: agreedBlob)
+                    scan.files[path] = agreedBlob
+                    continue
+                }
                 let data = try Data(contentsOf: url)
-                scan.files[path] = Hashing.gitBlobID(data)
+                let blobID = Hashing.gitBlobID(data)
+                blobHashes[path] = CachedBlobHash(size: size, modified: modStamp, blobID: blobID)
+                scan.files[path] = blobID
             } catch where Self.isMissingFile(error) {
                 // Gone between listing and reading: deleted, not unreadable.
                 continue
@@ -472,17 +547,23 @@ public actor DataRepoSync {
         return Hashing.gitBlobID(large.pointer)
     }
 
-    private func fetchBlobs(_ repo: RepoRef, paths: [String], ids: [String: String]) async throws -> [String: Data] {
-        try await withThrowingTaskGroup(of: (String, Data).self) { group in
-            var results: [String: Data] = [:]
+    private func fetchBlobsIsolated(_ repo: RepoRef, paths: [String], ids: [String: String]) async -> [String: Result<Data, Error>] {
+        await withTaskGroup(of: (String, Result<Data, Error>).self) { group in
+            var results: [String: Result<Data, Error>] = [:]
             var pending = paths.makeIterator()
             func addNext() {
-                guard let path = pending.next(), let sha = ids[path] else { return }
-                group.addTask { [github] in (path, try await github.blob(repo, sha: sha)) }
+                while let path = pending.next() {
+                    guard let sha = ids[path] else { continue }
+                    group.addTask { [github] in
+                        do { return (path, .success(try await github.blob(repo, sha: sha))) }
+                        catch { return (path, .failure(error)) }
+                    }
+                    return
+                }
             }
             for _ in 0..<6 { addNext() }
-            while let (path, data) = try await group.next() {
-                results[path] = data
+            while let (path, outcome) = await group.next() {
+                results[path] = outcome
                 addNext()
             }
             return results

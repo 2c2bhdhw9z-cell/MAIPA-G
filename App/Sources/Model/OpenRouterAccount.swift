@@ -127,9 +127,13 @@ final class OpenRouterAccount {
                 return hydrated
             }
         }
+        if let cachedBalances = UserDefaults.standard.dictionary(forKey: "externalProviderBalances") as? [String: Double] {
+            externalBalances = cachedBalances
+        }
         if let data = try? Data(contentsOf: cataloguePath), let saved = try? JSONCoding.decoder().decode([ModelInfo].self, from: data) {
-            openRouterCatalogCache = saved.filter { AIProviderModelID.decode($0.id) == nil }
-            for item in saved {
+            let normalizedSaved = saved.map(\.sanitized)
+            openRouterCatalogCache = normalizedSaved.filter { AIProviderModelID.decode($0.id) == nil }
+            for item in normalizedSaved {
                 if let decoded = AIProviderModelID.decode(item.id) {
                     externalCatalogCache[decoded.providerID, default: []].append(item)
                 }
@@ -199,6 +203,7 @@ final class OpenRouterAccount {
         externalErrors[id] = nil
         if let usd = await AIProviderGateway.fetchBalance(for: candidate, transport: transport) {
             externalBalances[id] = usd
+            UserDefaults.standard.set(externalBalances, forKey: "externalProviderBalances")
         }
         persistExternalProviders()
         rebuildMergedModels()
@@ -227,6 +232,7 @@ final class OpenRouterAccount {
         externalCatalogCache[id] = nil
         externalModelCounts[id] = nil
         externalBalances[id] = nil
+        UserDefaults.standard.set(externalBalances, forKey: "externalProviderBalances")
         externalErrors[id] = nil
         persistExternalProviders()
         rebuildMergedModels()
@@ -322,8 +328,17 @@ final class OpenRouterAccount {
 
     // MARK: Money
 
-    func refreshKeyInfo() async {
+    @ObservationIgnored private var lastKeyInfoRefreshAt: Date?
+
+    func refreshKeyInfo(force: Bool = false) async {
         guard !PreviewScenes.isActive else { return }
+        if !force,
+           let last = lastKeyInfoRefreshAt,
+           Date().timeIntervalSince(last) < 30,
+           (keyInfo != nil || !hasOpenRouterKey) {
+            return
+        }
+        lastKeyInfoRefreshAt = Date()
         if hasOpenRouterKey {
             do {
                 let info = try await client.keyInfo()
@@ -341,10 +356,15 @@ final class OpenRouterAccount {
             }
         }
         // Also refresh live USD balances for all connected external gateways (OneProvider, TeamoRouter, OmniRoute, SayGM, Custom).
+        var changedBalances = false
         for endpoint in readyExternalProviders {
             if let usd = await AIProviderGateway.fetchBalance(for: endpoint, transport: transport) {
                 externalBalances[endpoint.id] = usd
+                changedBalances = true
             }
+        }
+        if changedBalances {
+            UserDefaults.standard.set(externalBalances, forKey: "externalProviderBalances")
         }
     }
 
@@ -450,6 +470,7 @@ final class OpenRouterAccount {
         } else {
             combined = openRouterCatalogCache
         }
+        combined = combined.map(\.sanitized)
         modelsByID = Dictionary(combined.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         models = combined.filter { $0.isChatModel && !restrictedModelIDs.contains($0.id) }
         allSelectableModels = combined.filter { $0.isSelectableModel && !restrictedModelIDs.contains($0.id) }

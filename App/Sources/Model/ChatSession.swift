@@ -21,10 +21,15 @@ final class ChatSession: Identifiable {
     var autonomous = false
     /// Kiro-style mid-turn delivery mode (remembered per chat session, defaults to non-stopping `Steer`).
     var busySendMode: BusySendMode = .steer
+    struct PendingSteer: Identifiable, Hashable, Sendable {
+        let id = UUID()
+        var text: String
+    }
+
     private(set) var isRunning = false
     private(set) var isCompacting = false
     /// Unconsumed live steering notes waiting for the active run's next safe step boundary.
-    private(set) var pendingSteers: [String] = []
+    private(set) var pendingSteers: [PendingSteer] = []
     /// Durable follow-up messages queued via `Queue` mode to run sequentially after the active turn finishes.
     private(set) var queuedSteering: [QueuedFollowUp] = []
     private(set) var mergeCheckStatus: String?
@@ -231,9 +236,11 @@ final class ChatSession: Identifiable {
             // - `Steer` (default for text): folds guidance into the active turn at the next safe boundary
             //   WITHOUT calling `finishAfterCurrentStep()` or cancelling any running stream/sub-agent/tool!
             // - `Queue` (or attachments): holds follow-up on disk to run sequentially after the active turn finishes naturally.
-            if busySendMode == .steer, attachments.isEmpty, let activeRun = run {
-                pendingSteers.append(message)
-                Task { await activeRun.steer(message) }
+            if busySendMode == .steer, attachments.isEmpty {
+                pendingSteers.append(PendingSteer(text: message))
+                if let activeRun = run {
+                    Task { await activeRun.steer(message) }
+                }
             } else {
                 queuedSteering.append(QueuedFollowUp(text: message, attachments: attachments))
                 syncQueuedFollowUpsToChat()
@@ -253,9 +260,9 @@ final class ChatSession: Identifiable {
     }
 
     /// Cancels a pending unconsumed steer before the next step boundary consumes it and restores it to the composer.
-    func cancelPendingSteer(at index: Int) {
-        guard pendingSteers.indices.contains(index) else { return }
-        let removed = pendingSteers.remove(at: index)
+    func cancelPendingSteer(_ id: UUID) {
+        guard let index = pendingSteers.firstIndex(where: { $0.id == id }) else { return }
+        let removed = pendingSteers.remove(at: index).text
         if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             draft = removed
         } else {
@@ -307,14 +314,14 @@ final class ChatSession: Identifiable {
         guard !isRunning, var turn = lastTurn, turn.status == .running else { return }
         let finishedAt = Date()
         for stepIdx in turn.steps.indices {
-            for callIdx in turn.steps[stepIdx].toolCalls.indices where turn.steps[stepIdx].toolCalls[callIdx].status == .running {
-                var record = turn.steps[stepIdx].toolCalls[callIdx]
-                record.status = .failed
+            for callIdx in turn.steps[stepIdx].toolCalls.indices {
+                let existing = turn.steps[stepIdx].toolCalls[callIdx]
+                let hasRunningSubagents = existing.subagents?.contains(where: { $0.status == .running }) == true
+                guard existing.status == .running || hasRunningSubagents else { continue }
+                var record = existing
+                record.status = .done
                 if record.detail == nil || record.detail?.isEmpty == true {
-                    record.detail = "Interrupted when the app closed"
-                }
-                if record.result == nil {
-                    record.result = "Interrupted when the app closed."
+                    record.detail = "Paused when the app closed"
                 }
                 if var subs = record.subagents {
                     for sIdx in subs.indices where subs[sIdx].status == .running {
@@ -332,7 +339,22 @@ final class ChatSession: Identifiable {
                         return copy
                     }
                 }
-                record.finishedAt = finishedAt
+                if record.result == nil || record.result?.contains("running_in_background") == true {
+                    if record.name == "launch_helpers" {
+                        let actionsDone = (record.subagents ?? []).reduce(0) { $0 + $1.toolCallCount }
+                        let progressNote = actionsDone > 0 ? " after \(actionsDone) actions of partial progress" : ""
+                        record.result = "Paused when the app closed\(progressNote) (not a tool failure). Sub-agent launching works normally — launch sub-agents in parallel to continue."
+                    } else {
+                        record.result = "Paused when the app closed."
+                    }
+                }
+                let baseSummary = record.summary.replacingOccurrences(of: "…", with: "").trimmingCharacters(in: .whitespaces)
+                if !baseSummary.lowercased().contains("stopped"), !baseSummary.lowercased().contains("paused") {
+                    record.summary = baseSummary.isEmpty ? "Paused" : "\(baseSummary) · paused"
+                }
+                if record.finishedAt == nil {
+                    record.finishedAt = finishedAt
+                }
                 turn.steps[stepIdx].toolCalls[callIdx] = record
             }
             if turn.steps[stepIdx].finishedAt == nil {
@@ -415,7 +437,8 @@ final class ChatSession: Identifiable {
     /// Runs any saved answer again, rewinding messages after it while preserving compacted earlier
     /// session memory whenever the compacted cutoff precedes the retried message.
     func retryAnswer(_ messageID: UUID) {
-        guard !isRunning, let index = chat.messages.firstIndex(where: { $0.id == messageID }),
+        guard !isRunning, !isCompacting,
+              let index = chat.messages.firstIndex(where: { $0.id == messageID }),
               chat.messages[index].assistantTurn != nil else { return }
         chat.messages.removeSubrange(index...)
         chat.messages.append(ChatMessage(body: .assistant(AssistantTurn())))
@@ -426,7 +449,7 @@ final class ChatSession: Identifiable {
 
     func editAndResend(_ messageID: UUID, text: String) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isRunning, !clean.isEmpty,
+        guard !isRunning, !isCompacting, !clean.isEmpty,
               let index = chat.messages.firstIndex(where: { $0.id == messageID }),
               case .user(let original) = chat.messages[index].body else { return }
         chat.messages.removeSubrange(index...)
@@ -505,7 +528,10 @@ final class ChatSession: Identifiable {
     }
 
     private func performStructuredCompaction() async {
-        guard !isCompacting, !isRunning, let throughIndex = compactableRangeEndIndex else { return }
+        guard !isCompacting, !isRunning,
+              let throughIndex = compactableRangeEndIndex,
+              chat.messages.indices.contains(throughIndex) else { return }
+        let targetThroughMessageID = chat.messages[throughIndex].id
         isCompacting = true
         defer { isCompacting = false }
 
@@ -591,16 +617,30 @@ final class ChatSession: Identifiable {
             )
             if let stream = try? await app.openRouter.client.stream(req) {
                 var acc = ""
+                var streamFailed = false
+                var sawErrorFinish = false
                 do {
                     for try await chunk in stream {
+                        if let err = chunk.error { throw err }
                         if let d = chunk.contentDelta { acc += d }
+                        if chunk.finishReason == "error" || chunk.finishReason == "content_filter" {
+                            sawErrorFinish = true
+                        }
                     }
-                } catch {}
+                } catch {
+                    streamFailed = true
+                }
                 let trimmed = acc.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.count >= 80 {
+                if !streamFailed, !sawErrorFinish, trimmed.count >= 80, trimmed.contains("# ") {
                     aiSummary = trimmed
                 }
             }
+        }
+
+        // Re-verify target message ID after async suspension so concurrent rewinds/deletions can never crash on a stale index.
+        guard !isRunning,
+              let verifiedIndex = chat.messages.firstIndex(where: { $0.id == targetThroughMessageID }) else {
+            return
         }
 
         let finalSummary: String
@@ -615,8 +655,9 @@ final class ChatSession: Identifiable {
         chat.previousCompactedSummary = prevSummary
         chat.previousCompactedThroughMessageID = prevThrough
         chat.compactedSummary = finalSummary
-        chat.compactedThroughMessageID = chat.messages[throughIndex].id
-        appendNotice("Compacted \(slice.count) older messages into structured session memory (keeping the latest \(chat.messages.count - 1 - throughIndex) messages verbatim). Tap the Context ring anytime to restore full memory.")
+        chat.compactedThroughMessageID = targetThroughMessageID
+        let keptTailCount = max(0, chat.messages.count - 1 - verifiedIndex)
+        appendNotice("Compacted \(slice.count) older messages into structured session memory (keeping the latest \(keptTailCount) messages verbatim). Tap the Context ring anytime to restore full memory.")
         touch()
     }
 
@@ -1070,9 +1111,10 @@ final class ChatSession: Identifiable {
         }
         tools.append(createCustomAgentTool)
 
+        let turnSteering = SteeringInbox()
         if app.openRouter.supportsTools(chat.model) {
             let builtInHelpers = BuiltInAgents.kiroSubagents + BuiltInAgents.all.filter {
-                ["planner", "designer", "design-checker", "code-checker", "second-opinion", "review-combiner", "investigator"].contains($0.id)
+                ["planner", "designer", "design-checker", "design-reviewer", "code-checker", "second-opinion", "review-combiner", "investigator"].contains($0.id)
             }
             var seenHelperIDs = Set<String>()
             var builtHelpers: [AgentDefinition] = []
@@ -1084,7 +1126,7 @@ final class ChatSession: Identifiable {
             let helperDefinitions = builtHelpers
             if let baseLead = BuiltInAgents.named("coder"), !helperDefinitions.isEmpty {
                 var lead = baseLead
-                lead.maximumHelpers = max(lead.maximumHelpers, 8)
+                lead.maximumHelpers = max(lead.maximumHelpers, 16)
                 let inspectWorkflowTool = InspectWorkflowTool { [weak self, weak app] query in
                     await MainActor.run {
                         guard let self else { return "Chat closed." }
@@ -1104,7 +1146,8 @@ final class ChatSession: Identifiable {
                     lead: lead,
                     definitions: helperDefinitions,
                     context: lastMessage,
-                    spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil
+                    spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil,
+                    steering: turnSteering
                 ) { invocation in
                     var helperChoice = userChoice
                     if let explicitModel = invocation.preferredModelID, !explicitModel.isEmpty, explicitModel != ModelChoice.freeID {
@@ -1350,7 +1393,8 @@ final class ChatSession: Identifiable {
             attachmentData: attachmentData,
             serverTools: [],
             fallbackModels: fallbackModels,
-            requiresInitialSpendApproval: false
+            requiresInitialSpendApproval: false,
+            steering: turnSteering
         )
         let account = app.openRouter
         let attachmentStore = app.attachmentStore
@@ -1374,6 +1418,12 @@ final class ChatSession: Identifiable {
 
         let run = AgentLoop.start(input, environment: environment)
         self.run = run
+        if !pendingSteers.isEmpty {
+            let earlySteers = pendingSteers.map(\.text)
+            for steerMsg in earlySteers {
+                await run.steer(steerMsg)
+            }
+        }
         for await event in run.events {
             guard case .updated(let turn, let milestone) = event else { continue }
             receive(turn, milestone: milestone)
@@ -1422,7 +1472,7 @@ final class ChatSession: Identifiable {
         if !pendingSteers.isEmpty {
             let consumed = Set(turn.steps.flatMap { $0.steeredMessages ?? [] })
             if !consumed.isEmpty {
-                pendingSteers.removeAll { consumed.contains($0) }
+                pendingSteers.removeAll { consumed.contains($0.text) }
             }
         }
         if milestone {

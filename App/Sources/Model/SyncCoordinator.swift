@@ -29,9 +29,14 @@ final class SyncCoordinator {
     @ObservationIgnored private var engine: DataRepoSync?
     @ObservationIgnored private var setup: (client: GitHubClient, owner: String, installationID: Int)?
     @ObservationIgnored private var scheduled: Task<Void, Never>?
+    @ObservationIgnored private var activeSyncTask: Task<DataRepoSync.Report, Error>?
     @ObservationIgnored private var isRunning = false
     @ObservationIgnored private var runAgain = false
     private let paths: AppPaths
+
+    private struct SyncTimeoutError: LocalizedError {
+        var errorDescription: String? { "GitHub backup took too long and timed out. MAIPA-G will retry automatically." }
+    }
 
     init(paths: AppPaths) {
         self.paths = paths
@@ -48,13 +53,16 @@ final class SyncCoordinator {
     }
 
     /// Saves in a few seconds; more changes in the meantime wait for the same save.
-    func request(after seconds: Double = 4) {
+    func request(after seconds: Double = 4.5) {
         guard engine != nil else { return }
         if pendingPaths.isEmpty { pendingPaths = ["Changes on this phone"] }
         scheduled?.cancel()
+        let clampedDelay = max(0, seconds)
         scheduled = Task { [weak self] in
-            do { try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) }
-            catch { return }
+            if clampedDelay > 0 {
+                do { try await Task.sleep(nanoseconds: UInt64(clampedDelay * 1_000_000_000)) }
+                catch { return }
+            }
             guard !Task.isCancelled else { return }
             await self?.runScheduledSync()
         }
@@ -74,20 +82,34 @@ final class SyncCoordinator {
             return
         }
         isRunning = true
-        defer { isRunning = false }
+        defer {
+            isRunning = false
+            activeSyncTask = nil
+        }
+        var passes = 0
         repeat {
             runAgain = false
+            passes += 1
             status = .saving
             do {
-                // Finds (or makes) MAIPA-G-data the first time, and again after a failed try, for
-                // example when the phone was offline when the app opened.
-                if repo == nil {
-                    let client = setup.client, installationID = setup.installationID
-                    repo = try await engine.ensureRepository(owner: setup.owner) { repositoryID in
-                        try await client.addRepositoryToInstallation(installationID: installationID, repositoryID: repositoryID)
+                let client = setup.client
+                let owner = setup.owner
+                let installationID = setup.installationID
+                let needsRepoEnsure = (repo == nil)
+                let worker = Task<DataRepoSync.Report, Error> {
+                    if needsRepoEnsure {
+                        _ = try await engine.ensureRepository(owner: owner) { repositoryID in
+                            try await client.addRepositoryToInstallation(installationID: installationID, repositoryID: repositoryID)
+                        }
                     }
+                    return try await engine.sync()
                 }
-                let report = try await engine.sync()
+                activeSyncTask = worker
+                let report = try await Self.awaitWithTimeout(seconds: 180, task: worker)
+                activeSyncTask = nil
+                if repo == nil {
+                    repo = await engine.state.repo ?? RepoRef(owner: owner, name: DataRepoSync.repoName)
+                }
                 for problem in report.problems {
                     await app?.diagnostics.record(
                         error: ToolInputError(problem.message),
@@ -103,13 +125,47 @@ final class SyncCoordinator {
                 if !report.downloaded.isEmpty || !report.deletedHere.isEmpty {
                     await app?.dataChangedFromGitHub(report)
                 }
+                if runAgain, passes >= 2 {
+                    runAgain = false
+                    request(after: 6)
+                    return
+                }
             } catch {
+                activeSyncTask?.cancel()
+                activeSyncTask = nil
                 pendingPaths = await engine.pendingPaths()
                 await app?.diagnostics.record(error: error, area: "saving", operation: "sync")
-                status = .failed(Self.describe(error))
+                if error is SyncTimeoutError {
+                    status = lastSaved != nil ? .idle : .failed(Self.describe(error))
+                    request(after: 20)
+                } else {
+                    status = .failed(Self.describe(error))
+                }
                 return
             }
         } while runAgain
+    }
+
+    private nonisolated static func awaitWithTimeout<T: Sendable>(
+        seconds: Double,
+        task: Task<T, Error>
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await task.value
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                task.cancel()
+                throw SyncTimeoutError()
+            }
+            guard let first = try await group.next() else {
+                task.cancel()
+                throw SyncTimeoutError()
+            }
+            group.cancelAll()
+            return first
+        }
     }
 
     /// Screenshots only.
@@ -121,6 +177,8 @@ final class SyncCoordinator {
 
     func reset() async {
         scheduled?.cancel()
+        activeSyncTask?.cancel()
+        activeSyncTask = nil
         await engine?.reset()
         engine = nil
         setup = nil

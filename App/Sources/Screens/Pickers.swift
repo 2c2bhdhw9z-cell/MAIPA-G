@@ -64,6 +64,8 @@ struct ModelPicker: View {
                     if trimmedQuery.isEmpty && filter == .all && selectedMaker == nil {
                         smartModesSection(current: current)
                         pinnedAndRecentSection(current: current)
+                    } else if trimmedQuery.isEmpty && filter == .images && selectedMaker == nil {
+                        recentImagesSection(current: current)
                     }
 
                     if let customSlug = directSlugCandidate {
@@ -292,10 +294,13 @@ struct ModelPicker: View {
 
     @ViewBuilder
     private func pinnedAndRecentSection(current: ModelChoice) -> some View {
-        let pinned = app.openRouter.pinnedModelIDs.compactMap { app.openRouter.modelsByID[$0] }
+        let pinned = app.openRouter.pinnedModelIDs
+            .compactMap { app.openRouter.modelsByID[$0] }
+            .filter { !$0.isPureImageModel }
         let recents = app.openRouter.recentModelIDs
             .filter { !app.openRouter.pinnedModelIDs.contains($0) }
             .compactMap { app.openRouter.modelsByID[$0] }
+            .filter { !$0.isPureImageModel }
             .prefix(4)
 
         if !pinned.isEmpty {
@@ -310,6 +315,22 @@ struct ModelPicker: View {
             VStack(alignment: .leading, spacing: 8) {
                 sectionHeader("Recent", count: recents.count, icon: "clock")
                 ForEach(Array(recents)) { model in
+                    modelCard(model, current: current)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func recentImagesSection(current: ModelChoice) -> some View {
+        let recentImages = app.openRouter.recentModelIDs
+            .compactMap { app.openRouter.modelsByID[$0] }
+            .filter(\.generatesImages)
+            .prefix(4)
+        if !recentImages.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                sectionHeader("Recent", count: recentImages.count, icon: "clock")
+                ForEach(Array(recentImages)) { model in
                     modelCard(model, current: current)
                 }
             }
@@ -453,6 +474,8 @@ struct ModelPicker: View {
             if let selectedMaker, model.maker != selectedMaker { continue }
             // When actively typing a search query and filter == .pinned, don't trap the user in an empty pinned view.
             let activeFilter = (!tokens.isEmpty && filter == .pinned) ? .all : filter
+            // Exclude pure image-generation models (`Image gen only`) from default chat model lists unless `Images` is active or searching by name.
+            if activeFilter != .images, tokens.isEmpty, model.isPureImageModel { continue }
             switch activeFilter {
             case .all: break
             case .pinned: if !app.openRouter.isPinned(model.id) { continue }
@@ -672,14 +695,9 @@ struct ModelPicker: View {
         .background(highlight ? Color.green.opacity(0.12) : Theme.raised, in: Capsule())
     }
 
-    /// "128K", "1M", "1.5M": how much a model can read at once.
+    /// "128K", "1M", "1.5M": uses binary KiB/MiB math (`131,072` -> `128K`, `1,048,576` -> `1M`) when evenly divisible by 1,024.
     static func tokens(_ count: Int) -> String {
-        if count >= 1_000_000 {
-            let millions = Double(count) / 1_000_000
-            let text = String(format: "%.1f", millions)
-            return (text.hasSuffix(".0") ? String(text.dropLast(2)) : text) + "M"
-        }
-        return "\(max(1, count / 1000))K"
+        ModelInfo.formattedTokenCount(count)
     }
 
     private func perMillionText(_ perToken: Double) -> String {

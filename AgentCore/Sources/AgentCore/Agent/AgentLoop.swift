@@ -1,8 +1,24 @@
 import Foundation
 
-/// Thread-safe inbox for live mid-run steering instructions sent while an agent turn is running.
+public struct BackgroundSubagentCardPatch: Sendable {
+    public var callID: String
+    public var update: ToolLiveUpdate
+
+    public init(callID: String, update: ToolLiveUpdate) {
+        self.callID = callID
+        self.update = update
+    }
+}
+
+/// Thread-safe inbox for live mid-run steering instructions and backgrounded sub-agent completions
+/// sent while an agent turn is running.
 public actor SteeringInbox {
     private var pendingMessages: [String] = []
+    private var completedBackgroundReports: [String] = []
+    private var pendingCardPatches: [BackgroundSubagentCardPatch] = []
+    private var backgroundTasks: [UUID: Task<Void, Never>] = [:]
+    private var steerWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var activityWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var yieldAfterStep = false
 
     public init() {}
@@ -11,6 +27,8 @@ public actor SteeringInbox {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         pendingMessages.append(trimmed)
+        wakeSteerWaiters()
+        wakeActivityWaiters()
     }
 
     public func drain() -> [String] {
@@ -24,6 +42,10 @@ public actor SteeringInbox {
         pendingMessages
     }
 
+    public func hasPendingSteer() -> Bool {
+        !pendingMessages.isEmpty || yieldAfterStep
+    }
+
     public func removeFirst(matching text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let index = pendingMessages.firstIndex(of: trimmed) else { return false }
@@ -33,10 +55,131 @@ public actor SteeringInbox {
 
     public func requestYieldAfterStep() {
         yieldAfterStep = true
+        wakeSteerWaiters()
+        wakeActivityWaiters()
     }
 
     public func shouldYieldAfterStep() -> Bool {
         yieldAfterStep
+    }
+
+    /// Suspends until a live user steering note (or graceful yield) arrives, or returns immediately if one is already waiting.
+    public func waitForSteer() async {
+        if hasPendingSteer() || Task.isCancelled { return }
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                if hasPendingSteer() || Task.isCancelled {
+                    cont.resume()
+                } else {
+                    steerWaiters[id] = cont
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelSteerWaiter(id) }
+        }
+    }
+
+    private func cancelSteerWaiter(_ id: UUID) {
+        steerWaiters.removeValue(forKey: id)?.resume()
+    }
+
+    public func registerBackgroundTask(_ id: UUID, task: Task<Void, Never>) {
+        backgroundTasks[id] = task
+    }
+
+    public func recordBackgroundCardPatch(_ patch: BackgroundSubagentCardPatch) {
+        if let idx = pendingCardPatches.firstIndex(where: { $0.callID == patch.callID }) {
+            pendingCardPatches[idx] = patch
+        } else {
+            pendingCardPatches.append(patch)
+        }
+        wakeActivityWaiters()
+    }
+
+    public func completeBackgroundTask(
+        _ id: UUID,
+        report: String?,
+        finalPatch: BackgroundSubagentCardPatch?
+    ) {
+        backgroundTasks.removeValue(forKey: id)
+        if let finalPatch {
+            if let idx = pendingCardPatches.firstIndex(where: { $0.callID == finalPatch.callID }) {
+                pendingCardPatches[idx] = finalPatch
+            } else {
+                pendingCardPatches.append(finalPatch)
+            }
+        }
+        if let report, !report.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            completedBackgroundReports.append(report)
+        }
+        wakeActivityWaiters()
+    }
+
+    public func activeBackgroundTaskCount() -> Int {
+        backgroundTasks.count
+    }
+
+    public func drainBackgroundReports() -> [String] {
+        guard !completedBackgroundReports.isEmpty else { return [] }
+        let items = completedBackgroundReports
+        completedBackgroundReports.removeAll()
+        return items
+    }
+
+    public func drainCardPatches() -> [BackgroundSubagentCardPatch] {
+        guard !pendingCardPatches.isEmpty else { return [] }
+        let items = pendingCardPatches
+        pendingCardPatches.removeAll()
+        return items
+    }
+
+    public func cancelAllBackgroundTasks() {
+        yieldAfterStep = false
+        let tasks = Array(backgroundTasks.values)
+        backgroundTasks.removeAll()
+        for t in tasks { t.cancel() }
+        wakeSteerWaiters()
+        wakeActivityWaiters()
+    }
+
+    public func clearYieldFlag() {
+        yieldAfterStep = false
+    }
+
+    /// Waits while backgrounded sub-agents are still working until a live steer, card patch, or completion arrives.
+    public func waitForActivity() async {
+        if !pendingMessages.isEmpty || !completedBackgroundReports.isEmpty || !pendingCardPatches.isEmpty || yieldAfterStep || backgroundTasks.isEmpty || Task.isCancelled {
+            return
+        }
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                if !pendingMessages.isEmpty || !completedBackgroundReports.isEmpty || !pendingCardPatches.isEmpty || yieldAfterStep || backgroundTasks.isEmpty || Task.isCancelled {
+                    cont.resume()
+                } else {
+                    activityWaiters[id] = cont
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelActivityWaiter(id) }
+        }
+    }
+
+    private func cancelActivityWaiter(_ id: UUID) {
+        activityWaiters.removeValue(forKey: id)?.resume()
+    }
+
+    private func wakeSteerWaiters() {
+        let waiters = Array(steerWaiters.values)
+        steerWaiters.removeAll()
+        for w in waiters { w.resume() }
+    }
+
+    private func wakeActivityWaiters() {
+        let waiters = Array(activityWaiters.values)
+        activityWaiters.removeAll()
+        for w in waiters { w.resume() }
     }
 }
 
@@ -132,6 +275,8 @@ public struct AgentRun: Sendable {
 
     public func cancel() {
         task.cancel()
+        let inbox = steering
+        Task { await inbox.cancelAllBackgroundTasks() }
     }
 
     /// Injects a live mid-run steering note into the running turn at the next step boundary.
@@ -203,6 +348,7 @@ private struct Runner {
     var switchedToFree = false
     var autoContinuedBlankReply = false
     var injectedSteeringNotes: [String] = []
+    var pendingBackgroundReports: [String] = []
     var pendingBlankReplyNudge: String?
     var toolInlineImages: [String: [ToolInlineImage]] = [:]
     var lastEmit = Date.distantPast
@@ -251,6 +397,32 @@ private struct Runner {
         lastEmit = Date()
     }
 
+    mutating func applyBackgroundCardPatches() async {
+        guard let patches = await steering?.drainCardPatches(), !patches.isEmpty else { return }
+        var changed = false
+        for patch in patches {
+            for sIdx in turn.steps.indices {
+                if let cIdx = turn.steps[sIdx].toolCalls.firstIndex(where: { $0.id == patch.callID }) {
+                    turn.steps[sIdx].toolCalls[cIdx].summary = patch.update.summary
+                    if let detail = patch.update.detail {
+                        turn.steps[sIdx].toolCalls[cIdx].detail = detail
+                    }
+                    if let subs = patch.update.subagents {
+                        turn.steps[sIdx].toolCalls[cIdx].subagents = subs
+                        if !subs.contains(where: { $0.status == .running }),
+                           turn.steps[sIdx].toolCalls[cIdx].result?.contains("running_in_background") == true {
+                            turn.steps[sIdx].toolCalls[cIdx].result = patch.update.detail ?? patch.update.summary
+                        }
+                    }
+                    changed = true
+                }
+            }
+        }
+        if changed {
+            emit(milestone: false)
+        }
+    }
+
     mutating func run() async {
         turn.status = .running
         turn.failure = nil
@@ -261,6 +433,7 @@ private struct Runner {
         do {
             while true {
                 try Task.checkCancellation()
+                await applyBackgroundCardPatches()
                 if let last = turn.steps.indices.last, turn.steps[last].toolCalls.contains(where: { $0.result == nil }) {
                     if try await runTools(inStep: last) {
                         turn.status = .waitingForUser
@@ -275,14 +448,23 @@ private struct Runner {
                         turn.notices.append("Steered mid-run: \(preview)")
                     }
                     emit(milestone: false)
-                } else if newSteps > 0, await steering?.shouldYieldAfterStep() == true {
+                }
+                if let completedReports = await steering?.drainBackgroundReports(), !completedReports.isEmpty {
+                    pendingBackgroundReports.append(contentsOf: completedReports)
+                    await applyBackgroundCardPatches()
+                }
+                if injectedSteeringNotes.isEmpty, pendingBackgroundReports.isEmpty, newSteps > 0, await steering?.shouldYieldAfterStep() == true {
                     turn.status = .done
                     break
                 }
                 if let last = turn.steps.last, last.toolCalls.isEmpty, last.finishedAt != nil {
-                    // If the user sent a live mid-run steering note right as this step finished, continue immediately!
-                    if !injectedSteeringNotes.isEmpty {
-                        // Fall through to next step with `injectedSteeringNotes` appended.
+                    // If the user sent a live mid-run steering note or a backgrounded sub-agent completed, continue immediately!
+                    if !injectedSteeringNotes.isEmpty || !pendingBackgroundReports.isEmpty {
+                        // Fall through to next step with `injectedSteeringNotes` / `pendingBackgroundReports`.
+                    } else if (await steering?.activeBackgroundTaskCount() ?? 0) > 0 {
+                        await steering?.waitForActivity()
+                        await applyBackgroundCardPatches()
+                        continue
                     } else {
                         let visibleText = last.text.trimmingCharacters(in: .whitespacesAndNewlines)
                         let hasGeneratedImages = !(last.generatedImages ?? []).isEmpty
@@ -296,6 +478,7 @@ private struct Runner {
                     }
                 }
                 guard newSteps < maxSteps else {
+                    await steering?.cancelAllBackgroundTasks()
                     turn.status = .stopped
                     turn.failure = TurnFailure(kind: .stepLimit, message: "I stopped after \(maxSteps) steps so this doesn't run up a bill. Tap Keep going if you want more.")
                     break
@@ -320,9 +503,11 @@ private struct Runner {
                 try await requestStep()
             }
         } catch is CancellationError {
+            await steering?.cancelAllBackgroundTasks()
             stopRunningTools(reason: "Stopped")
             turn.status = .stopped
         } catch {
+            await steering?.cancelAllBackgroundTasks()
             stopRunningTools(reason: "Didn't finish")
             turn.status = .failed
             turn.failure = Self.describe(error)
@@ -331,30 +516,52 @@ private struct Runner {
             }
         }
         if Task.isCancelled, turn.status == .running { turn.status = .stopped }
+        await steering?.clearYieldFlag()
         emit(milestone: true)
     }
 
     mutating func stopRunningTools(reason: String) {
+        let isGracefulStop = (reason == "Stopped")
         for stepIndex in turn.steps.indices {
-            for callIndex in turn.steps[stepIndex].toolCalls.indices where turn.steps[stepIndex].toolCalls[callIndex].status == .running {
-                var record = turn.steps[stepIndex].toolCalls[callIndex]
-                record.status = .failed
+            for callIndex in turn.steps[stepIndex].toolCalls.indices {
+                let recordSnapshot = turn.steps[stepIndex].toolCalls[callIndex]
+                let hasRunningSubagents = recordSnapshot.subagents?.contains(where: { $0.status == .running }) == true
+                guard recordSnapshot.status == .running || hasRunningSubagents else { continue }
+                var record = recordSnapshot
+                if record.status == .running {
+                    record.status = isGracefulStop ? .done : .failed
+                }
                 if record.detail == nil || record.detail?.isEmpty == true {
                     record.detail = reason
+                }
+                let baseSummary = record.summary.replacingOccurrences(of: "…", with: "").trimmingCharacters(in: .whitespaces)
+                if isGracefulStop, !baseSummary.lowercased().contains("stopped") {
+                    record.summary = baseSummary.isEmpty ? "Stopped" : "\(baseSummary) · stopped"
                 }
                 if var subs = record.subagents {
                     for idx in subs.indices where subs[idx].status == .running {
                         subs[idx].status = .cancelled
+                        subs[idx].latestActivity = "Stopped"
                     }
                     record.subagents = subs
                 } else if record.name == "launch_helpers" {
                     record.subagents = SubagentRunItem.resolvedItems(for: record).map { item in
                         var copy = item
-                        if copy.status == .running { copy.status = .cancelled }
+                        if copy.status == .running {
+                            copy.status = .cancelled
+                            copy.latestActivity = "Stopped"
+                        }
                         return copy
                     }
                 }
-                record.finishedAt = Date()
+                if isGracefulStop, record.name == "launch_helpers", record.result == nil {
+                    let actionsDone = (record.subagents ?? []).reduce(0) { $0 + $1.toolCallCount }
+                    let progressNote = actionsDone > 0 ? " after \(actionsDone) actions of partial progress" : ""
+                    record.result = "Paused/stopped before completion\(progressNote) (not a tool failure). Sub-agent launching works normally — launch sub-agents in parallel when continuing."
+                }
+                if record.finishedAt == nil {
+                    record.finishedAt = Date()
+                }
                 turn.steps[stepIndex].toolCalls[callIndex] = record
             }
             if turn.steps[stepIndex].finishedAt == nil { turn.steps[stepIndex].finishedAt = Date() }
@@ -369,6 +576,8 @@ private struct Runner {
         pendingBlankReplyNudge = nil
         let activeSteeringNotes = injectedSteeringNotes
         injectedSteeringNotes.removeAll()
+        let activeBackgroundReports = pendingBackgroundReports
+        pendingBackgroundReports.removeAll()
         let stepSteered = activeSteeringNotes.isEmpty ? nil : activeSteeringNotes
         while true {
             attempt += 1
@@ -383,6 +592,17 @@ private struct Runner {
                 readsPDFs: route.readsPDFs,
                 toolInlineImages: toolInlineImages
             )
+            if !activeBackgroundReports.isEmpty {
+                let stillRunning = await steering?.activeBackgroundTaskCount() ?? 0
+                let tailNote = stillRunning > 0
+                    ? "(\(stillRunning) other background sub-agent\(stillRunning == 1 ? " is" : "s are") still running and will deliver \(stillRunning == 1 ? "its report" : "their reports") automatically when finished — acknowledge or continue any requested work without stopping.)"
+                    : "(All background sub-agents have now finished — synthesize the full findings clearly for the user.)"
+                rawMessages.append(.user(
+                    "[Background sub-agent report]\n\n"
+                    + activeBackgroundReports.joined(separator: "\n\n---\n\n")
+                    + "\n\n" + tailNote
+                ))
+            }
             if let nudge = activeBlankNudge {
                 rawMessages.append(.user(nudge))
             }
@@ -424,15 +644,17 @@ private struct Runner {
             )
             if trimmed, !turn.notices.contains(Self.trimmedNotice) { turn.notices.append(Self.trimmedNotice) }
 
-            emit(milestone: false)
-
             var accumulator = StreamAccumulator()
+            var emittedInitialStep = false
             do {
                 let stream = try await environment.openRouter.stream(request)
                 for try await chunk in stream {
+                    let prevToolCount = accumulator.toolCalls.count
                     accumulator.apply(chunk)
                     if let error = chunk.error { throw error }
-                    let changed = turn.steps[index].text != accumulator.text || turn.steps[index].reasoning != accumulator.reasoning
+                    let changed = turn.steps[index].text != accumulator.text
+                        || turn.steps[index].reasoning != accumulator.reasoning
+                        || accumulator.toolCalls.count != prevToolCount
                     if !accumulator.reasoning.isEmpty,
                        turn.steps[index].reasoningFinishedAt == nil,
                        (!accumulator.text.isEmpty || !accumulator.toolCalls.isEmpty) {
@@ -443,7 +665,10 @@ private struct Runner {
                     if let model = accumulator.model { turn.steps[index].model = model }
                     // Every new piece of text goes out at once, so words never wait for the next
                     // ones (a model can pause mid-reply). The app draws at most once a frame.
-                    if changed { emit(milestone: false) }
+                    if changed || !emittedInitialStep {
+                        emittedInitialStep = true
+                        emit(milestone: false)
+                    }
                 }
                 try Task.checkCancellation()
                 guard accumulator.hasOutput || !accumulator.reasoning.isEmpty || accumulator.finishReason != nil else {
@@ -577,6 +802,9 @@ private struct Runner {
 
     func recovery(for error: Error, attempt: Int) async -> Recovery {
         if let api = error as? OpenRouterAPIError {
+            if api.httpStatus == 413 && attempt <= 2 {
+                return .shrinkContext
+            }
             switch api.kind {
             case .outOfCredits where route.isAuto && !route.isFree && !switchedToFree:
                 return .switchToFree
@@ -614,14 +842,17 @@ private struct Runner {
         for callIndex in turn.steps[stepIndex].toolCalls.indices {
             let call = turn.steps[stepIndex].toolCalls[callIndex]
             guard call.result == nil else { continue }
-            let repeatedFailures = turn.steps.prefix(stepIndex).flatMap(\.toolCalls).filter {
-                $0.name == call.name && $0.arguments == call.arguments && $0.status == .failed
+            let repeatedFailures = turn.steps.prefix(stepIndex).flatMap(\.toolCalls).filter { prev in
+                guard prev.name == call.name && prev.arguments == call.arguments && prev.status == .failed else { return false }
+                let msg = (prev.result ?? "").lowercased()
+                let isTransient = msg.contains("rate limit") || msg.contains("timed out") || msg.contains("temporarily")
+                return !isTransient
             }.count
-            if repeatedFailures >= 2 {
+            if repeatedFailures >= 3 {
                 fail(
                     stepIndex,
                     callIndex,
-                    message: "This exact tool call already failed twice. Change the approach or ask the person what to do next.",
+                    message: "This exact tool call already failed three times. Change the approach or ask the person what to do next.",
                     summary: "Stopped a repeated failing tool call"
                 )
                 continue
@@ -669,7 +900,9 @@ private struct Runner {
                     waiting = true
                     continue
                 }
-                let allowed = questions.questions.first?.options.first == answer
+                let normalizedAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let affirmativeReplies: Set<String> = ["yes", "y", "allow", "approve", "approved", "sure", "ok", "okay", "go ahead", "do it"]
+                let allowed = (questions.questions.first?.options.first == answer) || affirmativeReplies.contains(normalizedAnswer)
                 guard allowed else {
                     turn.steps[stepIndex].toolCalls[callIndex].result = "The person did not approve this change."
                     turn.steps[stepIndex].toolCalls[callIndex].status = .done

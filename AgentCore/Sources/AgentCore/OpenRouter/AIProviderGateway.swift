@@ -378,20 +378,24 @@ public enum AIProviderGateway {
             "Authorization": "Bearer \(cleanKey)",
         ]
         let host = base.host?.lowercased() ?? ""
-        let candidatePaths: [String]
-        if endpoint.id == "oneprovider" || host.contains("oneprovider") {
-            candidatePaths = ["dashboard/balance", "dashboard/billing/credit_grants", "dashboard/billing/subscription"]
+        var candidateURLs: [URL] = []
+        if endpoint.id == "saygm" || host.contains("saygm") {
+            candidateURLs = ["credits", "billing/balance", "account/balance"].map { base.appendingPathComponent($0) }
+        } else if endpoint.id == "oneprovider" || host.contains("oneprovider") {
+            candidateURLs = ["dashboard/balance", "dashboard/billing/credit_grants", "dashboard/billing/subscription"].map { base.appendingPathComponent($0) }
         } else if endpoint.id == "teamorouter" || host.contains("teamorouter") {
-            candidatePaths = ["billing/balance", "dashboard/balance"]
+            candidateURLs = ["billing/balance", "dashboard/balance"].map { base.appendingPathComponent($0) }
         } else if endpoint.id == "omniroute" || host.contains("cheaperinference") || host.contains("omniroute") {
-            candidatePaths = ["account/balance", "dashboard/balance", "billing/balance"]
+            if host == "platform.cheaperinference.com", let apiURL = URL(string: "https://api.cheaperinference.com/v1/account/balance") {
+                candidateURLs.append(apiURL)
+            }
+            candidateURLs.append(contentsOf: ["account/balance", "dashboard/balance", "billing/balance"].map { base.appendingPathComponent($0) })
         } else {
-            candidatePaths = ["account/balance", "billing/balance", "dashboard/balance", "dashboard/billing/credit_grants", "credits"]
+            candidateURLs = ["credits", "account/balance", "billing/balance", "dashboard/balance", "dashboard/billing/credit_grants"].map { base.appendingPathComponent($0) }
         }
 
-        for rel in candidatePaths {
-            let url = base.appendingPathComponent(rel)
-            guard let resp = try? await transport.send(HTTPRequest(url: url, headers: headers, idleTimeout: 12)),
+        for url in candidateURLs {
+            guard let resp = try? await transport.send(HTTPRequest(url: url, headers: headers, idleTimeout: 10)),
                   resp.isSuccess,
                   let json = JSONValue.parse(resp.body),
                   let usd = parseBalanceJSON(json) else { continue }
@@ -401,6 +405,13 @@ public enum AIProviderGateway {
     }
 
     public static func parseBalanceJSON(_ json: JSONValue) -> Double? {
+        // SayGM: `{"object": "credit_balance", "balance": {"usd": "12.345678901", "nano_usd": 12345678901}}`
+        if let v = numberFromJSON(json["balance"]?["usd"]) ?? numberFromJSON(json["data"]?["balance"]?["usd"]) {
+            return max(0, v)
+        }
+        if let nano = numberFromJSON(json["balance"]?["nano_usd"]) ?? numberFromJSON(json["data"]?["balance"]?["nano_usd"]) ?? numberFromJSON(json["nano_usd"]) {
+            return max(0, nano / 1_000_000_000.0)
+        }
         // OmniRoute: `available_usd` (preferred over `balance_usd`)
         if let v = numberFromJSON(json["available_usd"]) ?? numberFromJSON(json["data"]?["available_usd"]) {
             return max(0, v)
@@ -635,7 +646,13 @@ public enum AIProviderGateway {
             ?? entry["max_output_tokens"]?.intValue
         let fallbackMaxOut: Int? = overlay?["max_output_tokens"]?.intValue
             ?? opMeta?.maxOut
-        let maxOut: Int = explicitMaxOut ?? fallbackMaxOut ?? inferredMaxOutputTokens(for: lower)
+        let rawMaxOut: Int? = explicitMaxOut ?? fallbackMaxOut
+        let normalizedOut = normalizeReportedMaxOutputTokens(
+            reported: rawMaxOut,
+            contextLength: contextLen,
+            lowerID: lower
+        )
+        let maxOut: Int = normalizedOut.cap ?? inferredMaxOutputTokens(for: lower)
 
         let extractedPrices = extractPerTokenPrices(entry: entry, overlay: overlay, opMeta: opMeta, rawID: lower)
 
@@ -759,6 +776,7 @@ public enum AIProviderGateway {
             summary: summaryParts.joined(separator: " · "),
             contextLength: contextLen,
             maxCompletionTokens: maxOut,
+            hadSyntheticMaxOutput: normalizedOut.wasSynthetic ? true : nil,
             promptPrice: extractedPrices.prompt,
             completionPrice: extractedPrices.completion,
             cacheReadPrice: extractedPrices.cacheRead,
@@ -866,7 +884,7 @@ public enum AIProviderGateway {
     }
 
     public static func inferredMaxOutputTokens(for lowerID: String) -> Int {
-        if lowerID.contains("deepseek-v4") { return 128_000 }
+        if lowerID.contains("deepseek-v4") { return 131_072 }
         if lowerID.contains("claude-opus-4-7") || lowerID.contains("claude-opus-4-8")
             || lowerID.contains("claude-opus-5") || lowerID.contains("claude-fable")
             || lowerID.contains("claude-mythos") || lowerID.contains("claude-sonnet-5")
@@ -875,10 +893,78 @@ public enum AIProviderGateway {
             || lowerID.contains("glm-5") {
             return 128_000
         }
+        if lowerID.contains("kimi-k3") || lowerID.contains("kimi-k2") {
+            return 65_536
+        }
         if lowerID.contains("claude-sonnet-4") || lowerID.contains("claude-haiku-4-5") || lowerID.contains("gemini") {
-            return 64_000
+            return 65_536
         }
         return 32_768
+    }
+
+    /// Detects synthetic ~75–100% context-fraction provider fallbacks (such as SayGM / LiteLLM reporting
+    /// `max_output_tokens = 943,718` = `0.9 * 1,048,576` on Kimi K3.1 Pro, or `max_output_tokens == context_length`).
+    public static func isSyntheticMaxOutputCap(reported: Int, contextLength: Int?) -> Bool {
+        guard reported > 0, let ctx = contextLength, ctx > 0 else { return false }
+        if reported >= ctx { return true }
+        if reported > 131_072, Double(reported) >= Double(ctx) * 0.75 {
+            return true
+        }
+        if Double(reported) >= Double(ctx) * 0.85, reported % 1_000 != 0, reported % 1_024 != 0 {
+            return true
+        }
+        return false
+    }
+
+    public static func normalizeReportedMaxOutputTokens(
+        reported: Int?,
+        contextLength: Int?,
+        lowerID: String
+    ) -> (cap: Int?, wasSynthetic: Bool) {
+        guard let reported, reported > 0 else { return (nil, false) }
+        if isSyntheticMaxOutputCap(reported: reported, contextLength: contextLength) {
+            let inferred = inferredMaxOutputTokens(for: lowerID)
+            let safeCap = contextLength.map { min(inferred, max(8_192, $0 / 2)) } ?? inferred
+            return (safeCap, true)
+        }
+        return (reported, false)
+    }
+
+    /// Computes a safe outgoing completion token limit across all providers so neither explicit `max_tokens`
+    /// nor a gateway's server-side ~90% synthetic default (`943,718`) can ever make `input_tokens + max_tokens`
+    /// exceed `context_length`.
+    public static func safeOutgoingMaxTokens(
+        requested: Int?,
+        catalogueModel: ModelInfo?,
+        rawModelID: String,
+        messages: [APIMessage],
+        tools: [ToolSpec]?,
+        requireExplicitCap: Bool = false
+    ) -> Int? {
+        let lower = rawModelID.lowercased()
+        let ctx = catalogueModel?.contextLength ?? inferredContextLength(for: lower)
+        let estimatedInput = Transcript.estimatedTokens(messages) + Transcript.estimatedToolTokens(tools ?? [])
+        let safetyMargin = max(1_024, min(8_192, ctx / 64))
+        let rawHeadroom = ctx - estimatedInput - safetyMargin
+        let headroom: Int
+        if rawHeadroom >= 1_024 {
+            headroom = rawHeadroom
+        } else if ctx - estimatedInput > 256 {
+            headroom = max(256, ctx - estimatedInput - 256)
+        } else {
+            headroom = 1_024
+        }
+
+        if let req = requested, req > 0 {
+            let clean = normalizeReportedMaxOutputTokens(reported: req, contextLength: ctx, lowerID: lower).cap ?? req
+            return min(clean, headroom)
+        }
+        if requireExplicitCap || catalogueModel?.hadSyntheticMaxOutput == true {
+            let base = catalogueModel?.maxCompletionTokens ?? inferredMaxOutputTokens(for: lower)
+            let clean = normalizeReportedMaxOutputTokens(reported: base, contextLength: ctx, lowerID: lower).cap ?? base
+            return min(clean, headroom)
+        }
+        return nil
     }
 
     /// Formats raw slugs cleanly (`claude-opus-5-5` -> `Claude Opus 5.5`, `gpt-6.1-sol` -> `GPT-6.1 Sol`).
@@ -1059,7 +1145,13 @@ public enum AIProviderGateway {
                 ]
             })
         }
-        if let maxTokens = request.maxTokens {
+        if let maxTokens = safeOutgoingMaxTokens(
+            requested: request.maxTokens,
+            catalogueModel: catalogueModel,
+            rawModelID: rawModelID,
+            messages: request.messages,
+            tools: request.tools
+        ) {
             bodyObj["max_tokens"] = .number(Double(maxTokens))
         }
         if let effort = request.reasoningEffort, effort != .none {
@@ -1070,15 +1162,30 @@ public enum AIProviderGateway {
         let url = base.appendingPathComponent("chat/completions")
         var http = try HTTPRequest.json("POST", url, body: JSONValue.object(bodyObj), headers: headers, idleTimeout: 180)
         var response = try await transport.stream(http)
-        if !response.isSuccess, response.status == 400, bodyObj["reasoning_effort"] != nil {
+        if !response.isSuccess, response.status == 400, (bodyObj["reasoning_effort"] != nil || bodyObj["max_tokens"] != nil) {
             let firstErr = try await response.collect(limit: 16 * 1024)
             let errText = String(decoding: firstErr, as: UTF8.self).lowercased()
-            if errText.contains("reasoning_effort") || errText.contains("effort") || errText.contains("xhigh") || errText.contains("max") {
+            var adjusted = false
+            if bodyObj["max_tokens"] != nil, errText.contains("max_completion_tokens") {
+                bodyObj["max_completion_tokens"] = bodyObj.removeValue(forKey: "max_tokens")
+                adjusted = true
+            } else if bodyObj["max_tokens"] != nil, (errText.contains("max_tokens") || errText.contains("context_length") || errText.contains("maximum context")) {
+                if let currentMax = bodyObj["max_tokens"]?.intValue, currentMax > 4_096 {
+                    bodyObj["max_tokens"] = .number(Double(max(2_048, currentMax / 2)))
+                } else {
+                    bodyObj.removeValue(forKey: "max_tokens")
+                }
+                adjusted = true
+            }
+            if bodyObj["reasoning_effort"] != nil, (errText.contains("reasoning_effort") || errText.contains("effort") || errText.contains("xhigh") || errText.contains("max")) {
                 if request.reasoningEffort == .xhigh || request.reasoningEffort == .max {
                     bodyObj["reasoning_effort"] = "high"
                 } else {
                     bodyObj.removeValue(forKey: "reasoning_effort")
                 }
+                adjusted = true
+            }
+            if adjusted {
                 http = try HTTPRequest.json("POST", url, body: JSONValue.object(bodyObj), headers: headers, idleTimeout: 180)
                 response = try await transport.stream(http)
             } else {
@@ -1315,8 +1422,17 @@ public enum AIProviderGateway {
         }
 
         let lowerModel = rawModelID.lowercased()
-        let modelMaxOut = catalogueModel?.maxCompletionTokens ?? inferredMaxOutputTokens(for: lowerModel)
-        let requestedMaxTokens = request.maxTokens ?? modelMaxOut
+        let anthropicCtx = catalogueModel?.contextLength ?? inferredContextLength(for: lowerModel)
+        let anthropicInput = Transcript.estimatedTokens(request.messages) + Transcript.estimatedToolTokens(request.tools ?? [])
+        let anthropicHeadroom = max(1_024, anthropicCtx - anthropicInput - max(1_024, min(8_192, anthropicCtx / 64)))
+        let requestedMaxTokens = safeOutgoingMaxTokens(
+            requested: request.maxTokens,
+            catalogueModel: catalogueModel,
+            rawModelID: rawModelID,
+            messages: request.messages,
+            tools: request.tools,
+            requireExplicitCap: true
+        ) ?? min(inferredMaxOutputTokens(for: lowerModel), anthropicHeadroom)
 
         var baseBody: [String: JSONValue] = [
             "model": .string(rawModelID),
@@ -1387,9 +1503,12 @@ public enum AIProviderGateway {
                         }
                     }
                 } else if let effort = effectiveEffort, effort != .none, !lowerModel.contains("haiku-3") {
-                    let budget = classicThinkingBudget(for: effort)
-                    maxOut = max(maxOut, budget + 8_192)
-                    body["thinking"] = ["type": "enabled", "budget_tokens": .number(Double(budget))]
+                    let maxAllowedBudget = max(1_024, anthropicHeadroom - 2_048)
+                    let budget = min(classicThinkingBudget(for: effort), maxAllowedBudget)
+                    maxOut = min(anthropicHeadroom, max(maxOut, budget + 2_048))
+                    if budget >= 1_024, maxOut > budget {
+                        body["thinking"] = ["type": "enabled", "budget_tokens": .number(Double(budget))]
+                    }
                 }
             } else if mode == 1 {
                 if let effort = effectiveEffort, effort != .none {
@@ -1398,14 +1517,17 @@ public enum AIProviderGateway {
                     body["output_config"] = ["effort": .string(effortWire)]
                 }
             } else {
-                maxOut = min(maxOut, 32_768)
+                maxOut = min(maxOut, min(32_768, anthropicHeadroom))
                 if let effort = effectiveEffort, effort != .none, !lowerModel.contains("haiku-3") {
-                    let budget = min(classicThinkingBudget(for: effort), 24_576)
-                    maxOut = max(maxOut, budget + 4_096)
-                    body["thinking"] = ["type": "enabled", "budget_tokens": .number(Double(budget))]
+                    let maxAllowedBudget = max(1_024, maxOut - 2_048)
+                    let budget = min(min(classicThinkingBudget(for: effort), 24_576), maxAllowedBudget)
+                    maxOut = min(anthropicHeadroom, max(maxOut, budget + 2_048))
+                    if budget >= 1_024, maxOut > budget {
+                        body["thinking"] = ["type": "enabled", "budget_tokens": .number(Double(budget))]
+                    }
                 }
             }
-            body["max_tokens"] = .number(Double(maxOut))
+            body["max_tokens"] = .number(Double(min(maxOut, anthropicHeadroom)))
             return body
         }
 
@@ -1657,7 +1779,13 @@ public enum AIProviderGateway {
         if let effort = request.reasoningEffort, effort != .none {
             bodyObj["reasoning"] = ["effort": .string(effort.rawValue), "summary": "auto"]
         }
-        if let maxTokens = request.maxTokens {
+        if let maxTokens = safeOutgoingMaxTokens(
+            requested: request.maxTokens,
+            catalogueModel: catalogueModel,
+            rawModelID: rawModelID,
+            messages: request.messages,
+            tools: request.tools
+        ) {
             bodyObj["max_output_tokens"] = .number(Double(maxTokens))
         }
         let functionTools = (request.tools ?? []).filter { $0.type == "function" }
@@ -1816,6 +1944,15 @@ public enum AIProviderGateway {
         }
 
         var bodyObj: [String: JSONValue] = ["contents": .array(contents)]
+        if let maxTokens = safeOutgoingMaxTokens(
+            requested: request.maxTokens,
+            catalogueModel: catalogueModel,
+            rawModelID: rawModelID,
+            messages: request.messages,
+            tools: request.tools
+        ) {
+            bodyObj["generationConfig"] = ["maxOutputTokens": .number(Double(maxTokens))]
+        }
         if !systemTexts.isEmpty {
             bodyObj["systemInstruction"] = ["parts": .array([["text": .string(systemTexts.joined(separator: "\n\n"))]])]
         }

@@ -1,8 +1,10 @@
+import AgentCore
 import ChatMarkdown
 import SwiftUI
 import UIKit
 
 /// Parsed replies, kept so finished messages aren't parsed again on every redraw.
+/// Keyed by SHA-256 + length digest so dictionary keys never duplicate full 80 KB message bodies.
 @MainActor
 final class MarkdownCache {
     static let shared = MarkdownCache()
@@ -11,12 +13,17 @@ final class MarkdownCache {
     private var highlightedCode: [String: AttributedString] = [:]
     private var codeOrder: [String] = []
 
+    private static func digestKey(for text: String) -> String {
+        "\(text.utf8.count):\(Hashing.sha256Hex(Data(text.utf8)))"
+    }
+
     func document(for text: String, cacheable: Bool = true) -> MarkdownDocument {
-        if let cached = documents[text] { return cached }
+        let key = Self.digestKey(for: text)
+        if let cached = documents[key] { return cached }
         let document = MarkdownDocument(parsing: text)
         guard cacheable else { return document }
-        documents[text] = document
-        order.append(text)
+        documents[key] = document
+        order.append(key)
         if order.count > 240 {
             documents[order.removeFirst()] = nil
         }
@@ -24,7 +31,7 @@ final class MarkdownCache {
     }
 
     func highlighted(code: String, language: String?, dark: Bool, cacheable: Bool = true) -> AttributedString {
-        let key = "\(dark ? 1 : 0):\(language ?? ""):\(code)"
+        let key = "\(dark ? 1 : 0):\(language ?? ""):\(Self.digestKey(for: code))"
         if let cached = highlightedCode[key] { return cached }
         let palette = CodePalette(dark: dark)
         var result = AttributedString()

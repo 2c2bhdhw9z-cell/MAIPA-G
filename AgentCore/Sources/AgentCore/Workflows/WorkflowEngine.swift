@@ -410,7 +410,7 @@ public actor WorkflowEngine {
                 preferredEffort: helper.effortLevel ?? node.effortLevel ?? state.defaultEffort
             )
         }
-        let lead = agents[agentID]!
+        guard let lead = agents[agentID] else { throw WorkflowEngineError.unknownAgent(agentID) }
         let dynamicLimit = max(0, lead.maximumHelpers - staticHelpers.count)
         let helperCoordinator = AgentHelperCoordinator(
             lead: AgentDefinition(

@@ -600,8 +600,44 @@ struct ActivityTimelineCard: View {
             }
 
             if isOpen {
+                let isThoughtOnlyCard = !items.contains {
+                    if case .tool = $0 { return true }
+                    return false
+                }
                 Group {
-                    if timelineNeedsScroll {
+                    if isThoughtOnlyCard {
+                        let thoughtBody = VStack(alignment: .leading, spacing: 10) {
+                            ForEach(Array(items.enumerated()), id: \.element.id) { idx, item in
+                                if case .thought(let step, _) = item {
+                                    if items.count > 1 {
+                                        Text(step.thinkingSeconds.map { "Step \(idx + 1) · \($0)s" } ?? "Step \(idx + 1)")
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(theme.accent)
+                                    }
+                                    Text(step.reasoning)
+                                        .font(.footnote)
+                                        .foregroundStyle(Theme.secondaryText)
+                                        .textSelection(.enabled)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        if timelineNeedsScroll {
+                            ScrollView(.vertical, showsIndicators: true) {
+                                thoughtBody
+                            }
+                            .frame(height: 240)
+                            .background(Theme.surface.opacity(0.45), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.stroke.opacity(0.8)))
+                        } else {
+                            thoughtBody
+                                .background(Theme.surface.opacity(0.45), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.stroke.opacity(0.8)))
+                        }
+                    } else if timelineNeedsScroll {
                         ScrollViewReader { timelineProxy in
                             ScrollView(.vertical, showsIndicators: true) {
                                 LazyVStack(alignment: .leading, spacing: 8) {
@@ -647,11 +683,18 @@ struct ActivityTimelineCard: View {
         }
     }
 
+    fileprivate static func isLegacyInterruptedLaunchHelpers(_ call: ToolCallRecord) -> Bool {
+        guard call.name == "launch_helpers" else { return false }
+        let noChildFailed = !(call.subagents ?? []).contains(where: { $0.status == .failed })
+        return noChildFailed && (call.result == nil || call.result == "Interrupted when the app closed.")
+    }
+
     private func isRecoveredItem(at index: Int) -> Bool {
         guard items.indices.contains(index),
               case .tool(let call) = items[index],
               call.status == .failed
         else { return false }
+        if Self.isLegacyInterruptedLaunchHelpers(call) { return true }
         return items.dropFirst(index + 1).contains { later in
             if case .tool(let nextCall) = later { return nextCall.status == .done }
             return false
@@ -668,7 +711,8 @@ struct ActivityTimelineCard: View {
 
     private var hasFailure: Bool {
         // Only flag the collapsed header if the final tool action in this block ended in an unrecovered failure.
-        toolItems.last?.status == .failed
+        guard let last = toolItems.last, last.status == .failed else { return false }
+        return !Self.isLegacyInterruptedLaunchHelpers(last)
     }
 
     private var headerIcon: String {
@@ -745,7 +789,16 @@ private struct ActivityTimelineRow: View {
 
             switch item {
             case .thought(let step, let isLive):
-                ThoughtsView(step: step, isLive: isLive)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(isLive ? "Thinking…" : (step.thinkingSeconds.map { "Thought for \($0)s" } ?? "Thoughts"))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(isLive ? theme.accent : Theme.secondaryText)
+                    Text(step.reasoning)
+                        .font(.footnote)
+                        .foregroundStyle(Theme.secondaryText)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             case .tool(let call):
                 if call.name == "launch_helpers", !SubagentRunItem.resolvedItems(for: call).isEmpty {
                     SubagentCardsGroupView(call: call, modelName: { $0 })

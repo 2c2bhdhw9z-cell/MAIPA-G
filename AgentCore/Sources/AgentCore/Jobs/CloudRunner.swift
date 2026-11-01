@@ -713,8 +713,12 @@ public struct CloudRunner: Sendable {
                 )
             let repairCost = await toolResults.additionalCost
             let remaining = job.state["spendLimit"]?.doubleValue.map { max(0.000_001, $0 - job.cumulativeCost - repairCost) }
+            guard let coderAgent = BuiltInAgents.named("coder"),
+                  let checkerAgent = BuiltInAgents.named("code-checker") else {
+                throw CloudRunnerError.commandFailed
+            }
             let coder = try await executeCloudAgent(
-                BuiltInAgents.named("coder")!,
+                coderAgent,
                 task: "Repair the automatic checks for commit \(commit). Inspect the actual redacted logs, make only the necessary fix, and run the affected local checks. Do not commit or push.",
                 context: repairContext,
                 tools: tools,
@@ -724,7 +728,7 @@ public struct CloudRunner: Sendable {
             )
             await toolResults.add(cost: coder.cost)
             let checker = try await executeCloudAgent(
-                BuiltInAgents.named("code-checker")!,
+                checkerAgent,
                 task: "Check the repair against the failed logs and current workspace. End with a standalone GOAL_MET line only if the repair is complete and local checks support it; otherwise end with GOAL_NOT_MET.",
                 context: coder.output,
                 tools: tools,

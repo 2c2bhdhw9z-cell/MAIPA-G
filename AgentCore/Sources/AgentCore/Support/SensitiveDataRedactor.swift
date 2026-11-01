@@ -43,6 +43,11 @@ public struct SensitiveDataRedactor: Sendable {
     }
 
     public func redactJSON(_ data: Data, pretty: Bool = true) throws -> Data {
+        if let rawText = String(data: data, encoding: .utf8), redact(rawText) == rawText {
+            // Preserve byte-for-byte representation when nothing in the JSON matched a secret,
+            // preventing download/upload hash churn across devices.
+            return data
+        }
         let value = try JSONCoding.decoder().decode(JSONValue.self, from: data)
         return try JSONCoding.encoder(pretty: pretty).encode(redact(value))
     }

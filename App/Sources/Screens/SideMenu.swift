@@ -10,7 +10,7 @@ struct SideMenu: View {
         switch PreviewScenes.scene {
         case "menu-agents": return .agents
         case "menu-workflows": return .workflows
-        case "menu-memories": return .memories
+        case "menu-specs", "menu-memories": return .specs
         default: return .chats
         }
     }()
@@ -88,13 +88,60 @@ struct SideMenu: View {
         showDelete = true
     }
 
+    private var activeSidebarRepo: ChatRepo? {
+        app.library.openSession?.chat.repo ?? app.home.repo
+    }
+
     private var header: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             Spark(size: 34)
             Text("MAIPA-G")
                 .font(.rounded(.title3, weight: .bold))
                 .accessibilityAddTraits(.isHeader)
             Spacer()
+            if tab == .agents {
+                Button {
+                    app.sheet = .agentEditor(nil)
+                    app.isMenuOpen = false
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(theme.accent)
+                        .frame(width: 36, height: 36)
+                        .background(Theme.raised, in: Circle())
+                        .overlay(Circle().strokeBorder(Theme.stroke))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Create agent")
+            } else if tab == .workflows {
+                Button {
+                    app.sheet = .workflowEditor(nil)
+                    app.isMenuOpen = false
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(theme.accent)
+                        .frame(width: 36, height: 36)
+                        .background(Theme.raised, in: Circle())
+                        .overlay(Circle().strokeBorder(Theme.stroke))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Build workflow")
+            } else if tab == .specs {
+                Button {
+                    app.sheet = .specs(activeSidebarRepo, startCreating: true)
+                    app.isMenuOpen = false
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(theme.accent)
+                        .frame(width: 36, height: 36)
+                        .background(Theme.raised, in: Circle())
+                        .overlay(Circle().strokeBorder(Theme.stroke))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("New spec")
+            }
             Button {
                 app.newChat()
             } label: {
@@ -115,9 +162,9 @@ struct SideMenu: View {
 
     private enum MenuTab: String, CaseIterable, Identifiable {
         case chats = "Chats"
+        case specs = "Specs"
         case agents = "Agents"
         case workflows = "Workflows"
-        case memories = "Memories"
         var id: String { rawValue }
     }
 
@@ -286,29 +333,79 @@ struct SideMenu: View {
                 }
             }
             .listStyle(.plain).scrollContentBackground(.hidden)
-        case .memories:
-            let filteredMemories = app.memories.memories.filter { query.isEmpty || $0.text.localizedCaseInsensitiveContains(query) }
+        case .specs:
+            let filteredSpecs = app.specs.specs.filter {
+                query.isEmpty
+                    || $0.title.localizedCaseInsensitiveContains(query)
+                    || $0.repo.fullName.localizedCaseInsensitiveContains(query)
+            }
             List {
-                if filteredMemories.isEmpty {
-                    Text(query.isEmpty ? "No memories yet." : "No memories match.")
-                        .font(.subheadline).foregroundStyle(Theme.secondaryText).listRowBackground(Color.clear)
-                }
-                ForEach(filteredMemories) { memory in
+                Section {
+                    if filteredSpecs.isEmpty {
+                        Text(query.isEmpty ? "No specs yet. Tap + above to start one." : "No specs match.")
+                            .font(.subheadline)
+                            .foregroundStyle(Theme.secondaryText)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                    }
+                    ForEach(filteredSpecs) { spec in
+                        Button {
+                            app.sheet = .specReview(spec.id)
+                            app.isMenuOpen = false
+                        } label: {
+                            HStack(spacing: 10) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack(spacing: 6) {
+                                        Text(spec.title)
+                                            .font(.subheadline.weight(.semibold))
+                                            .lineLimit(1)
+                                        Text(spec.stage.title)
+                                            .font(.system(size: 10, weight: .semibold))
+                                            .foregroundStyle(theme.accent)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(theme.accent.opacity(0.12), in: Capsule())
+                                    }
+                                    Text(spec.repo.fullName)
+                                        .font(.caption)
+                                        .foregroundStyle(Theme.secondaryText)
+                                        .lineLimit(1)
+                                    if spec.stage == .execution || spec.stage == .completed {
+                                        ProgressView(
+                                            value: Double(spec.tasks.filter(\.isComplete).count),
+                                            total: Double(max(spec.tasks.count, 1))
+                                        )
+                                        .padding(.top, 2)
+                                    }
+                                }
+                                Spacer(minLength: 4)
+                                Image(systemName: "chevron.right")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(Theme.secondaryText)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                    }
                     Button {
-                        app.sheet = .memoryEditor(memory.id)
+                        app.sheet = .specs(activeSidebarRepo)
                         app.isMenuOpen = false
                     } label: {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(memory.text).lineLimit(3)
-                            Label(memory.source.label, systemImage: memory.source.icon).font(.caption).foregroundStyle(Theme.secondaryText)
-                        }
-                    }.buttonStyle(.plain)
+                        Label("Manage or start a spec", systemImage: "list.clipboard")
+                    }
                     .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                } header: {
+                    Text("Structured feature plans with requirements, design, and tasks.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.secondaryText)
+                        .textCase(nil)
                 }
-                Button { app.sheet = .memories; app.isMenuOpen = false } label: { Label("Manage memories", systemImage: "slider.horizontal.3") }
-                    .listRowBackground(Color.clear)
             }
-            .listStyle(.plain).scrollContentBackground(.hidden)
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
         }
     }
 
@@ -361,82 +458,96 @@ struct SideMenu: View {
     }
 
     private var footer: some View {
-        VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
             Divider()
-            HStack(spacing: 10) {
-                if let login = app.github.login {
-                    Image(systemName: "person.crop.circle.fill")
-                        .font(.title2)
-                        .foregroundStyle(theme.accent)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(login).font(.subheadline.weight(.medium)).lineLimit(1)
-                        Text(saveStatus).font(.caption).foregroundStyle(Theme.secondaryText).lineLimit(1)
-                        if let credit = openRouterStatus {
-                            Text(credit).font(.caption2.monospacedDigit()).foregroundStyle(Theme.secondaryText).lineLimit(1)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    if let login = app.github.login {
+                        Image(systemName: "person.crop.circle.fill")
+                            .font(.title2)
+                            .foregroundStyle(theme.accent)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(login).font(.subheadline.weight(.medium)).lineLimit(1)
+                            Text(saveStatus).font(.caption).foregroundStyle(Theme.secondaryText).lineLimit(1)
+                        }
+                    } else {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Not connected to GitHub")
+                                .font(.subheadline)
+                                .foregroundStyle(Theme.secondaryText)
+                                .lineLimit(1)
                         }
                     }
-                } else {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Not connected to GitHub")
-                            .font(.subheadline)
-                            .foregroundStyle(Theme.secondaryText)
-                        if let credit = openRouterStatus {
-                            Text(credit).font(.caption2.monospacedDigit()).foregroundStyle(Theme.secondaryText).lineLimit(1)
+                    Spacer(minLength: 6)
+                    Button {
+                        app.sheet = .connectors
+                        app.isMenuOpen = false
+                    } label: {
+                        Image(systemName: "puzzlepiece.extension")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 36, height: 36)
+                            .background(Theme.raised, in: Circle())
+                            .overlay(Circle().strokeBorder(Theme.stroke))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Connectors")
+                    Button {
+                        app.jobs.show()
+                    } label: {
+                        Image(systemName: "gearshape.2")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 36, height: 36)
+                            .background(Theme.raised, in: Circle())
+                            .overlay(Circle().strokeBorder(Theme.stroke))
+                            .overlay(alignment: .topTrailing) {
+                                if app.jobs.activeCount > 0 {
+                                    Text("\(min(app.jobs.activeCount, 9))")
+                                        .font(.system(size: 9, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .frame(width: 16, height: 16)
+                                        .background(theme.accent, in: Circle())
+                                }
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Jobs")
+                    Button {
+                        app.sheet = .settings
+                    } label: {
+                        Image(systemName: "gearshape")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 36, height: 36)
+                            .background(Theme.raised, in: Circle())
+                            .overlay(Circle().strokeBorder(Theme.stroke))
+                            .overlay(alignment: .topTrailing) {
+                                if app.updates.newer != nil {
+                                    Circle().fill(.red).frame(width: 9, height: 9)
+                                }
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(app.updates.newer != nil ? "Settings, a new build is out" : "Settings")
+                }
+
+                let badges = providerFooterBadges
+                if !badges.isEmpty {
+                    FlowLayout(spacing: 5, lineSpacing: 5) {
+                        ForEach(badges, id: \.self) { item in
+                            Text(item)
+                                .font(.caption2.weight(.medium).monospacedDigit())
+                                .foregroundStyle(Theme.secondaryText)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(Theme.raised.opacity(0.85), in: Capsule())
+                                .overlay(Capsule().strokeBorder(Theme.stroke))
                         }
                     }
                 }
-                Spacer()
-                Button {
-                    app.sheet = .connectors
-                    app.isMenuOpen = false
-                } label: {
-                    Image(systemName: "puzzlepiece.extension")
-                        .font(.body.weight(.semibold))
-                        .frame(width: 36, height: 36)
-                        .background(Theme.raised, in: Circle())
-                        .overlay(Circle().strokeBorder(Theme.stroke))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Connectors")
-                Button {
-                    app.jobs.show()
-                } label: {
-                    Image(systemName: "gearshape.2")
-                        .font(.body.weight(.semibold))
-                        .frame(width: 36, height: 36)
-                        .background(Theme.raised, in: Circle())
-                        .overlay(Circle().strokeBorder(Theme.stroke))
-                        .overlay(alignment: .topTrailing) {
-                            if app.jobs.activeCount > 0 {
-                                Text("\(min(app.jobs.activeCount, 9))")
-                                    .font(.system(size: 9, weight: .bold))
-                                    .foregroundStyle(.white)
-                                    .frame(width: 16, height: 16)
-                                    .background(theme.accent, in: Circle())
-                            }
-                        }
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Jobs")
-                Button {
-                    app.sheet = .settings
-                } label: {
-                    Image(systemName: "gearshape")
-                        .font(.body.weight(.semibold))
-                        .frame(width: 36, height: 36)
-                        .background(Theme.raised, in: Circle())
-                        .overlay(Circle().strokeBorder(Theme.stroke))
-                        .overlay(alignment: .topTrailing) {
-                            if app.updates.newer != nil {
-                                Circle().fill(.red).frame(width: 9, height: 9)
-                            }
-                        }
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(app.updates.newer != nil ? "Settings, a new build is out" : "Settings")
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            .padding(.vertical, 10)
         }
     }
 
@@ -449,20 +560,23 @@ struct SideMenu: View {
         }
     }
 
-    private var openRouterStatus: String? {
-        guard app.openRouter.isSignedIn else { return nil }
-        let balances = app.openRouter.providerBalanceItems
+    private var providerFooterBadges: [String] {
+        guard app.openRouter.isSignedIn else { return [] }
         var items: [String] = []
-        if balances.count == 1 {
-            items.append(balances[0].balance.dollars)
-        } else if balances.count > 1 {
-            items.append(contentsOf: balances.prefix(3).map { "\($0.name) \($0.balance.dollars)" })
+        let balances = app.openRouter.providerBalanceItems
+        var listedNames = Set<String>()
+        for entry in balances {
+            items.append("\(entry.name) \(entry.balance.dollars)")
+            listedNames.insert(entry.name)
         }
-        if let free = app.openRouter.freeRequestsLeft { items.append("\(free) free") }
-        if items.isEmpty, !app.openRouter.readyExternalProviders.isEmpty {
-            items.append(app.openRouter.readyExternalProviders.map(\.name).joined(separator: " · "))
+        for provider in app.openRouter.readyExternalProviders where !listedNames.contains(provider.name) {
+            items.append(provider.name)
+            listedNames.insert(provider.name)
         }
-        return items.isEmpty ? nil : items.joined(separator: " · ")
+        if let free = app.openRouter.freeRequestsLeft {
+            items.append("\(free) free")
+        }
+        return items
     }
 
     // MARK: Grouping by day

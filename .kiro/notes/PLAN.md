@@ -1,20 +1,6 @@
 # MAIPA-G plan
 
-**Status (31 October 2026, 10:42 PM ET): Shipping Build 84 (PRs #25–#26) to replace Build 82 (`build-82-1d5648c`)
-with: (1) true Kiro non-stopping `Steer` / `Queue` / `Stop` mid-turn controls (`Steer` folds guidance
-into the running turn without cancelling or stopping streams/tools/sub-agents, persists `steeredMessages`
-on `AssistantStep` + `Transcript` across multi-step turns and reloads, renders inline `↳ Steered:`
-banners, and drains end-of-turn steer races; `Queue` persists follow-ups on disk to run sequentially
-after the active turn finishes, restoring text + attachments on `Edit`/cancel; only explicit `Stop`
-cancels the active turn); (2) extended iOS 26 `BGContinuedProcessingTask` background continuation for
-active chats/sub-agents + 4-second periodic checkpoints + durable `existingSubagents` resume so
-completed sub-agents are never wiped back to `0` if interrupted; (3) real-time unthrottled sub-agent
-card updates (full reasoning signature past 600 chars, immediate structural `emit` on every action/status
-change, stable card IDs across start -> live -> done so expanded cards never slam shut, and single-tree
-`SubagentItemCard` rendering with `LazyVStack` instead of `ViewThatFits`); (4) automatic API key paste
-sanitization + eye reveal toggle across all providers (`OpenRouter`, `OneProvider`, `SayGM`,
-`TeamoRouter`, `OmniRoute`, `Custom`); and (5) stale `.running` chat settlement inside
-`ChatLibrary.reloadFromDisk()`.
+**Status (1 November 2026, 2:05 AM ET): Shipped Build 88 to `main` (PR #27), combining all Build 85/86 fixes and all S1/S2/S3 findings from `MAIPA-G-AUDIT.md` (verified across 197 Linux + macOS tests with `-strict-concurrency=complete`).**
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
 saving works (Settings and the side menu showed "Saved just now", and the 173 MB Continuum .ipa is

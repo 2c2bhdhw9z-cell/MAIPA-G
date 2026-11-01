@@ -66,6 +66,7 @@ struct Composer: View {
     @State private var takingPhoto = false
     @State private var importError: String?
     @State private var attachmentsExpanded = false
+    @State private var showingPlusMenu = false
 
     private var hasSendableContent: Bool {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
@@ -386,101 +387,16 @@ struct Composer: View {
     }
 
     private var plusMenu: some View {
-        Menu {
-            Section {
-                Button {
-                    focused = false
-                    choosingPhoto = true
-                } label: {
-                    Label("Photo library", systemImage: "photo.on.rectangle")
-                }
-                Button {
-                    focused = false
-                    if CameraPicker.isAvailable { takingPhoto = true }
-                    else { importError = "The camera isn't available." }
-                } label: {
-                    Label("Take a photo", systemImage: "camera")
-                }
-                Button { pickFile() } label: {
-                    Label("Choose a file", systemImage: "doc")
-                }
-                Button(action: onPicture) {
-                    Label("Make picture", systemImage: "paintbrush")
-                }
-            }
-
-            Section {
-                Button { webEnabled.toggle() } label: {
-                    Label("Web search", systemImage: webEnabled ? "globe" : "globe.badge.chevron.backward")
-                    Text(webEnabled ? "On" : "Off")
-                }
-                Button { autonomous.toggle() } label: {
-                    Label("Autonomous", systemImage: autonomous ? "bolt.fill" : "bolt")
-                    Text(!app.settings.autonomousEnabled ? "Enable in Settings" : (autonomous ? "On" : "Off"))
-                }
-                .disabled(!app.settings.autonomousEnabled)
-                Button(action: onPickGroup) {
-                    Label("Group", systemImage: "folder.badge.plus")
-                    Text(groupName ?? "None")
-                }
-                if let onCompact {
-                    Button(action: onCompact) {
-                        Label(isCompacting ? "Compacting older messages…" : "Compact older messages", systemImage: "rectangle.compress.vertical")
-                        Text(isCompacting ? "Summarizing with AI…" : (canCompact ? "Summarizes earlier turns with AI" : "Up to date"))
-                    }
-                    .disabled(!canCompact || isCompacting)
-                }
-                if canRestoreMemory, let onRestoreMemory {
-                    Button(action: onRestoreMemory) {
-                        Label("Restore full memory", systemImage: "arrow.uturn.backward.circle")
-                        Text("Undo compaction")
-                    }
-                }
-            }
-
-            Section {
-                Button(action: onSpec) {
-                    Label("Specs", systemImage: "list.clipboard")
-                }
-                Button { app.sheet = .agents } label: {
-                    Label("Agents", systemImage: "person.crop.circle")
-                }
-                Button { app.sheet = .workflows } label: {
-                    Label("Workflows", systemImage: "point.3.connected.trianglepath.dotted")
-                }
-                Button { app.sheet = .connectors } label: {
-                    Label("Connectors", systemImage: "puzzlepiece.extension")
-                }
-                if let onWorkstation {
-                    Button(action: onWorkstation) {
-                        Label("Workstation (Canvas & Files)", systemImage: "square.on.square.dashed")
-                    }
-                }
-                if repo != nil {
-                    if let onFiles {
-                        Button(action: onFiles) {
-                            Label("Repo files", systemImage: "folder")
-                        }
-                    }
-                    Button(action: onPreview) {
-                        Label("Web preview", systemImage: "safari")
-                    }
-                }
-                if !app.jobs.jobs.isEmpty {
-                    Button { app.jobs.show() } label: {
-                        Label("Jobs", systemImage: "gearshape.2")
-                        if app.jobs.activeCount > 0 {
-                            Text("\(app.jobs.activeCount) working")
-                        }
-                    }
-                }
-            }
+        Button {
+            focused = false
+            showingPlusMenu.toggle()
+            Haptics.selection()
         } label: {
             Image(systemName: "plus")
                 .font(.subheadline.weight(.bold))
                 .foregroundStyle(.primary)
                 .frame(width: 32, height: 32)
-                .background(Theme.raised.opacity(0.9), in: Circle())
+                .background(Theme.raised.opacity(0.95), in: Circle())
                 .overlay(Circle().strokeBorder(Theme.stroke))
                 .overlay(alignment: .topTrailing) {
                     if autonomous || !webEnabled || groupName != nil {
@@ -490,6 +406,130 @@ struct Composer: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Tools, modes, and attachments")
+        .popover(isPresented: $showingPlusMenu, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 2) {
+                plusPopoverRow("Photo library", icon: "photo.on.rectangle") {
+                    showingPlusMenu = false
+                    focused = false
+                    choosingPhoto = true
+                }
+                plusPopoverRow("Take a photo", icon: "camera") {
+                    showingPlusMenu = false
+                    focused = false
+                    if CameraPicker.isAvailable { takingPhoto = true }
+                    else { importError = "The camera isn't available." }
+                }
+                plusPopoverRow("Choose a file", icon: "doc") {
+                    showingPlusMenu = false
+                    pickFile()
+                }
+                plusPopoverRow("Make picture", icon: "paintbrush") {
+                    showingPlusMenu = false
+                    onPicture()
+                }
+
+                Divider().padding(.vertical, 4)
+
+                plusPopoverRow("Web search", icon: webEnabled ? "globe" : "globe.badge.chevron.backward", trailing: webEnabled ? "On" : "Off", highlightTrailing: webEnabled) {
+                    webEnabled.toggle()
+                    Haptics.selection()
+                }
+                plusPopoverRow(
+                    "Autonomous",
+                    icon: autonomous ? "bolt.fill" : "bolt",
+                    trailing: !app.settings.autonomousEnabled ? "Enable in Settings" : (autonomous ? "On" : "Off"),
+                    highlightTrailing: autonomous,
+                    disabled: !app.settings.autonomousEnabled
+                ) {
+                    autonomous.toggle()
+                    Haptics.selection()
+                }
+                plusPopoverRow("Group", icon: "folder.badge.plus", trailing: groupName ?? "None") {
+                    showingPlusMenu = false
+                    onPickGroup()
+                }
+                if let onCompact {
+                    plusPopoverRow(
+                        isCompacting ? "Compacting older messages…" : "Compact older messages",
+                        icon: "rectangle.compress.vertical",
+                        trailing: isCompacting ? "Working…" : (canCompact ? nil : "Up to date"),
+                        disabled: !canCompact || isCompacting
+                    ) {
+                        showingPlusMenu = false
+                        onCompact()
+                    }
+                }
+                if canRestoreMemory, let onRestoreMemory {
+                    plusPopoverRow("Restore full memory", icon: "arrow.uturn.backward.circle", trailing: "Undo") {
+                        showingPlusMenu = false
+                        onRestoreMemory()
+                    }
+                }
+
+                if repo != nil || !app.jobs.jobs.isEmpty {
+                    Divider().padding(.vertical, 3)
+                }
+
+                if repo != nil {
+                    if let onFiles {
+                        plusPopoverRow("Repo files", icon: "folder") {
+                            showingPlusMenu = false
+                            onFiles()
+                        }
+                    }
+                    plusPopoverRow("Web preview", icon: "safari") {
+                        showingPlusMenu = false
+                        onPreview()
+                    }
+                }
+                if !app.jobs.jobs.isEmpty {
+                    plusPopoverRow("Jobs", icon: "gearshape.2", trailing: app.jobs.activeCount > 0 ? "\(app.jobs.activeCount) working" : nil) {
+                        showingPlusMenu = false
+                        app.jobs.show()
+                    }
+                }
+            }
+            .padding(.vertical, 6)
+            .padding(.horizontal, 8)
+            .frame(width: 268)
+            .background(Theme.raised.opacity(0.98))
+            .presentationBackground(Theme.raised.opacity(0.98))
+            .presentationCompactAdaptation(.popover)
+        }
+    }
+
+    private func plusPopoverRow(
+        _ title: String,
+        icon: String,
+        trailing: String? = nil,
+        highlightTrailing: Bool = false,
+        disabled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(disabled ? Theme.secondaryText.opacity(0.5) : theme.accent)
+                    .frame(width: 20)
+                Text(title)
+                    .font(.subheadline)
+                    .foregroundStyle(disabled ? Theme.secondaryText.opacity(0.5) : .primary)
+                    .lineLimit(1)
+                Spacer(minLength: 6)
+                if let trailing {
+                    Text(trailing)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(highlightTrailing ? theme.accent : Theme.secondaryText)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6.5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
     }
 
     private func pickFile() {

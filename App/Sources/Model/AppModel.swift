@@ -31,7 +31,7 @@ enum AppSheet: Identifiable, Hashable {
     case unreadableFiles
     case memoryEditor(UUID?)
     case groups(ComposerTarget)
-    case specs(ChatRepo?)
+    case specs(ChatRepo?, startCreating: Bool = false)
     case specReview(UUID)
     case connectors
     case connectorDetail(UUID)
@@ -64,7 +64,7 @@ enum AppSheet: Identifiable, Hashable {
         case .unreadableFiles: return "unreadable-files"
         case .memoryEditor(let id): return "memory-editor-\(id?.uuidString ?? "new")"
         case .groups(let target): return "groups-\(target)"
-        case .specs(let repo): return "specs-\(repo?.ref.fullName ?? "all")"
+        case .specs(let repo, let startCreating): return "specs-\(repo?.ref.fullName ?? "all")-\(startCreating)"
         case .specReview(let id): return "spec-review-\(id.uuidString)"
         case .connectors: return "connectors"
         case .connectorDetail(let id): return "connector-\(id.uuidString)"
@@ -420,8 +420,8 @@ final class AppModel {
     }
 
     func turnFinished(in session: ChatSession) {
-        Task { await openRouter.refreshKeyInfo() }
-        sync.request()
+        Task { await openRouter.refreshKeyInfo(force: true) }
+        sync.request(after: 2.5)
         if session.lastTurn?.status == .done || session.lastTurn?.status == .waitingForUser {
             Haptics.success()
             let needsAnswer = session.lastTurn?.status == .waitingForUser
@@ -626,7 +626,7 @@ final class AppModel {
             }
         case "chat-connector":
             var chat = PreviewScenes.sampleChat()
-            if var turn = chat.lastAssistantTurn {
+            if var turn = chat.lastAssistantTurn, !turn.steps.isEmpty {
                 var call = ToolCallRecord(id: "mcp1", name: "mcp_github_search_repositories", arguments: "{}", summary: "Used GitHub · Search repositories", status: .done)
                 call.detail = "Found MAIPA-G and Continuum-."
                 turn.steps[0].toolCalls.append(call); chat.messages[chat.messages.count - 1].assistantTurn = turn
