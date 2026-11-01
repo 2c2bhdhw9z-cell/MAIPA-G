@@ -177,6 +177,116 @@ and 35 (chat-computer features) and 14 (the owner has to add the GitHub app's Pl
 Cancelled by the owner: Stability 40 and necessary item 8 (the screenshot job was deleted at 2:40
 PM). The 37 items finished before noon were spot-checked, not re-audited sentence by sentence.**
 
+## Speed and video (owner, 31 October 2026, evening; waiting on his answers, not built yet)
+His words: "an agentic/Video/Text/Thinking/Tools/Etc harness ... Optimize to Run As fast as Possible
+on apple silicon. I want to get Max Through put, latency, p50, p75, p90, p95, p99". He doesn't know
+those terms. **He expects Kiro to learn everything it can from the repo before asking him anything.**
+Kiro first asked him to explain things this repo already answers, and he was rightly angry.
+
+What the terms mean here:
+- Latency: how long he waits. The wait that matters most runs from tapping Send to the first word.
+- Throughput: how fast the words come once they start.
+- p50 to p99: line up 100 replies from fastest to slowest. p50 is the 50th (the normal case) and
+  p99 is the 99th (the worst 1 in 100). OpenRouter tracks p50, p75, p90 and p99 for every AI and
+  provider, and lets an app ask for the fast ones. MAIPA-G can work out p95 from its own timings.
+
+What Kiro found (build 80, checked again on main `1d5648c` after Build 81 merged):
+- MAIPA-G's harness is its agent loop: it sends the chat to the AI, runs the tools the AI asks for,
+  and repeats. Text, thinking, tools, pictures, PDFs, helpers and workflows already go through it.
+  Video doesn't exist yet, in or out.
+- The AIs run on OpenRouter's and the other gateways' computers. Apple's AI on the iPhone only
+  names chats and judges how hard a request is for Auto.
+- His iPhone is an iPhone 17 Pro Max (`iPhone18,2`, 12 GB) on iOS 27.0.1, from the crash reports in
+  MAIPA-G-data.
+- Nothing measures speed. Replies keep start and finish times, but nothing records the wait for the
+  first word or turns the times into numbers.
+- MAIPA-G's own code slows replies down here:
+  1. Auto waits up to 1.5 seconds for Apple's AI to judge the request before it asks OpenRouter,
+     and starts Apple's AI from cold each time.
+  2. Before every reply, MAIPA-G reloads every picture in the chat and shrinks the big ones again,
+     on the part of the app that draws the screen, so the screen can freeze for a moment.
+  3. In repo chats, the setup before the AI is asked runs one step at a time (check the open PR,
+     look up the branch on GitHub, read the rules, hooks and agents, check the computer). Several
+     could run at once.
+  4. Every step of a reply sends the whole chat again, pictures included (up to 9 MB), so long jobs
+     with pictures upload the same pictures over and over.
+  5. While words stream in, the whole reply is re-read and laid out again about 22 times a second,
+     so long replies get slower and can stutter. Each new piece of text also copies the whole reply
+     so far.
+  6. MAIPA-G never asks OpenRouter for the fastest provider of an AI, so it gets OpenRouter's
+     default balance of price and speed.
+  7. Nothing gets the connection to OpenRouter ready before he taps Send.
+
+Proposed batch (needs his OK):
+1. Measure first. Time every reply: the wait for the first word, words per second, each tool, and
+   the whole reply. Show p50, p75, p90, p95 and p99 in Settings → Speed, with a "Run speed test"
+   button that sends the same test messages every time. Save the numbers to MAIPA-G-data so Kiro
+   can read them like the crash reports, plus Apple's daily reports on launch time, freezes and
+   stutters.
+2. Fix slow spots 1 to 5 and 7, then measure again. The build notes give before and after numbers.
+3. Ask OpenRouter for its fastest providers, with limits on the slow cases (for example "p90 wait
+   under 2 seconds"). This fixes slow spot 6; how it's done depends on question 2.
+4. Video, depending on question 1.
+5. AIs on the iPhone itself, depending on question 3.
+
+Build 81 (PR #24, the crash fix) was merged at 9:26 PM ET and published as `build-82-1d5648c`, and
+all seven slow spots are still in that code. Nothing else is open, so this batch can start as soon
+as he answers and OKs it.
+
+Open questions (sent 31 October 2026, 9:30 PM ET):
+1. Video: should the AI watch videos he sends, make videos, or both?
+2. Speed or price: OpenRouter's fastest providers for an AI can cost more. Always use the fastest,
+   or only when it costs the same?
+3. Should MAIPA-G also run AIs on the iPhone itself (works offline, free and private, but less smart
+   than OpenRouter's), or keep the real work on OpenRouter?
+
+Technical notes (for Kiro; the owner doesn't read these). Line numbers are main `1d5648c` (Build 81
+merged).
+- Spot 1: `ChatSession.swift:914-918` awaits `OnDeviceAI.difficulty` when `chat.model == .auto` and
+  paid is allowed. It makes a new `LanguageModelSession` per call under `withTimeout(1.5)`
+  (`OnDeviceAI.swift:67`). Options: run it alongside the setup and use it only if it's ready; keep
+  one session and `prewarm()` it when the composer gets focus; guided generation with a
+  `@Generable` enum; skip it when `TaskDifficulty.estimate` is confident.
+- Spot 2: `ChatSession.swift:730-739` loads every image/PDF in the chat each turn and runs
+  `compactWireImageData` (`:1554`: UIImage decode, redraw, JPEG) on the main actor. Do it once at
+  import, off the main actor, and keep the wire copy.
+- Spot 3: `ChatSession.swift:802-909` runs `github.pullRequest`, `resolveCommit`,
+  `workspace.prefetch`, `resolveRules`, `RepoHooks.load`, `RepoAgentLoader.loadAgents`,
+  `prepareComputer` and `stagedDiff` in sequence (`reconnectIfNeeded` at `:714`). Run the
+  independent ones with `async let` or a task group; cache rules, hooks and agents per commit.
+- Spot 4: `Transcript.messages` base64-encodes every image on every step (`Transcript.swift:88,133`),
+  and `fit` caps the body at 9 MB (`:206`). Options to check: keep encoded parts between steps;
+  smaller copies for older turns; whether OpenRouter accepts gzip request bodies.
+- Spot 5: `AgentLoop.swift:427` emits the whole `AssistantTurn` for every chunk, and `emit` (`:227`)
+  also writes it into `chat`, so copy-on-write copies text and steps each time. `ChatSession.receive`
+  flushes every 45 ms (`:1330`), and `MarkdownView.swift:54` parses the whole streaming text uncached
+  on every redraw (`:219` does the same for code highlighting). Cache finished blocks and parse
+  only the last one; send deltas.
+- Spot 6: `ChatCompletionRequest` (`OpenRouterChat.swift:113`) sends no `provider` object.
+  OpenRouter offers `provider.sort` (`throughput`, `latency` or `price`; bypasses default routing),
+  the `:nitro` suffix (throughput sort plus priority-tier endpoints), and `preferred_min_throughput`
+  / `preferred_max_latency` as a number (p50) or an object with p50/p75/p90/p99 cutoffs over a
+  rolling 5-minute window (slow endpoints move to the back, they aren't removed). Keep `session_id`
+  for cache stickiness. https://openrouter.ai/docs/features/provider-routing. The other gateways
+  need their own check.
+- Spot 7: `URLSessionTransport` (`HTTP.swift`) is one shared session, which is right. Add a
+  pre-connect when the composer gets focus; consider `assumesHTTP3Capable`.
+- Measuring: `MetricKitCollector` only takes `MXDiagnosticPayload`; add `MXMetricPayload`. Time the
+  first token, tokens per second and tool durations with `ContinuousClock` inside AgentLoop, and
+  cross-check against OpenRouter's own per-request stats.
+- Video in: OpenRouter's `video_url` part on `/chat/completions` (base64 data URL for phone files;
+  mp4, mpeg, mov, webm; only models with video input; Gemini takes `processing: agentic|static`).
+  Base64 video hits the 9 MB cap, so compress and trim on the phone first (AVFoundation export at
+  720p or lower). https://openrouter.ai/docs/guides/overview/multimodal/videos
+- Video out: OpenRouter's async `/api/v1/videos` (submit, poll, download the MP4), with Seedance,
+  Veo 3.1, Wan and Sora 2 Pro at launch.
+  https://openrouter.ai/docs/guides/overview/multimodal/video-generation
+- On-phone AIs: iOS 27 FoundationModels takes images, and its `LanguageModel` protocol lets other
+  models plug in (https://developer.apple.com/wwdc26/guides/ios/). His iPhone gets Apple's larger
+  on-device package (up to 14 GB, https://support.apple.com/en-au/121115). One public iPhone test
+  measured small 2B open models at 55-61 tokens per second. The app's minimum is iOS 17, so this
+  stays behind availability checks.
+
 ## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
 He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,
 ask_user, generate_image) and Kiro's (read_file, list_directory, file_search, grep_search, code,
