@@ -1,8 +1,8 @@
 import Foundation
 import UIKit
 
-/// Asks iOS for background execution time when a reply or save is in progress. If iOS expires the
-/// background assertion before the work finishes, `onExpire` hops safely to `@MainActor` without
+/// Asks iOS for background execution time when a reply, sub-agent batch, or save is in progress. If
+/// iOS expires the assertion before the work finishes, `onExpire` hops safely to `@MainActor` without
 /// assuming UIKit invoked the expiration block on the main thread.
 @MainActor
 final class BackgroundGrace {

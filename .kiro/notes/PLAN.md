@@ -1,6 +1,6 @@
 # MAIPA-G plan
 
-**Status (31 October 2026, 10:25 PM ET): Shipping Build 83 (PR #25) to replace Build 82 (`build-82-1d5648c`)
+**Status (31 October 2026, 10:42 PM ET): Shipping Build 84 (PRs #25–#26) to replace Build 82 (`build-82-1d5648c`)
 with: (1) true Kiro non-stopping `Steer` / `Queue` / `Stop` mid-turn controls (`Steer` folds guidance
 into the running turn without cancelling or stopping streams/tools/sub-agents, persists `steeredMessages`
 on `AssistantStep` + `Transcript` across multi-step turns and reloads, renders inline `↳ Steered:`
@@ -173,7 +173,7 @@ Built since then:
   settle cleanly to `"stopped"` instead of auto-looping on startup; and isolated `BGTaskScheduler`,
   `UNUserNotificationCenter`, and `PHPhotoLibrary` callbacks into `nonisolated` static helpers to
   eliminate Swift 6 `@MainActor` background-queue `SIGTRAP` crashes.
-- Build 83 (PR #25): implemented true Kiro non-stopping `Steer` / `Queue` / `Stop` mid-turn controls
+- Build 84 (PRs #25–#26): implemented true Kiro non-stopping `Steer` / `Queue` / `Stop` mid-turn controls
   (`Steer` injects guidance into the active `AgentRun` without `finishAfterCurrentStep()` or `cancel()`,
   persists `AssistantStep.steeredMessages` in `Transcript.messages` across multi-step turns, renders
   inline `Steered:` banners, and handles end-of-turn steer races via `drainUnconsumedSteering()`;
