@@ -20,6 +20,17 @@ public actor SteeringInbox {
         return items
     }
 
+    public func peek() -> [String] {
+        pendingMessages
+    }
+
+    public func removeFirst(matching text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let index = pendingMessages.firstIndex(of: trimmed) else { return false }
+        pendingMessages.remove(at: index)
+        return true
+    }
+
     public func requestYieldAfterStep() {
         yieldAfterStep = true
     }
@@ -126,6 +137,16 @@ public struct AgentRun: Sendable {
     /// Injects a live mid-run steering note into the running turn at the next step boundary.
     public func steer(_ message: String) async {
         await steering.enqueue(message)
+    }
+
+    /// Cancels a pending unconsumed steering note before the next step boundary consumes it.
+    public func removeSteering(_ message: String) async -> Bool {
+        await steering.removeFirst(matching: message)
+    }
+
+    /// Drains any steering notes that arrived right as the turn finished so the session can continue immediately (`KiroCrew#20549`).
+    public func drainUnconsumedSteering() async -> [String] {
+        await steering.drain()
     }
 
     /// Gracefully finishes the current step/tools without killing an in-flight tool command, then ends the run so a chronological user message can continue immediately.
@@ -348,8 +369,11 @@ private struct Runner {
         pendingBlankReplyNudge = nil
         let activeSteeringNotes = injectedSteeringNotes
         injectedSteeringNotes.removeAll()
+        let stepSteered = activeSteeringNotes.isEmpty ? nil : activeSteeringNotes
         while true {
             attempt += 1
+            turn.steps.append(AssistantStep(steeredMessages: stepSteered))
+            let index = turn.steps.count - 1
             chat.messages[chat.messages.count - 1].assistantTurn = turn
             var rawMessages = Transcript.messages(
                 for: chat,
@@ -359,9 +383,6 @@ private struct Runner {
                 readsPDFs: route.readsPDFs,
                 toolInlineImages: toolInlineImages
             )
-            for note in activeSteeringNotes {
-                rawMessages.append(.user("Live instruction from the user while you were working — follow this update immediately:\n\(note)"))
-            }
             if let nudge = activeBlankNudge {
                 rawMessages.append(.user(nudge))
             }
@@ -403,8 +424,6 @@ private struct Runner {
             )
             if trimmed, !turn.notices.contains(Self.trimmedNotice) { turn.notices.append(Self.trimmedNotice) }
 
-            turn.steps.append(AssistantStep())
-            let index = turn.steps.count - 1
             emit(milestone: false)
 
             var accumulator = StreamAccumulator()
@@ -590,7 +609,7 @@ private struct Runner {
     /// questions that still need answers.
     mutating func runTools(inStep stepIndex: Int) async throws -> Bool {
         var waiting = false
-        var jobs: [(callIndex: Int, tool: any AgentTool, arguments: JSONValue, approved: Bool)] = []
+        var jobs: [(callIndex: Int, callID: String, tool: any AgentTool, arguments: JSONValue, approved: Bool, existingSubagents: [SubagentRunItem]?)] = []
 
         for callIndex in turn.steps[stepIndex].toolCalls.indices {
             let call = turn.steps[stepIndex].toolCalls[callIndex]
@@ -670,12 +689,25 @@ private struct Runner {
             } else {
                 wasApproved = false
             }
+            let priorSubs = turn.steps[stepIndex].toolCalls[callIndex].subagents
             turn.steps[stepIndex].toolCalls[callIndex].status = .running
             turn.steps[stepIndex].toolCalls[callIndex].summary = tool.runningSummary(for: arguments)
             if let initialSubs = tool.initialSubagents(for: arguments, callID: call.id) {
-                turn.steps[stepIndex].toolCalls[callIndex].subagents = initialSubs
+                if let priorSubs, !priorSubs.isEmpty {
+                    turn.steps[stepIndex].toolCalls[callIndex].subagents = initialSubs.enumerated().map { idx, fresh in
+                        if priorSubs.indices.contains(idx), priorSubs[idx].status == .completed, !priorSubs[idx].output.isEmpty {
+                            var preserved = priorSubs[idx]
+                            preserved.id = fresh.id
+                            return preserved
+                        }
+                        return fresh
+                    }
+                } else {
+                    turn.steps[stepIndex].toolCalls[callIndex].subagents = initialSubs
+                }
             }
-            jobs.append((callIndex, tool, arguments, wasApproved))
+            let resumeSubs = turn.steps[stepIndex].toolCalls[callIndex].subagents
+            jobs.append((callIndex, call.id, tool, arguments, wasApproved, resumeSubs))
         }
         emit(milestone: true)
 
@@ -692,11 +724,11 @@ private struct Runner {
                         do {
                             let output: ToolOutput
                             if job.approved {
-                                output = try await job.tool.runApprovedLive(arguments: job.arguments) { update in
+                                output = try await job.tool.runApprovedLive(arguments: job.arguments, callID: job.callID, existingSubagents: job.existingSubagents) { update in
                                     sink.yield(.progress(job.callIndex, update))
                                 }
                             } else {
-                                output = try await job.tool.runLive(arguments: job.arguments) { update in
+                                output = try await job.tool.runLive(arguments: job.arguments, callID: job.callID, existingSubagents: job.existingSubagents) { update in
                                     sink.yield(.progress(job.callIndex, update))
                                 }
                             }
@@ -713,15 +745,22 @@ private struct Runner {
                     switch event {
                     case .progress(let callIndex, let update):
                         if turn.steps[stepIndex].toolCalls[callIndex].status == .running {
+                            let previousSubs = turn.steps[stepIndex].toolCalls[callIndex].subagents
                             turn.steps[stepIndex].toolCalls[callIndex].summary = update.summary
                             if let detail = update.detail {
                                 turn.steps[stepIndex].toolCalls[callIndex].detail = detail
                             }
+                            var structuralSubagentChange = false
                             if let subagents = update.subagents {
+                                structuralSubagentChange = previousSubs?.count != subagents.count || zip(previousSubs ?? [], subagents).contains { old, new in
+                                    old.status != new.status || old.toolCallCount != new.toolCallCount || old.model != new.model
+                                }
                                 turn.steps[stepIndex].toolCalls[callIndex].subagents = subagents
                             }
-                            let minInterval = update.subagents != nil ? 0.12 : 0.25
-                            if Date().timeIntervalSince(lastEmit) > minInterval { emit(milestone: false) }
+                            let minInterval = update.subagents != nil ? 0.06 : 0.20
+                            if structuralSubagentChange || Date().timeIntervalSince(lastEmit) >= minInterval {
+                                emit(milestone: false)
+                            }
                         }
                     case .finished(let callIndex, let result):
                         if case .failure(let error) = result, let approval = error as? ToolApprovalRequired {

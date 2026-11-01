@@ -82,25 +82,43 @@ final class ChatLibrary {
     /// while preserving unsaved staged repository changes, active workflows, and Composer drafts.
     func reloadFromDisk() async {
         let chats = await store.loadAll()
-        summaries = chats.map(ChatSummary.init).sorted { $0.updatedAt > $1.updatedAt }
-        for chat in chats {
-            if let session = sessions[chat.id], !session.isRunning, !session.hasActiveWorkflowRuns, chat.updatedAt > session.chat.updatedAt {
-                let hasUnsaved = await session.hasUnsavedStagedWork()
-                if hasUnsaved {
-                    session.adoptSyncedChatMetadataPreservingWorkspace(chat)
-                } else {
-                    let existingDraft = ComposerDraft(text: session.draft, attachments: session.draftAttachments)
-                    let savedDraft = await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: chat.id.uuidString.lowercased()))
-                    let mergedDraft = existingDraft.isEmpty ? savedDraft : existingDraft
-                    let fresh = ChatSession(chat: chat, app: app, draft: mergedDraft)
-                    fresh.settleInterruptedTurnOnLaunch()
-                    fresh.workstationFiles = session.workstationFiles
-                    fresh.activeWorkflowRuns = session.activeWorkflowRuns
-                    sessions[chat.id] = fresh
-                    if openSession?.id == chat.id { openSession = fresh }
+        var resolvedChats = chats
+        for index in resolvedChats.indices {
+            let chat = resolvedChats[index]
+            if let session = sessions[chat.id] {
+                if session.isRunning || session.hasActiveWorkflowRuns {
+                    resolvedChats[index] = session.chat
+                    continue
                 }
+                if chat.updatedAt > session.chat.updatedAt {
+                    let hasUnsaved = await session.hasUnsavedStagedWork()
+                    if hasUnsaved {
+                        session.adoptSyncedChatMetadataPreservingWorkspace(chat)
+                        resolvedChats[index] = session.chat
+                    } else {
+                        let existingDraft = ComposerDraft(text: session.draft, attachments: session.draftAttachments)
+                        let savedDraft = await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: chat.id.uuidString.lowercased()))
+                        let mergedDraft = existingDraft.isEmpty ? savedDraft : existingDraft
+                        let fresh = ChatSession(chat: chat, app: app, draft: mergedDraft)
+                        fresh.settleInterruptedTurnOnLaunch()
+                        fresh.workstationFiles = session.workstationFiles
+                        fresh.activeWorkflowRuns = session.activeWorkflowRuns
+                        sessions[chat.id] = fresh
+                        if openSession?.id == chat.id { openSession = fresh }
+                        resolvedChats[index] = fresh.chat
+                    }
+                } else {
+                    resolvedChats[index] = session.chat
+                }
+            } else if chat.lastAssistantTurn?.status == .running {
+                let savedDraft = await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: chat.id.uuidString.lowercased()))
+                let settled = ChatSession(chat: chat, app: app, draft: savedDraft)
+                settled.settleInterruptedTurnOnLaunch()
+                sessions[chat.id] = settled
+                resolvedChats[index] = settled.chat
             }
         }
+        summaries = resolvedChats.map(ChatSummary.init).sorted { $0.updatedAt > $1.updatedAt }
         let ids = Set(chats.map(\.id))
         if let open = openSession, !ids.contains(open.id), !open.isRunning, !open.hasActiveWorkflowRuns, !open.chat.messages.isEmpty {
             let hasUnsaved = await open.hasUnsavedStagedWork()
@@ -136,6 +154,27 @@ final class ChatLibrary {
         session.send(text, attachments: attachments)
         upsert(session.chat)
         dropIdleSessions()
+    }
+
+    var hasActiveWork: Bool {
+        sessions.values.contains { $0.isRunning || $0.hasActiveWorkflowRuns }
+    }
+
+    var activeWorkSummary: String? {
+        guard let busy = sessions.values.first(where: { $0.isRunning || $0.hasActiveWorkflowRuns }) else { return nil }
+        return busy.backgroundStatusSubtitle
+    }
+
+    func checkpointActiveSessions() async {
+        for session in sessions.values where session.isRunning || session.hasActiveWorkflowRuns {
+            await session.checkpointNow()
+        }
+    }
+
+    func suspendAllForBackground() {
+        for session in sessions.values where session.isRunning {
+            session.suspendForBackgroundIfNeeded()
+        }
     }
 
     func resumePausedChats() {

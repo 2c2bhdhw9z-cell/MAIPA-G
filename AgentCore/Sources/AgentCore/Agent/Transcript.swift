@@ -104,6 +104,10 @@ public enum Transcript {
                 let isCurrent = index == lastAssistantIndex && index == chat.messages.count - 1
                 let isOlderTurn = !isCurrent && index < max(0, chat.messages.count - 4)
                 for step in turn.steps {
+                    if let steered = step.steeredMessages, !steered.isEmpty {
+                        let notes = steered.joined(separator: "\n\n")
+                        result.append(.user("Live steering from the user while you were working — incorporate this into your approach and answer:\n\(notes)"))
+                    }
                     let calls = step.toolCalls
                     let text = step.text.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !text.isEmpty || !calls.isEmpty else { continue }

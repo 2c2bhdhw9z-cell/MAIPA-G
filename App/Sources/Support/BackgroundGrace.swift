@@ -1,17 +1,35 @@
+import Foundation
 import UIKit
 
-/// Asks iOS for a little more time when the app is sent to the background, so a reply that is
-/// still coming in can finish (usually up to about 30 seconds). If time runs out first,
-/// `onExpire` runs so the reply can be saved as stopped rather than lost.
+/// Asks iOS for background execution time when a reply or save is in progress. If iOS expires the
+/// background assertion before the work finishes, `onExpire` hops safely to `@MainActor` without
+/// assuming UIKit invoked the expiration block on the main thread.
 @MainActor
 final class BackgroundGrace {
     private var identifier: UIBackgroundTaskIdentifier = .invalid
 
     init(name: String, onExpire: @escaping @MainActor @Sendable () -> Void) {
-        identifier = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
-            MainActor.assumeIsolated {
-                onExpire()
-                self?.end()
+        identifier = Self.beginTask(name: name, owner: self, onExpire: onExpire)
+    }
+
+    nonisolated private static func beginTask(
+        name: String,
+        owner: BackgroundGrace,
+        onExpire: @escaping @MainActor @Sendable () -> Void
+    ) -> UIBackgroundTaskIdentifier {
+        MainActor.assumeIsolated {
+            UIApplication.shared.beginBackgroundTask(withName: name) { [weak owner] in
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated {
+                        onExpire()
+                        owner?.end()
+                    }
+                } else {
+                    Task { @MainActor [weak owner] in
+                        onExpire()
+                        owner?.end()
+                    }
+                }
             }
         }
     }

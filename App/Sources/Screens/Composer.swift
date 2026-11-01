@@ -24,6 +24,7 @@ struct Composer: View {
     @Binding var attachments: [AttachmentReference]
     @Binding var webEnabled: Bool
     @Binding var autonomous: Bool
+    var busySendMode: Binding<ChatSession.BusySendMode>? = nil
     var modelLabel: String
     var supportsTools = true
     var isImageOnlyModel = false
@@ -68,6 +69,17 @@ struct Composer: View {
 
     private var hasSendableContent: Bool {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+    }
+
+    private var effectiveBusyMode: ChatSession.BusySendMode {
+        if !attachments.isEmpty { return .queue }
+        return busySendMode?.wrappedValue ?? .steer
+    }
+
+    private var busyPlaceholderText: String {
+        effectiveBusyMode == .steer
+            ? "Steer running reply without stopping…"
+            : "Queue follow-up for after this turn…"
     }
 
     private var canSend: Bool {
@@ -174,7 +186,7 @@ struct Composer: View {
                 }
                 TextField(
                     isRunning
-                        ? "Steer or add a follow-up…"
+                        ? busyPlaceholderText
                         : (isImageOnlyModel ? "Describe the picture to generate…" : "Ask anything…"),
                     text: $text,
                     axis: .vertical
@@ -190,6 +202,9 @@ struct Composer: View {
                     modelButton
                     if !thinkingLevels.isEmpty { thinkingMenu }
                     Spacer(minLength: 4)
+                    if isRunning, let modeBinding = busySendMode {
+                        busyModeToggle(modeBinding)
+                    }
                     ContextMeter(
                         used: contextUsedTokens,
                         limit: contextLimitTokens,
@@ -502,6 +517,44 @@ struct Composer: View {
     }
 
     @ViewBuilder
+    private func busyModeToggle(_ modeBinding: Binding<ChatSession.BusySendMode>) -> some View {
+        let activeMode = effectiveBusyMode
+        Menu {
+            Button {
+                modeBinding.wrappedValue = .steer
+                Haptics.selection()
+            } label: {
+                Label("Steer — guide active reply without stopping", systemImage: activeMode == .steer ? "checkmark.circle.fill" : "arrow.turn.down.right")
+            }
+            .disabled(!attachments.isEmpty)
+            Button {
+                modeBinding.wrappedValue = .queue
+                Haptics.selection()
+            } label: {
+                Label("Queue — run after current reply finishes", systemImage: activeMode == .queue ? "checkmark.circle.fill" : "text.append")
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: activeMode == .steer ? "arrow.turn.down.right" : "text.append")
+                    .font(.system(size: 10, weight: .bold))
+                Text(activeMode == .steer ? "Steer" : "Queue")
+                    .font(.caption.weight(.semibold))
+            }
+            .foregroundStyle(activeMode == .steer ? theme.accent : .primary)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(
+                activeMode == .steer ? theme.accent.opacity(0.14) : Theme.raised,
+                in: Capsule()
+            )
+            .overlay(Capsule().strokeBorder(activeMode == .steer ? theme.accent.opacity(0.35) : Theme.stroke))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Mid-turn message mode")
+        .accessibilityValue(activeMode == .steer ? "Steer running reply" : "Queue follow-up")
+    }
+
+    @ViewBuilder
     private var sendButton: some View {
         HStack(spacing: 6) {
             if isRunning && canStop {
@@ -517,20 +570,28 @@ struct Composer: View {
                 .accessibilityLabel("Stop")
             }
             if !isRunning || hasSendableContent {
+                let sendIcon: String = {
+                    guard isRunning else { return "arrow.up" }
+                    return effectiveBusyMode == .steer ? "arrow.turn.up.right" : "text.badge.plus"
+                }()
+                let sendA11yLabel: String = {
+                    guard isRunning else { return "Send" }
+                    return effectiveBusyMode == .steer ? "Steer running reply" : "Queue follow-up"
+                }()
                 Button {
                     guard canSend else { return }
                     focused = false
                     onSend()
                 } label: {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 16, weight: .bold))
+                    Image(systemName: sendIcon)
+                        .font(.system(size: 15, weight: .bold))
                         .foregroundStyle(Color.black.opacity(canSend ? 0.85 : 0.4))
                         .frame(width: 36, height: 36)
                         .background(theme.gradient.opacity(canSend ? 1 : 0.35), in: Circle())
                 }
                 .buttonStyle(.plain)
                 .disabled(!canSend)
-                .accessibilityLabel(isRunning ? "Steer running reply" : "Send")
+                .accessibilityLabel(sendA11yLabel)
             }
         }
     }

@@ -96,7 +96,7 @@ public struct AIProviderEndpoint: Codable, Sendable, Hashable, Identifiable {
         self.id = id
         self.name = name
         self.baseURL = Self.normalizeBaseURL(baseURL)
-        self.apiKey = apiKey
+        self.apiKey = Self.sanitizeAPIKey(apiKey)
         self.isEnabled = isEnabled
         self.modelWireHints = modelWireHints
     }
@@ -106,11 +106,82 @@ public struct AIProviderEndpoint: Codable, Sendable, Hashable, Identifiable {
     }
 
     public var isReady: Bool {
-        isEnabled && !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && normalizedURL != nil
+        isEnabled && !Self.sanitizeAPIKey(apiKey).isEmpty && normalizedURL != nil
     }
 
     public var normalizedURL: URL? {
         URL(string: Self.normalizeBaseURL(baseURL))
+    }
+
+    /// Cleans pasted API keys from dashboards, password managers, `.env` snippets, and `curl` headers
+    /// across ALL providers (`OpenRouter`, `OneProvider`, `SayGM`, `TeamoRouter`, `OmniRoute`, `Custom`).
+    public static func sanitizeAPIKey(_ raw: String) -> String {
+        let zeroWidthScalars: Set<Unicode.Scalar> = [
+            "\u{200B}", "\u{200C}", "\u{200D}", "\u{2060}", "\u{FEFF}", "\u{00A0}",
+        ]
+        var cleaned = String(raw.unicodeScalars.filter { scalar in
+            if zeroWidthScalars.contains(scalar) { return false }
+            return scalar.value >= 0x20 || scalar == "\t" || scalar == "\n" || scalar == "\r"
+        }).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // If multiple lines were pasted (e.g. a `.env` or `curl` block), pick the first non-comment line that looks like a key/header.
+        let lines = cleaned
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+        if lines.count > 1 {
+            cleaned = lines.first(where: {
+                let lower = $0.lowercased()
+                return lower.contains("sk-") || lower.contains("bearer ") || lower.contains("api_key") || lower.contains("x-api-key")
+            }) ?? lines[0]
+        } else if let single = lines.first {
+            cleaned = single
+        }
+
+        // Strip leading `export ` and `ENV_VAR=` assignment prefixes (e.g. `TEAMO_API_KEY=sk-teamo-...`).
+        if cleaned.lowercased().hasPrefix("export ") {
+            cleaned = String(cleaned.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let eqIndex = cleaned.firstIndex(of: "=") {
+            let lhs = cleaned[..<eqIndex].trimmingCharacters(in: .whitespaces)
+            if !lhs.isEmpty, lhs.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }) {
+                cleaned = String(cleaned[cleaned.index(after: eqIndex)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
+        // Strip wrapping straight/smart quotes or backticks before and after header prefixes.
+        let quoteChars = CharacterSet(charactersIn: "\"'“”‘’`")
+        cleaned = cleaned.trimmingCharacters(in: quoteChars).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Strip common HTTP header prefixes (`Authorization: Bearer ...`, `Bearer ...`, `x-api-key: ...`).
+        let headerPrefixes = [
+            "authorization: bearer ",
+            "authorization:bearer ",
+            "authorization:",
+            "x-api-key:",
+            "api-key:",
+            "bearer ",
+        ]
+        var strippedPrefix = true
+        while strippedPrefix {
+            strippedPrefix = false
+            let lower = cleaned.lowercased()
+            for prefix in headerPrefixes where lower.hasPrefix(prefix) {
+                cleaned = String(cleaned.dropFirst(prefix.count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: quoteChars)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                strippedPrefix = true
+                break
+            }
+        }
+
+        // Strip trailing shell continuation or semicolon/comma characters from `curl`/JSON snippets.
+        while let last = cleaned.last, [",", ";", "\\"].contains(String(last)) {
+            cleaned.removeLast()
+            cleaned = cleaned.trimmingCharacters(in: quoteChars).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return cleaned
     }
 
     public static func normalizeBaseURL(_ raw: String) -> String {
@@ -299,7 +370,7 @@ public enum AIProviderGateway {
     ) async -> Double? {
         guard let base = endpoint.normalizedURL,
               (try? validateEndpointURL(base)) != nil else { return nil }
-        let cleanKey = endpoint.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanKey = AIProviderEndpoint.sanitizeAPIKey(endpoint.apiKey)
         guard !cleanKey.isEmpty else { return nil }
         // Single-header Bearer auth only (OneProvider rejects dual Authorization + x-api-key).
         let headers = [
@@ -372,7 +443,7 @@ public enum AIProviderGateway {
         }
         try validateEndpointURL(base)
 
-        let cleanKey = endpoint.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanKey = AIProviderEndpoint.sanitizeAPIKey(endpoint.apiKey)
         // IMPORTANT: Send ONLY Authorization: Bearer on /v1/models (OneProvider rejects requests carrying both Authorization and x-api-key!).
         var headers: [String: String] = ["Accept": "application/json"]
         if !cleanKey.isEmpty {
@@ -960,7 +1031,7 @@ public enum AIProviderGateway {
         catalogueModel: ModelInfo?,
         transport: any HTTPTransport
     ) async throws -> AsyncThrowingStream<StreamChunk, Error> {
-        let cleanKey = endpoint.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanKey = AIProviderEndpoint.sanitizeAPIKey(endpoint.apiKey)
         var headers = [
             "Accept": "text/event-stream",
             "Content-Type": "application/json",
@@ -1116,7 +1187,7 @@ public enum AIProviderGateway {
         catalogueModel: ModelInfo?,
         transport: any HTTPTransport
     ) async throws -> AsyncThrowingStream<StreamChunk, Error> {
-        let cleanKey = endpoint.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanKey = AIProviderEndpoint.sanitizeAPIKey(endpoint.apiKey)
         // IMPORTANT: Send ONLY `x-api-key` on `/v1/messages` (never dual `Authorization` + `x-api-key`, which OneProvider rejects).
         var headers = [
             "Accept": "text/event-stream",
@@ -1517,7 +1588,7 @@ public enum AIProviderGateway {
         catalogueModel: ModelInfo?,
         transport: any HTTPTransport
     ) async throws -> AsyncThrowingStream<StreamChunk, Error> {
-        let cleanKey = endpoint.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanKey = AIProviderEndpoint.sanitizeAPIKey(endpoint.apiKey)
         var headers = [
             "Accept": "text/event-stream",
             "Content-Type": "application/json",
@@ -1678,7 +1749,7 @@ public enum AIProviderGateway {
         catalogueModel: ModelInfo?,
         transport: any HTTPTransport
     ) async throws -> AsyncThrowingStream<StreamChunk, Error> {
-        let cleanKey = endpoint.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanKey = AIProviderEndpoint.sanitizeAPIKey(endpoint.apiKey)
         var headers = [
             "Accept": "text/event-stream",
             "Content-Type": "application/json",
@@ -1853,7 +1924,7 @@ public enum AIProviderGateway {
             throw OpenRouterAPIError(httpStatus: 400, code: "invalid_url", message: "Invalid base URL for \(endpoint.name).")
         }
         try validateEndpointURL(base)
-        let cleanKey = endpoint.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanKey = AIProviderEndpoint.sanitizeAPIKey(endpoint.apiKey)
         var headers = ["Accept": "application/json"]
         if !cleanKey.isEmpty { headers["Authorization"] = "Bearer \(cleanKey)" }
 
