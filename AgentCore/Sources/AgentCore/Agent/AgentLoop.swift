@@ -54,8 +54,10 @@ public struct AgentTurnInput: Sendable {
     public var agent: AgentDefinition?
     /// Optional live steering inbox so the user can redirect a running turn between steps.
     public var steering: SteeringInbox?
+    /// False for background sub-agents and workflow steps that run autonomously without pausing for interactive questions.
+    public var allowAskUser: Bool
 
-    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 250, spendLimit: Double? = nil, attachmentData: [UUID: Data] = [:], serverTools: [ToolSpec] = [], fallbackModels: [String] = [], requiresInitialSpendApproval: Bool = false, agent: AgentDefinition? = nil, steering: SteeringInbox? = nil) {
+    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 250, spendLimit: Double? = nil, attachmentData: [UUID: Data] = [:], serverTools: [ToolSpec] = [], fallbackModels: [String] = [], requiresInitialSpendApproval: Bool = false, agent: AgentDefinition? = nil, steering: SteeringInbox? = nil, allowAskUser: Bool = true) {
         self.chat = chat
         self.route = route
         self.systemPrompt = systemPrompt
@@ -69,6 +71,7 @@ public struct AgentTurnInput: Sendable {
         self.requiresInitialSpendApproval = requiresInitialSpendApproval
         self.agent = agent
         self.steering = steering
+        self.allowAskUser = allowAskUser
     }
 }
 
@@ -209,7 +212,7 @@ private struct Runner {
         }
         tools = byName
         let serverSpecs = input.serverTools.filter { input.agent?.permits(tool: $0.function.name) ?? true }
-        let mayAsk = input.agent?.permits(tool: AskUserTool.name) ?? true
+        let mayAsk = input.allowAskUser && (input.agent?.permits(tool: AskUserTool.name) ?? true)
         specs = input.allowTools ? localSpecs + serverSpecs + (mayAsk ? [AskUserTool.spec] : []) : []
         maxSteps = input.maxSteps
         spendLimit = input.spendLimit.flatMap { $0 > 0 ? $0 : nil }
@@ -313,9 +316,25 @@ private struct Runner {
     mutating func stopRunningTools(reason: String) {
         for stepIndex in turn.steps.indices {
             for callIndex in turn.steps[stepIndex].toolCalls.indices where turn.steps[stepIndex].toolCalls[callIndex].status == .running {
-                turn.steps[stepIndex].toolCalls[callIndex].status = .failed
-                turn.steps[stepIndex].toolCalls[callIndex].detail = reason
-                turn.steps[stepIndex].toolCalls[callIndex].finishedAt = Date()
+                var record = turn.steps[stepIndex].toolCalls[callIndex]
+                record.status = .failed
+                if record.detail == nil || record.detail?.isEmpty == true {
+                    record.detail = reason
+                }
+                if var subs = record.subagents {
+                    for idx in subs.indices where subs[idx].status == .running {
+                        subs[idx].status = .cancelled
+                    }
+                    record.subagents = subs
+                } else if record.name == "launch_helpers" {
+                    record.subagents = SubagentRunItem.resolvedItems(for: record).map { item in
+                        var copy = item
+                        if copy.status == .running { copy.status = .cancelled }
+                        return copy
+                    }
+                }
+                record.finishedAt = Date()
+                turn.steps[stepIndex].toolCalls[callIndex] = record
             }
             if turn.steps[stepIndex].finishedAt == nil { turn.steps[stepIndex].finishedAt = Date() }
         }
@@ -653,13 +672,16 @@ private struct Runner {
             }
             turn.steps[stepIndex].toolCalls[callIndex].status = .running
             turn.steps[stepIndex].toolCalls[callIndex].summary = tool.runningSummary(for: arguments)
+            if let initialSubs = tool.initialSubagents(for: arguments, callID: call.id) {
+                turn.steps[stepIndex].toolCalls[callIndex].subagents = initialSubs
+            }
             jobs.append((callIndex, tool, arguments, wasApproved))
         }
         emit(milestone: true)
 
         if !jobs.isEmpty {
             enum ToolEvent: Sendable {
-                case progress(Int, String)
+                case progress(Int, ToolLiveUpdate)
                 case finished(Int, Result<ToolOutput, Error>)
             }
             let (events, sink) = AsyncStream<ToolEvent>.makeStream()
@@ -670,12 +692,12 @@ private struct Runner {
                         do {
                             let output: ToolOutput
                             if job.approved {
-                                output = try await job.tool.runApproved(arguments: job.arguments) { message in
-                                    sink.yield(.progress(job.callIndex, message))
+                                output = try await job.tool.runApprovedLive(arguments: job.arguments) { update in
+                                    sink.yield(.progress(job.callIndex, update))
                                 }
                             } else {
-                                output = try await job.tool.run(arguments: job.arguments) { message in
-                                    sink.yield(.progress(job.callIndex, message))
+                                output = try await job.tool.runLive(arguments: job.arguments) { update in
+                                    sink.yield(.progress(job.callIndex, update))
                                 }
                             }
                             result = .success(output)
@@ -689,10 +711,17 @@ private struct Runner {
                 var remaining = jobs.count
                 for await event in events {
                     switch event {
-                    case .progress(let callIndex, let message):
+                    case .progress(let callIndex, let update):
                         if turn.steps[stepIndex].toolCalls[callIndex].status == .running {
-                            turn.steps[stepIndex].toolCalls[callIndex].summary = message
-                            if Date().timeIntervalSince(lastEmit) > 0.25 { emit(milestone: false) }
+                            turn.steps[stepIndex].toolCalls[callIndex].summary = update.summary
+                            if let detail = update.detail {
+                                turn.steps[stepIndex].toolCalls[callIndex].detail = detail
+                            }
+                            if let subagents = update.subagents {
+                                turn.steps[stepIndex].toolCalls[callIndex].subagents = subagents
+                            }
+                            let minInterval = update.subagents != nil ? 0.12 : 0.25
+                            if Date().timeIntervalSince(lastEmit) > minInterval { emit(milestone: false) }
                         }
                     case .finished(let callIndex, let result):
                         if case .failure(let error) = result, let approval = error as? ToolApprovalRequired {
@@ -744,6 +773,9 @@ private struct Runner {
             record.status = output.isError ? .failed : .done
             record.summary = output.summary
             record.detail = output.detail
+            if let subagents = output.subagents {
+                record.subagents = subagents
+            }
             record.result = Self.capped(output.forModel)
             record.finishedAt = Date()
             if output.billedCost > 0 { record.billedCost = output.billedCost }

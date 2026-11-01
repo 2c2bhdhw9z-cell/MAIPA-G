@@ -195,11 +195,42 @@ def check_oct31_build76_kiro_arena_all_providers() -> None:
         failures.append("OCT31-20: TurnSourceItem still matches search_code via substring 'search'")
 
 
+def check_oct31_build81_subagent_cards_and_crash_safety() -> None:
+    """Build 81: Kiro SubagentCardsGroupView in chat, zero values[index]! crash, cold-launch settle, nonisolated system callbacks."""
+    message_views = (ROOT / "App/Sources/Screens/MessageViews.swift").read_text()
+    for required in ("struct SubagentCardsGroupView", "case subagents(ToolCallRecord)", "SubagentRunItem.resolvedItems(for: call)"):
+        if required not in message_views:
+            failures.append(f"OCT31-21: MessageViews is missing {required}")
+
+    agent_exec = (ROOT / "AgentCore/Sources/AgentCore/Agents/AgentExecutor.swift").read_text()
+    if "values[index]!" in agent_exec:
+        failures.append("OCT31-22: AgentExecutor still contains unsafe values[index]! force-unwrap")
+
+    chat_lib = (ROOT / "App/Sources/Model/ChatLibrary.swift").read_text()
+    load_start = chat_lib.find("func load()")
+    reload_start = chat_lib.find("func reloadFromDisk()")
+    load_body = chat_lib[load_start:reload_start] if load_start >= 0 and reload_start > load_start else ""
+    if "settleInterruptedTurnOnLaunch()" not in load_body or "resumeInterruptedTurn()" in load_body:
+        failures.append("OCT31-23: ChatLibrary.load() must settle cold-launch interrupted turns instead of auto-resuming crash loops")
+
+    bg_jobs = (ROOT / "App/Sources/Support/BackgroundJobs.swift").read_text()
+    if "nonisolated private static func registerSystemTasks" not in bg_jobs:
+        failures.append("OCT31-24: BackgroundJobs must register BGTaskScheduler handlers from a nonisolated context")
+
+    notifications = (ROOT / "App/Sources/Support/Notifications.swift").read_text()
+    pic_viewer = (ROOT / "App/Sources/Screens/PictureViewer.swift").read_text()
+    if "nonisolated private static func ignoreAuthorizationResult" not in notifications:
+        failures.append("OCT31-25: Notifications must use a nonisolated authorization completion handler")
+    if "nonisolated private static func addPhoto" not in pic_viewer:
+        failures.append("OCT31-25: PictureViewer must run PhotoKit callbacks from nonisolated helpers")
+
+
 check_oct29_01_real_connector_logos()
 check_oct29_04_tool_bars_hug_their_content()
 check_oct31_build67_workstation_photos_sources_and_models()
 check_oct31_build70_buttons_github_and_ai_providers()
 check_oct31_build76_kiro_arena_all_providers()
+check_oct31_build81_subagent_cards_and_crash_safety()
 if failures:
     raise SystemExit("\n".join(failures))
-print("UI regression checks passed (OCT29-01, OCT29-04, OCT31-01..20)")
+print("UI regression checks passed (OCT29-01, OCT29-04, OCT31-01..25)")

@@ -268,6 +268,8 @@ struct AssistantTurnView: View {
                 switch segment {
                 case .activity(let id, let items, let isActive):
                     ActivityTimelineCard(id: id, items: items, isActive: isActive)
+                case .subagents(let call):
+                    SubagentCardsGroupView(call: call, modelName: modelName)
                 case .content(let step, let isLive):
                     StepContentView(step: step, isStreaming: isLive)
                 }
@@ -330,6 +332,15 @@ struct AssistantTurnView: View {
             buffer.removeAll(keepingCapacity: true)
         }
 
+        func appendToolSegmentOrBuffer(_ call: ToolCallRecord, isLastStep: Bool) {
+            if call.name == "launch_helpers", !SubagentRunItem.resolvedItems(for: call).isEmpty {
+                flushBuffer(isActive: false)
+                output.append(.subagents(call))
+            } else {
+                buffer.append(.tool(call))
+            }
+        }
+
         for (index, step) in turn.steps.enumerated() {
             let isLastStep = step.id == lastStepID
             let stepIsLive = turn.status == .running && isLastStep && step.finishedAt == nil
@@ -344,15 +355,15 @@ struct AssistantTurnView: View {
                 flushBuffer(isActive: false)
                 output.append(.content(step, isLive: stepIsLive))
                 for call in step.toolCalls {
-                    buffer.append(.tool(call))
+                    appendToolSegmentOrBuffer(call, isLastStep: isLastStep)
                 }
             } else {
                 for call in step.toolCalls {
-                    buffer.append(.tool(call))
+                    appendToolSegmentOrBuffer(call, isLastStep: isLastStep)
                 }
             }
             if index == turn.steps.count - 1 {
-                let active = turn.status == .running && (!hasVisibleContent || step.toolCalls.contains(where: { $0.status == .running }))
+                let active = turn.status == .running && (!hasVisibleContent || step.toolCalls.contains(where: { $0.status == .running && $0.name != "launch_helpers" }))
                 flushBuffer(isActive: active)
             }
         }
@@ -362,7 +373,10 @@ struct AssistantTurnView: View {
     /// "Thinking…" shows until words, thoughts or a tool appear.
     private var showsThinkingLine: Bool {
         guard let last = turn.steps.last else { return true }
-        if !segments.isEmpty, case .activity(_, _, let active) = segments.last, active { return false }
+        if let lastSegment = segments.last {
+            if case .activity(_, _, let active) = lastSegment, active { return false }
+            if case .subagents(let call) = lastSegment, call.status == .running { return false }
+        }
         if last.finishedAt != nil { return !last.toolCalls.contains { $0.status == .running } }
         return last.text.isEmpty && last.reasoning.isEmpty
     }
@@ -440,11 +454,13 @@ struct AssistantTurnView: View {
 
 enum TurnSegment: Identifiable {
     case activity(id: String, items: [ActivityItem], isActive: Bool)
+    case subagents(ToolCallRecord)
     case content(AssistantStep, isLive: Bool)
 
     var id: String {
         switch self {
         case .activity(let id, _, _): return "activity-\(id)"
+        case .subagents(let call): return "subagents-\(call.id)"
         case .content(let step, _): return "content-\(step.id.uuidString)"
         }
     }
@@ -682,7 +698,11 @@ private struct ActivityTimelineRow: View {
             case .thought(let step, let isLive):
                 ThoughtsView(step: step, isLive: isLive)
             case .tool(let call):
-                ToolLine(call: call, wasRecovered: wasRecovered)
+                if call.name == "launch_helpers", !SubagentRunItem.resolvedItems(for: call).isEmpty {
+                    SubagentCardsGroupView(call: call, modelName: { $0 })
+                } else {
+                    ToolLine(call: call, wasRecovered: wasRecovered)
+                }
             }
         }
     }
@@ -1063,7 +1083,7 @@ struct ToolLine: View {
     }
 
     private var hasDetail: Bool {
-        !(call.detail ?? call.result ?? "").isEmpty && call.status != .running
+        !(call.detail ?? call.result ?? "").isEmpty
     }
 
     private var icon: String {
@@ -1477,5 +1497,476 @@ struct ActiveWorkflowsInlineCard: View {
             .padding(.horizontal, 7)
             .padding(.vertical, 2)
             .background(color.opacity(0.14), in: Capsule())
+    }
+}
+
+/// Kiro-style first-class Sub-Agent Cards rendered directly in chat whenever `launch_helpers` runs.
+/// Every sub-agent card is individually tappable from millisecond zero — while running, after
+/// finishing, or if stopped — expanding to show its exact Task, live file/tool actions, and report.
+struct SubagentCardsGroupView: View {
+    let call: ToolCallRecord
+    var modelName: (String) -> String
+
+    @State private var collapsedGroup = false
+    @Environment(\.theme) private var theme
+
+    private var items: [SubagentRunItem] {
+        SubagentRunItem.resolvedItems(for: call)
+    }
+
+    private var duplicateNames: Set<String> {
+        var counts: [String: Int] = [:]
+        for item in items { counts[item.name, default: 0] += 1 }
+        return Set(counts.filter { $0.value > 1 }.map(\.key))
+    }
+
+    private var isAnyRunning: Bool {
+        items.contains { $0.status == .running }
+    }
+
+    private var totalActions: Int {
+        items.reduce(0) { $0 + $1.toolCallCount }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if items.count > 1 {
+                Button {
+                    withAnimation(.snappy(duration: 0.2)) { collapsedGroup.toggle() }
+                    Haptics.selection()
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: "person.2.wave.2.fill")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(theme.accent)
+                        Text("SUB-AGENTS")
+                            .font(.caption.weight(.bold))
+                            .tracking(0.6)
+                            .foregroundStyle(Theme.secondaryText)
+                        Text("\(items.count)")
+                            .font(.caption2.weight(.bold).monospacedDigit())
+                            .foregroundStyle(theme.accent)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(theme.accent.opacity(0.14), in: Capsule())
+                        Text(groupStatusSummary)
+                            .font(.caption)
+                            .foregroundStyle(isAnyRunning ? .primary : Theme.secondaryText)
+                            .lineLimit(1)
+                        Spacer(minLength: 6)
+                        if isAnyRunning {
+                            ProgressView().controlSize(.mini)
+                        }
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(Theme.secondaryText)
+                            .rotationEffect(.degrees(collapsedGroup ? 0 : 90))
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            if !collapsedGroup || items.count == 1 {
+                VStack(alignment: .leading, spacing: 8) {
+                    let dupes = duplicateNames
+                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                        SubagentItemCard(
+                            item: item,
+                            displayTitle: dupes.contains(item.name) ? "\(item.name) #\(index + 1)" : item.name,
+                            modelName: modelName
+                        )
+                    }
+                }
+            }
+        }
+        .padding(items.count > 1 ? 10 : 0)
+        .background(
+            items.count > 1
+                ? AnyShapeStyle(Theme.surface.opacity(0.45))
+                : AnyShapeStyle(Color.clear),
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+        )
+        .overlay {
+            if items.count > 1 {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(isAnyRunning ? theme.accent.opacity(0.28) : Theme.stroke.opacity(0.85))
+            }
+        }
+    }
+
+    private var groupStatusSummary: String {
+        let running = items.filter { $0.status == .running }.count
+        if running > 0 {
+            let actWord = totalActions == 1 ? "1 action" : "\(totalActions) actions"
+            return totalActions > 0 ? "\(running) running · \(actWord)" : "\(running) running…"
+        }
+        let cancelled = items.filter { $0.status == .cancelled }.count
+        if cancelled == items.count {
+            return totalActions > 0 ? "Stopped · \(totalActions) actions" : "Stopped"
+        }
+        let failed = items.filter { $0.status == .failed }.count
+        if failed > 0 {
+            return "\(items.count - failed) done · \(failed) failed"
+        }
+        let actWord = totalActions == 1 ? "1 action" : "\(totalActions) actions"
+        return totalActions > 0 ? "Done · \(actWord)" : "Done"
+    }
+}
+
+private struct SubagentItemCard: View {
+    let item: SubagentRunItem
+    let displayTitle: String
+    var modelName: (String) -> String
+
+    @State private var expanded = false
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.snappy(duration: 0.22)) { expanded.toggle() }
+                Haptics.selection()
+            } label: {
+                HStack(alignment: .center, spacing: 10) {
+                    statusLeadingBadge
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Image(systemName: roleIcon)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(theme.accent)
+                            Text(displayTitle)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                            if let rawModel = item.model, !rawModel.isEmpty {
+                                Text(modelName(rawModel))
+                                    .font(.caption2.weight(.medium))
+                                    .foregroundStyle(Theme.secondaryText)
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Theme.raised, in: Capsule())
+                            }
+                        }
+
+                        Text(subtitleText)
+                            .font(.caption)
+                            .foregroundStyle(item.status == .failed ? Theme.danger : Theme.secondaryText)
+                            .lineLimit(expanded ? 2 : 1)
+                            .truncationMode(.tail)
+                            .shimmer(item.status == .running && theme.thinkingShimmer)
+                    }
+
+                    Spacer(minLength: 6)
+
+                    rightBadge
+
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(Theme.secondaryText)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Sub-agent \(displayTitle)")
+            .accessibilityValue(expanded ? "Expanded" : "Tap to view task, live actions, and report")
+
+            if expanded {
+                Divider()
+                    .overlay(Theme.stroke.opacity(0.75))
+
+                VStack(alignment: .leading, spacing: 10) {
+                    if !item.task.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("TASK")
+                                .font(.caption2.weight(.bold))
+                                .tracking(0.5)
+                                .foregroundStyle(Theme.secondaryText)
+                            ViewThatFits(in: .vertical) {
+                                Text(item.task)
+                                    .font(.caption)
+                                    .foregroundStyle(.primary.opacity(0.9))
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(8)
+                                    .background(Theme.raised.opacity(0.55), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                                ScrollView(.vertical, showsIndicators: true) {
+                                    Text(item.task)
+                                        .font(.caption)
+                                        .foregroundStyle(.primary.opacity(0.9))
+                                        .textSelection(.enabled)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(8)
+                                }
+                                .frame(height: 130)
+                                .background(Theme.raised.opacity(0.55), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            }
+                        }
+                    }
+
+                    if !item.toolSummaries.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("ACTIONS (\(item.toolSummaries.count))")
+                                .font(.caption2.weight(.bold))
+                                .tracking(0.5)
+                                .foregroundStyle(Theme.secondaryText)
+
+                            ViewThatFits(in: .vertical) {
+                                actionsListView
+                                    .padding(8)
+                                    .background(Theme.codeBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                                ScrollView(.vertical, showsIndicators: true) {
+                                    actionsListView
+                                        .padding(8)
+                                }
+                                .frame(height: 170)
+                                .background(Theme.codeBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            }
+                        }
+                    }
+
+                    if item.status == .running,
+                       let thought = item.liveThought?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !thought.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("THINKING LIVE")
+                                .font(.caption2.weight(.bold))
+                                .tracking(0.5)
+                                .foregroundStyle(theme.accent)
+                            Text(thought)
+                                .font(.caption)
+                                .foregroundStyle(Theme.secondaryText)
+                                .lineLimit(6)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(8)
+                                .background(Theme.raised.opacity(0.45), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(outputSectionTitle)
+                                .font(.caption2.weight(.bold))
+                                .tracking(0.5)
+                                .foregroundStyle(item.status == .failed ? Theme.danger : Theme.secondaryText)
+                            Spacer()
+                            if !cleanedOutput.isEmpty {
+                                Button {
+                                    UIPasteboard.general.string = cleanedOutput
+                                    Haptics.selection()
+                                } label: {
+                                    Label("Copy", systemImage: "doc.on.doc")
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(theme.accent)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+
+                        if !cleanedOutput.isEmpty {
+                            ViewThatFits(in: .vertical) {
+                                MarkdownView(text: cleanedOutput, isStreaming: item.status == .running)
+                                    .padding(10)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(Theme.raised.opacity(0.45), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                                ScrollView(.vertical, showsIndicators: true) {
+                                    MarkdownView(text: cleanedOutput, isStreaming: item.status == .running)
+                                        .padding(10)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .frame(height: 280)
+                                .background(Theme.raised.opacity(0.45), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            }
+                        } else {
+                            Text(emptyOutputPlaceholder)
+                                .font(.caption)
+                                .foregroundStyle(Theme.secondaryText)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(8)
+                                .background(Theme.raised.opacity(0.35), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                    }
+                }
+                .padding(12)
+            }
+        }
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(borderColor)
+        )
+    }
+
+    private var actionsListView: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(Array(item.toolSummaries.enumerated()), id: \.offset) { idx, summary in
+                HStack(alignment: .top, spacing: 6) {
+                    Text("\(idx + 1).")
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(Theme.secondaryText)
+                        .frame(width: 22, alignment: .trailing)
+                    Image(systemName: actionIcon(for: summary))
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(theme.accent)
+                        .padding(.top, 2)
+                    Text(summary)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.primary.opacity(0.88))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var statusLeadingBadge: some View {
+        ZStack {
+            Circle()
+                .fill(statusColor.opacity(0.14))
+                .frame(width: 26, height: 26)
+            switch item.status {
+            case .running:
+                ProgressView().controlSize(.mini)
+            case .completed:
+                Image(systemName: "checkmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.green)
+            case .cancelled:
+                Image(systemName: "stop.fill")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Theme.secondaryText)
+            case .failed:
+                Image(systemName: "exclamationmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Theme.danger)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var rightBadge: some View {
+        let (text, color): (String, Color) = {
+            if item.toolCallCount > 0 {
+                let word = item.toolCallCount == 1 ? "1 action" : "\(item.toolCallCount) actions"
+                switch item.status {
+                case .running: return (word, theme.accent)
+                case .completed: return (word, .green)
+                case .cancelled: return ("Stopped · \(item.toolCallCount)", Theme.secondaryText)
+                case .failed: return ("Failed", Theme.danger)
+                }
+            }
+            switch item.status {
+            case .running: return ("Running", theme.accent)
+            case .completed: return ("Done", .green)
+            case .cancelled: return ("Stopped", Theme.secondaryText)
+            case .failed: return ("Failed", Theme.danger)
+            }
+        }()
+        Text(text)
+            .font(.caption2.weight(.semibold).monospacedDigit())
+            .foregroundStyle(color)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(color.opacity(0.13), in: Capsule())
+    }
+
+    private var statusColor: Color {
+        switch item.status {
+        case .running: return theme.accent
+        case .completed: return .green
+        case .cancelled: return Theme.secondaryText
+        case .failed: return Theme.danger
+        }
+    }
+
+    private var borderColor: Color {
+        switch item.status {
+        case .running: return theme.accent.opacity(0.35)
+        case .failed: return Theme.danger.opacity(0.4)
+        case .completed, .cancelled: return Theme.stroke
+        }
+    }
+
+    private var roleIcon: String {
+        switch item.agentID {
+        case "context-gatherer": return "magnifyingglass"
+        case "general-task-execution": return "hammer"
+        case "semantic-reviewer": return "checkmark.shield"
+        case "introspect": return "waveform.path.ecg"
+        case "custom-agent-creator": return "person.badge.plus"
+        default: return "person.crop.circle.badge.checkmark"
+        }
+    }
+
+    private func actionIcon(for summary: String) -> String {
+        let lower = summary.lowercased()
+        if lower.hasPrefix("read ") || lower.hasPrefix("reading ") { return "doc.text" }
+        if lower.hasPrefix("search") { return "magnifyingglass" }
+        if lower.hasPrefix("looked in") || lower.hasPrefix("found ") || lower.hasPrefix("list") { return "folder" }
+        if lower.contains("command") || lower.contains("mcp-") { return "terminal" }
+        return "sparkle"
+    }
+
+    private var subtitleText: String {
+        if item.status == .running {
+            if let latest = item.latestActivity, !latest.isEmpty, latest != "Starting…" {
+                return latest
+            }
+            return firstLinePreview(of: item.task, fallback: "Starting sub-agent…")
+        }
+        if item.status == .failed, !cleanedOutput.isEmpty {
+            return firstLinePreview(of: cleanedOutput, fallback: "Failed")
+        }
+        return firstLinePreview(of: item.task, fallback: item.status == .cancelled ? "Stopped" : "Completed")
+    }
+
+    private func firstLinePreview(of raw: String, fallback: String) -> String {
+        let first = raw
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first(where: { !$0.isEmpty })
+        guard let first, !first.isEmpty else { return fallback }
+        return first.count > 120 ? String(first.prefix(120)) + "…" : first
+    }
+
+    private var cleanedOutput: String {
+        let trimmed = item.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed == "cancelled" ? "" : trimmed
+    }
+
+    private var outputSectionTitle: String {
+        switch item.status {
+        case .running: return "LIVE OUTPUT"
+        case .failed: return "ERROR"
+        case .cancelled: return cleanedOutput.isEmpty ? "STATUS" : "PARTIAL REPORT"
+        case .completed: return "REPORT"
+        }
+    }
+
+    private var emptyOutputPlaceholder: String {
+        switch item.status {
+        case .running:
+            if let latest = item.latestActivity, !latest.isEmpty {
+                return "Currently \(latest.lowercased())"
+            }
+            return "Reading files and gathering context…"
+        case .cancelled:
+            return "Stopped before finishing its final report."
+        case .failed:
+            return "Sub-agent stopped with an error."
+        case .completed:
+            return "Completed without extra text."
+        }
     }
 }

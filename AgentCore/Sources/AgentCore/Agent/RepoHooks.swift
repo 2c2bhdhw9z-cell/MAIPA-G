@@ -162,14 +162,31 @@ public struct HookedTool: AgentTool {
     public var name: String { inner.name }
     public var spec: ToolSpec { inner.spec }
     public func runningSummary(for arguments: JSONValue) -> String { inner.runningSummary(for: arguments) }
+    public func initialSubagents(for arguments: JSONValue, callID: String) -> [SubagentRunItem]? {
+        inner.initialSubagents(for: arguments, callID: callID)
+    }
     public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? { await inner.approvalRequest(for: arguments) }
 
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         try await afterwards(try await inner.run(arguments: arguments, progress: progress), arguments: arguments, progress: progress)
     }
 
+    public func runLive(arguments: JSONValue, update: @escaping @Sendable (ToolLiveUpdate) -> Void) async throws -> ToolOutput {
+        let output = try await inner.runLive(arguments: arguments, update: update)
+        return try await afterwards(output, arguments: arguments) { msg in
+            update(ToolLiveUpdate(summary: msg, detail: output.detail, subagents: output.subagents))
+        }
+    }
+
     public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         try await afterwards(try await inner.runApproved(arguments: arguments, progress: progress), arguments: arguments, progress: progress)
+    }
+
+    public func runApprovedLive(arguments: JSONValue, update: @escaping @Sendable (ToolLiveUpdate) -> Void) async throws -> ToolOutput {
+        let output = try await inner.runApprovedLive(arguments: arguments, update: update)
+        return try await afterwards(output, arguments: arguments) { msg in
+            update(ToolLiveUpdate(summary: msg, detail: output.detail, subagents: output.subagents))
+        }
     }
 
     func afterwards(_ output: ToolOutput, arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {

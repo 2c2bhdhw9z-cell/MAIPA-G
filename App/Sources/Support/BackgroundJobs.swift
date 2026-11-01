@@ -3,11 +3,18 @@ import BackgroundTasks
 import Foundation
 import Observation
 
+/// Wraps Objective-C `BGTask` subclasses that predate `Sendable` annotations so `nonisolated`
+/// system callbacks can hop to `@MainActor` cleanly under Swift 6 strict concurrency without
+/// inheriting `@MainActor` isolation from `BackgroundJobs`.
+private struct BGTaskBox<T>: @unchecked Sendable {
+    let value: T
+}
+
 @MainActor
 @Observable
 final class BackgroundJobs {
-    static let refreshIdentifier = "dev.maipag.app.refresh"
-    static let continuedIdentifier = "dev.maipag.app.autonomous"
+    nonisolated static let refreshIdentifier = "dev.maipag.app.refresh"
+    nonisolated static let continuedIdentifier = "dev.maipag.app.autonomous"
 
     weak var app: AppModel?
     private(set) var lastFailure: String?
@@ -16,40 +23,54 @@ final class BackgroundJobs {
     func register() {
         guard !registered, !PreviewScenes.isActive else { return }
         registered = true
-        BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.refreshIdentifier, using: nil) { [weak self] task in
-            guard let refresh = task as? BGAppRefreshTask else { return }
-            let work = Task { @MainActor [weak self] in
-                await self?.app?.jobs.refresh()
-                refresh.setTaskCompleted(success: !Task.isCancelled)
+        Self.registerSystemTasks(owner: self)
+    }
+
+    /// Registers `BGTaskScheduler` callbacks from a `nonisolated` context so Swift 6 never injects
+    /// a `@MainActor` dispatch assertion into BackgroundTasks' background XPC launch or expiration queues.
+    nonisolated private static func registerSystemTasks(owner: BackgroundJobs) {
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.refreshIdentifier, using: DispatchQueue.main) { [weak owner] task in
+            guard let refresh = task as? BGAppRefreshTask else {
+                task.setTaskCompleted(success: false)
+                return
             }
-            refresh.expirationHandler = { [weak self] in
+            let box = BGTaskBox(value: refresh)
+            let work = Task { @MainActor [weak owner] in
+                await owner?.app?.jobs.refresh()
+                box.value.setTaskCompleted(success: !Task.isCancelled)
+            }
+            refresh.expirationHandler = { [weak owner] in
                 work.cancel()
-                Task { @MainActor in
-                    self?.lastFailure = "iOS ended MAIPA-G’s background refresh before job status finished updating. The GitHub job keeps running; open Jobs to refresh it."
+                Task { @MainActor [weak owner] in
+                    owner?.lastFailure = "iOS ended MAIPA-G’s background refresh before job status finished updating. The GitHub job keeps running; open Jobs to refresh it."
                 }
             }
         }
         if #available(iOS 26.0, *) {
-            BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.continuedIdentifier, using: nil) { [weak self] task in
-                guard let continued = task as? BGContinuedProcessingTask else { return }
-                let work = Task { @MainActor [weak self] in
-                    continued.progress.totalUnitCount = 100
+            BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.continuedIdentifier, using: DispatchQueue.main) { [weak owner] task in
+                guard let continued = task as? BGContinuedProcessingTask else {
+                    task.setTaskCompleted(success: false)
+                    return
+                }
+                let box = BGTaskBox(value: continued)
+                let work = Task { @MainActor [weak owner] in
+                    box.value.progress.totalUnitCount = 100
                     var ticks: Int64 = 0
-                    while !Task.isCancelled, let self, self.app?.jobs.activeCount ?? 0 > 0 {
-                        await self.app?.jobs.refresh()
+                    while !Task.isCancelled, let owner, owner.app?.jobs.activeCount ?? 0 > 0 {
+                        await owner.app?.jobs.refresh()
                         ticks = min(ticks + 1, 99)
-                        continued.progress.completedUnitCount = ticks
-                        continued.updateTitle("MAIPA-G is working", subtitle: "Checking Autonomous jobs")
+                        box.value.progress.completedUnitCount = ticks
+                        box.value.updateTitle("MAIPA-G is working", subtitle: "Checking Autonomous jobs")
                         try? await Task.sleep(nanoseconds: 20_000_000_000)
                     }
-                    continued.progress.completedUnitCount = 100
-                    continued.setTaskCompleted(success: !Task.isCancelled)
+                    box.value.progress.completedUnitCount = 100
+                    box.value.setTaskCompleted(success: !Task.isCancelled)
                 }
-                continued.expirationHandler = { [weak self] in
+                continued.expirationHandler = { [weak owner] in
                     work.cancel()
-                    Task { @MainActor in
-                        let title = self?.app?.jobs.jobs.first(where: { ![.done, .failed, .stopped].contains($0.status) })?.title ?? "the active job"
-                        self?.lastFailure = "iOS stopped background monitoring for \(title). The GitHub job itself keeps running; open Jobs to see its result."
+                    Task { @MainActor [weak owner] in
+                        let title = owner?.app?.jobs.jobs.first(where: { ![.done, .failed, .stopped].contains($0.status) })?.title ?? "the active job"
+                        owner?.lastFailure = "iOS stopped background monitoring for \(title). The GitHub job itself keeps running; open Jobs to see its result."
                     }
                 }
             }

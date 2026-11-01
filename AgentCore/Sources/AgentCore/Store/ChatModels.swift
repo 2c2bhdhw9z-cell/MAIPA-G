@@ -423,6 +423,122 @@ public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
     }
 }
 
+/// Live and persisted state for a single Kiro-style sub-agent launched via `launch_helpers`.
+public struct SubagentRunItem: Codable, Sendable, Hashable, Identifiable {
+    public enum Status: String, Codable, Sendable {
+        case running
+        case completed
+        case cancelled
+        case failed
+    }
+
+    public var id: String
+    public var agentID: String
+    public var name: String
+    public var task: String
+    public var model: String?
+    public var status: Status
+    public var toolCallCount: Int
+    public var latestActivity: String?
+    public var toolSummaries: [String]
+    public var liveThought: String?
+    public var output: String
+    public var cost: Double
+
+    public init(
+        id: String,
+        agentID: String,
+        name: String,
+        task: String,
+        model: String? = nil,
+        status: Status = .running,
+        toolCallCount: Int = 0,
+        latestActivity: String? = nil,
+        toolSummaries: [String] = [],
+        liveThought: String? = nil,
+        output: String = "",
+        cost: Double = 0
+    ) {
+        self.id = id
+        self.agentID = agentID
+        self.name = name
+        self.task = task
+        self.model = model
+        self.status = status
+        self.toolCallCount = toolCallCount
+        self.latestActivity = latestActivity
+        self.toolSummaries = toolSummaries
+        self.liveThought = liveThought
+        self.output = output
+        self.cost = cost
+    }
+
+    /// Resolves per-sub-agent items from `call.subagents` when present, or reconstructs them from
+    /// `call.parsedArguments["helpers"]` so sub-agent cards are immediately expandable from t=0ms
+    /// and for older saved chats that predate structured `subagents` persistence.
+    public static func resolvedItems(for call: ToolCallRecord) -> [SubagentRunItem] {
+        if let stored = call.subagents, !stored.isEmpty {
+            guard call.status != .running && call.status != .waitingForUser else { return stored }
+            return stored.map { item in
+                guard item.status == .running else { return item }
+                var copy = item
+                copy.status = fallbackTerminalStatus(for: call)
+                return copy
+            }
+        }
+        guard call.name == "launch_helpers",
+              let helpers = call.parsedArguments["helpers"]?.arrayValue,
+              !helpers.isEmpty
+        else { return [] }
+
+        let status: Status = {
+            switch call.status {
+            case .running, .waitingForUser:
+                return .running
+            case .done:
+                return call.summary.localizedCaseInsensitiveContains("cancelled") ? .cancelled : .completed
+            case .failed:
+                return fallbackTerminalStatus(for: call)
+            }
+        }()
+
+        let legacySections: [String] = {
+            guard let detail = call.detail, !detail.isEmpty, detail != "Stopped" else { return [] }
+            return detail.components(separatedBy: "\n\n---\n\n")
+        }()
+
+        return helpers.enumerated().map { index, entry in
+            let agentID = entry["agent_id"]?.stringValue ?? "sub-agent"
+            let name = BuiltInAgents.named(agentID)?.name ?? agentID
+            let task = entry["task"]?.stringValue ?? ""
+            let fallbackOutput: String = {
+                if index < legacySections.count { return legacySections[index] }
+                if helpers.count == 1, let r = call.result, !r.isEmpty { return r }
+                return ""
+            }()
+            return SubagentRunItem(
+                id: "\(call.id)-sub-\(index)",
+                agentID: agentID,
+                name: name,
+                task: task,
+                status: status,
+                output: fallbackOutput
+            )
+        }
+    }
+
+    private static func fallbackTerminalStatus(for call: ToolCallRecord) -> Status {
+        let combined = "\(call.summary) \(call.detail ?? "")".lowercased()
+        if combined.contains("cancel") || combined.contains("stopped") || combined.contains("interrupted") {
+            return .cancelled
+        }
+        if call.detail == nil && call.result == nil {
+            return .cancelled
+        }
+        return call.status == .done ? .completed : .failed
+    }
+}
+
 /// One tool the AI used, what it was asked, and what it found.
 public struct ToolCallRecord: Codable, Sendable, Hashable, Identifiable {
     public enum Status: String, Codable, Sendable { case running, done, failed, waitingForUser }
@@ -443,8 +559,18 @@ public struct ToolCallRecord: Codable, Sendable, Hashable, Identifiable {
     public var finishedAt: Date?
     /// Dollars a tool cost outside the AI request, such as measured chat-computer time.
     public var billedCost: Double?
+    /// Structured per-sub-agent live and completed states when `name == "launch_helpers"`.
+    public var subagents: [SubagentRunItem]?
 
-    public init(id: String, name: String, arguments: String, summary: String, status: Status = .running, startedAt: Date = Date()) {
+    public init(
+        id: String,
+        name: String,
+        arguments: String,
+        summary: String,
+        status: Status = .running,
+        startedAt: Date = Date(),
+        subagents: [SubagentRunItem]? = nil
+    ) {
         self.id = id
         self.name = name
         self.arguments = arguments
@@ -455,6 +581,7 @@ public struct ToolCallRecord: Codable, Sendable, Hashable, Identifiable {
         self.questions = nil
         self.startedAt = startedAt
         self.finishedAt = nil
+        self.subagents = subagents
     }
 
     public var parsedArguments: JSONValue { JSONValue.parse(arguments) ?? .object([:]) }
