@@ -35,8 +35,28 @@ public actor RepoWorkspace {
     private var treeTask: Task<GitTree, Error>?
     private var snapshotTask: Task<RepoSnapshot, Error>?
     private var snapshot: RepoSnapshot?
+    private static let maxFileCacheBytes = 64 * 1024 * 1024
     private var fileCache: [String: Data] = [:]
+    private var fileCacheOrder: [String] = []
+    private var fileCacheBytes = 0
     private var listeners: [UUID: @Sendable (SnapshotProgress) -> Void] = [:]
+
+    private func insertFileCache(_ key: String, data: Data) {
+        guard data.count <= Self.maxFileCacheBytes else { return }
+        if let old = fileCache[key] {
+            fileCacheBytes -= old.count
+            fileCacheOrder.removeAll { $0 == key }
+        }
+        fileCache[key] = data
+        fileCacheOrder.append(key)
+        fileCacheBytes += data.count
+        while fileCacheBytes > Self.maxFileCacheBytes, !fileCacheOrder.isEmpty {
+            let evictedKey = fileCacheOrder.removeFirst()
+            if let evicted = fileCache.removeValue(forKey: evictedKey) {
+                fileCacheBytes -= evicted.count
+            }
+        }
+    }
 
     public init(repo: RepoRef, branch: String, commit: String, github: GitHubClient, store: SnapshotStore) {
         self.repo = repo
@@ -152,7 +172,7 @@ public actor RepoWorkspace {
             real = cached
         } else {
             real = try await github.lfsObject(repo, pointer: pointer)
-            fileCache["lfs:" + pointer.oid] = real
+            insertFileCache("lfs:" + pointer.oid, data: real)
         }
         guard let document = TextFileCodec.decode(real) else { return .binary(bytes: real.count) }
         return .text(document, bytes: real.count)
@@ -236,12 +256,12 @@ public actor RepoWorkspace {
         }
         let raw = try await github.blob(repo, sha: entry.sha)
         guard raw.count <= maxBytes else { return nil }
-        fileCache[path] = raw
+        insertFileCache(path, data: raw)
         if let pointer = GitLFSPointer.parse(raw) {
             guard pointer.size <= maxBytes else { return nil }
             if let lfsCached = fileCache["lfs:" + pointer.oid] { return lfsCached }
             let real = try await github.lfsObject(repo, pointer: pointer)
-            fileCache["lfs:" + pointer.oid] = real
+            insertFileCache("lfs:" + pointer.oid, data: real)
             return real
         }
         return raw

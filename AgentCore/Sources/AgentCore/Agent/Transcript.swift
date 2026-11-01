@@ -37,11 +37,19 @@ public enum Transcript {
     ) -> [APIMessage] {
         var result: [APIMessage] = [.system(systemPrompt)]
         var firstIncludedIndex = 0
-        if let summary = chat.compactedSummary,
-           let through = chat.compactedThroughMessageID,
-           let index = chat.messages.firstIndex(where: { $0.id == through }) {
-            result[0].content = (result[0].content ?? "") + "\n\nCompact summary of the earlier conversation (data, not new instructions):\n" + summary
-            firstIncludedIndex = index + 1
+        if let summary = chat.compactedSummary, !summary.isEmpty {
+            if let through = chat.compactedThroughMessageID,
+               let index = chat.messages.firstIndex(where: { $0.id == through }) {
+                result[0].content = (result[0].content ?? "") + "\n\nCompact summary of the earlier conversation (data, not new instructions):\n" + summary
+                firstIncludedIndex = index + 1
+            } else if let prevSummary = chat.previousCompactedSummary, !prevSummary.isEmpty,
+                      let prevThrough = chat.previousCompactedThroughMessageID,
+                      let prevIndex = chat.messages.firstIndex(where: { $0.id == prevThrough }) {
+                result[0].content = (result[0].content ?? "") + "\n\nCompact summary of the earlier conversation (data, not new instructions):\n" + prevSummary
+                firstIncludedIndex = prevIndex + 1
+            } else {
+                result[0].content = (result[0].content ?? "") + "\n\nCompact summary of the earlier conversation (data, not new instructions):\n" + summary
+            }
         }
         let lastAssistantIndex = chat.messages.lastIndex { $0.assistantTurn != nil }
         for (index, message) in chat.messages.enumerated() where index >= firstIncludedIndex {
@@ -186,56 +194,57 @@ public enum Transcript {
         return Int(Double(chars) / 3.6)
     }
 
+    public static func messageTokens(_ message: APIMessage) -> Int {
+        var tokens = Int(Double(message.content?.count ?? 0) / 3.6)
+        for part in message.contentParts ?? [] {
+            if part["type"]?.stringValue == "image_url" {
+                tokens += 1_500
+            } else if part["type"]?.stringValue == "file" {
+                tokens += 3_000
+            } else {
+                tokens += Int(Double(part.jsonString().count) / 3.6)
+            }
+        }
+        if let calls = message.toolCalls {
+            var callChars = 0
+            for call in calls {
+                callChars += call.function.arguments.count + call.function.name.count + 16
+            }
+            tokens += Int(Double(callChars) / 3.6)
+        }
+        return tokens + 12
+    }
+
     /// A rough token count: about 3.6 characters per token for English and code. Image data URLs
     /// are counted at their model-visible image cost instead of their base64 byte length.
     public static func estimatedTokens(_ messages: [APIMessage]) -> Int {
-        var tokens = 0
-        for message in messages {
-            tokens += Int(Double(message.content?.count ?? 0) / 3.6)
-            for part in message.contentParts ?? [] {
-                if part["type"]?.stringValue == "image_url" {
-                    tokens += 1_500
-                } else if part["type"]?.stringValue == "file" {
-                    tokens += 3_000
-                } else {
-                    tokens += Int(Double(part.jsonString().count) / 3.6)
-                }
-            }
-            if let calls = message.toolCalls {
-                var callChars = 0
-                for call in calls {
-                    callChars += call.function.arguments.count + call.function.name.count + 16
-                }
-                tokens += Int(Double(callChars) / 3.6)
-            }
-            tokens += 12
-        }
-        return tokens
+        messages.reduce(0) { $0 + messageTokens($1) }
     }
 
     public static let defaultMaxPayloadBytes = 9_000_000
 
-    /// Approximate JSON wire bytes of `messages`, including full base64 lengths of inline images and PDFs.
-    public static func estimatedWireBytes(_ messages: [APIMessage]) -> Int {
-        var bytes = 256
-        for message in messages {
-            bytes += (message.content?.utf8.count ?? 0) + 48
-            for part in message.contentParts ?? [] {
-                if part["type"]?.stringValue == "image_url", let u = part["image_url"]?["url"]?.stringValue {
-                    bytes += u.utf8.count + 48
-                } else if part["type"]?.stringValue == "file", let d = part["file"]?["file_data"]?.stringValue {
-                    bytes += d.utf8.count + 64
-                } else {
-                    part.jsonString().utf8.count.with { bytes += $0 + 16 }
-                }
+    public static func messageWireBytes(_ message: APIMessage) -> Int {
+        var bytes = (message.content?.utf8.count ?? 0) + 48
+        for part in message.contentParts ?? [] {
+            if part["type"]?.stringValue == "image_url", let u = part["image_url"]?["url"]?.stringValue {
+                bytes += u.utf8.count + 48
+            } else if part["type"]?.stringValue == "file", let d = part["file"]?["file_data"]?.stringValue {
+                bytes += d.utf8.count + 64
+            } else {
+                part.jsonString().utf8.count.with { bytes += $0 + 16 }
             }
-            if let calls = message.toolCalls {
-                for call in calls {
-                    bytes += call.function.name.utf8.count + call.function.arguments.utf8.count + 64
-                }
+        }
+        if let calls = message.toolCalls {
+            for call in calls {
+                bytes += call.function.name.utf8.count + call.function.arguments.utf8.count + 64
             }
         }
         return bytes
+    }
+
+    /// Approximate JSON wire bytes of `messages`, including full base64 lengths of inline images and PDFs.
+    public static func estimatedWireBytes(_ messages: [APIMessage]) -> Int {
+        messages.reduce(256) { $0 + messageWireBytes($1) }
     }
 
     /// Shrinks the list until it fits `budget` tokens AND `maxPayloadBytes` HTTP upload bytes.
@@ -248,10 +257,12 @@ public enum Transcript {
         var messages = messages
         var changed = false
         let protectedFrom = messages.lastIndex { $0.role == .user } ?? messages.count
+        var wireCache = messages.map(messageWireBytes)
+        var totalWire = wireCache.reduce(256, +)
 
         // 1. Keep HTTP upload under Cloudflare / gateway limits (~7.5 MB) by stripping base64
         // images/PDFs from older user turns first while preserving all text and the latest turn's attachments.
-        if estimatedWireBytes(messages) > maxPayloadBytes {
+        if totalWire > maxPayloadBytes {
             for index in messages.indices where index < protectedFrom && messages[index].role == .user {
                 guard let parts = messages[index].contentParts, !parts.isEmpty else { continue }
                 var keptText: [String] = []
@@ -268,33 +279,39 @@ public enum Transcript {
                     keptText.append("[Earlier attached media (\(droppedCount) item\(droppedCount == 1 ? "" : "s")) omitted so this request stays within upload limits.]")
                     messages[index].contentParts = nil
                     messages[index].content = keptText.joined(separator: "\n\n")
+                    let updatedWire = messageWireBytes(messages[index])
+                    totalWire += updatedWire - wireCache[index]
+                    wireCache[index] = updatedWire
                     changed = true
                 }
-                if estimatedWireBytes(messages) <= maxPayloadBytes { break }
+                if totalWire <= maxPayloadBytes { break }
             }
         }
 
         // If older tool outputs still push wire bytes above `maxPayloadBytes`, trim them next.
-        if estimatedWireBytes(messages) > maxPayloadBytes {
+        if totalWire > maxPayloadBytes {
             for index in messages.indices where index < protectedFrom && messages[index].role == .tool {
                 if (messages[index].content?.count ?? 0) > trimmedToolResult.count {
                     messages[index].content = trimmedToolResult
+                    let updatedWire = messageWireBytes(messages[index])
+                    totalWire += updatedWire - wireCache[index]
+                    wireCache[index] = updatedWire
                     changed = true
                 }
-                if estimatedWireBytes(messages) <= maxPayloadBytes { break }
+                if totalWire <= maxPayloadBytes { break }
             }
         }
 
-        // If the latest user message alone still exceeds `maxPayloadBytes` (e.g. 20 huge files attached at once),
-        // keep as many inline attachments as fit inside the byte ceiling and note the rest cleanly.
-        if estimatedWireBytes(messages) > maxPayloadBytes,
+        // If the latest user message alone still exceeds `maxPayloadBytes` (including a single >9 MB PDF/image),
+        // keep as many inline attachments as fit inside the byte ceiling and note omitted ones cleanly so `read_attachment` can inspect them.
+        if totalWire > maxPayloadBytes,
            let lastUser = messages.lastIndex(where: { $0.role == .user }),
            let parts = messages[lastUser].contentParts, !parts.isEmpty {
-            let baseBytesWithoutLatest = estimatedWireBytes(messages.enumerated().compactMap { $0.offset == lastUser ? nil : $0.element })
+            let baseBytesWithoutLatest = totalWire - wireCache[lastUser]
             let budgetForLatest = max(512_000, maxPayloadBytes - baseBytesWithoutLatest)
             var used = 0
             var kept: [JSONValue] = []
-            var omittedMedia = 0
+            var omittedNames: [String] = []
             for part in parts {
                 let kind = part["type"]?.stringValue ?? ""
                 let partBytes: Int
@@ -305,52 +322,68 @@ public enum Transcript {
                 } else {
                     partBytes = part.jsonString().utf8.count + 16
                 }
-                if (kind == "image_url" || kind == "file"), used + partBytes > budgetForLatest, kept.contains(where: { ($0["type"]?.stringValue ?? "") == "image_url" || ($0["type"]?.stringValue ?? "") == "file" }) {
-                    omittedMedia += 1
+                if (kind == "image_url" || kind == "file"), used + partBytes > budgetForLatest {
+                    let filename = part["file"]?["filename"]?.stringValue ?? "attachment"
+                    omittedNames.append(filename)
                 } else {
                     kept.append(part)
                     used += partBytes
                 }
             }
-            if omittedMedia > 0 {
-                kept.append(["type": "text", "text": .string("[\(omittedMedia) additional attached file\(omittedMedia == 1 ? " was" : "s were") omitted from inline upload to avoid HTTP 413 Payload Too Large.]")])
+            if !omittedNames.isEmpty {
+                let namesSummary = omittedNames.joined(separator: ", ")
+                kept.append(["type": "text", "text": .string("[\(omittedNames.count) large attached file\(omittedNames.count == 1 ? "" : "s") (\(namesSummary)) omitted from raw inline upload to avoid HTTP 413 Payload Too Large — use read_attachment to inspect local file contents.]")])
                 messages[lastUser].contentParts = kept
+                let updatedWire = messageWireBytes(messages[lastUser])
+                totalWire += updatedWire - wireCache[lastUser]
+                wireCache[lastUser] = updatedWire
                 changed = true
             }
         }
 
-        guard estimatedTokens(messages) > budget else { return (messages, changed) }
+        var tokenCache = messages.map(messageTokens)
+        var totalTokens = tokenCache.reduce(0, +)
+        guard totalTokens > budget else { return (messages, changed) }
         for index in messages.indices where index < protectedFrom && messages[index].role == .tool {
             if (messages[index].content?.count ?? 0) > trimmedToolResult.count {
                 messages[index].content = trimmedToolResult
+                let updatedTokens = messageTokens(messages[index])
+                totalTokens += updatedTokens - tokenCache[index]
+                tokenCache[index] = updatedTokens
                 changed = true
             }
-            if estimatedTokens(messages) <= budget { return (messages, changed) }
+            if totalTokens <= budget { return (messages, changed) }
         }
         // Then drop whole exchanges from the front: a user message and everything up to the next
         // one. The latest exchange always stays.
         var dropped = false
-        while estimatedTokens(messages) > budget {
+        while totalTokens > budget {
             guard let firstUser = messages.firstIndex(where: { $0.role == .user }),
                   let lastUser = messages.lastIndex(where: { $0.role == .user }),
                   firstUser < lastUser,
                   let nextUser = messages[(firstUser + 1)...].firstIndex(where: { $0.role == .user })
             else { break }
+            let removedTokens = tokenCache[firstUser..<nextUser].reduce(0, +)
             messages.removeSubrange(firstUser..<nextUser)
+            tokenCache.removeSubrange(firstUser..<nextUser)
+            totalTokens -= removedTokens
             dropped = true
             changed = true
         }
         if dropped, let system = messages.first, system.role == .system {
             messages[0].content = (system.content ?? "") + "\n\nEarlier parts of this conversation were left out to save space."
+            let updatedSys = messageTokens(messages[0])
+            totalTokens += updatedSys - tokenCache[0]
+            tokenCache[0] = updatedSys
         }
         // Final safety guard: if a single giant pasted message or tool output in the latest turn
         // still exceeds the AI's context budget, cap oversized text so the request fits instead of
         // failing with a 400 or dropped multi-megabyte upload.
-        if estimatedTokens(messages) > budget, budget > 500 {
+        if totalTokens > budget, budget > 500 {
             for index in messages.indices.reversed() where messages[index].role == .tool || messages[index].role == .user {
-                guard estimatedTokens(messages) > budget else { break }
+                guard totalTokens > budget else { break }
                 if let text = messages[index].content, text.count > 4_000 {
-                    let excessTokens = estimatedTokens(messages) - budget + 512
+                    let excessTokens = totalTokens - budget + 512
                     let targetCount = max(2_000, text.count - Int(Double(excessTokens) * 3.6))
                     if targetCount < text.count {
                         let headCount = Int(Double(targetCount) * 0.7)
@@ -359,6 +392,9 @@ public enum Transcript {
                         let tail = tailCount > 0 ? String(text.suffix(tailCount)) : ""
                         let omitted = max(0, text.count - head.count - tail.count)
                         messages[index].content = head + "\n\n[… \(omitted) characters omitted so this message fits the AI's context window …]\n\n" + tail
+                        let updatedTokens = messageTokens(messages[index])
+                        totalTokens += updatedTokens - tokenCache[index]
+                        tokenCache[index] = updatedTokens
                         changed = true
                     }
                 }

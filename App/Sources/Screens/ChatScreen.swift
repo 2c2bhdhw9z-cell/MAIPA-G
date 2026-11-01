@@ -229,18 +229,18 @@ struct ChatScreen: View {
             VStack(spacing: 8) {
                 if !session.pendingSteers.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
-                        ForEach(Array(session.pendingSteers.enumerated()), id: \.offset) { idx, steerText in
+                        ForEach(session.pendingSteers) { steer in
                             HStack(spacing: 8) {
                                 Image(systemName: "arrow.turn.down.right")
                                     .font(.caption.weight(.bold))
                                     .foregroundStyle(theme.accent)
-                                Text("Steering active reply: \(steerText)")
+                                Text("Steering active reply: \(steer.text)")
                                     .font(.caption.weight(.medium))
                                     .foregroundStyle(.primary)
                                     .lineLimit(2)
                                 Spacer(minLength: 4)
                                 Button {
-                                    session.cancelPendingSteer(at: idx)
+                                    session.cancelPendingSteer(steer.id)
                                     Haptics.selection()
                                 } label: {
                                     Image(systemName: "xmark.circle.fill")

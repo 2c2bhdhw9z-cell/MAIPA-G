@@ -75,17 +75,28 @@ public enum BoundedProcess {
             let input = Pipe()
             process.standardInput = input
             try process.run()
-            try input.fileHandleForWriting.write(contentsOf: stdin)
-            try input.fileHandleForWriting.close()
+            let writeHandle = input.fileHandleForWriting
+            DispatchQueue.global(qos: .userInitiated).async {
+                try? writeHandle.write(contentsOf: stdin)
+                try? writeHandle.close()
+            }
         } else {
             try process.run()
         }
+        let maxOnDiskBytes = UInt64(max(outputLimit * 2, 32_000_000))
         let deadline = Date().addingTimeInterval(max(1, min(timeout, 900)))
+        var exceededDiskCap = false
         while process.isRunning && Date() < deadline && !Task.isCancelled {
+            let outSize = (try? manager.attributesOfItem(atPath: outputURL.path)[.size] as? UInt64) ?? 0
+            let errSize = (try? manager.attributesOfItem(atPath: errorURL.path)[.size] as? UInt64) ?? 0
+            if outSize + errSize > maxOnDiskBytes {
+                exceededDiskCap = true
+                break
+            }
             try await Task.sleep(nanoseconds: 100_000_000)
         }
         let wasCancelled = Task.isCancelled
-        let timedOut = process.isRunning && !wasCancelled
+        let timedOut = process.isRunning && !wasCancelled && !exceededDiskCap
         if process.isRunning {
             #if os(Linux)
             if manager.isExecutableFile(atPath: "/usr/bin/setsid") {
@@ -104,13 +115,16 @@ public enum BoundedProcess {
                 #else
                 process.interrupt()
                 #endif
+                for _ in 0..<40 where process.isRunning { try? await Task.sleep(nanoseconds: 25_000_000) }
             }
         }
-        process.waitUntilExit()
+        if !process.isRunning {
+            process.waitUntilExit()
+        }
         if wasCancelled { throw CancellationError() }
         try output.synchronize(); try errors.synchronize()
         return ProcessResult(
-            exitCode: process.terminationStatus,
+            exitCode: process.isRunning ? -1 : process.terminationStatus,
             stdout: Self.read(outputURL, limit: outputLimit),
             stderr: Self.read(errorURL, limit: outputLimit),
             timedOut: timedOut
@@ -214,8 +228,10 @@ public struct WorkspaceInspectTool: AgentTool {
     }
 
     private func safeURL(_ path: String) throws -> URL {
-        guard SnapshotStore.isSafeRelativePath(path.isEmpty ? "." : path) || path.isEmpty else { throw ToolInputError("That path is outside the repository.") }
-        let value = directory.appendingPathComponent(path).standardizedFileURL
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let clean = (trimmed == "." || trimmed == "./") ? "" : trimmed
+        guard clean.isEmpty || SnapshotStore.isSafeRelativePath(clean) else { throw ToolInputError("That path is outside the repository.") }
+        let value = (clean.isEmpty ? directory : directory.appendingPathComponent(clean)).standardizedFileURL
         guard value.path == directory.path || value.path.hasPrefix(directory.path + "/") else { throw ToolInputError("That path is outside the repository.") }
         return value
     }
@@ -282,7 +298,7 @@ public struct ProcessTool: AgentTool {
 
     private func runOrBackground(arguments: JSONValue, approved: Bool, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         if arguments["background"]?.boolValue == true {
-            let id = await BackgroundCommandRegistry.shared.start {
+            let id = try await BackgroundCommandRegistry.shared.start {
                 try await execute(arguments: arguments, approved: approved, progress: { _ in })
             }
             return ToolOutput(forModel: "Background command started with task id \(id). Use run_shell operation status or stop with this task_id.", summary: "Started background command")
@@ -299,7 +315,17 @@ public struct ProcessTool: AgentTool {
         guard let first = words.first else { return true }
         if first == "pwd" && words.count == 1 { return false }
         if first == "git", let operation = words.dropFirst().first,
-           ["status", "diff", "log", "show"].contains(operation) { return false }
+           ["status", "diff", "log", "show"].contains(operation) {
+            let unsafeFlags = ["--output", "-o", "--ext-diff", "--no-index", "--exec", "--git-dir", "--work-tree", "-c"]
+            let rest = words.dropFirst()
+            for arg in rest {
+                let lower = arg.lowercased()
+                if unsafeFlags.contains(where: { lower == $0 || lower.hasPrefix($0 + "=") }) {
+                    return true
+                }
+            }
+            return false
+        }
         return true
     }
 
@@ -344,7 +370,15 @@ public struct ProcessTool: AgentTool {
             }
         }
         let combined = [result.stdout, result.stderr].filter { !$0.isEmpty }.joined(separator: "\n")
-        if result.timedOut { throw ProcessFailure.timedOut }
+        if result.timedOut {
+            let partial = combined.isEmpty ? "No output before timeout." : combined
+            return ToolOutput(
+                forModel: "Command timed out after \(Int(timeout)) seconds.\nPartial output before timeout:\n\(partial)",
+                summary: "Command timed out",
+                detail: partial,
+                isError: true
+            )
+        }
         return ToolOutput(
             forModel: "Exit code: \(result.exitCode)\n\(combined)",
             summary: result.exitCode == 0 ? "Command finished" : "Command failed (\(result.exitCode))",
@@ -354,24 +388,52 @@ public struct ProcessTool: AgentTool {
     }
 }
 
-/// Lets one workspace-changing operation run at a time, in arrival order. A model can ask for
-/// several tools in one step and they normally run side by side; anything that checks the repo
-/// before and after itself (shell commands, connector calls, publishing) goes through here.
+/// Lets one workspace-changing operation run at a time, in arrival order. Cancelled waiters are
+/// evicted immediately without running their body.
 public actor WorkspaceTurnstile {
     public static let shared = WorkspaceTurnstile()
     private var busy = false
-    private var waiting: [CheckedContinuation<Void, Never>] = []
+    private var waiting: [(id: UUID, continuation: CheckedContinuation<Void, Error>)] = []
 
     public func run<T: Sendable>(_ body: @Sendable () async throws -> T) async throws -> T {
+        try Task.checkCancellation()
         if busy {
-            await withCheckedContinuation { waiting.append($0) }
+            let id = UUID()
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                    if Task.isCancelled {
+                        cont.resume(throwing: CancellationError())
+                    } else if !busy {
+                        busy = true
+                        cont.resume()
+                    } else {
+                        waiting.append((id: id, continuation: cont))
+                    }
+                }
+            } onCancel: {
+                Task { await self.cancelWaiter(id) }
+            }
         } else {
             busy = true
         }
-        defer {
-            if waiting.isEmpty { busy = false } else { waiting.removeFirst().resume() }
-        }
+        defer { releaseSlot() }
+        try Task.checkCancellation()
         return try await body()
+    }
+
+    private func cancelWaiter(_ id: UUID) {
+        guard let idx = waiting.firstIndex(where: { $0.id == id }) else { return }
+        let removed = waiting.remove(at: idx)
+        removed.continuation.resume(throwing: CancellationError())
+    }
+
+    private func releaseSlot() {
+        if waiting.isEmpty {
+            busy = false
+        } else {
+            let next = waiting.removeFirst()
+            next.continuation.resume()
+        }
     }
 }
 
@@ -396,23 +458,47 @@ struct WorkspaceState: Sendable {
         for path in paths where ChangeWorkspace.isBuildSetup(path) {
             buildFiles[path] = try Data(contentsOf: directory.appendingPathComponent(path), options: .mappedIfSafe)
         }
-        let add = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["add", "-A"], directory: directory, timeout: 120)
-        guard add.exitCode == 0 else { throw CloudRunnerError.commandFailed }
-        do {
-            let diff = try await BoundedProcess.run(
-                executable: "/usr/bin/git", arguments: ["diff", "--cached", "--binary", "--full-index"],
-                directory: directory, timeout: 120, outputLimit: 90_000_000
-            )
-            guard diff.exitCode == 0 else { throw CloudRunnerError.commandFailed }
-            let reset = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["reset"], directory: directory, timeout: 120)
-            guard reset.exitCode == 0 else { throw CloudRunnerError.commandFailed }
-            let headResult = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["rev-parse", "HEAD"], directory: directory, timeout: 60)
-            guard headResult.exitCode == 0 else { throw CloudRunnerError.commandFailed }
-            return WorkspaceState(head: headResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines), paths: paths, buildFiles: buildFiles, patch: Data(diff.stdout.utf8))
-        } catch {
-            _ = try? await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["reset"], directory: directory, timeout: 120)
-            throw error
+        let headResult = try await BoundedProcess.run(executable: "/usr/bin/git", arguments: ["rev-parse", "HEAD"], directory: directory, timeout: 60)
+        guard headResult.exitCode == 0 else { throw CloudRunnerError.commandFailed }
+        let headSHA = headResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Fast path: if working tree has zero modifications or untracked files, skip index staging and binary diffing entirely.
+        let statusCheck = try await BoundedProcess.run(
+            executable: "/usr/bin/git", arguments: ["status", "--porcelain", "-z"],
+            directory: directory, timeout: 60, outputLimit: 20_000_000
+        )
+        if statusCheck.exitCode == 0 && statusCheck.stdout.isEmpty {
+            return WorkspaceState(head: headSHA, paths: paths, buildFiles: buildFiles, patch: Data())
         }
+
+        // Dirty tree: stage into an isolated temporary GIT_INDEX_FILE so the real .git/index is never mutated or rewritten.
+        let tempIndexDir = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-idx-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempIndexDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempIndexDir) }
+        let tempIndexFile = tempIndexDir.appendingPathComponent("index")
+        let gitIndexPathRes = try await BoundedProcess.run(
+            executable: "/usr/bin/git", arguments: ["rev-parse", "--git-path", "index"],
+            directory: directory, timeout: 30
+        )
+        if gitIndexPathRes.exitCode == 0 {
+            let rawIdxPath = gitIndexPathRes.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolvedIdxURL = rawIdxPath.hasPrefix("/") ? URL(fileURLWithPath: rawIdxPath) : directory.appendingPathComponent(rawIdxPath)
+            if FileManager.default.fileExists(atPath: resolvedIdxURL.path) {
+                try? FileManager.default.copyItem(at: resolvedIdxURL, to: tempIndexFile)
+            }
+        }
+        let idxEnv = ["GIT_INDEX_FILE": tempIndexFile.path]
+        let add = try await BoundedProcess.run(
+            executable: "/usr/bin/git", arguments: ["add", "-A"],
+            directory: directory, environment: idxEnv, timeout: 120
+        )
+        guard add.exitCode == 0 else { throw CloudRunnerError.commandFailed }
+        let diff = try await BoundedProcess.run(
+            executable: "/usr/bin/git", arguments: ["diff", "--cached", "--binary", "--full-index", headSHA],
+            directory: directory, environment: idxEnv, timeout: 120, outputLimit: 90_000_000
+        )
+        guard diff.exitCode == 0 else { throw CloudRunnerError.commandFailed }
+        return WorkspaceState(head: headSHA, paths: paths, buildFiles: buildFiles, patch: Data(diff.stdout.utf8))
     }
 
     func isSameRepositoryState(as other: WorkspaceState) -> Bool {

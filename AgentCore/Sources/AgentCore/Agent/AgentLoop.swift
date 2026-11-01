@@ -135,11 +135,16 @@ public actor SteeringInbox {
     }
 
     public func cancelAllBackgroundTasks() {
+        yieldAfterStep = false
         let tasks = Array(backgroundTasks.values)
         backgroundTasks.removeAll()
         for t in tasks { t.cancel() }
         wakeSteerWaiters()
         wakeActivityWaiters()
+    }
+
+    public func clearYieldFlag() {
+        yieldAfterStep = false
     }
 
     /// Waits while backgrounded sub-agents are still working until a live steer, card patch, or completion arrives.
@@ -511,6 +516,7 @@ private struct Runner {
             }
         }
         if Task.isCancelled, turn.status == .running { turn.status = .stopped }
+        await steering?.clearYieldFlag()
         emit(milestone: true)
     }
 
@@ -638,15 +644,17 @@ private struct Runner {
             )
             if trimmed, !turn.notices.contains(Self.trimmedNotice) { turn.notices.append(Self.trimmedNotice) }
 
-            emit(milestone: false)
-
             var accumulator = StreamAccumulator()
+            var emittedInitialStep = false
             do {
                 let stream = try await environment.openRouter.stream(request)
                 for try await chunk in stream {
+                    let prevToolCount = accumulator.toolCalls.count
                     accumulator.apply(chunk)
                     if let error = chunk.error { throw error }
-                    let changed = turn.steps[index].text != accumulator.text || turn.steps[index].reasoning != accumulator.reasoning
+                    let changed = turn.steps[index].text != accumulator.text
+                        || turn.steps[index].reasoning != accumulator.reasoning
+                        || accumulator.toolCalls.count != prevToolCount
                     if !accumulator.reasoning.isEmpty,
                        turn.steps[index].reasoningFinishedAt == nil,
                        (!accumulator.text.isEmpty || !accumulator.toolCalls.isEmpty) {
@@ -657,7 +665,10 @@ private struct Runner {
                     if let model = accumulator.model { turn.steps[index].model = model }
                     // Every new piece of text goes out at once, so words never wait for the next
                     // ones (a model can pause mid-reply). The app draws at most once a frame.
-                    if changed { emit(milestone: false) }
+                    if changed || !emittedInitialStep {
+                        emittedInitialStep = true
+                        emit(milestone: false)
+                    }
                 }
                 try Task.checkCancellation()
                 guard accumulator.hasOutput || !accumulator.reasoning.isEmpty || accumulator.finishReason != nil else {
@@ -791,6 +802,9 @@ private struct Runner {
 
     func recovery(for error: Error, attempt: Int) async -> Recovery {
         if let api = error as? OpenRouterAPIError {
+            if api.httpStatus == 413 && attempt <= 2 {
+                return .shrinkContext
+            }
             switch api.kind {
             case .outOfCredits where route.isAuto && !route.isFree && !switchedToFree:
                 return .switchToFree
@@ -828,14 +842,17 @@ private struct Runner {
         for callIndex in turn.steps[stepIndex].toolCalls.indices {
             let call = turn.steps[stepIndex].toolCalls[callIndex]
             guard call.result == nil else { continue }
-            let repeatedFailures = turn.steps.prefix(stepIndex).flatMap(\.toolCalls).filter {
-                $0.name == call.name && $0.arguments == call.arguments && $0.status == .failed
+            let repeatedFailures = turn.steps.prefix(stepIndex).flatMap(\.toolCalls).filter { prev in
+                guard prev.name == call.name && prev.arguments == call.arguments && prev.status == .failed else { return false }
+                let msg = (prev.result ?? "").lowercased()
+                let isTransient = msg.contains("rate limit") || msg.contains("timed out") || msg.contains("temporarily")
+                return !isTransient
             }.count
-            if repeatedFailures >= 2 {
+            if repeatedFailures >= 3 {
                 fail(
                     stepIndex,
                     callIndex,
-                    message: "This exact tool call already failed twice. Change the approach or ask the person what to do next.",
+                    message: "This exact tool call already failed three times. Change the approach or ask the person what to do next.",
                     summary: "Stopped a repeated failing tool call"
                 )
                 continue
@@ -883,7 +900,9 @@ private struct Runner {
                     waiting = true
                     continue
                 }
-                let allowed = questions.questions.first?.options.first == answer
+                let normalizedAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let affirmativeReplies: Set<String> = ["yes", "y", "allow", "approve", "approved", "sure", "ok", "okay", "go ahead", "do it"]
+                let allowed = (questions.questions.first?.options.first == answer) || affirmativeReplies.contains(normalizedAnswer)
                 guard allowed else {
                     turn.steps[stepIndex].toolCalls[callIndex].result = "The person did not approve this change."
                     turn.steps[stepIndex].toolCalls[callIndex].status = .done

@@ -626,7 +626,7 @@ final class AppModel {
             }
         case "chat-connector":
             var chat = PreviewScenes.sampleChat()
-            if var turn = chat.lastAssistantTurn {
+            if var turn = chat.lastAssistantTurn, !turn.steps.isEmpty {
                 var call = ToolCallRecord(id: "mcp1", name: "mcp_github_search_repositories", arguments: "{}", summary: "Used GitHub · Search repositories", status: .done)
                 call.detail = "Found MAIPA-G and Continuum-."
                 turn.steps[0].toolCalls.append(call); chat.messages[chat.messages.count - 1].assistantTurn = turn

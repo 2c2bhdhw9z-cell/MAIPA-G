@@ -127,12 +127,15 @@ public struct GitHubClient: Sendable {
         var query = query
         query["per_page"] = "100"
         var next: URL? = url(path, query: query)
-        while let page = next, results.count < limit {
+        var pagesFetched = 0
+        while let page = next, results.count < limit, pagesFetched < 200 {
+            pagesFetched += 1
             let response = try await withRetries(.standard, retryAfter: defaultRetryDelay) {
                 let headers = try await headers(auth, accept: "application/vnd.github+json")
                 return try await transport.send(HTTPRequest(url: page, headers: headers))
             }
             guard response.isSuccess else { throw GitHubAPIError(response: response) }
+            let previousCount = results.count
             if let key {
                 let decoder = JSONCoding.decoder()
                 decoder.userInfo[.paginationKey] = key
@@ -144,7 +147,11 @@ public struct GitHubClient: Sendable {
             } else {
                 results += try response.decode([T].self)
             }
-            next = Self.nextPage(from: response.header("link"))
+            let candidateNext = Self.nextPage(from: response.header("link"))
+            if results.count == previousCount || candidateNext == page {
+                break
+            }
+            next = candidateNext
         }
         return results
     }
