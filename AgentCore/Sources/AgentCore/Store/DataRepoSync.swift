@@ -28,7 +28,7 @@ public actor DataRepoSync {
     }
 
     public struct FileProblem: Sendable, Hashable {
-        public enum Stage: String, Sendable, Hashable { case read, download, write, upload }
+        public enum Stage: String, Sendable, Hashable { case read, download, write, upload, checkpoint }
         public var path: String
         public var stage: Stage
         public var message: String
@@ -95,9 +95,17 @@ public actor DataRepoSync {
         return managedBlobPrefixes.contains(where: path.hasPrefix)
     }
 
-    private func saveState() {
-        try? FileManager.default.createDirectory(at: stateURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? JSONCoding.encoder(pretty: true).encode(state).write(to: stateURL, options: .atomic)
+    /// Persists the reconciliation baseline and reports failure to the caller that owns the sync report.
+    @discardableResult
+    private func saveState() -> FileProblem? {
+        do {
+            try FileManager.default.createDirectory(at: stateURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let stateData = try JSONCoding.encoder(pretty: true).encode(state)
+            try stateData.write(to: stateURL, options: .atomic)
+            return nil
+        } catch {
+            return FileProblem(path: stateURL.lastPathComponent, stage: .checkpoint, message: "Could not persist the sync checkpoint: \(error.localizedDescription)")
+        }
     }
 
     /// Finds the user's MAIPA-G-data repo, making it (private) the first time.
@@ -420,7 +428,7 @@ public actor DataRepoSync {
         report.uploaded = successfulUploads.sorted()
         report.deletedThere = changes.isEmpty ? [] : committedDeletes.sorted()
         state.lastSyncAt = Date()
-        saveState()
+        if let problem = saveState() { report.problems.append(problem) }
         return report
     }
 

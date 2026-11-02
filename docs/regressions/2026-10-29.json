@@ -64,7 +64,7 @@
     {
       "id": "OCT29-13",
       "status": "covered",
-      "evidence": "scopedDirectSaveSentenceDoesNotChangeTheWholeRepository"
+      "evidence": "repositoryInstructionsCannotEnableDirectSaving"
     },
     {
       "id": "OCT29-14",

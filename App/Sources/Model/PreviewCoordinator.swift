@@ -55,24 +55,31 @@ final class PreviewCoordinator {
             } else {
                 buildProject = nil
                 let prefix = detected.rootPath.isEmpty ? "" : detected.rootPath + "/"
-                let publishedEntries: [GitTreeEntry]
-                if detected.rootPath.isEmpty {
-                    // A root index does not publish every sibling in a private repository. Only
-                    // the entry point is exposed; projects needing assets should use public/,
-                    // docs/, site/, or a verified build artifact.
-                    publishedEntries = entries.filter { $0.isFile && !$0.isSymlink && $0.path == detected.entryPath }
-                } else {
-                    publishedEntries = entries.filter { $0.isFile && !$0.isSymlink && $0.path.hasPrefix(prefix) }
-                }
+                let entryByPath = Dictionary(uniqueKeysWithValues: entries.map { ($0.path, $0) })
+                var pendingPaths = detected.rootPath.isEmpty
+                    ? [detected.entryPath]
+                    : entries.filter { $0.isFile && !$0.isSymlink && $0.path.hasPrefix(prefix) }.map(\.path)
+                var visited = Set<String>()
                 var publishedPaths = Set<String>()
-                for entry in publishedEntries {
-                    let relative = String(entry.path.dropFirst(prefix.count))
+                while let path = pendingPaths.popLast() {
+                    guard visited.insert(path).inserted,
+                          let entry = entryByPath[path], entry.isFile, !entry.isSymlink,
+                          detected.rootPath.isEmpty || path.hasPrefix(prefix) else { continue }
+                    let relative = detected.rootPath.isEmpty ? path : String(path.dropFirst(prefix.count))
                     guard SnapshotStore.isSafeRelativePath(relative), !relative.split(separator: "/").contains(where: { $0.hasPrefix(".") }) else { continue }
-                    let data = try await github.fileContents(repo.ref, path: entry.path, ref: commit)
+                    let data = try await github.fileContents(repo.ref, path: path, ref: commit)
                     let url = destination.appendingPathComponent(relative)
                     try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
                     try data.write(to: url, options: .atomic)
                     publishedPaths.insert(relative)
+
+                    // Root-level previews stay private-by-default: publish the entry and only
+                    // tracked local files it explicitly references, including nested CSS assets.
+                    if detected.rootPath.isEmpty,
+                       ["html", "htm", "css", "js", "mjs"].contains(relative.split(separator: ".").last?.lowercased() ?? ""),
+                       let text = String(data: data, encoding: .utf8) {
+                        pendingPaths.append(contentsOf: PreviewAssetResolver.referencedFiles(in: text, from: relative).filter { !visited.contains($0) })
+                    }
                 }
                 let entryPath = detected.entryPath.split(separator: "/").last.map(String.init) ?? "index.html"
                 guard publishedPaths.contains(entryPath) else { throw WebPreviewError.missingResource(entryPath) }

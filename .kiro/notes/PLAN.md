@@ -175,10 +175,12 @@ Built since then:
   `ViewThatFits`); added `AIProviderEndpoint.sanitizeAPIKey` + eye reveal toggle across all providers;
   and settled stale `.running` synced chats in `ChatLibrary.reloadFromDisk()`.
 
-Still not done: Stability 11 (about 250 silent `try?` failures remain), necessary item 4 (sandbox
-for downloaded connectors blocks all network, so npx/uvx connectors can't install), and necessary
-item 6's leak test (deleted on the owner's order). Waiting on the phone: Stability 10, 31, 33, 34
-and 35 (chat-computer features) and 14 (the owner has to add the GitHub app's Plan permission).
+Still open in the historical plan: Stability 11 (the earlier estimate of silent `try?` sites needs
+revalidation), necessary item 4 (downloaded connector sandbox blocks network, so package bootstrap
+that needs outbound access cannot run), and necessary item 6's leak test (deleted on the owner's
+order). Waiting on the phone: Stability 10, 31, 33, 34 and 35 (chat-computer features) and 14 (the
+owner has to add the GitHub app's Plan permission). See the source-reconciled status below before
+creating any follow-up tickets.
 Cancelled by the owner: Stability 40 and necessary item 8 (the screenshot job was deleted at 2:40
 PM). The 37 items finished before noon were spot-checked, not re-audited sentence by sentence.**
 
@@ -214,6 +216,24 @@ invoke_sub_agent, disclose_context, introspect): **"Whatever tools it doesn't ha
      report 12.
   8. **Regex search** (grep_search): check that search_code takes regular expressions; add them
      if not. List and search respect .gitignore and .kiroignore.
+
+### Current source reconciliation (2026-11-01)
+The historical checklist above is not a current implementation status. Source and tests now confirm:
+- `append_file`, image-aware `read_file` for vision-capable models, regex-enabled `search_code`, and
+  `introspect` exist.
+- `run_command` exists only when a computer is configured and the selected model supports tools;
+  it is not an always-available shell in every chat.
+- `launch_helpers` is wired into eligible chat runs as well as agent/workflow contexts.
+- The richer `code` tool (AST/language-server navigation and edits) and on-demand
+  `load_context`/steering-skill tool were not found in the current source and remain unimplemented.
+- Downloaded stdio connector execution remains network-isolated by design; package bootstrap that
+  requires outbound network is unsupported. Keep this as a capability limitation, not an isolation
+  escape.
+
+Do not create tickets for items marked implemented above. Re-check conditional availability and
+runtime behavior on-device before describing them as universal. The old Stability 11 estimate of
+about 250 silent `try?` sites is historical; a case-sensitive source scan on this date counted 379
+`try?` expressions, which is an inventory count, not a count of confirmed defects.
 
 ## Stability list (owner, 29 October 2026, 4:50 PM: "everything else ... that make it work and stable"; not built yet)
 On top of reports 5-18 and the tools list. Kiro's suggested order: 1-11 first (no lost work, and

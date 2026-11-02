@@ -14,6 +14,9 @@ struct PictureViewer: View {
     @State private var quality: ImageQuality = .standard
     @State private var model = ""
     @State private var generated: GeneratedImageResult?
+    @State private var generatedBatch: [GeneratedImageResult] = []
+    @State private var selectedGeneratedID: UUID?
+    @State private var variationCount = 1
     @State private var image: UIImage?
     @State private var isGenerating = false
     @State private var isLoadingStoredImage = false
@@ -44,6 +47,7 @@ struct PictureViewer: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    if generatedBatch.count > 1 { variationPicker }
                     if let image {
                         Image(uiImage: image)
                             .resizable()
@@ -78,6 +82,8 @@ struct PictureViewer: View {
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
             .task {
                 generated = result
+                generatedBatch = result.map { [$0] } ?? []
+                selectedGeneratedID = result?.id
                 if imageModels.isEmpty {
                     await app.openRouter.loadModels()
                 }
@@ -117,8 +123,14 @@ struct PictureViewer: View {
             Picker("Image AI", selection: $model) {
                 ForEach(imageModels) { Text($0.shortName).tag($0.id) }
             }
+            if supportsMultipleImages {
+                Picker("Variations", selection: $variationCount) {
+                    ForEach(1...4, id: \.self) { Text("\($0)").tag($0) }
+                }
+                .pickerStyle(.segmented)
+            }
             if let error { Text(error).foregroundStyle(Theme.danger) }
-            Button(error == nil ? "Generate picture" : "Retry") {
+            Button(error == nil ? (requestedCount == 1 ? "Generate picture" : "Generate \(requestedCount) variations") : "Retry") {
                 let paid = imageModels.first(where: { $0.id == model })?.isFree == false
                 confirmSpend = paid
                 if !paid { generate() }
@@ -131,6 +143,33 @@ struct PictureViewer: View {
     private var imageModels: [ModelInfo] {
         let pool = app.openRouter.allSelectableModels.isEmpty ? app.openRouter.models : app.openRouter.allSelectableModels
         return pool.filter(\.generatesImages).sorted { $0.shortName < $1.shortName }
+    }
+
+    private var supportsMultipleImages: Bool {
+        imageModels.first(where: { $0.id == model })?.isPureImageModel == true
+    }
+
+    private var requestedCount: Int { supportsMultipleImages ? variationCount : 1 }
+
+    private var variationPicker: some View {
+        Picker("Picture", selection: Binding(
+            get: { selectedGeneratedID ?? generatedBatch[0].id },
+            set: { selectVariation($0) }
+        )) {
+            ForEach(generatedBatch.indices, id: \.self) { index in
+                Text("Option \(index + 1)").tag(generatedBatch[index].id)
+            }
+        }
+        .pickerStyle(.segmented)
+    }
+
+    private func selectVariation(_ id: UUID) {
+        guard let selected = generatedBatch.first(where: { $0.id == id }) else { return }
+        selectedGeneratedID = id
+        generated = selected
+        image = nil
+        saveState = .idle
+        Task { await loadImage() }
     }
 
     @ViewBuilder
@@ -156,6 +195,7 @@ struct PictureViewer: View {
                 }
             }
             .buttonStyle(.bordered)
+            if let error { Text(error).font(.footnote).foregroundStyle(Theme.danger) }
 
             switch saveState {
             case .idle, .saving:
@@ -185,10 +225,11 @@ struct PictureViewer: View {
 
     private var spendMessage: String {
         let providerLabel = app.openRouter.providerName(forModelID: model)
+        let operation = requestedCount == 1 ? "Generating this picture" : "Generating up to \(requestedCount) variations"
         if app.settings.spendLimitOn {
-            return "This billed picture is a separate paid operation. Your stop-and-ask amount is \(app.settings.spendLimit.dollars); approve it before \(providerLabel) starts."
+            return "\(operation) is a separate paid operation. Your stop-and-ask amount is \(app.settings.spendLimit.dollars); approve before \(providerLabel) starts."
         }
-        return "This picture can use \(providerLabel) credit."
+        return "\(operation) can use \(providerLabel) credit."
     }
 
     private func generate() {
@@ -202,40 +243,54 @@ struct PictureViewer: View {
         saveState = .idle
         Task {
             defer { isGenerating = false }
+            var savedResults: [GeneratedImageResult] = []
             do {
                 let values = try await app.openRouter.client.generateImages(
                     prompt: prompt,
                     model: model,
-                    options: ImageGenerationOptions(aspectRatio: aspect, quality: quality)
+                    options: ImageGenerationOptions(aspectRatio: aspect, quality: quality, count: requestedCount)
                 ) { value in
                     Task { @MainActor in progress = value }
                 }
-                guard let value = values.first(where: { ImageDownsampler.image(from: $0.data) != nil }),
-                      let decoded = ImageDownsampler.image(from: value.data)
-                else { throw PictureError.noReadableImage }
-
-                // Validate bytes before saving either the attachment or its metadata.
-                let ext = value.mimeType.contains("jpeg") || value.mimeType.contains("jpg") ? "jpg" : (value.mimeType.contains("webp") ? "webp" : "png")
-                let attachment = try await app.attachmentStore.importGeneratedImage(
-                    value.data,
-                    name: "picture-\(value.id.uuidString.lowercased()).\(ext)",
-                    mimeType: value.mimeType
-                )
-                let saved = GeneratedImageResult(
-                    attachment: attachment,
-                    prompt: value.prompt,
-                    model: value.model,
-                    aspectRatio: aspect.rawValue,
-                    quality: quality.rawValue,
-                    cost: value.cost
-                )
-                try await app.attachmentStore.saveGeneratedMetadata(saved)
-                generated = saved
+                var firstDecoded: UIImage?
+                for value in values {
+                    guard let decoded = ImageDownsampler.image(from: value.data) else { continue }
+                    let ext = value.mimeType.contains("jpeg") || value.mimeType.contains("jpg") ? "jpg" : (value.mimeType.contains("webp") ? "webp" : "png")
+                    let attachment = try await app.attachmentStore.importGeneratedImage(
+                        value.data,
+                        name: "picture-\(value.id.uuidString.lowercased()).\(ext)",
+                        mimeType: value.mimeType
+                    )
+                    let saved = GeneratedImageResult(
+                        attachment: attachment,
+                        prompt: value.prompt,
+                        model: value.model,
+                        aspectRatio: aspect.rawValue,
+                        quality: quality.rawValue,
+                        cost: value.cost
+                    )
+                    try await app.attachmentStore.saveGeneratedMetadata(saved)
+                    savedResults.append(saved)
+                    generatedBatch = savedResults
+                    if firstDecoded == nil {
+                        firstDecoded = decoded
+                        selectedGeneratedID = saved.id
+                        generated = saved
+                        image = decoded
+                    }
+                }
+                guard !savedResults.isEmpty else { throw PictureError.noReadableImage }
+                if let first = savedResults.first {
+                    selectedGeneratedID = first.id
+                    generated = first
+                }
+                guard let decoded = firstDecoded else { throw PictureError.noReadableImage }
                 image = decoded
                 app.openRouter.recordRecent(.model(model))
                 app.sync.request()
                 await app.openRouter.refreshKeyInfo(force: true)
             } catch {
+                if !savedResults.isEmpty { app.sync.request() }
                 self.error = userMessage(for: error)
             }
         }

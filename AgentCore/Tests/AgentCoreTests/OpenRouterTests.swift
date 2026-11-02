@@ -164,12 +164,12 @@ struct OpenRouterTests {
             func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse { HTTPStreamResponse(status: 404, headers: [:], body: AsyncThrowingStream { $0.finish() }) }
         }
         let transport = ImageTransport()
-        let options = ImageGenerationOptions(aspectRatio: .wide, quality: .high)
+        let options = ImageGenerationOptions(aspectRatio: .wide, quality: .high, count: 3)
         let images = try await OpenRouterClient(transport: transport, apiKey: "key").generateImages(prompt: "A robot", model: "image/model", options: options)
         #expect(images.count == 1 && images[0].data == Data([1, 2, 3]))
         #expect(images[0].cost == 0.04 && images[0].revisedPrompt == "A clearer prompt")
         let body = try #require(transport.request?.body.flatMap(JSONValue.parse))
-        #expect(body["aspect_ratio"] == "16:9" && body["quality"] == "high")
+        #expect(body["aspect_ratio"] == "16:9" && body["quality"] == "high" && body["n"] == 3)
         #expect(transport.request?.url.path == "/api/v1/images")
     }
 

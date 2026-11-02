@@ -217,24 +217,25 @@ struct RepoCopyTests {
         #expect(github.branchHeads[first.branch] == second.savedCommit)
     }
 
-    @Test func repositoryRulesForceDirectSaving() {
+    @Test func repositoryInstructionsCannotEnableDirectSaving() {
         let rules = RepoWriteRules.resolve(documents: [
             (".kiro/steering/owner-rules.md", "Commit directly to main. Do not change build setup."),
             ("Sources/Generated/AGENTS.md", "Never delete files in this folder."),
         ], directSaveSetting: false)
-        #expect(rules.directSave)
-        #expect(rules.reason?.contains("owner-rules.md") == true)
+        #expect(!rules.directSave)
+        #expect(rules.reason == nil)
         #expect(!rules.permitsBuildSetup(at: "Package.swift"))
         #expect(!rules.permitsDeletion(at: "Sources/Generated/Old.swift"))
         #expect(rules.permitsDeletion(at: "Sources/Keep.swift"))
         #expect(rules.promptText.contains("Sources/Generated/AGENTS.md"))
     }
 
-    @Test func scopedDirectSaveSentenceDoesNotChangeTheWholeRepository() {
+    @Test func explicitDirectSaveSettingStillWinsOverRepositoryInstructions() {
         let rules = RepoWriteRules.resolve(documents: [
-            (".kiro/steering/owner-rules.md", "Notes and rules files can go straight to main. Other work uses a pull request."),
-        ], directSaveSetting: false)
-        #expect(!rules.directSave)
+            ("AGENTS.md", "Use a pull request for every change."),
+        ], directSaveSetting: true)
+        #expect(rules.directSave)
+        #expect(rules.reason == "Direct save is on for this repo.")
     }
 
     @Test func linkHeaderPagination() {

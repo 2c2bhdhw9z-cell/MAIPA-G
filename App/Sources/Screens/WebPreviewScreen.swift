@@ -31,8 +31,17 @@ struct WebPreviewScreen: View {
                         }
                 } else { ProgressView() }
             }
-            .navigationTitle("Live preview")
+            .navigationTitle("Website preview")
             .navigationBarTitleDisplayMode(.inline)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                Text("Shows saved site files or the latest build; this is not a running development server.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.secondaryText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.bar)
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
                 ToolbarItemGroup(placement: .bottomBar) {

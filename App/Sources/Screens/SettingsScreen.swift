@@ -537,7 +537,7 @@ struct SettingsScreen: View {
         } header: {
             Text("Repository saving")
         } footer: {
-            Text("Off uses a side branch and pull request. A repo's own rules always win.")
+            Text("Off uses a side branch and pull request. Only this app setting enables direct saves; repository instructions cannot bypass review.")
         }
     }
 
@@ -548,7 +548,8 @@ struct SettingsScreen: View {
             HStack {
                 Text("Chats and settings")
                 Spacer()
-                Text(saveStatus).foregroundStyle(Theme.secondaryText)
+                Text(saveStatus)
+                    .foregroundStyle(app.sync.fileProblems.isEmpty ? Theme.secondaryText : Theme.danger)
             }
             if let billing = app.github.actionsBilling {
                 HStack {
@@ -601,9 +602,11 @@ struct SettingsScreen: View {
         } header: {
             Text("Saving")
         } footer: {
-            Text(app.sync.isEverythingBackedUp
-                 ? "Everything is in your private MAIPA-G-data repo. Install updates over this app."
-                 : "Some data is still only on this phone. Don’t delete the app; tap Save now and install updates over it.")
+            Text(app.sync.fileProblems.contains(where: { $0.stage == .checkpoint })
+                 ? "The sync checkpoint could not be saved on this phone. Keep the app installed and tap Save now to retry. Synced data is stored in your private GitHub repository, not end-to-end encrypted."
+                 : (app.sync.isEverythingBackedUp
+                    ? "Everything is in your private MAIPA-G-data repository on GitHub. This is private account storage, not end-to-end encryption. Install updates over this app."
+                    : "Some data is still only on this phone. Don’t delete the app; tap Save now and install updates over it. Synced data is in your private GitHub repository, not end-to-end encrypted."))
         }
     }
 
@@ -626,6 +629,12 @@ struct SettingsScreen: View {
     }
 
     private var saveStatus: String {
+        if app.sync.fileProblems.contains(where: { $0.stage == .checkpoint }) {
+            return "Sync ran; local checkpoint needs repair"
+        }
+        if !app.sync.fileProblems.isEmpty {
+            return "Some files need attention"
+        }
         switch app.sync.status {
         case .off: return "On this phone only"
         case .idle: return app.sync.lastSaved.map { "Saved \($0.friendlyAgo)" } ?? "Saved"

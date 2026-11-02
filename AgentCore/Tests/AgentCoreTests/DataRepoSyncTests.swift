@@ -405,6 +405,23 @@ struct DataRepoSyncTests {
         #expect(setup.github.remoteFile(badPath) == bad)
     }
 
+    @Test func checkpointWriteFailureIsReportedAfterRemoteSync() async throws {
+        let setup = try await Setup()
+        defer { try? FileManager.default.removeItem(at: setup.directory) }
+        let chat = Self.chat("checkpoint", updated: Date())
+        try await setup.store.save(chat)
+
+        let stateURL = setup.directory.appendingPathComponent("sync-state.json")
+        try FileManager.default.removeItem(at: stateURL)
+        try FileManager.default.createDirectory(at: stateURL, withIntermediateDirectories: true)
+
+        let report = try await setup.sync.sync()
+        let checkpoint = try #require(report.problems.first { $0.stage == .checkpoint })
+        #expect(checkpoint.path == "sync-state.json")
+        #expect(checkpoint.message.contains("Could not persist the sync checkpoint"))
+        #expect(setup.github.remoteFile(ChatStore.relativePath(for: chat.id)) != nil, "remote commit can succeed even when local checkpoint storage fails")
+    }
+
     @Test func commitMessagesAreReadable() {
         #expect(DataRepoSync.commitMessage(uploads: ["chats/a.json"], deletes: []) == "Save 1 chat")
         #expect(DataRepoSync.commitMessage(uploads: ["chats/a.json", "chats/b.json", "settings.json"], deletes: ["chats/c.json"]) == "Save 2 chats and settings, remove 1 chat")

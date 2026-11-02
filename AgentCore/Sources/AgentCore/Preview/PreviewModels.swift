@@ -15,6 +15,56 @@ public struct WebPreviewProject: Codable, Sendable, Hashable {
     }
 }
 
+/// Resolves static asset/page references while publishing a private repository's root-level
+/// preview. Only explicitly referenced, safe, tracked files are returned.
+public enum PreviewAssetResolver {
+    public static func referencedFiles(in source: String, from entryPath: String) -> Set<String> {
+        var references = matches(#"(?i)(?:src|href|poster)\s*=\s*(['"])(.*?)\1"#, group: 2, in: source)
+        references += matches(#"(?i)srcset\s*=\s*(['"])(.*?)\1"#, group: 2, in: source)
+            .flatMap { $0.split(separator: ",").compactMap { $0.split(whereSeparator: { $0.isWhitespace }).first.map { String($0) } } }
+        references += matches(#"(?i)url\(\s*(['"]?)(.*?)\1\s*\)"#, group: 2, in: source)
+        references += matches(#"(?i)@import\s+(['"])(.*?)\1"#, group: 2, in: source)
+        references += matches(#"(?m)\b(?:import|export)\s+[^;\n]*?\s+from\s+(['"])(.*?)\1"#, group: 2, in: source)
+        references += matches(#"(?m)\bimport\s*\(\s*(['"])(.*?)\1\s*\)"#, group: 2, in: source)
+        references += matches(#"(?m)\bimport\s+(['"])(.*?)\1"#, group: 2, in: source)
+        return Set(references.compactMap { resolve($0, from: entryPath) })
+    }
+
+    private static func matches(_ pattern: String, group: Int, in source: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(source.startIndex..<source.endIndex, in: source)
+        return regex.matches(in: source, range: range).compactMap { match in
+            guard match.numberOfRanges > group, let range = Range(match.range(at: group), in: source) else { return nil }
+            return String(source[range])
+        }
+    }
+
+    private static func resolve(_ reference: String, from entryPath: String) -> String? {
+        var value = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, !value.hasPrefix("//"),
+              value.range(of: #"^[a-z][a-z0-9+.-]*:"#, options: .caseInsensitive) == nil else { return nil }
+        value = String(value.prefix { $0 != "?" && $0 != "#" })
+        guard !value.isEmpty else { return nil }
+        if let decoded = value.removingPercentEncoding { value = decoded }
+        else if value.contains("%") { return nil }
+        guard !value.contains("\\") else { return nil }
+
+        var parts = value.hasPrefix("/") ? [] : Array(entryPath.split(separator: "/").dropLast().map(String.init))
+        for component in value.split(separator: "/") {
+            switch component {
+            case ".": continue
+            case "..":
+                guard !parts.isEmpty else { return nil }
+                parts.removeLast()
+            default: parts.append(String(component))
+            }
+        }
+        let path = parts.joined(separator: "/")
+        guard SnapshotStore.isSafeRelativePath(path), !parts.contains(where: { $0.hasPrefix(".") }) else { return nil }
+        return path
+    }
+}
+
 public struct PublishedPreviewManifest: Codable, Sendable, Hashable {
     public var entryPath: String
     public var files: Set<String>

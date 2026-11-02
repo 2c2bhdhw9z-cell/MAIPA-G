@@ -262,7 +262,7 @@ struct ConnectorDetailScreen: View {
                 } header: {
                     Text("Environment variables")
                 } footer: {
-                    Text(setupHint(for: spec) ?? "Secrets stay in Keychain and are passed securely when running on your connected Linux computer (`mcp-maipa-g`) or Autonomous jobs.")
+                    Text((setupHint(for: spec).map { "\($0)\n\n" } ?? "") + "Secrets stay in Keychain and are passed securely when running on your connected Linux computer (`mcp-maipa-g`) or Autonomous jobs. Downloaded stdio connectors run in a network-isolated sandbox, so tools that need to download packages or contact the internet while starting will not work there. Hosted OAuth and remote MCP connectors are unaffected.")
                 }
             }
 

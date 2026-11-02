@@ -40,6 +40,20 @@ struct TrustBoundaryTests {
         #expect(manifest.contentSecurityPolicy.contains("form-action 'none'"))
     }
 
+    @Test func rootPreviewAssetResolverIncludesOnlySafeLocalReferences() {
+        let html = #"<link rel="stylesheet" href="css/site.css"><script src="assets/app.js"></script><img srcset="images/a.png 1x, images/b.png 2x"><img src="../secret.json"><img src="/.env"><script src="https://cdn.example/app.js"></script>"#
+        let htmlAssets = PreviewAssetResolver.referencedFiles(in: html, from: "index.html")
+        #expect(htmlAssets == ["css/site.css", "assets/app.js", "images/a.png", "images/b.png"])
+
+        let css = #"@import "theme.css"; .hero { background: url("../images/hero.png?width=2"); mask: url(%2e%2e%2f%2e%2e%2fprivate.svg); }"#
+        let cssAssets = PreviewAssetResolver.referencedFiles(in: css, from: "css/site.css")
+        #expect(cssAssets == ["css/theme.css", "images/hero.png"])
+
+        let js = #"import "./module.js"; export { image } from "../shared.js"; import("./lazy.js")"#
+        let jsAssets = PreviewAssetResolver.referencedFiles(in: js, from: "scripts/main.js")
+        #expect(jsAssets == ["scripts/module.js", "shared.js", "scripts/lazy.js"])
+    }
+
     @Test func connectorOutputIsBoundedWithHeadAndTail() {
         let input = String(repeating: "a", count: 50_000) + String(repeating: "z", count: 50_000)
         let output = ConnectorOutputLimit.cap(input)

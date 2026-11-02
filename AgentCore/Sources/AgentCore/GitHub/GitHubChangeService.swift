@@ -42,23 +42,10 @@ public struct RepoWriteRules: Sendable, Hashable {
         var result = RepoWriteRules(directSave: directSaveSetting, reason: directSaveSetting ? "Direct save is on for this repo." : nil, documents: documents)
         for document in documents {
             let lines = document.text.lowercased().components(separatedBy: .newlines)
-            let statements = lines.flatMap { line in
-                line.components(separatedBy: CharacterSet(charactersIn: ".;"))
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "-*`"))) }
-            }
-            // Only an unconditional, repository-wide statement selects direct mode. A sentence
-            // such as "notes files can go straight to main" is scoped to those files and must not
-            // silently send an unrelated README change to the default branch.
-            let directStatements: Set<String> = [
-                "no branches", "do not create branches", "never create branches", "never create a branch",
-                "commit directly to main", "commit directly to master", "push directly to main", "push directly to master",
-                "save directly to main", "save directly to master", "do not open pull requests", "never open pull requests",
-                "no pull requests", "no pull request",
-            ]
-            if document.scope.isEmpty, statements.contains(where: directStatements.contains) {
-                result.directSave = true
-                result.reason = "\(document.path) requires direct saves."
-            }
+            // Repository prose is supplied by the checked-out repository and must not grant the
+            // authority to bypass review. Direct saves are controlled only by the app's explicit
+            // per-repository setting; these documents remain advisory to the agent and may still
+            // impose additional deletion/build-setup restrictions below.
             if lines.contains(where: { line in ["do not delete", "never delete", "must not delete", "deletions are forbidden"].contains(where: line.contains) }) {
                 result.deletionDeniedScopes.insert(document.scope)
             }
