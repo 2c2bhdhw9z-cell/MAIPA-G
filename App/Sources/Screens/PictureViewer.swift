@@ -14,12 +14,16 @@ struct PictureViewer: View {
     @State private var quality: ImageQuality = .standard
     @State private var model = ""
     @State private var generated: GeneratedImageResult?
-    @State private var generatedBatch: [GeneratedImageResult] = []
-    @State private var selectedGeneratedID: UUID?
-    @State private var variationCount = 1
     @State private var image: UIImage?
+    @State private var parentImage: UIImage?
+    @State private var parentResult: GeneratedImageResult?
+    @State private var showComparison = false
     @State private var isGenerating = false
     @State private var isLoadingStoredImage = false
+    @State private var showMaskEditor = false
+    @State private var preparedMaskData: Data?
+    @State private var preparedMaskGeometry: ImageEditMask?
+    @State private var preparedEditInstruction: String?
     @State private var progress = ""
     @State private var error: String?
     @State private var confirmSpend = false
@@ -47,7 +51,6 @@ struct PictureViewer: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if generatedBatch.count > 1 { variationPicker }
                     if let image {
                         Image(uiImage: image)
                             .resizable()
@@ -82,8 +85,6 @@ struct PictureViewer: View {
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
             .task {
                 generated = result
-                generatedBatch = result.map { [$0] } ?? []
-                selectedGeneratedID = result?.id
                 if imageModels.isEmpty {
                     await app.openRouter.loadModels()
                 }
@@ -96,12 +97,22 @@ struct PictureViewer: View {
                 } else {
                     await loadImage()
                 }
+                if result?.parentImageID != nil { await loadParentImage() }
             }
             .alert("Approve spending?", isPresented: $confirmSpend) {
                 Button("Generate") { spendApproved = true; generate() }
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text(spendMessage)
+            }
+            .sheet(isPresented: $showMaskEditor) {
+                if let generated, let image {
+                    ImageMaskEditor(source: generated, image: image) { mask, geometry, instruction in
+                        preparedMaskData = mask
+                        preparedMaskGeometry = geometry
+                        preparedEditInstruction = instruction
+                    }
+                }
             }
         }
     }
@@ -123,14 +134,8 @@ struct PictureViewer: View {
             Picker("Image AI", selection: $model) {
                 ForEach(imageModels) { Text($0.shortName).tag($0.id) }
             }
-            if supportsMultipleImages {
-                Picker("Variations", selection: $variationCount) {
-                    ForEach(1...4, id: \.self) { Text("\($0)").tag($0) }
-                }
-                .pickerStyle(.segmented)
-            }
             if let error { Text(error).foregroundStyle(Theme.danger) }
-            Button(error == nil ? (requestedCount == 1 ? "Generate picture" : "Generate \(requestedCount) variations") : "Retry") {
+            Button(error == nil ? "Generate picture" : "Retry") {
                 let paid = imageModels.first(where: { $0.id == model })?.isFree == false
                 confirmSpend = paid
                 if !paid { generate() }
@@ -145,36 +150,18 @@ struct PictureViewer: View {
         return pool.filter(\.generatesImages).sorted { $0.shortName < $1.shortName }
     }
 
-    private var supportsMultipleImages: Bool {
-        imageModels.first(where: { $0.id == model })?.isPureImageModel == true
-    }
-
-    private var requestedCount: Int { supportsMultipleImages ? variationCount : 1 }
-
-    private var variationPicker: some View {
-        Picker("Picture", selection: Binding(
-            get: { selectedGeneratedID ?? generatedBatch[0].id },
-            set: { selectVariation($0) }
-        )) {
-            ForEach(generatedBatch.indices, id: \.self) { index in
-                Text("Option \(index + 1)").tag(generatedBatch[index].id)
-            }
-        }
-        .pickerStyle(.segmented)
-    }
-
-    private func selectVariation(_ id: UUID) {
-        guard let selected = generatedBatch.first(where: { $0.id == id }) else { return }
-        selectedGeneratedID = id
-        generated = selected
-        image = nil
-        saveState = .idle
-        Task { await loadImage() }
-    }
-
     @ViewBuilder
     private func controls(for _: UIImage) -> some View {
         if let generated {
+            Button {
+                preparedMaskData = nil
+                preparedMaskGeometry = nil
+                preparedEditInstruction = nil
+                showMaskEditor = true
+            } label: {
+                Label(generated.parentImageID == nil ? "Edit this picture" : "Use as next edit", systemImage: "paintbrush.pointed")
+            }
+            .buttonStyle(.borderedProminent)
             HStack {
                 Button {
                     Task { await saveToPhotos(generated) }
@@ -195,6 +182,36 @@ struct PictureViewer: View {
                 }
             }
             .buttonStyle(.bordered)
+            if let parentImage, let parentResult {
+                Button(showComparison ? "Hide comparison" : "Compare", systemImage: "rectangle.split.2x1") {
+                    withAnimation { showComparison.toggle() }
+                }
+                .buttonStyle(.bordered)
+                if showComparison {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Before and after").font(.headline)
+                        HStack(alignment: .top, spacing: 10) {
+                            comparisonCard(title: "Original", image: parentImage)
+                            comparisonCard(title: "Edited", image: image)
+                        }
+                        HStack {
+                            Button { Task { await saveToPhotos(parentResult) } } label: { Label("Save original", systemImage: "square.and.arrow.down") }
+                            ShareLink(item: app.paths.data.appendingPathComponent(parentResult.attachment.path)) {
+                                Label("Share original", systemImage: "square.and.arrow.up")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+            }
+            if preparedMaskData != nil, let geometry = preparedMaskGeometry {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Local mask ready (\(geometry.sourcePixelWidth) × \(geometry.sourcePixelHeight)). Editing service is not enabled yet; no image was sent.", systemImage: "hand.raised.fill")
+                    if let preparedEditInstruction { Text(preparedEditInstruction).font(.caption) }
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            }
             if let error { Text(error).font(.footnote).foregroundStyle(Theme.danger) }
 
             switch saveState {
@@ -223,9 +240,23 @@ struct PictureViewer: View {
         }
     }
 
+    private func comparisonCard(title: String, image: UIImage) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.caption.weight(.semibold))
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: .infinity)
+                .frame(height: 150)
+                .background(.black.opacity(0.04))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .frame(maxWidth: .infinity)
+    }
+
     private var spendMessage: String {
         let providerLabel = app.openRouter.providerName(forModelID: model)
-        let operation = requestedCount == 1 ? "Generating this picture" : "Generating up to \(requestedCount) variations"
+        let operation = "Generating this picture"
         if app.settings.spendLimitOn {
             return "\(operation) is a separate paid operation. Your stop-and-ask amount is \(app.settings.spendLimit.dollars); approve before \(providerLabel) starts."
         }
@@ -248,7 +279,7 @@ struct PictureViewer: View {
                 let values = try await app.openRouter.client.generateImages(
                     prompt: prompt,
                     model: model,
-                    options: ImageGenerationOptions(aspectRatio: aspect, quality: quality, count: requestedCount)
+                    options: ImageGenerationOptions(aspectRatio: aspect, quality: quality, count: 1)
                 ) { value in
                     Task { @MainActor in progress = value }
                 }
@@ -267,21 +298,19 @@ struct PictureViewer: View {
                         model: value.model,
                         aspectRatio: aspect.rawValue,
                         quality: quality.rawValue,
-                        cost: value.cost
+                        cost: value.cost,
+                        provider: app.openRouter.client.providerEndpoint(for: model)?.endpoint.name ?? "OpenRouter"
                     )
                     try await app.attachmentStore.saveGeneratedMetadata(saved)
                     savedResults.append(saved)
-                    generatedBatch = savedResults
                     if firstDecoded == nil {
                         firstDecoded = decoded
-                        selectedGeneratedID = saved.id
                         generated = saved
                         image = decoded
                     }
                 }
                 guard !savedResults.isEmpty else { throw PictureError.noReadableImage }
                 if let first = savedResults.first {
-                    selectedGeneratedID = first.id
                     generated = first
                 }
                 guard let decoded = firstDecoded else { throw PictureError.noReadableImage }
@@ -293,6 +322,20 @@ struct PictureViewer: View {
                 if !savedResults.isEmpty { app.sync.request() }
                 self.error = userMessage(for: error)
             }
+        }
+    }
+
+    private func loadParentImage() async {
+        guard let parentID = generated?.parentImageID else { return }
+        do {
+            let savedParent = try await app.attachmentStore.generatedMetadata(parentID)
+            let data = try await app.attachmentStore.data(for: savedParent.attachment)
+            guard let decoded = ImageDownsampler.image(from: data) else { return }
+            parentResult = savedParent
+            parentImage = decoded
+        } catch {
+            parentResult = nil
+            parentImage = nil
         }
     }
 

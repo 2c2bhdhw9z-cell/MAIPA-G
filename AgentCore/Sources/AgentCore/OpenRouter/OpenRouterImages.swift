@@ -236,7 +236,7 @@ public struct GenerateImageTool: AgentTool {
         for image in generated {
             let ext = image.mimeType.contains("jpeg") || image.mimeType.contains("jpg") ? "jpg" : (image.mimeType.contains("webp") ? "webp" : "png")
             let reference = try await store.importGeneratedImage(image.data, name: "picture-\(image.id.uuidString.lowercased()).\(ext)", mimeType: image.mimeType)
-            let result = GeneratedImageResult(attachment: reference, prompt: image.prompt, model: image.model, aspectRatio: aspect.rawValue, quality: quality.rawValue, cost: image.cost)
+            let result = GeneratedImageResult(attachment: reference, prompt: image.prompt, model: image.model, aspectRatio: aspect.rawValue, quality: quality.rawValue, cost: image.cost, provider: client.providerEndpoint(for: model)?.endpoint.name ?? "OpenRouter")
             try await store.saveGeneratedMetadata(result)
             results.append(result)
         }

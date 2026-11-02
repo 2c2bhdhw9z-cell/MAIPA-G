@@ -56,6 +56,66 @@ public actor AttachmentStore {
         try JSONCoding.decoder().decode(GeneratedImageResult.self, from: Data(contentsOf: dataDirectory.appendingPathComponent("media/\(id.uuidString.lowercased()).json")))
     }
 
+    /// Saves a successful edit as a new child image with its mask stored as a separate attachment.
+    /// The original file is never overwritten; if persistence fails, newly written files are removed.
+    public func saveEditedImage(
+        _ response: ImageEditResponse,
+        from source: GeneratedImageResult,
+        instruction: String,
+        maskData: Data,
+        maskGeometry: ImageEditMask,
+        seedUsed: Int64? = nil
+    ) throws -> GeneratedImageResult {
+        let cleanInstruction = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard source.attachment.kind == .image, !cleanInstruction.isEmpty else {
+            throw ToolInputError("An image source and edit instruction are required.")
+        }
+        guard !maskData.isEmpty, maskData.count <= Self.maximumAttachmentBytes else {
+            throw ToolInputError("The edit mask is empty or too large to save safely.")
+        }
+        try ImageEditMaskRasterizer.validate(maskGeometry)
+        try response.validate(maximumOutputBytes: 32 * 1_024 * 1_024)
+        let sourceURL = try fileURL(for: source.attachment)
+        guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+            throw ToolInputError("The original picture is missing; it has not been changed.")
+        }
+        var maskReference: AttachmentReference?
+        var outputReference: AttachmentReference?
+        do {
+            let mask = try importData(maskData, name: "edit-mask-\(UUID().uuidString.lowercased()).png", mimeType: "image/png", kind: .image)
+            maskReference = mask
+            let ext = response.mimeType == "image/jpeg" ? "jpg" : (response.mimeType == "image/webp" ? "webp" : "png")
+            let output = try importGeneratedImage(response.imageData, name: "edited-picture-\(UUID().uuidString.lowercased()).\(ext)", mimeType: response.mimeType)
+            outputReference = output
+            let result = GeneratedImageResult(
+                attachment: output,
+                prompt: cleanInstruction,
+                model: response.model,
+                aspectRatio: source.aspectRatio,
+                quality: source.quality,
+                cost: response.cost,
+                provider: response.provider,
+                modelVersion: response.modelVersion,
+                seed: response.seed ?? seedUsed,
+                parentImageID: source.id,
+                editInstruction: cleanInstruction,
+                maskAttachment: mask,
+                maskGeometry: maskGeometry
+            )
+            try saveGeneratedMetadata(result)
+            return result
+        } catch {
+            if let outputReference { removeNewAttachment(outputReference) }
+            if let maskReference { removeNewAttachment(maskReference) }
+            throw error
+        }
+    }
+
+    private func removeNewAttachment(_ reference: AttachmentReference) {
+        guard let url = try? fileURL(for: reference) else { return }
+        try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+    }
+
     private func write(_ data: Data, name: String, mimeType: String, kind: AttachmentKind, folder: String) throws -> AttachmentReference {
         guard data.count <= Self.maximumAttachmentBytes else {
             throw ToolInputError("That file is too large to save safely. Use a file smaller than 250 MB.")

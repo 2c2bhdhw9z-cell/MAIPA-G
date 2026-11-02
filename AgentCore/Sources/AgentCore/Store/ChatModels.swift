@@ -385,6 +385,36 @@ public struct QueuedFollowUp: Codable, Sendable, Hashable, Identifiable {
     }
 }
 
+/// A brush point in normalized source-image coordinates. It remains stable when the image is
+/// shown at a different size or aspect ratio in the editor.
+public struct ImageBrushPoint: Codable, Sendable, Hashable {
+    public var x: Double
+    public var y: Double
+    public init(x: Double, y: Double) { self.x = x; self.y = y }
+}
+
+/// One editable stroke. `radius` is normalized against the shorter source-image dimension.
+public struct ImageBrushStroke: Codable, Sendable, Hashable, Identifiable {
+    public var id: UUID
+    public var points: [ImageBrushPoint]
+    public var radius: Double
+    public var feather: Double
+    public init(id: UUID = UUID(), points: [ImageBrushPoint], radius: Double, feather: Double = 0.15) {
+        self.id = id; self.points = points; self.radius = radius; self.feather = feather
+    }
+}
+
+/// Editable mask geometry in source-image space. The raster mask is stored separately as an
+/// attachment for provider APIs; retaining the geometry permits future editing and replay.
+public struct ImageEditMask: Codable, Sendable, Hashable {
+    public var sourcePixelWidth: Int
+    public var sourcePixelHeight: Int
+    public var strokes: [ImageBrushStroke]
+    public init(sourcePixelWidth: Int, sourcePixelHeight: Int, strokes: [ImageBrushStroke]) {
+        self.sourcePixelWidth = sourcePixelWidth; self.sourcePixelHeight = sourcePixelHeight; self.strokes = strokes
+    }
+}
+
 public struct GeneratedImageResult: Codable, Sendable, Hashable, Identifiable {
     public var id: UUID { attachment.id }
     public var attachment: AttachmentReference
@@ -393,9 +423,34 @@ public struct GeneratedImageResult: Codable, Sendable, Hashable, Identifiable {
     public var aspectRatio: String
     public var quality: String
     public var cost: Double?
-    public init(attachment: AttachmentReference, prompt: String, model: String, aspectRatio: String, quality: String, cost: Double? = nil) {
+    /// Optional provenance/edit information. Kept optional so older chat and media JSON decodes unchanged.
+    public var provider: String?
+    public var modelVersion: String?
+    public var seed: Int64?
+    public var parentImageID: UUID?
+    public var editInstruction: String?
+    public var maskAttachment: AttachmentReference?
+    public var maskGeometry: ImageEditMask?
+    public init(
+        attachment: AttachmentReference,
+        prompt: String,
+        model: String,
+        aspectRatio: String,
+        quality: String,
+        cost: Double? = nil,
+        provider: String? = nil,
+        modelVersion: String? = nil,
+        seed: Int64? = nil,
+        parentImageID: UUID? = nil,
+        editInstruction: String? = nil,
+        maskAttachment: AttachmentReference? = nil,
+        maskGeometry: ImageEditMask? = nil
+    ) {
         self.attachment = attachment; self.prompt = prompt; self.model = model
         self.aspectRatio = aspectRatio; self.quality = quality; self.cost = cost
+        self.provider = provider; self.modelVersion = modelVersion; self.seed = seed
+        self.parentImageID = parentImageID; self.editInstruction = editInstruction
+        self.maskAttachment = maskAttachment; self.maskGeometry = maskGeometry
     }
 }
 

@@ -1779,7 +1779,8 @@ final class ChatSession: Identifiable {
                     model: image.model,
                     aspectRatio: ImageAspectRatio.square.rawValue,
                     quality: ImageQuality.standard.rawValue,
-                    cost: image.cost
+                    cost: image.cost,
+                    provider: client.providerEndpoint(for: model.id)?.endpoint.name ?? "OpenRouter"
                 )
                 try? await app.attachmentStore.saveGeneratedMetadata(item)
                 savedResults.append(item)
