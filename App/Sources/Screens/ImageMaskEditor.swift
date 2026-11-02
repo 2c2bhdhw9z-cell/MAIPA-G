@@ -114,7 +114,7 @@ struct ImageMaskEditor: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
-                Text("Preparing a mask is local. The provider request and any charge must wait for the verified provider to be enabled and your approval.")
+                Text("Preparing a mask is local. The photo and mask are sent only after you select an image-capable model and approve the request in Workstation.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }

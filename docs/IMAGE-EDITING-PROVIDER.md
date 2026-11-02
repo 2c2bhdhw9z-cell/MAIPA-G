@@ -1,52 +1,25 @@
-# Brush-edit provider evaluation
+# Image-edit model integration
 
-**Status: integrated behind per-request in-app approval and an on-device Keychain credential; provider proof is still unverified.** No API request has been sent by the development workflow and no sample result has been visually checked. The Workstation image preview can submit only after the user enters their own Replicate key on-device and explicitly approves the listed charge for that request. This implementation note does not claim the real-provider proof passed.
+**Provider choice:** Use MAIPA-G's already-configured OpenRouter account and model catalog. Do not require a separate Replicate account, Replicate API key, or new provider secret.
 
-## Leading candidate
+## Model eligibility
 
-- **Provider:** Replicate's official-model API.
-- **Model:** `black-forest-labs/flux-fill-pro`.
-- **Pinned version:** `b23335a86ed317e5a35eb1be11bbf8f8985f9fdf12c53484ecf930d734095f74`.
-- **Documented price checked 2026-11-01:** `$0.05` per output image. The app must still get user approval before every paid edit; never infer an exact quote from a local estimate.
-- **Inputs in the pinned schema:** `prompt` (string), `image` (file, JPEG/PNG/WebP), `mask` (file, JPEG/PNG/WebP, optional only if using an alpha mask), `seed` (integer, optional), plus `steps` (1–50, default 50), `prompt_upsampling` (boolean, default false), `guidance` (2–5, default 3), `safety_tolerance` (1–6, default 2), and `output_format` (default JPG).
-- **Mask polarity:** black preserves; white is repainted. The mask must have the same pixel dimensions as the source.
-- **Seed:** documented for reproducible generation; it is not a promise that faces or unmasked pixels will remain identical. Store only a seed actually supplied/returned by the service.
-- **Input limits:** the published pinned input schema does not state a maximum pixel dimension. Replicate's generic file-input guidance recommends data URLs only for files below 1 MB; larger files should use a file upload or hosted URL. Do not silently upload user images to another hosting service. Before enabling, choose and test a size policy, keep source and mask dimensions identical, and disclose provider processing.
-- **Output and retention:** the API returns a prediction; image output is represented by an HTTPS file URL. Replicate documents API prediction inputs/outputs as being deleted after one hour by default. The app must download and save a completed output locally, never retain a signed output URL in image metadata, and handle cancellation/timeouts without saving partial output.
-- **Visual quality limitation:** documentation describes the intended inpainting behavior, but does not prove that the untouched area is preserved well enough for MAIPA-G. A real, redacted fixture and visual comparison are still required.
+The Workstation edit picker includes only catalog models that are live chat models and advertise both `image` input and `image` output. Pure image-generation models that cannot accept a source image, and text/vision-only models that cannot return an image, are excluded. A model's advertised modalities are a filter, not proof of image-edit quality.
 
-## Redacted request shape (not a working fixture)
+## Request shape and limits
 
-The following shows the request contract only. Placeholders are not valid input and no credentials or user files are included.
+The app uses the existing OpenRouter `/api/v1/chat/completions` transport. The request sends (1) the original image, (2) a same-size black-and-white mask image, and (3) the edit instruction. The instruction identifies the first image as the source and the second as a guide, with white as the area to change and black as the area to preserve. The model returns an image through the same image-output response format already handled by MAIPA-G.
 
-```json
-{
-  "version": "b23335a86ed317e5a35eb1be11bbf8f8985f9fdf12c53484ecf930d734095f74",
-  "input": {
-    "prompt": "<user instruction>",
-    "image": "<approved image file input>",
-    "mask": "<same-size black/white mask file input>",
-    "seed": 12345,
-    "output_format": "jpg"
-  }
-}
-```
+The mask is a **visual guide**, not a provider-native inpainting mask parameter. A model may change unmasked pixels or ignore part of the mask. The UI must say this plainly, show the result for review, and never promise exact pixel preservation. The adapter validates dimensions, accepted MIME types, non-empty input, and output image signatures/size.
 
-For the official-model HTTP path, Replicate documents `POST /v1/models/black-forest-labs/flux-fill-pro/predictions`, bearer authentication, and polling through the prediction's `urls.get` until a terminal status. The app must validate that every API URL it follows is HTTPS and on the expected Replicate host, impose an output byte limit, and never log image/mask bytes, tokens, or full signed URLs.
+## Approval, account, and privacy
 
-## Evidence and remaining proof
+- The request uses the user's existing OpenRouter account and their selected catalog model; no separate image-provider credential is stored.
+- Before every request, show the selected model, disclose that the original photo, mask, and instruction are sent to OpenRouter and its upstream model provider, and obtain an explicit in-app approval.
+- Cost depends on the model/provider's current rates and may include image input/output charges. Do not invent a fixed price or claim an exact quote when the provider does not return one. Preserve the existing spend-approval pattern.
+- The original image is never overwritten. Save a successful result as a new child image with parent metadata and the mask attachment. Do not save a partial or undecodable response.
+- No real model request or visual quality proof has been run by the development workflow. The feature is not release-validated until an owner-approved sample edit is reviewed for output quality, mask adherence, latency, and actual cost.
 
-Official schema and model information:
+## Local validation
 
-- [Pinned version API schema](https://replicate.com/black-forest-labs/flux-fill-pro/versions/b23335a86ed317e5a35eb1be11bbf8f8985f9fdf12c53484ecf930d734095f74/api)
-- [Model pricing and data-use statement](https://replicate.com/black-forest-labs/flux-fill-pro/api/schema)
-- [Replicate HTTP API and prediction lifecycle](https://replicate.com/docs/reference/http)
-- [Replicate input files and data-URL guidance](https://replicate.com/docs/topics/predictions/input-files)
-- [Black Forest Labs FLUX.1 Fill documentation](https://docs.bfl.ml/flux_1_fill)
-
-Still required before the provider can be declared validated:
-
-1. The owner must explicitly approve a real-provider proof request. The in-app approval is per image and displays the documented price; do not make a request on the owner's behalf.
-2. On the iPhone, enter a suitable Replicate key into the secure Keychain sheet, then submit one suitable sample source/mask through the app. No token should be pasted into chat or committed to the repository.
-3. Save a redacted request/response fixture without credentials, image bytes, or signed URLs. Verify output MIME type/dimensions and visually check that unmasked content is acceptably preserved; record latency and actual charge.
-4. Keep the fixture-backed adapter tests green and update these notes with measured evidence. Until a real result is inspected, describe the integration as unverified and experimental.
+Fixture tests should verify that the outgoing request uses only the selected eligible model, includes the source and mask as image inputs, requests image output, rejects mismatched dimensions and unsupported modalities before network access, handles an image response, and never logs image bytes or credentials. Real-provider testing requires the user's explicit approval in the app before a billed request.

@@ -1752,6 +1752,7 @@ private struct WorkstationItemPreviewSheet: View {
     @State private var repoImage: UIImage?
     @State private var loading = true
     @State private var presentedImageSheet: ImageSheet?
+    @State private var imageEditModelID = ""
     @State private var preparedMaskData: Data?
     @State private var preparedMaskGeometry: ImageEditMask?
     @State private var preparedEditInstruction: String?
@@ -1763,7 +1764,7 @@ private struct WorkstationItemPreviewSheet: View {
     @State private var showingEditedImage = false
 
     private enum ImageSheet: String, Identifiable {
-        case maskEditor, providerKey
+        case maskEditor
         var id: String { rawValue }
     }
 
@@ -1803,17 +1804,29 @@ private struct WorkstationItemPreviewSheet: View {
                             }
 
                             if preparedMaskData != nil, preparedMaskGeometry != nil, let preparedEditInstruction {
-                                Button {
-                                    if Keychain.string(.replicateImageEditKey) == nil {
-                                        presentedImageSheet = .providerKey
-                                    } else {
-                                        confirmPaidImageEdit = true
+                                if !app.openRouter.hasOpenRouterKey {
+                                    Text("Connect your existing OpenRouter account before sending an image edit.")
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                } else if imageEditModels.isEmpty {
+                                    Text("No connected OpenRouter model currently advertises both image input and image output.")
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    Picker("Edit model", selection: $imageEditModelID) {
+                                        ForEach(imageEditModels) { model in
+                                            Text(model.shortName + (model.isFree ? " · Free" : " · Paid by provider rates"))
+                                                .tag(model.id)
+                                        }
                                     }
-                                } label: {
-                                    Label("Request masked image edit · $0.05 listed", systemImage: "sparkles")
+                                    Button {
+                                        confirmPaidImageEdit = true
+                                    } label: {
+                                        Label("Request image edit", systemImage: "sparkles")
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(selectedImageEditModel == nil || isSubmittingImageEdit || preparedEditInstruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                                 }
-                                .buttonStyle(.borderedProminent)
-                                .disabled(isSubmittingImageEdit || preparedEditInstruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             }
 
                             if isSubmittingImageEdit { ProgressView("Sending approved edit…") }
@@ -1918,20 +1931,33 @@ private struct WorkstationItemPreviewSheet: View {
                             preparedEditInstruction = instruction
                         }
                     }
-                case .providerKey:
-                    ReplicateImageEditKeySheet()
                 }
             }
-            .alert("Approve paid image edit?", isPresented: $confirmPaidImageEdit) {
-                Button("Approve and send · $0.05 listed") {
+            .alert("Send to \(selectedImageEditModel?.shortName ?? "image model")?", isPresented: $confirmPaidImageEdit) {
+                Button("Approve and send") {
                     Task { await performApprovedImageEdit() }
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This sends the original photo, painted mask, and instruction to Replicate FLUX Fill. The listed price was $0.05 per output when checked; provider pricing may change. The original will not be overwritten. No request is sent unless you approve here.")
+                Text("This uses your existing OpenRouter account and sends the original photo, painted mask, and instruction to the selected model. Costs depend on that model’s current provider rates; no exact image-edit quote is available here. The mask is visual guidance, so inspect the result; the original stays unchanged. Nothing is sent until you approve.")
             }
         }
         .presentationDragIndicator(.visible)
+    }
+
+    private var imageEditModels: [ModelInfo] {
+        app.openRouter.allSelectableModels
+            .filter { model in
+                model.isChatModel
+                    && model.acceptsImages
+                    && model.outputModalities.contains("image")
+                    && app.openRouter.client.providerEndpoint(for: model.id) == nil
+            }
+            .sorted { $0.shortName.localizedCaseInsensitiveCompare($1.shortName) == .orderedAscending }
+    }
+
+    private var selectedImageEditModel: ModelInfo? {
+        imageEditModels.first(where: { $0.id == imageEditModelID })
     }
 
     @MainActor
@@ -1944,8 +1970,8 @@ private struct WorkstationItemPreviewSheet: View {
             imageEditError = "Prepare a painted mask and instruction before sending an edit."
             return
         }
-        guard let token = Keychain.string(.replicateImageEditKey), !token.isEmpty else {
-            presentedImageSheet = .providerKey
+        guard let selectedImageEditModel else {
+            imageEditError = "Choose a connected model that accepts and returns images."
             return
         }
 
@@ -1954,7 +1980,9 @@ private struct WorkstationItemPreviewSheet: View {
         defer { isSubmittingImageEdit = false }
         do {
             let sourceData = try await app.attachmentStore.data(for: source)
-            let request = ImageEditRequest(
+            let response = try await app.openRouter.client.editImage(
+                instruction: instruction,
+                model: selectedImageEditModel.id,
                 sourceData: sourceData,
                 sourceMimeType: source.mimeType,
                 sourcePixelWidth: maskGeometry.sourcePixelWidth,
@@ -1962,11 +1990,8 @@ private struct WorkstationItemPreviewSheet: View {
                 maskData: maskData,
                 maskMimeType: "image/png",
                 maskPixelWidth: maskGeometry.sourcePixelWidth,
-                maskPixelHeight: maskGeometry.sourcePixelHeight,
-                instruction: instruction
+                maskPixelHeight: maskGeometry.sourcePixelHeight
             )
-            let provider = try ReplicateFluxFillProvider(token: token, transport: URLSessionTransport())
-            let response = try await provider.edit(request)
             guard let decoded = ImageDownsampler.image(from: response.imageData, maxPixelSize: 2_400) else {
                 throw ImageEditProviderError.invalidResponse("The edited picture could not be decoded and was not saved.")
             }
@@ -2003,6 +2028,13 @@ private struct WorkstationItemPreviewSheet: View {
 
     private func loadPreview() async {
         defer { loading = false }
+        Keychain.remove(account: "replicate.image-edit.key")
+        if app.openRouter.allSelectableModels.isEmpty {
+            await app.openRouter.loadModels()
+        }
+        if imageEditModelID.isEmpty {
+            imageEditModelID = imageEditModels.first?.id ?? ""
+        }
         if let att = item.attachment {
             if let resolvedURL = try? app.attachmentStore.fileURL(for: att),
                FileManager.default.fileExists(atPath: resolvedURL.path) {
@@ -2056,68 +2088,5 @@ private struct WorkstationItemPreviewSheet: View {
 
     private func shellSingleQuote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-}
-
-private struct ReplicateImageEditKeySheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @State private var token = Keychain.string(.replicateImageEditKey) ?? ""
-    @State private var saveError: String?
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Replicate API key") {
-                    SecureField("r8_…", text: $token)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    if let saveError {
-                        Text(saveError).font(.footnote).foregroundStyle(Theme.danger)
-                    }
-                    Text("Stored only in this iPhone’s Keychain. It is sent only to Replicate over HTTPS. Do not paste it into chat.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section {
-                    Link("Get a Replicate API key", destination: URL(string: "https://replicate.com/account/api-tokens")!)
-                    Text("Image edits use Replicate FLUX Fill. The listed price was $0.05 per output when checked; pricing may change. MAIPA-G asks for approval before every request.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                if Keychain.string(.replicateImageEditKey) != nil {
-                    Section {
-                        Button("Remove saved key", role: .destructive) {
-                            Keychain.remove(.replicateImageEditKey)
-                            token = ""
-                            dismiss()
-                        }
-                    }
-                }
-            }
-            .navigationTitle("Image edit provider")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save securely") {
-                        let cleaned = token.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard cleaned.hasPrefix("r8_"), !cleaned.contains(where: \.isWhitespace) else {
-                            saveError = "Enter a valid Replicate API key (it starts with r8_)."
-                            return
-                        }
-                        guard Keychain.set(Data(cleaned.utf8), for: .replicateImageEditKey) else {
-                            saveError = "The key could not be stored in Keychain. Try again."
-                            return
-                        }
-                        dismiss()
-                    }
-                    .disabled(token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-        }
     }
 }

@@ -173,6 +173,68 @@ struct OpenRouterTests {
         #expect(transport.request?.url.path == "/api/v1/images")
     }
 
+    @Test func imageEditingUsesExistingImageInputAndOutputModelWithMaskGuide() async throws {
+        final class EditTransport: HTTPTransport, @unchecked Sendable {
+            let lock = NSLock()
+            var captured: HTTPRequest?
+            func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+                lock.withLock { captured = request }
+                let png = Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).base64EncodedString()
+                let json = """
+                {"choices":[{"message":{"images":[{"type":"image_url","image_url":{"url":"data:image/png;base64,\(png)"}}]}}],"usage":{"cost":0.012}}
+                """
+                return HTTPResponse(status: 200, headers: ["content-type": "application/json"], body: Data(json.utf8))
+            }
+            func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse {
+                HTTPStreamResponse(status: 404, headers: [:], body: AsyncThrowingStream { $0.finish() })
+            }
+        }
+
+        let modelID = "google/gemini-image-edit-fixture"
+        let model = ModelInfo(id: modelID, name: "Google: Image Edit Fixture", inputModalities: ["text", "image"], outputModalities: ["text", "image"])
+        let transport = EditTransport()
+        let client = OpenRouterClient(transport: transport, apiKey: "existing-openrouter-key", catalogueByID: [modelID: model])
+        let result = try await client.editImage(
+            instruction: "make the painted area green",
+            model: modelID,
+            sourceData: Data([1, 2, 3]),
+            sourceMimeType: "image/jpeg",
+            sourcePixelWidth: 2,
+            sourcePixelHeight: 2,
+            maskData: Data([4, 5, 6]),
+            maskMimeType: "image/png",
+            maskPixelWidth: 2,
+            maskPixelHeight: 2
+        )
+        #expect(result.provider == "OpenRouter")
+        #expect(result.model == modelID)
+        #expect(result.cost == 0.012)
+        #expect(result.imageData == Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+        let request = try #require(transport.captured)
+        #expect(request.url.path == "/api/v1/chat/completions")
+        #expect(request.headers["Authorization"] == "Bearer existing-openrouter-key")
+        let body = try #require(request.body.flatMap(JSONValue.parse))
+        #expect(body["model"]?.stringValue == modelID)
+        #expect(body["modalities"]?.arrayValue?.compactMap(\.stringValue) == ["image", "text"])
+        let content = try #require(body["messages"]?.arrayValue?.first?["content"]?.arrayValue)
+        #expect(content.count == 3)
+        #expect(content[0]["text"]?.stringValue?.contains("make the painted area green") == true)
+        #expect(content[1]["image_url"]?["url"]?.stringValue == "data:image/jpeg;base64,AQID")
+        #expect(content[2]["image_url"]?["url"]?.stringValue == "data:image/png;base64,BAUG")
+    }
+
+    @Test func imageEditingRejectsModelsWithoutImageInputAndOutputBeforeNetwork() async {
+        final class NeverCalledTransport: HTTPTransport, @unchecked Sendable {
+            func send(_ request: HTTPRequest) async throws -> HTTPResponse { Issue.record("Unexpected network call"); return HTTPResponse(status: 500) }
+            func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse { HTTPStreamResponse(status: 404, headers: [:], body: AsyncThrowingStream { $0.finish() }) }
+        }
+        let textOnly = ModelInfo(id: "openai/text-only", name: "Text", inputModalities: ["text"], outputModalities: ["text"])
+        let client = OpenRouterClient(transport: NeverCalledTransport(), apiKey: "key", catalogueByID: [textOnly.id: textOnly])
+        await #expect(throws: ImageEditProviderError.self) {
+            _ = try await client.editImage(instruction: "edit", model: textOnly.id, sourceData: Data([1]), sourceMimeType: "image/png", sourcePixelWidth: 1, sourcePixelHeight: 1, maskData: Data([2]), maskMimeType: "image/png", maskPixelWidth: 1, maskPixelHeight: 1)
+        }
+    }
+
     @Test func imageGenerationRejectsEmptyOrMalformedResults() async {
         final class EmptyImageTransport: HTTPTransport, @unchecked Sendable {
             let body: Data

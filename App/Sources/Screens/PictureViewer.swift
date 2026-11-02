@@ -206,7 +206,7 @@ struct PictureViewer: View {
             }
             if preparedMaskData != nil, let geometry = preparedMaskGeometry {
                 VStack(alignment: .leading, spacing: 4) {
-                    Label("Local mask ready (\(geometry.sourcePixelWidth) × \(geometry.sourcePixelHeight)). Editing service is not enabled yet; no image was sent.", systemImage: "hand.raised.fill")
+                    Label("Local mask ready (\(geometry.sourcePixelWidth) × \(geometry.sourcePixelHeight)). This screen only prepares a local mask; it does not send an edit request.", systemImage: "hand.raised.fill")
                     if let preparedEditInstruction { Text(preparedEditInstruction).font(.caption) }
                 }
                 .font(.footnote)

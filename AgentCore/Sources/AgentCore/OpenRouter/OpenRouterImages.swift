@@ -38,6 +38,112 @@ public extension ModelInfo {
 }
 
 public extension OpenRouterClient {
+    /// Sends a source picture and a visual mask guide to an already-configured OpenRouter chat model
+    /// that advertises both image input and image output. The mask is model guidance, not a native
+    /// provider mask parameter; exact unmasked-pixel preservation is model-dependent.
+    func editImage(
+        instruction: String,
+        model: String,
+        sourceData: Data,
+        sourceMimeType: String,
+        sourcePixelWidth: Int,
+        sourcePixelHeight: Int,
+        maskData: Data,
+        maskMimeType: String,
+        maskPixelWidth: Int,
+        maskPixelHeight: Int
+    ) async throws -> ImageEditResponse {
+        guard providerEndpoint(for: model) == nil,
+              let modelInfo = catalogueByID[model],
+              modelInfo.isChatModel,
+              modelInfo.acceptsImages,
+              modelInfo.outputModalities.contains("image") else {
+            throw ImageEditProviderError.unsupported("image editing with this model; choose a configured model that accepts and returns images")
+        }
+        guard sourcePixelWidth > 0, sourcePixelHeight > 0,
+              sourcePixelWidth == maskPixelWidth, sourcePixelHeight == maskPixelHeight else {
+            throw ImageEditProviderError.invalidInput("The source image and mask guide must have identical, non-zero dimensions.")
+        }
+        let cleanInstruction = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanInstruction.isEmpty, !sourceData.isEmpty, !maskData.isEmpty else {
+            throw ImageEditProviderError.invalidInput("A source image, painted mask, and edit instruction are required.")
+        }
+        let acceptedTypes: Set<String> = ["image/jpeg", "image/png", "image/webp"]
+        let sourceMime = sourceMimeType.lowercased()
+        let maskMime = maskMimeType.lowercased()
+        guard acceptedTypes.contains(sourceMime), acceptedTypes.contains(maskMime) else {
+            throw ImageEditProviderError.unsupported("the source or mask image format")
+        }
+        let maxInputBytes = 12 * 1_024 * 1_024
+        guard sourceData.count <= maxInputBytes, maskData.count <= maxInputBytes else {
+            throw ImageEditProviderError.inputTooLarge(maximumBytes: maxInputBytes)
+        }
+
+        let guide = "Edit the first image according to this instruction: \(cleanInstruction). The second image is a black-and-white mask guide: white marks the region to change; black marks the region to preserve. Keep the original composition and preserve the unmasked content as closely as you can. Return one edited image, not a description. Mask fidelity depends on the selected model."
+        let body: JSONValue = .object([
+            "model": .string(model),
+            "stream": .bool(false),
+            "modalities": .array([.string("image"), .string("text")]),
+            "messages": .array([.object([
+                "role": .string("user"),
+                "content": .array([
+                    .object(["type": .string("text"), "text": .string(guide)]),
+                    .object(["type": .string("image_url"), "image_url": .object(["url": .string(Self.imageDataURL(mimeType: sourceMime, data: sourceData))])]),
+                    .object(["type": .string("image_url"), "image_url": .object(["url": .string(Self.imageDataURL(mimeType: maskMime, data: maskData))])])
+                ])
+            ])])
+        ])
+        let request = try HTTPRequest.json(
+            "POST",
+            Self.apiBase.appendingPathComponent("chat/completions"),
+            body: body,
+            headers: headers(forModel: model),
+            idleTimeout: 300
+        )
+        let response = try await transport.send(request)
+        guard response.isSuccess else { throw OpenRouterAPIError(status: response.status, body: response.body, headers: response.headers) }
+        guard let root = JSONValue.parse(response.body),
+              let message = root["choices"]?.arrayValue?.first?["message"] else {
+            throw HTTPError.undecodable(status: response.status, type: "edited image", detail: "missing chat completion", body: response.text)
+        }
+        let imageEntries = message["images"]?.arrayValue ?? []
+        var imageData: Data?
+        var outputMime: String?
+        for entry in imageEntries {
+            guard let raw = entry["image_url"]?["url"]?.stringValue ?? entry["url"]?.stringValue else { continue }
+            if raw.hasPrefix("data:") {
+                let decoded = Self.decodeImagePayload(raw)
+                imageData = decoded.data
+                outputMime = decoded.mimeType
+            } else if let url = URL(string: raw), url.scheme?.lowercased() == "https", url.user == nil, url.password == nil {
+                let downloaded = try await transport.send(HTTPRequest(url: url, idleTimeout: 120, followsRedirects: false))
+                guard downloaded.isSuccess else {
+                    throw ImageEditProviderError.provider("The edited image could not be downloaded (HTTP \(downloaded.status)).")
+                }
+                imageData = downloaded.body
+                outputMime = downloaded.headers["content-type"]?.split(separator: ";", maxSplits: 1).first.map(String.init)
+            }
+            if imageData != nil { break }
+        }
+        guard let imageData, let outputMime else {
+            throw HTTPError.undecodable(status: response.status, type: "edited image", detail: "no image returned", body: response.text)
+        }
+        let result = ImageEditResponse(
+            imageData: imageData,
+            mimeType: outputMime,
+            provider: "OpenRouter",
+            model: model,
+            modelVersion: "catalogue",
+            cost: root["usage"]?["cost"]?.doubleValue ?? root["cost"]?.doubleValue
+        )
+        try result.validate(maximumOutputBytes: 32 * 1_024 * 1_024)
+        return result
+    }
+
+    private static func imageDataURL(mimeType: String, data: Data) -> String {
+        "data:\(mimeType);base64,\(data.base64EncodedString())"
+    }
+
     /// Generates actual image bytes through OpenRouter's `/api/v1/images` endpoint (for pure image models like
     /// FLUX, Seedream, Qwen Image, Recraft, Riverflow, Krea) or `/api/v1/chat/completions` with
     /// `modalities: ["image", "text"]` (for multimodal chat-image models like Gemini Flash Image and GPT-5 Image).
