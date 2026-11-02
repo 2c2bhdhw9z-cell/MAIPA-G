@@ -497,8 +497,7 @@ public actor DataRepoSync {
                     scan.files[path] = cached.blobID
                     continue
                 }
-                let data = try Data(contentsOf: url)
-                let blobID = Hashing.gitBlobID(data)
+                let blobID = try Hashing.gitBlobID(fileAt: url)
                 blobHashes[path] = CachedBlobHash(size: size, modified: modStamp, blobID: blobID)
                 scan.files[path] = blobID
             } catch where Self.isMissingFile(error) {
@@ -517,7 +516,7 @@ public actor DataRepoSync {
     }
 
     private func currentBlobID(at url: URL) -> String? {
-        (try? Data(contentsOf: url)).map(Hashing.gitBlobID)
+        try? Hashing.gitBlobID(fileAt: url)
     }
 
     /// The blob id this path has on the phone right now; for a pointer, the pointer of the big
