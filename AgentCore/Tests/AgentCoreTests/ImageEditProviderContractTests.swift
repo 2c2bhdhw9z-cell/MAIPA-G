@@ -90,7 +90,7 @@ struct ImageEditProviderContractTests {
     @Test("Output bytes, MIME type, and cost are validated")
     func responseValidation() throws {
         let valid = ImageEditResponse(imageData: Data([0xff, 0xd8, 0xff, 0xd9]), mimeType: "image/jpeg", provider: "Fixture", model: "fixture-fill", modelVersion: "fixture-v1", seed: nil, cost: 0.05)
-        try valid.validate(maximumOutputBytes: 3)
+        try valid.validate(maximumOutputBytes: 4)
         let tooLarge = ImageEditResponse(imageData: Data(repeating: 1, count: 4), mimeType: "image/jpeg", provider: "Fixture", model: "fixture-fill", modelVersion: "fixture-v1")
         #expect(throws: ImageEditProviderError.self) { try tooLarge.validate(maximumOutputBytes: 3) }
         let badMime = ImageEditResponse(imageData: Data([1]), mimeType: "text/plain", provider: "Fixture", model: "fixture-fill", modelVersion: "fixture-v1")

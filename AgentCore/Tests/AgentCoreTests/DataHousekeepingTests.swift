@@ -86,7 +86,12 @@ struct DataHousekeepingTests {
         }
         let legacy = try JSONSerialization.data(withJSONObject: object)
         let decoded = try JSONCoding.decoder().decode(GeneratedImageResult.self, from: legacy)
-        #expect(decoded.attachment == attachment)
+        #expect(decoded.attachment.id == attachment.id)
+        #expect(decoded.attachment.name == attachment.name)
+        #expect(decoded.attachment.mimeType == attachment.mimeType)
+        #expect(decoded.attachment.kind == attachment.kind)
+        #expect(decoded.attachment.path == attachment.path)
+        #expect(decoded.attachment.bytes == attachment.bytes)
         #expect(decoded.parentImageID == nil)
         #expect(decoded.maskAttachment == nil)
         #expect(decoded.maskGeometry == nil)
