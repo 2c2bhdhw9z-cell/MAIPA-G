@@ -42,7 +42,7 @@ public enum PreviewAssetResolver {
     private static func resolve(_ reference: String, from entryPath: String) -> String? {
         var value = reference.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty, !value.hasPrefix("//"),
-              value.range(of: #"^[a-z][a-z0-9+.-]*:"#, options: .caseInsensitive) == nil else { return nil }
+              value.range(of: #"^[a-z][a-z0-9+.-]*:"#, options: [.regularExpression, .caseInsensitive]) == nil else { return nil }
         value = String(value.prefix { $0 != "?" && $0 != "#" })
         guard !value.isEmpty else { return nil }
         if let decoded = value.removingPercentEncoding { value = decoded }
