@@ -1,6 +1,6 @@
 # Brush-edit provider evaluation
 
-**Status: documented candidate only; not enabled for user edits.** No API request has been sent and no image has been uploaded. The owner’s no-spend rule remains in force. A real proof requires explicit approval for one billed image and a Replicate credential; this note does not imply that proof passed.
+**Status: integrated behind per-request in-app approval and an on-device Keychain credential; provider proof is still unverified.** No API request has been sent by the development workflow and no sample result has been visually checked. The Workstation image preview can submit only after the user enters their own Replicate key on-device and explicitly approves the listed charge for that request. This implementation note does not claim the real-provider proof passed.
 
 ## Leading candidate
 
@@ -44,9 +44,9 @@ Official schema and model information:
 - [Replicate input files and data-URL guidance](https://replicate.com/docs/topics/predictions/input-files)
 - [Black Forest Labs FLUX.1 Fill documentation](https://docs.bfl.ml/flux_1_fill)
 
-Still required before the provider can be enabled:
+Still required before the provider can be declared validated:
 
-1. Owner approval of one `$0.05` real-provider proof request and a suitable Replicate credential, or a clear decision not to use this provider.
-2. Submit the roadmap's sample source/mask once; save a redacted request/response fixture with no credentials, image bytes, or signed URLs.
-3. Verify output MIME type/dimensions and visually check that unmasked content is acceptably preserved; record latency and actual charge.
-4. Implement/test the provider adapter against that verified fixture and pinned version. Until then, the in-app editor must not dispatch a request or imply that an edit is available.
+1. The owner must explicitly approve a real-provider proof request. The in-app approval is per image and displays the documented price; do not make a request on the owner's behalf.
+2. On the iPhone, enter a suitable Replicate key into the secure Keychain sheet, then submit one suitable sample source/mask through the app. No token should be pasted into chat or committed to the repository.
+3. Save a redacted request/response fixture without credentials, image bytes, or signed URLs. Verify output MIME type/dimensions and visually check that unmasked content is acceptably preserved; record latency and actual charge.
+4. Keep the fixture-backed adapter tests green and update these notes with measured evidence. Until a real result is inspected, describe the integration as unverified and experimental.

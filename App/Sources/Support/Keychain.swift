@@ -12,6 +12,7 @@ enum Keychain {
         case githubApp = "github.app"
         case githubUserToken = "github.user-token"
         case githubInstallation = "github.installation"
+        case replicateImageEditKey = "replicate.image-edit.key"
     }
 
     static func data(_ item: Item) -> Data? {

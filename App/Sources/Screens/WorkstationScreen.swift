@@ -113,7 +113,10 @@ struct WorkstationScreen: View {
                 item: item,
                 repo: activeRepo,
                 repoCommit: repoCommit,
-                onAddToChat: { addItemToChat(item) }
+                onAddToChat: { editedAttachment in
+                    if let editedAttachment { addAttachmentToChat(editedAttachment) }
+                    else { addItemToChat(item) }
+                }
             )
         }
         .sheet(isPresented: $showingWorkflowsLibrary) {
@@ -1308,20 +1311,24 @@ struct WorkstationScreen: View {
         UserDefaults.standard.set(encoded, forKey: storageKey)
     }
 
+    private func addAttachmentToChat(_ att: AttachmentReference) {
+        switch target {
+        case .home:
+            if !app.home.attachments.contains(where: { $0.id == att.id }) {
+                app.home.attachments.append(att)
+            }
+        case .chat(let id):
+            if let s = app.library.session(id), !s.draftAttachments.contains(where: { $0.id == att.id }) {
+                s.draftAttachments.append(att)
+            }
+        }
+        Haptics.selection()
+        dismiss()
+    }
+
     private func addItemToChat(_ item: WorkstationItem) {
         if let att = item.attachment {
-            switch target {
-            case .home:
-                if !app.home.attachments.contains(where: { $0.id == att.id }) {
-                    app.home.attachments.append(att)
-                }
-            case .chat(let id):
-                if let s = app.library.session(id), !s.draftAttachments.contains(where: { $0.id == att.id }) {
-                    s.draftAttachments.append(att)
-                }
-            }
-            Haptics.selection()
-            dismiss()
+            addAttachmentToChat(att)
             return
         }
         if let path = item.repoPath, let repo = activeRepo {
@@ -1734,7 +1741,7 @@ private struct WorkstationItemPreviewSheet: View {
     let item: WorkstationItem
     let repo: ChatRepo?
     let repoCommit: String?
-    var onAddToChat: () -> Void
+    var onAddToChat: (AttachmentReference?) -> Void
 
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
@@ -1744,10 +1751,21 @@ private struct WorkstationItemPreviewSheet: View {
     @State private var repoText: String?
     @State private var repoImage: UIImage?
     @State private var loading = true
-    @State private var showMaskEditor = false
+    @State private var presentedImageSheet: ImageSheet?
     @State private var preparedMaskData: Data?
     @State private var preparedMaskGeometry: ImageEditMask?
     @State private var preparedEditInstruction: String?
+    @State private var confirmPaidImageEdit = false
+    @State private var isSubmittingImageEdit = false
+    @State private var imageEditError: String?
+    @State private var editedImage: UIImage?
+    @State private var editedResult: GeneratedImageResult?
+    @State private var showingEditedImage = false
+
+    private enum ImageSheet: String, Identifiable {
+        case maskEditor, providerKey
+        var id: String { rawValue }
+    }
 
     var body: some View {
         NavigationStack {
@@ -1757,17 +1775,55 @@ private struct WorkstationItemPreviewSheet: View {
                         ProgressView("Opening \(item.name)…")
                     } else if let attachmentImage {
                         VStack(spacing: 10) {
-                            ZoomableImageCanvas(image: attachmentImage)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            Group {
+                                if showingEditedImage, let editedImage {
+                                    ZoomableImageCanvas(image: editedImage)
+                                } else {
+                                    ZoomableImageCanvas(image: attachmentImage)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                            if editedImage != nil {
+                                Button(showingEditedImage ? "Show original" : "Show edit") {
+                                    showingEditedImage.toggle()
+                                }
+                                .buttonStyle(.bordered)
+                            }
+
                             if let preparedMaskGeometry {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Label("Local mask ready (\(preparedMaskGeometry.sourcePixelWidth) × \(preparedMaskGeometry.sourcePixelHeight)). No image was uploaded or edited.", systemImage: "hand.raised.fill")
+                                    Label("Mask ready (\(preparedMaskGeometry.sourcePixelWidth) × \(preparedMaskGeometry.sourcePixelHeight)). The original remains unchanged.", systemImage: "hand.raised.fill")
                                     if let preparedEditInstruction { Text(preparedEditInstruction).font(.caption) }
                                 }
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                                 .padding(.horizontal)
-                                .padding(.bottom, 8)
+                                .padding(.bottom, 4)
+                            }
+
+                            if preparedMaskData != nil, preparedMaskGeometry != nil, let preparedEditInstruction {
+                                Button {
+                                    if Keychain.string(.replicateImageEditKey) == nil {
+                                        presentedImageSheet = .providerKey
+                                    } else {
+                                        confirmPaidImageEdit = true
+                                    }
+                                } label: {
+                                    Label("Request masked image edit · $0.05 listed", systemImage: "sparkles")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(isSubmittingImageEdit || preparedEditInstruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            }
+
+                            if isSubmittingImageEdit { ProgressView("Sending approved edit…") }
+                            if let imageEditError {
+                                Text(imageEditError).font(.footnote).foregroundStyle(Theme.danger).textSelection(.enabled)
+                            }
+                            if let editedResult {
+                                Label("Edited result saved as a new picture (\(editedResult.model)).", systemImage: "checkmark.circle.fill")
+                                    .font(.footnote)
+                                    .foregroundStyle(.green)
                             }
                         }
                     } else if (att.kind == .pdf || att.name.lowercased().hasSuffix(".pdf")), let attachmentFileURL {
@@ -1817,25 +1873,25 @@ private struct WorkstationItemPreviewSheet: View {
                 }
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button {
-                        onAddToChat()
+                        onAddToChat(editedResult?.attachment)
                     } label: {
                         Image(systemName: "plus.bubble")
                     }
-                    .accessibilityLabel("Add to chat")
+                    .accessibilityLabel(editedResult == nil ? "Add to chat" : "Add edited picture to chat")
 
                     if item.attachment?.kind == .image, attachmentImage != nil {
                         Button {
                             preparedMaskData = nil
                             preparedMaskGeometry = nil
                             preparedEditInstruction = nil
-                            showMaskEditor = true
+                            presentedImageSheet = .maskEditor
                         } label: {
                             Image(systemName: "paintbrush.pointed")
                         }
                         .accessibilityLabel("Edit picture mask")
                     }
 
-                    if let att = item.attachment, attachmentFileURL != nil {
+                    if let att = editedResult?.attachment ?? item.attachment {
                         Button {
                             Task {
                                 if let url = await ShareableAttachmentURL.prepare(attachment: att, store: app.attachmentStore) {
@@ -1852,17 +1908,97 @@ private struct WorkstationItemPreviewSheet: View {
             .task {
                 await loadPreview()
             }
-            .sheet(isPresented: $showMaskEditor) {
-                if let source = item.attachment, let attachmentImage {
-                    ImageMaskEditor(source: source, image: attachmentImage) { data, geometry, instruction in
-                        preparedMaskData = data
-                        preparedMaskGeometry = geometry
-                        preparedEditInstruction = instruction
+            .sheet(item: $presentedImageSheet) { sheet in
+                switch sheet {
+                case .maskEditor:
+                    if let source = item.attachment, let attachmentImage {
+                        ImageMaskEditor(source: source, image: attachmentImage) { data, geometry, instruction in
+                            preparedMaskData = data
+                            preparedMaskGeometry = geometry
+                            preparedEditInstruction = instruction
+                        }
                     }
+                case .providerKey:
+                    ReplicateImageEditKeySheet()
                 }
+            }
+            .alert("Approve paid image edit?", isPresented: $confirmPaidImageEdit) {
+                Button("Approve and send · $0.05 listed") {
+                    Task { await performApprovedImageEdit() }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This sends the original photo, painted mask, and instruction to Replicate FLUX Fill. The listed price was $0.05 per output when checked; provider pricing may change. The original will not be overwritten. No request is sent unless you approve here.")
             }
         }
         .presentationDragIndicator(.visible)
+    }
+
+    @MainActor
+    private func performApprovedImageEdit() async {
+        guard let source = item.attachment,
+              let maskData = preparedMaskData,
+              let maskGeometry = preparedMaskGeometry,
+              let instruction = preparedEditInstruction,
+              !instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            imageEditError = "Prepare a painted mask and instruction before sending an edit."
+            return
+        }
+        guard let token = Keychain.string(.replicateImageEditKey), !token.isEmpty else {
+            presentedImageSheet = .providerKey
+            return
+        }
+
+        isSubmittingImageEdit = true
+        imageEditError = nil
+        defer { isSubmittingImageEdit = false }
+        do {
+            let sourceData = try await app.attachmentStore.data(for: source)
+            let request = ImageEditRequest(
+                sourceData: sourceData,
+                sourceMimeType: source.mimeType,
+                sourcePixelWidth: maskGeometry.sourcePixelWidth,
+                sourcePixelHeight: maskGeometry.sourcePixelHeight,
+                maskData: maskData,
+                maskMimeType: "image/png",
+                maskPixelWidth: maskGeometry.sourcePixelWidth,
+                maskPixelHeight: maskGeometry.sourcePixelHeight,
+                instruction: instruction
+            )
+            let provider = try ReplicateFluxFillProvider(token: token, transport: URLSessionTransport())
+            let response = try await provider.edit(request)
+            guard let decoded = ImageDownsampler.image(from: response.imageData, maxPixelSize: 2_400) else {
+                throw ImageEditProviderError.invalidResponse("The edited picture could not be decoded and was not saved.")
+            }
+
+            let parent: GeneratedImageResult
+            if let existing = try? await app.attachmentStore.generatedMetadata(source.id) {
+                parent = existing
+            } else {
+                let record = GeneratedImageResult(
+                    attachment: source,
+                    prompt: "Original image from Workstation",
+                    model: "User-provided image",
+                    aspectRatio: "original",
+                    quality: "original"
+                )
+                try await app.attachmentStore.saveGeneratedMetadata(record)
+                parent = record
+            }
+            let saved = try await app.attachmentStore.saveEditedImage(
+                response,
+                from: parent,
+                instruction: instruction,
+                maskData: maskData,
+                maskGeometry: maskGeometry
+            )
+            editedResult = saved
+            editedImage = decoded
+            showingEditedImage = true
+            app.sync.request()
+        } catch {
+            imageEditError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
     }
 
     private func loadPreview() async {
@@ -1920,5 +2056,68 @@ private struct WorkstationItemPreviewSheet: View {
 
     private func shellSingleQuote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
+private struct ReplicateImageEditKeySheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var token = Keychain.string(.replicateImageEditKey) ?? ""
+    @State private var saveError: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Replicate API key") {
+                    SecureField("r8_…", text: $token)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    if let saveError {
+                        Text(saveError).font(.footnote).foregroundStyle(Theme.danger)
+                    }
+                    Text("Stored only in this iPhone’s Keychain. It is sent only to Replicate over HTTPS. Do not paste it into chat.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section {
+                    Link("Get a Replicate API key", destination: URL(string: "https://replicate.com/account/api-tokens")!)
+                    Text("Image edits use Replicate FLUX Fill. The listed price was $0.05 per output when checked; pricing may change. MAIPA-G asks for approval before every request.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                if Keychain.string(.replicateImageEditKey) != nil {
+                    Section {
+                        Button("Remove saved key", role: .destructive) {
+                            Keychain.remove(.replicateImageEditKey)
+                            token = ""
+                            dismiss()
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Image edit provider")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save securely") {
+                        let cleaned = token.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard cleaned.hasPrefix("r8_"), !cleaned.contains(where: \.isWhitespace) else {
+                            saveError = "Enter a valid Replicate API key (it starts with r8_)."
+                            return
+                        }
+                        guard Keychain.set(Data(cleaned.utf8), for: .replicateImageEditKey) else {
+                            saveError = "The key could not be stored in Keychain. Try again."
+                            return
+                        }
+                        dismiss()
+                    }
+                    .disabled(token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
     }
 }
