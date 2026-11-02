@@ -41,7 +41,7 @@ public struct OpenRouterAPIError: Error, Sendable, Hashable, CustomStringConvert
     ) {
         self.httpStatus = httpStatus
         self.code = code
-        self.message = message
+        self.message = Self.sanitizeProviderMessage(message)
         self.metadata = metadata
         self.retryAfter = retryAfter
         self.providerName = providerName
@@ -109,8 +109,38 @@ public struct OpenRouterAPIError: Error, Sendable, Hashable, CustomStringConvert
             }
             return "\(providerName) returned HTTP \(status)."
         }
-        let oneLine = String(trimmed.prefix(320))
+        let oneLine = Self.sanitizeProviderMessage(String(trimmed.prefix(320)))
         return oneLine.isEmpty ? "HTTP \(status)" : oneLine
+    }
+
+    /// Drops OpenRouter's dead "add your own key" link. That page is not the settings page it claims to be.
+    /// Leaves "per day" / "daily" wording alone so a daily free-limit is still recognized.
+    static func sanitizeProviderMessage(_ message: String) -> String {
+        var text = message
+        let patterns = [
+            #"(?i),?\s*or add your own key to accumulate your rate limits\s*:?\s*https://openrouter\.ai/settings/integrations/?"#,
+            #"(?i)https://openrouter\.ai/settings/integrations/?"#,
+            #"(?i),?\s*or add your own key to accumulate your rate limits\s*:?\s*"#,
+        ]
+        for pattern in patterns {
+            text = text.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        }
+        while text.contains("  ") {
+            text = text.replacingOccurrences(of: "  ", with: " ")
+        }
+        text = text.replacingOccurrences(of: "( ", with: "(")
+        text = text.replacingOccurrences(of: " )", with: ")")
+        text = text.replacingOccurrences(of: "()", with: "")
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        while text.hasSuffix(",") || text.hasSuffix(":") || text.hasSuffix(" or") {
+            if text.hasSuffix(" or") {
+                text = String(text.dropLast(3))
+            } else {
+                text = String(text.dropLast())
+            }
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text
     }
 
     public var kind: Kind {

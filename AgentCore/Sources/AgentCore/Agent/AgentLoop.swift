@@ -148,14 +148,15 @@ public actor SteeringInbox {
     }
 
     /// Waits while backgrounded sub-agents are still working until a live steer, card patch, or completion arrives.
+    /// A "finish after this step" flag does not wake this: the main agent stays here until the helpers actually finish.
     public func waitForActivity() async {
-        if !pendingMessages.isEmpty || !completedBackgroundReports.isEmpty || !pendingCardPatches.isEmpty || yieldAfterStep || backgroundTasks.isEmpty || Task.isCancelled {
+        if !pendingMessages.isEmpty || !completedBackgroundReports.isEmpty || !pendingCardPatches.isEmpty || backgroundTasks.isEmpty || Task.isCancelled {
             return
         }
         let id = UUID()
         await withTaskCancellationHandler {
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                if !pendingMessages.isEmpty || !completedBackgroundReports.isEmpty || !pendingCardPatches.isEmpty || yieldAfterStep || backgroundTasks.isEmpty || Task.isCancelled {
+                if !pendingMessages.isEmpty || !completedBackgroundReports.isEmpty || !pendingCardPatches.isEmpty || backgroundTasks.isEmpty || Task.isCancelled {
                     cont.resume()
                 } else {
                     activityWaiters[id] = cont
@@ -456,6 +457,13 @@ private struct Runner {
                     pendingBackgroundReports.append(contentsOf: completedReports)
                     await applyBackgroundCardPatches()
                 }
+                // Helpers that are still working must finish before the next model step.
+                // A steer is kept and sent with their reports. It must not start a new
+                // reply, or another helper, while they are running.
+                if (await steering?.activeBackgroundTaskCount() ?? 0) > 0 {
+                    await steering?.waitForActivity()
+                    continue
+                }
                 if injectedSteeringNotes.isEmpty, pendingBackgroundReports.isEmpty, newSteps > 0, await steering?.shouldYieldAfterStep() == true {
                     turn.status = .done
                     break
@@ -598,7 +606,7 @@ private struct Runner {
             if !activeBackgroundReports.isEmpty {
                 let stillRunning = await steering?.activeBackgroundTaskCount() ?? 0
                 let tailNote = stillRunning > 0
-                    ? "(\(stillRunning) other background sub-agent\(stillRunning == 1 ? " is" : "s are") still running and will deliver \(stillRunning == 1 ? "its report" : "their reports") automatically when finished — acknowledge or continue any requested work without stopping.)"
+                    ? "(\(stillRunning) other background sub-agent\(stillRunning == 1 ? " is" : "s are") still running. Do not answer the user and do not start more work until \(stillRunning == 1 ? "that report arrives" : "those reports arrive").)"
                     : "(All background sub-agents have now finished — synthesize the full findings clearly for the user.)"
                 rawMessages.append(.user(
                     "[Background sub-agent report]\n\n"

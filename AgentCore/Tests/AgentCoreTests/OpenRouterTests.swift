@@ -92,6 +92,20 @@ struct OpenRouterTests {
         #expect(kind(503, "<html>busy</html>") == .noModelAvailable)
     }
 
+    @Test func rateLimitMessageDropsDeadIntegrationsLink() {
+        let body = #"{"error":{"code":429,"message":"Provider returned error (thinkingmachines/inkling:free is temporarily rate limited upstream. Please retry shortly, or add your own key to accumulate your rate limits: https://openrouter.ai/settings/integrations)"}}"#
+        let error = OpenRouterAPIError(status: 429, body: Data(body.utf8), headers: [:])
+        #expect(error.kind == .rateLimited)
+        #expect(!error.description.contains("openrouter.ai/settings/integrations"))
+        #expect(!error.description.lowercased().contains("add your own key"))
+        #expect(error.description.contains("retry shortly"))
+        let daily = #"{"error":{"code":429,"message":"Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day. https://openrouter.ai/settings/integrations"}}"#
+        let dailyError = OpenRouterAPIError(status: 429, body: Data(daily.utf8), headers: [:])
+        #expect(dailyError.kind == .freeDailyLimit)
+        #expect(!dailyError.message.contains("settings/integrations"))
+        #expect(dailyError.message.contains("per-day"))
+    }
+
     @Test func catalogueParsing() throws {
         let catalogue = """
         {"data":[

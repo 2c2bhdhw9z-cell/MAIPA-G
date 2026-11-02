@@ -78,14 +78,14 @@ struct Build85Tests {
         #expect(estInput + clampedCap < 1_048_576)
     }
 
-    @Test("Live Steer while a sub-agent is running immediately wakes AgentLoop without cancelling the running sub-agent")
-    func liveSteeringDuringSubagentRunsParallelWithoutStopping() async throws {
+    @Test("A steer while a sub-agent is running is kept, and the main agent does not take another step until that sub-agent finishes")
+    func liveSteeringWaitsForRunningSubagent() async throws {
         actor Timeline {
             var events: [String] = []
             var stepCount = 0
             var sub1Cancelled = false
             var sub1Finished = false
-            var sub2LaunchedWhileSub1Running = false
+            var continuedWhileSub1Running = false
 
             func nextStep() -> Int {
                 stepCount += 1
@@ -94,8 +94,8 @@ struct Build85Tests {
             func mark(_ event: String) { events.append(event) }
             func markSub1Cancelled() { sub1Cancelled = true }
             func markSub1Finished() { sub1Finished = true }
-            func markSub2Started() {
-                if !sub1Finished { sub2LaunchedWhileSub1Running = true }
+            func markModelContinued() {
+                if !sub1Finished { continuedWhileSub1Running = true }
             }
         }
 
@@ -140,10 +140,7 @@ struct Build85Tests {
                     status: "completed"
                 )
             } else {
-                await timeline.markSub2Started()
-                await timeline.mark("sub2:start")
-                try await Task.sleep(nanoseconds: 40_000_000)
-                await timeline.mark("sub2:done")
+                await timeline.markModelContinued()
                 return AgentExecutionResult(
                     output: "SECOND_REPORT_COMPLETE",
                     model: "nvidia/nemotron:free",
@@ -165,35 +162,20 @@ struct Build85Tests {
             }
             func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse {
                 let step = await timeline.nextStep()
+                if step > 1 {
+                    await timeline.markModelContinued()
+                }
                 let sse: String
-                switch step {
-                case 1:
+                if step == 1 {
                     sse = """
                     data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_sub_1","type":"function","function":{"name":"launch_helpers","arguments":"{\\"helpers\\":[{\\"agent_id\\":\\"context-gatherer\\",\\"task\\":\\"FIRST_TASK\\"}]}"}}]},"finish_reason":"tool_calls"}]}
 
                     data: [DONE]
 
                     """
-                case 2:
-                    // Triggered immediately by live Steer while Sub-Agent 1 is STILL running!
+                } else {
                     sse = """
-                    data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_sub_2","type":"function","function":{"name":"launch_helpers","arguments":"{\\"helpers\\":[{\\"agent_id\\":\\"semantic-reviewer\\",\\"task\\":\\"SECOND_TASK\\"}]}"}}]},"finish_reason":"tool_calls"}]}
-
-                    data: [DONE]
-
-                    """
-                case 3:
-                    // Quick interim acknowledgement while Sub-Agent 1 finishes in background
-                    sse = """
-                    data: {"choices":[{"delta":{"content":"Launched the second sub-agent while the first continues!"},"finish_reason":"stop"}]}
-
-                    data: [DONE]
-
-                    """
-                default:
-                    // Final synthesis after background Sub-Agent 1 delivers its report
-                    sse = """
-                    data: {"choices":[{"delta":{"content":"Both sub-agents finished cleanly."},"finish_reason":"stop"}]}
+                    data: {"choices":[{"delta":{"content":"Waited for the sub-agent, then answered."},"finish_reason":"stop"}]}
 
                     data: [DONE]
 
@@ -256,8 +238,9 @@ struct Build85Tests {
         #expect(settled.status == .done)
         #expect(await timeline.sub1Cancelled == false)
         #expect(await timeline.sub1Finished == true)
-        #expect(await timeline.sub2LaunchedWhileSub1Running == true)
-        #expect(settled.steps.last?.text == "Both sub-agents finished cleanly.")
+        #expect(await timeline.continuedWhileSub1Running == false)
+        #expect(settled.steps.last?.text == "Waited for the sub-agent, then answered.")
+        #expect(settled.notices.contains { $0.contains("Do another sub agent right now") })
         // Verify Sub-Agent 1's card updated all the way to `.completed` with 90 actions!
         let sub1Card = settled.steps.first?.toolCalls.first?.subagents?.first
         #expect(sub1Card?.status == .completed)

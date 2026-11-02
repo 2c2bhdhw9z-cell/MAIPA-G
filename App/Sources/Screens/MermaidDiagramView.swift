@@ -200,12 +200,21 @@ struct MermaidBlockView: View {
                     .frame(maxWidth: .infinity)
                     .frame(height: 140)
                 } else if showCode || renderFailed || MermaidBundle.userScript == nil {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        Text(code)
-                            .font(.system(.footnote, design: .monospaced))
-                            .textSelection(.enabled)
-                            .padding(12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 6) {
+                        if renderFailed || MermaidBundle.userScript == nil {
+                            Text("This diagram didn't draw. The code is below.")
+                                .font(.caption)
+                                .foregroundStyle(Theme.secondaryText)
+                                .padding(.horizontal, 12)
+                                .padding(.top, 8)
+                        }
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            Text(code)
+                                .font(.system(.footnote, design: .monospaced))
+                                .textSelection(.enabled)
+                                .padding(12)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
                 } else if let snap = cachedSnapshot ?? MermaidSnapshotCache.shared.snapshot(for: cacheKey)?.image {
                     Button {
@@ -420,7 +429,7 @@ private struct MermaidWebCanvas: UIViewRepresentable {
             <head>
               <meta charset="utf-8">
               <meta name="viewport" content="\(viewport)">
-              <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:;">
+              <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data:;">
               <style>
                 html, body {
                   margin: 0; padding: 0;
@@ -458,9 +467,9 @@ private struct MermaidWebCanvas: UIViewRepresentable {
                     if (!src) { send({ height: 120 }); return; }
                     window.mermaid.initialize({
                       startOnLoad: false,
-                      securityLevel: "antiscript",
+                      securityLevel: "loose",
                       theme: "\(themeName)",
-                      flowchart: { htmlLabels: true, curve: "basis" }
+                      flowchart: { htmlLabels: false, curve: "basis" }
                     });
                     const out = await window.mermaid.render("mDiagram", src);
                     const wrap = document.getElementById("wrap");
