@@ -28,7 +28,7 @@ private final class ReplicateFixtureTransport: HTTPTransport, @unchecked Sendabl
     }
 
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
-        lock.lock(); captured.append(request); lock.unlock()
+        lock.withLock { captured.append(request) }
         if request.method == "POST" && request.url.path == "/v1/predictions" {
             return HTTPResponse(status: createStatus, headers: ["content-type": "application/json"], body: predictionBody, finalURL: request.url)
         }
@@ -36,7 +36,7 @@ private final class ReplicateFixtureTransport: HTTPTransport, @unchecked Sendabl
     }
 
     func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse {
-        lock.lock(); captured.append(request); lock.unlock()
+        lock.withLock { captured.append(request) }
         let stream = AsyncThrowingStream<Data, Error> { continuation in
             continuation.yield(outputBytes)
             continuation.finish()
