@@ -1251,18 +1251,10 @@ struct WorkstationScreen: View {
         }
     }
 
-    /// Items placed visually on the Canvas: staged changes, all uploads (every format!), generated pictures,
-    /// Mermaid diagrams, and up to 24 key repo files so even a 2,000-file repo stays snappy.
+    /// Everything in this workstation, on the canvas. Off-screen cards are not built; files are not dropped to make it faster.
     private var canvasItems: [WorkstationItem] {
-        let stagedPaths = Set(stagedWorkstationItems.compactMap(\.repoPath))
-        var combined = stagedWorkstationItems + uploadItems + generatedItems + diagramItems
-        if combined.count < 40 {
-            combined += Array(repoWorkstationItems.filter { item in
-                guard let p = item.repoPath else { return true }
-                return !stagedPaths.contains(p)
-            }.prefix(24))
-        }
-        return combined
+        var seen = Set<String>()
+        return allItems.filter { seen.insert($0.id).inserted }
     }
 
     private var allItems: [WorkstationItem] {

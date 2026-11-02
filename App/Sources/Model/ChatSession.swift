@@ -307,6 +307,25 @@ final class ChatSession: Identifiable {
         start()
     }
 
+    /// The reply was still going when the app was closed. Continue it, unless that just crashed.
+    func resumeFromRelaunchIfSafe() {
+        guard !isRunning, lastTurn?.status == .running else { return }
+        let key = Self.autoResumeKey(chat.id)
+        let now = Date().timeIntervalSince1970
+        let last = UserDefaults.standard.double(forKey: key)
+        if last > 0, now - last < 45 {
+            settleInterruptedTurnOnLaunch()
+            return
+        }
+        UserDefaults.standard.set(now, forKey: key)
+        pausedInBackground = false
+        start()
+    }
+
+    private static func autoResumeKey(_ id: UUID) -> String {
+        "maipag.autoresume.\(id.uuidString)"
+    }
+
     /// Settles a cold-launch `.running` turn left behind when the app previously closed or crashed so
     /// startup never triggers an automatic background re-run or crash loop. The user can tap "Keep going"
     /// or "Retry this answer" whenever they want to continue it.
@@ -810,7 +829,11 @@ final class ChatSession: Identifiable {
         app?.notifications.requestIfNeeded(enabled: app?.settings.notificationsOn == true)
         isRunning = true
         userStoppedExplicitly = false
-        let grace = BackgroundGrace(name: "MAIPA-G reply") { [weak self] in self?.suspendForBackgroundIfNeeded() }
+        let grace = BackgroundGrace(name: "MAIPA-G reply") { [weak self] in
+            // iOS is taking the app away. Save, but do not cancel the reply. A short trip
+            // to the home screen used to kill the turn and every sub-agent.
+            self?.saveSoon(immediately: true)
+        }
         Task { [weak self] in
             await self?.runTurn()
             grace.end()
@@ -832,6 +855,9 @@ final class ChatSession: Identifiable {
             isRunning = false
             run = nil
             saveSoon(immediately: true)
+            if lastTurn?.status != .running {
+                UserDefaults.standard.removeObject(forKey: Self.autoResumeKey(chat.id))
+            }
             app?.turnFinished(in: self)
         }
         guard let app else { return }

@@ -1632,7 +1632,7 @@ struct SubagentCardsGroupView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if items.count > 1 {
+            if !items.isEmpty {
                 Button {
                     withAnimation(.snappy(duration: 0.2)) { collapsedGroup.toggle() }
                     Haptics.selection()
@@ -1669,7 +1669,7 @@ struct SubagentCardsGroupView: View {
                 .buttonStyle(.plain)
             }
 
-            if !collapsedGroup || items.count == 1 {
+            if !collapsedGroup {
                 VStack(alignment: .leading, spacing: 8) {
                     let dupes = duplicateNames
                     ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
@@ -1682,15 +1682,15 @@ struct SubagentCardsGroupView: View {
                 }
             }
         }
-        .padding(items.count > 1 ? 10 : 0)
+        .padding(items.isEmpty ? 0 : 10)
         .background(
-            items.count > 1
-                ? AnyShapeStyle(Theme.surface.opacity(0.45))
-                : AnyShapeStyle(Color.clear),
+            items.isEmpty
+                ? AnyShapeStyle(Color.clear)
+                : AnyShapeStyle(Theme.surface.opacity(0.45)),
             in: RoundedRectangle(cornerRadius: 16, style: .continuous)
         )
         .overlay {
-            if items.count > 1 {
+            if !items.isEmpty {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .strokeBorder(isAnyRunning ? theme.accent.opacity(0.28) : Theme.stroke.opacity(0.85))
             }

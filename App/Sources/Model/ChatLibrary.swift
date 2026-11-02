@@ -70,7 +70,7 @@ final class ChatLibrary {
                 app: app,
                 draft: await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: chat.id.uuidString.lowercased()))
             )
-            session.settleInterruptedTurnOnLaunch()
+            session.resumeFromRelaunchIfSafe()
             sessions[chat.id] = session
             loadedSummaries[index] = ChatSummary(session.chat)
         }
@@ -100,7 +100,7 @@ final class ChatLibrary {
                         let savedDraft = await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: chat.id.uuidString.lowercased()))
                         let mergedDraft = existingDraft.isEmpty ? savedDraft : existingDraft
                         let fresh = ChatSession(chat: chat, app: app, draft: mergedDraft)
-                        fresh.settleInterruptedTurnOnLaunch()
+                        fresh.resumeFromRelaunchIfSafe()
                         fresh.workstationFiles = session.workstationFiles
                         fresh.activeWorkflowRuns = session.activeWorkflowRuns
                         sessions[chat.id] = fresh
@@ -113,7 +113,7 @@ final class ChatLibrary {
             } else if chat.lastAssistantTurn?.status == .running {
                 let savedDraft = await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: chat.id.uuidString.lowercased()))
                 let settled = ChatSession(chat: chat, app: app, draft: savedDraft)
-                settled.settleInterruptedTurnOnLaunch()
+                settled.resumeFromRelaunchIfSafe()
                 sessions[chat.id] = settled
                 resolvedChats[index] = settled.chat
             }
@@ -138,7 +138,7 @@ final class ChatLibrary {
         guard let chat = await store.load(id) else { return }
         let draft = await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: id.uuidString.lowercased()))
         let session = ChatSession(chat: chat, app: app, draft: draft)
-        session.settleInterruptedTurnOnLaunch()
+        session.resumeFromRelaunchIfSafe()
         sessions[id] = session
         openSession = session
         dropIdleSessions()

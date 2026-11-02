@@ -82,7 +82,6 @@ final class BackgroundJobs {
                     Task { @MainActor [weak owner] in
                         guard let owner else { return }
                         owner.isContinuedProcessingActive = false
-                        owner.app?.library.suspendAllForBackground()
                         if (owner.app?.jobs.activeCount ?? 0) > 0 {
                             let title = owner.app?.jobs.jobs.first(where: { ![.done, .failed, .stopped].contains($0.status) })?.title ?? "the active job"
                             owner.lastFailure = "iOS stopped background monitoring for \(title). The GitHub job itself keeps running; open Jobs to see its result."
