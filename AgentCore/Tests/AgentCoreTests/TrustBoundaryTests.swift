@@ -107,10 +107,10 @@ extension AgentLoopTests {
     /// Simulates a compromised model attempting quote-split or wrapped destructive commands and
     /// SSH/shell-rc persistence writes.
     @Test func trustBoundary_blocksDestructiveWrappersAndDotfilePersistence() async throws {
-        #expect(ShellRisk.isRisky("bash -lc 'rm -rf ~/repos'") != nil)
-        #expect(ShellRisk.isRisky("r'm' -rf /tmp/work") != nil)
-        #expect(ShellRisk.isRisky("python3 -c \"import shutil; shutil.rmtree('/home/sprite')\"") != nil)
-        #expect(ShellRisk.isRisky("node -e \"require('fs').rmSync('/home/sprite', {recursive: true})\"") != nil)
+        #expect(ShellRisk.isRisky("bash -lc 'rm -rf ~/repos'"))
+        #expect(ShellRisk.isRisky("r'm' -rf /tmp/work"))
+        #expect(ShellRisk.isRisky("python3 -c \"import shutil; shutil.rmtree('/home/sprite')\""))
+        #expect(ShellRisk.isRisky("node -e \"require('fs').rmSync('/home/sprite', {recursive: true})\""))
 
         let writeDef = ConnectorToolDefinition(serverID: "sprites", serverName: "Sprites", originalName: "write_file")
         #expect(ConnectorActionPolicy.risk(for: writeDef, arguments: ["path": "/home/sprite/.ssh/authorized_keys"]) == .changesAccess)
