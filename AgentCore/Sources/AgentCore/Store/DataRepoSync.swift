@@ -75,6 +75,9 @@ public actor DataRepoSync {
     public static let pointerSuffix = ".maipa-g-file.json"
     private var largeHashes: [String: (size: Int, modified: Date, sha256: String)] = [:]
     private var blobHashes: [String: CachedBlobHash] = [:]
+    /// Pictures and other big attachments at least this size are not read again when this phone
+    /// already agreed on their id. Reading all of them on open is what was closing the app.
+    private static let rememberedFileBytes = 1024 * 1024
 
     public init(github: GitHubClient, dataDirectory: URL, stateURL: URL, largeFileThreshold: Int = DataRepoSync.defaultLargeFileThreshold) {
         self.github = github
@@ -85,6 +88,10 @@ public actor DataRepoSync {
             state = saved
         } else {
             state = State()
+        }
+        if let data = try? Data(contentsOf: Self.hashCacheURL(for: stateURL)),
+           let saved = try? JSONCoding.decoder().decode([String: CachedBlobHash].self, from: data) {
+            blobHashes = saved
         }
     }
 
@@ -146,6 +153,17 @@ public actor DataRepoSync {
         state = State()
         blobHashes = [:]
         saveState()
+        try? FileManager.default.removeItem(at: Self.hashCacheURL(for: stateURL))
+    }
+
+    private nonisolated static func hashCacheURL(for stateURL: URL) -> URL {
+        stateURL.deletingLastPathComponent().appendingPathComponent("blob-hash-cache.json")
+    }
+
+    private func saveHashCache() {
+        let url = Self.hashCacheURL(for: stateURL)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? JSONCoding.encoder().encode(blobHashes).write(to: url, options: .atomic)
     }
 
     private static func isRefConflict(_ error: GitHubAPIError) -> Bool {
@@ -497,6 +515,16 @@ public actor DataRepoSync {
                     scan.files[path] = cached.blobID
                     continue
                 }
+                // Already saved, and big enough that reading it (with every other picture) gets
+                // the app closed. Remember its size and date instead, and only read it if those change.
+                if size >= Self.rememberedFileBytes,
+                   Self.managedBlobPrefixes.contains(where: path.hasPrefix),
+                   blobHashes[path] == nil,
+                   let agreed = state.files[path] {
+                    blobHashes[path] = CachedBlobHash(size: size, modified: modStamp, blobID: agreed)
+                    scan.files[path] = agreed
+                    continue
+                }
                 let blobID = try Hashing.gitBlobID(fileAt: url)
                 blobHashes[path] = CachedBlobHash(size: size, modified: modStamp, blobID: blobID)
                 scan.files[path] = blobID
@@ -508,6 +536,7 @@ public actor DataRepoSync {
                 scan.problems.append(FileProblem(path: path, stage: .read, message: error.localizedDescription))
             }
         }
+        saveHashCache()
         for record in Quarantine.records(dataDirectory: dataDirectory) where scan.files[record.originalPath] == nil {
             scan.unreadablePaths.insert(record.originalPath)
             scan.problems.append(FileProblem(path: record.originalPath, stage: .read, message: "Stored file was quarantined: \(record.reason)"))
