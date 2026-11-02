@@ -244,7 +244,7 @@ struct WorkstationScreen: View {
 
                 if items.isEmpty {
                     emptyCanvasPlaceholder
-                } else if Self.useOverview(zoom: zoom, itemCount: items.count, viewport: geo.size) {
+                } else if Self.useOverview(zoom: zoom, itemCount: items.count) {
                     CanvasOverviewMarks(
                         items: items,
                         zoom: zoom,
@@ -274,7 +274,7 @@ struct WorkstationScreen: View {
                                 isSelected: selectedItemID == item.id,
                                 pointerEnabled: tool == .pointer,
                                 zoom: zoom,
-                                showsPreview: zoom >= 0.42,
+                                showsPreview: true,
                                 onSelect: {
                                     selectedItemID = item.id
                                     Haptics.selection()
@@ -456,15 +456,10 @@ struct WorkstationScreen: View {
         return Int(ceil(sqrt(Double(count))))
     }
 
-    /// One drawing pass instead of a SwiftUI card per file. A medium zoom still uses real
-    /// cards, but only the ones on screen. Farther out, hundreds of cards become one picture.
-    private static func useOverview(zoom: CGFloat, itemCount: Int, viewport: CGSize) -> Bool {
-        if zoom < 0.22 { return true }
-        let visualW = max(WorkstationCanvasCard.cardWidth * zoom, 1)
-        let visualH = max(WorkstationCanvasCard.cardHeight * zoom, 1)
-        let across = Int(ceil(viewport.width / visualW)) + 1
-        let down = Int(ceil(viewport.height / visualH)) + 1
-        return min(itemCount, across * down) > 64
+    /// Real cards, including their text and pictures, stay up as long as a card is big enough to read.
+    /// Farther out, one drawing paints a miniature of each card (icon and name), not a blank bar.
+    private static func useOverview(zoom: CGFloat, itemCount: Int) -> Bool {
+        zoom < 0.18 && itemCount > 24
     }
 
     private static func cardFrame(position: CGPoint, zoom: CGFloat, pan: CGSize, viewport: CGSize) -> CGRect {
@@ -1633,6 +1628,7 @@ private struct WorkstationCanvasCard: View {
 
     @Environment(AppModel.self) private var app
     @Environment(\.theme) private var theme
+    @Environment(\.displayScale) private var displayScale
     @State private var thumbnail: UIImage?
     @State private var snippet: String?
     @State private var liveDrag: CGSize = .zero
@@ -1641,45 +1637,59 @@ private struct WorkstationCanvasCard: View {
     static let cardHeight: CGFloat = 196
     private let previewHeight: CGFloat = 152
 
+    private var renderedWidth: CGFloat { max(1, Self.cardWidth * zoom) }
+    private var renderedHeight: CGFloat { max(1, Self.cardHeight * zoom) }
+    private var renderedPreviewHeight: CGFloat { max(1, previewHeight * zoom) }
+
+    /// Pixels the photo needs on this screen. A fixed small thumbnail stretched by zoom is what made pictures soft.
+    private var thumbnailPixelSize: Int {
+        let pixels = previewHeight * zoom * max(displayScale, 2)
+        return min(1600, max(160, Int(pixels.rounded(.up))))
+    }
+
+    private func scaled(_ value: CGFloat, floor: CGFloat = 1) -> CGFloat {
+        max(floor, value * zoom)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             previewArea
-                .frame(width: Self.cardWidth, height: previewHeight)
+                .frame(width: renderedWidth, height: renderedPreviewHeight)
                 .clipped()
 
-            HStack(spacing: 7) {
+            HStack(spacing: scaled(7)) {
                 Text(item.badgeText)
-                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .font(.system(size: scaled(9), weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2.5)
-                    .background(item.badgeColor, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .padding(.horizontal, scaled(6))
+                    .padding(.vertical, scaled(2.5))
+                    .background(item.badgeColor, in: RoundedRectangle(cornerRadius: scaled(5), style: .continuous))
 
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: scaled(1, floor: 0)) {
                     Text(item.name)
-                        .font(.caption.weight(.semibold))
+                        .font(.system(size: scaled(12), weight: .semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Text(item.subtitle)
-                        .font(.system(size: 10))
+                        .font(.system(size: scaled(10)))
                         .foregroundStyle(Theme.secondaryText)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .frame(width: Self.cardWidth, alignment: .leading)
+            .padding(.horizontal, scaled(10))
+            .padding(.vertical, scaled(8))
+            .frame(width: renderedWidth, height: max(1, renderedHeight - renderedPreviewHeight), alignment: .leading)
             .background(Theme.surface)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .frame(width: renderedWidth, height: renderedHeight)
+        .clipShape(RoundedRectangle(cornerRadius: scaled(16), style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(isSelected ? theme.accent : Theme.stroke, lineWidth: isSelected ? 2.5 : 1)
+            RoundedRectangle(cornerRadius: scaled(16), style: .continuous)
+                .strokeBorder(isSelected ? theme.accent : Theme.stroke, lineWidth: isSelected ? scaled(2.5) : max(0.5, zoom))
         )
-        .shadow(color: showsPreview ? .black.opacity(isSelected ? 0.26 : 0.10) : .clear, radius: isSelected ? 10 : 4, x: 0, y: 3)
-        .scaleEffect(zoom)
+        .shadow(color: zoom >= 0.8 ? .black.opacity(isSelected ? 0.26 : 0.10) : .clear, radius: isSelected ? 10 : 4, x: 0, y: 3)
         .offset(liveDrag)
         .onTapGesture(count: 2, perform: onDoubleTap)
         .onTapGesture(count: 1, perform: onSelect)
@@ -1697,16 +1707,17 @@ private struct WorkstationCanvasCard: View {
                     onMoveEnd()
                 }
         )
-        .task(id: showsPreview ? item.id : "") {
+        .task(id: showsPreview ? "\(item.id)#\(thumbnailPixelSize / 180)" : "") {
             guard showsPreview else {
                 thumbnail = nil
                 snippet = nil
                 return
             }
+            let pixels = thumbnailPixelSize
             if case .stagedChange(let path, let data, _, _) = item.kind {
                 let lower = path.lowercased()
                 if [".png", ".jpg", ".jpeg", ".gif", ".webp"].contains(where: { lower.hasSuffix($0) }) {
-                    thumbnail = ImageDownsampler.image(from: data, maxPixelSize: 360)
+                    thumbnail = ImageDownsampler.image(from: data, maxPixelSize: pixels)
                 } else if let str = String(data: data, encoding: .utf8) {
                     snippet = String(str.prefix(280))
                 }
@@ -1715,7 +1726,7 @@ private struct WorkstationCanvasCard: View {
             guard let att = item.attachment else { return }
             switch item.kind {
             case .image, .pdf:
-                thumbnail = await ImageDownsampler.attachmentThumbnail(att, store: app.attachmentStore, maxPixelSize: 360)
+                thumbnail = await ImageDownsampler.attachmentThumbnail(att, store: app.attachmentStore, maxPixelSize: pixels)
             case .textOrCode:
                 if let slice = (try? await app.attachmentStore.readSlice(for: att, offsetBytes: 0, maxBytes: 4_096))?.data,
                    let str = AttachmentDataPreviewBody.readableText(from: slice, name: att.name) {
@@ -1734,30 +1745,39 @@ private struct WorkstationCanvasCard: View {
             if showsPreview, let thumbnail {
                 Image(uiImage: thumbnail)
                     .resizable()
+                    .interpolation(.high)
                     .scaledToFill()
-                    .frame(width: Self.cardWidth, height: previewHeight)
+                    .frame(width: renderedWidth, height: renderedPreviewHeight)
             } else if showsPreview, let snippet {
                 let lowerName = item.name.lowercased()
-                if lowerName.hasSuffix(".mmd") || lowerName.hasSuffix(".mermaid") {
+                if zoom >= 0.85, lowerName.hasSuffix(".mmd") || lowerName.hasSuffix(".mermaid") {
                     MermaidBlockView(code: snippet, compactCardMode: true)
-                        .frame(width: Self.cardWidth, height: previewHeight)
+                        .frame(width: renderedWidth, height: renderedPreviewHeight)
                 } else {
                     Text(snippet)
-                        .font(.system(size: 9.5, design: .monospaced))
+                        .font(.system(size: scaled(9.5), design: .monospaced))
                         .foregroundStyle(.primary.opacity(0.86))
-                        .padding(10)
-                        .frame(width: Self.cardWidth, height: previewHeight, alignment: .topLeading)
+                        .padding(scaled(10))
+                        .frame(width: renderedWidth, height: renderedPreviewHeight, alignment: .topLeading)
                 }
             } else if showsPreview, case .mermaid(let code) = item.kind {
-                MermaidBlockView(code: code, compactCardMode: true)
-                    .frame(width: Self.cardWidth, height: previewHeight)
+                if zoom >= 0.85 {
+                    MermaidBlockView(code: code, compactCardMode: true)
+                        .frame(width: renderedWidth, height: renderedPreviewHeight)
+                } else {
+                    Text(code)
+                        .font(.system(size: scaled(9.5), design: .monospaced))
+                        .foregroundStyle(.primary.opacity(0.86))
+                        .padding(scaled(10))
+                        .frame(width: renderedWidth, height: renderedPreviewHeight, alignment: .topLeading)
+                }
             } else {
-                VStack(spacing: 8) {
+                VStack(spacing: scaled(8)) {
                     Image(systemName: item.icon)
-                        .font(.system(size: 34, weight: .semibold))
+                        .font(.system(size: scaled(34), weight: .semibold))
                         .foregroundStyle(item.badgeColor)
                     Text(item.badgeText)
-                        .font(.caption.weight(.bold))
+                        .font(.system(size: scaled(12), weight: .bold))
                         .foregroundStyle(Theme.secondaryText)
                 }
             }
@@ -1773,35 +1793,59 @@ private struct CanvasOverviewMarks: View {
     let selectedID: String?
     let position: (String, Int) -> CGPoint
 
+    @Environment(\.colorScheme) private var colorScheme
+
     var body: some View {
         Canvas { context, size in
-            let cardW = max(2, WorkstationCanvasCard.cardWidth * zoom)
-            let cardH = max(2, WorkstationCanvasCard.cardHeight * zoom)
+            let cardW = max(4, WorkstationCanvasCard.cardWidth * zoom)
+            let cardH = max(4, WorkstationCanvasCard.cardHeight * zoom)
             let bounds = CGRect(origin: .zero, size: size).insetBy(dx: -30, dy: -30)
-            let showName = zoom >= 0.16 && cardH >= 22
+            let isDark = colorScheme == .dark
+            let fill = isDark ? Color(white: 0.16) : Color.white.opacity(0.96)
+            let ink = isDark ? Color.white.opacity(0.88) : Color.black.opacity(0.78)
             for (index, item) in items.enumerated() {
                 let pos = position(item.id, index)
                 let cx = size.width * 0.5 + pan.width + pos.x * zoom
                 let cy = size.height * 0.46 + pan.height + pos.y * zoom
                 let rect = CGRect(x: cx - cardW / 2, y: cy - cardH / 2, width: cardW, height: cardH)
                 guard rect.intersects(bounds) else { continue }
-                let radius = min(8, max(1.5, 10 * zoom))
-                let path = Path(roundedRect: rect, cornerRadius: radius)
-                context.fill(path, with: .color(Color.white.opacity(0.94)))
-                let badgeH = max(1.5, min(rect.height * 0.16, 8))
-                let badge = CGRect(x: rect.minX, y: rect.maxY - badgeH, width: rect.width, height: badgeH)
-                context.fill(Path(roundedRect: badge, cornerRadius: min(radius, badgeH / 2)), with: .color(item.badgeColor))
-                if item.id == selectedID {
-                    context.stroke(path, with: .color(item.badgeColor), lineWidth: max(1, 1.5 * zoom))
+                let radius = min(rect.width, rect.height) * 0.16
+                let path = Path(roundedRect: rect, cornerRadius: max(1, radius))
+                context.fill(path, with: .color(fill))
+                let preview = CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height * 0.70)
+                let tint = Path(roundedRect: preview, cornerRadius: max(1, radius))
+                context.fill(tint, with: .color(item.badgeColor.opacity(0.16)))
+                let iconSide = min(preview.width, preview.height) * 0.46
+                if iconSide >= 3 {
+                    let iconRect = CGRect(
+                        x: preview.midX - iconSide / 2,
+                        y: preview.midY - iconSide / 2,
+                        width: iconSide,
+                        height: iconSide
+                    )
+                    let icon = context.resolve(
+                        Text(Image(systemName: item.icon))
+                            .font(.system(size: iconSide, weight: .semibold))
+                            .foregroundColor(item.badgeColor)
+                    )
+                    context.draw(icon, in: iconRect)
                 }
-                if showName {
+                if rect.height >= 18 {
                     let title = context.resolve(
                         Text(item.name)
-                            .font(.system(size: min(11, max(7, 13 * zoom)), weight: .semibold))
-                            .foregroundColor(Color.black.opacity(0.78))
+                            .font(.system(size: min(11, max(6, rect.height * 0.16)), weight: .semibold))
+                            .foregroundColor(ink)
                     )
-                    let titleRect = CGRect(x: rect.minX + 4, y: rect.minY + 3, width: rect.width - 8, height: min(16, rect.height * 0.4))
+                    let titleRect = CGRect(
+                        x: rect.minX + 3,
+                        y: preview.maxY + 1,
+                        width: max(1, rect.width - 6),
+                        height: max(8, rect.maxY - preview.maxY - 2)
+                    )
                     context.draw(title, in: titleRect)
+                }
+                if item.id == selectedID {
+                    context.stroke(path, with: .color(item.badgeColor), lineWidth: max(1, 1.5 * zoom))
                 }
             }
         }

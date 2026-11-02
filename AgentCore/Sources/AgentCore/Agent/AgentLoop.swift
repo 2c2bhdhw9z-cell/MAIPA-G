@@ -408,11 +408,14 @@ private struct Runner {
                         turn.steps[sIdx].toolCalls[cIdx].detail = detail
                     }
                     if let subs = patch.update.subagents {
+                        let wasRunning = turn.steps[sIdx].toolCalls[cIdx].subagents?.contains { $0.status == .running } == true
                         turn.steps[sIdx].toolCalls[cIdx].subagents = subs
-                        if !subs.contains(where: { $0.status == .running }),
-                           turn.steps[sIdx].toolCalls[cIdx].result?.contains("running_in_background") == true {
+                        if wasRunning, !subs.contains(where: { $0.status == .running }) {
                             turn.steps[sIdx].toolCalls[cIdx].result = patch.update.detail ?? patch.update.summary
                         }
+                    }
+                    if patch.update.billedCost > 0 {
+                        turn.steps[sIdx].toolCalls[cIdx].billedCost = patch.update.billedCost
                     }
                     changed = true
                 }

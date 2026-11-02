@@ -19,11 +19,14 @@ public struct ToolLiveUpdate: Sendable, Hashable {
     public var summary: String
     public var detail: String?
     public var subagents: [SubagentRunItem]?
+    /// Dollars the helpers have cost so far. Copied onto the tool call when a background card updates.
+    public var billedCost: Double
 
-    public init(summary: String, detail: String? = nil, subagents: [SubagentRunItem]? = nil) {
+    public init(summary: String, detail: String? = nil, subagents: [SubagentRunItem]? = nil, billedCost: Double = 0) {
         self.summary = summary
         self.detail = detail
         self.subagents = subagents
+        self.billedCost = billedCost
     }
 }
 

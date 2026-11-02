@@ -403,7 +403,8 @@ struct Build85Tests {
 
     @Test("SubagentRunItem.resolvedItems keeps detached background sub-agents running and marks legacy app-closed runs stopped instead of failed")
     func subagentResolvedItemsBackgroundAndLegacyInterrupted() {
-        // 1. Detached background sub-agent (`call.status == .done`, `result` contains `running_in_background`) stays `.running`!
+        // 1. Detached background sub-agent stays `.running` because its own status is `.running`,
+        // even when the tool text says "not stopped" and never contains the token running_in_background.
         var detachedCall = ToolCallRecord(
             id: "call-bg",
             name: "launch_helpers",
@@ -424,9 +425,17 @@ struct Build85Tests {
             ]
         )
         detachedCall.detail = "Reading files"
-        detachedCall.result = #"{"status":"running_in_background","running_subagents":1}"#
+        detachedCall.result = "Sub-agent 1 (Verification Sub-Agent · 14 actions so far): STILL RUNNING IN THE BACKGROUND (not stopped). Its complete report will arrive automatically when it finishes."
         let detachedResolved = SubagentRunItem.resolvedItems(for: detachedCall)
         #expect(detachedResolved.first?.status == .running)
+
+        // A negated word inside a failed-call sentence must not cancel the helper.
+        var negated = detachedCall
+        negated.status = .failed
+        negated.result = "Helper reported the job was not stopped and not cancelled."
+        let negatedResolved = SubagentRunItem.resolvedItems(for: negated)
+        #expect(negatedResolved.first?.status != .cancelled)
+        #expect(negatedResolved.first?.status == .failed)
 
         // 2. Legacy Build 84 chat (`status == .failed`, `result == "Interrupted when the app closed."`) resolves to `.cancelled` and emits neutral transcript text!
         var legacyCall = ToolCallRecord(
