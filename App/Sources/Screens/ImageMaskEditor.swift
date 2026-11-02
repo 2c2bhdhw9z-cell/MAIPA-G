@@ -7,7 +7,7 @@ import UIKit
 /// Brush-mask editor. Brush coordinates are stored in normalized source-image space, never in
 /// screen points, so resize, zoom, and pan cannot move the selected region.
 struct ImageMaskEditor: View {
-    let source: GeneratedImageResult
+    let source: AttachmentReference
     let image: UIImage
     let onPrepare: (Data, ImageEditMask, String) -> Void
 
@@ -34,7 +34,7 @@ struct ImageMaskEditor: View {
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 14) {
-                Text("Editing \(source.attachment.name). Painted areas are the parts that will change. Use Navigate to zoom or move the picture; brush marks remain attached to the image.")
+                Text("Editing \(source.name). Painted areas are the parts that will change. Use Navigate to zoom or move the picture; brush marks remain attached to the image.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .accessibilityLabel("Painted areas are the parts that will change. Orange fill and dashed outlines show selected areas.")
@@ -218,7 +218,7 @@ struct ImageMaskEditor: View {
     @MainActor
     private func loadOriginalPixelSize() async {
         do {
-            let bytes = try await app.attachmentStore.data(for: source.attachment)
+            let bytes = try await app.attachmentStore.data(for: source)
             guard let imageSource = CGImageSourceCreateWithData(bytes as CFData, nil),
                   let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any],
                   let rawWidth = properties[kCGImagePropertyPixelWidth] as? Int,

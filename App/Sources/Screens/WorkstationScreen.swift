@@ -1744,6 +1744,10 @@ private struct WorkstationItemPreviewSheet: View {
     @State private var repoText: String?
     @State private var repoImage: UIImage?
     @State private var loading = true
+    @State private var showMaskEditor = false
+    @State private var preparedMaskData: Data?
+    @State private var preparedMaskGeometry: ImageEditMask?
+    @State private var preparedEditInstruction: String?
 
     var body: some View {
         NavigationStack {
@@ -1752,8 +1756,20 @@ private struct WorkstationItemPreviewSheet: View {
                     if loading {
                         ProgressView("Opening \(item.name)…")
                     } else if let attachmentImage {
-                        ZoomableImageCanvas(image: attachmentImage)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        VStack(spacing: 10) {
+                            ZoomableImageCanvas(image: attachmentImage)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            if let preparedMaskGeometry {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Label("Local mask ready (\(preparedMaskGeometry.sourcePixelWidth) × \(preparedMaskGeometry.sourcePixelHeight)). No image was uploaded or edited.", systemImage: "hand.raised.fill")
+                                    if let preparedEditInstruction { Text(preparedEditInstruction).font(.caption) }
+                                }
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal)
+                                .padding(.bottom, 8)
+                            }
+                        }
                     } else if (att.kind == .pdf || att.name.lowercased().hasSuffix(".pdf")), let attachmentFileURL {
                         PDFInlineReaderView(url: attachmentFileURL)
                     } else if let attachmentData {
@@ -1807,6 +1823,18 @@ private struct WorkstationItemPreviewSheet: View {
                     }
                     .accessibilityLabel("Add to chat")
 
+                    if item.attachment?.kind == .image, attachmentImage != nil {
+                        Button {
+                            preparedMaskData = nil
+                            preparedMaskGeometry = nil
+                            preparedEditInstruction = nil
+                            showMaskEditor = true
+                        } label: {
+                            Image(systemName: "paintbrush.pointed")
+                        }
+                        .accessibilityLabel("Edit picture mask")
+                    }
+
                     if let att = item.attachment, attachmentFileURL != nil {
                         Button {
                             Task {
@@ -1823,6 +1851,15 @@ private struct WorkstationItemPreviewSheet: View {
             }
             .task {
                 await loadPreview()
+            }
+            .sheet(isPresented: $showMaskEditor) {
+                if let source = item.attachment, let attachmentImage {
+                    ImageMaskEditor(source: source, image: attachmentImage) { data, geometry, instruction in
+                        preparedMaskData = data
+                        preparedMaskGeometry = geometry
+                        preparedEditInstruction = instruction
+                    }
+                }
             }
         }
         .presentationDragIndicator(.visible)

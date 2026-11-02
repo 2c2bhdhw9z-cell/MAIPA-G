@@ -107,7 +107,7 @@ struct PictureViewer: View {
             }
             .sheet(isPresented: $showMaskEditor) {
                 if let generated, let image {
-                    ImageMaskEditor(source: generated, image: image) { mask, geometry, instruction in
+                    ImageMaskEditor(source: generated.attachment, image: image) { mask, geometry, instruction in
                         preparedMaskData = mask
                         preparedMaskGeometry = geometry
                         preparedEditInstruction = instruction
