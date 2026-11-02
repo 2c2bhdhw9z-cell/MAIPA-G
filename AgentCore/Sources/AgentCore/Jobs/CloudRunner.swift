@@ -730,7 +730,7 @@ public struct CloudRunner: Sendable {
             let checker = try await executeCloudAgent(
                 checkerAgent,
                 task: "Check the repair against the failed logs and current workspace. End with a standalone GOAL_MET line only if the repair is complete and local checks support it; otherwise end with GOAL_NOT_MET.",
-                context: coder.output,
+                context: "<helper_report agent=\"coder\">\n\(coder.output)\n</helper_report>",
                 tools: tools,
                 rules: rules,
                 spendLimit: remaining.map { max(0.000_001, $0 - coder.cost) },

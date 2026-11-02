@@ -237,7 +237,9 @@ public struct AgentExecutor: Sendable {
         let helperResults: [AgentExecutionResult?] = helpers.indices.map { helperResultsByIndex[$0] }
 
         let joined = helperResults.enumerated().compactMap { index, result -> String? in
-            result.map { "Helper \(index + 1) (\(helpers[index].definition.name)):\n\($0.output)" }
+            result.map {
+                "<helper_report agent=\"\(helpers[index].definition.name)\">\n\($0.output)\n</helper_report>"
+            }
         }.joined(separator: "\n\n")
         let fullContext = [context, joined].filter { !$0.isEmpty }.joined(separator: "\n\nIndependent helper reports:\n")
         let helperCost = helperResults.compactMap { $0?.cost }.reduce(0, +)
