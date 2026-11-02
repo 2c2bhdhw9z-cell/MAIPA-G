@@ -1,15 +1,20 @@
-app = "maipa-g"
-primary_region = "iad"
+# fly.toml app configuration file generated for maipa-g on 2026-11-02T19:21:53Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'maipa-g'
+primary_region = 'iad'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = "off"
+  auto_stop_machines = 'off'
   auto_start_machines = true
 
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "1024mb"
+  size = 'shared-cpu-1x'
+  memory = '1024mb'
