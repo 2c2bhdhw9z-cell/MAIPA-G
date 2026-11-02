@@ -210,8 +210,16 @@ def check_oct31_build81_subagent_cards_and_crash_safety() -> None:
     load_start = chat_lib.find("func load()")
     reload_start = chat_lib.find("func reloadFromDisk()")
     load_body = chat_lib[load_start:reload_start] if load_start >= 0 and reload_start > load_start else ""
-    if "settleInterruptedTurnOnLaunch()" not in load_body or "resumeInterruptedTurn()" in load_body:
-        failures.append("OCT31-23: ChatLibrary.load() must settle cold-launch interrupted turns instead of auto-resuming crash loops")
+    # A still-running reply continues when the app is opened again. resumeInterruptedTurn() is the
+    # old path that restarted turns the app itself had marked stopped, which crash-looped.
+    if "resumeFromRelaunchIfSafe()" not in load_body or "resumeInterruptedTurn()" in load_body:
+        failures.append("OCT31-23: ChatLibrary.load() must resume a still-running reply, and must not call resumeInterruptedTurn()")
+    session = (ROOT / "App/Sources/Model/ChatSession.swift").read_text()
+    resume_start = session.find("func resumeFromRelaunchIfSafe()")
+    resume_end = session.find("func settleInterruptedTurnOnLaunch()")
+    resume_body = session[resume_start:resume_end] if resume_start >= 0 and resume_end > resume_start else ""
+    if "settleInterruptedTurnOnLaunch()" not in resume_body or "< 45" not in resume_body:
+        failures.append("OCT31-23: resumeFromRelaunchIfSafe() must still settle a reply that crashed again within 45 seconds")
 
     bg_jobs = (ROOT / "App/Sources/Support/BackgroundJobs.swift").read_text()
     if "nonisolated private static func registerSystemTasks" not in bg_jobs:
