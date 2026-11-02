@@ -89,7 +89,7 @@ public actor DataRepoSync {
         } else {
             state = State()
         }
-        if let data = try? Data(contentsOf: hashCacheURL),
+        if let data = try? Data(contentsOf: Self.hashCacheURL(for: stateURL)),
            let saved = try? JSONCoding.decoder().decode([String: CachedBlobHash].self, from: data) {
             blobHashes = saved
         }
@@ -153,16 +153,17 @@ public actor DataRepoSync {
         state = State()
         blobHashes = [:]
         saveState()
-        try? FileManager.default.removeItem(at: hashCacheURL)
+        try? FileManager.default.removeItem(at: Self.hashCacheURL(for: stateURL))
     }
 
-    private var hashCacheURL: URL {
+    private nonisolated static func hashCacheURL(for stateURL: URL) -> URL {
         stateURL.deletingLastPathComponent().appendingPathComponent("blob-hash-cache.json")
     }
 
     private func saveHashCache() {
-        try? FileManager.default.createDirectory(at: hashCacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? JSONCoding.encoder().encode(blobHashes).write(to: hashCacheURL, options: .atomic)
+        let url = Self.hashCacheURL(for: stateURL)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? JSONCoding.encoder().encode(blobHashes).write(to: url, options: .atomic)
     }
 
     private static func isRefConflict(_ error: GitHubAPIError) -> Bool {
