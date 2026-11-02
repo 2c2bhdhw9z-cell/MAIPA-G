@@ -1,4 +1,6 @@
 import AgentCore
+import Foundation
+import ImageIO
 import SwiftUI
 import UIKit
 
@@ -9,7 +11,9 @@ struct ImageMaskEditor: View {
     let image: UIImage
     let onPrepare: (Data, ImageEditMask, String) -> Void
 
+    @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
+    @State private var originalPixelSize: (width: Int, height: Int)?
     @State private var strokes: [ImageBrushStroke] = []
     @State private var activeStroke: ImageBrushStroke?
     @State private var instruction = ""
@@ -23,8 +27,8 @@ struct ImageMaskEditor: View {
     @State private var confirmDiscard = false
     @State private var error: String?
 
-    private var pixelWidth: Int { image.cgImage?.width ?? Int(image.size.width * image.scale) }
-    private var pixelHeight: Int { image.cgImage?.height ?? Int(image.size.height * image.scale) }
+    private var pixelWidth: Int { originalPixelSize?.width ?? image.cgImage?.width ?? Int(image.size.width * image.scale) }
+    private var pixelHeight: Int { originalPixelSize?.height ?? image.cgImage?.height ?? Int(image.size.height * image.scale) }
     private var sourceSize: ImageEditSize { ImageEditSize(width: Double(pixelWidth), height: Double(pixelHeight)) }
 
     var body: some View {
@@ -104,7 +108,12 @@ struct ImageMaskEditor: View {
                 if let error { Text(error).font(.footnote).foregroundStyle(.red) }
                 Button("Prepare edit mask") { prepareMask() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(strokes.isEmpty && activeStroke == nil || instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(originalPixelSize == nil || (strokes.isEmpty && activeStroke == nil) || instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if originalPixelSize == nil {
+                    Text("Checking the full-size source image…")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
                 Text("Preparing a mask is local. The provider request and any charge must wait for the verified provider to be enabled and your approval.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -127,6 +136,7 @@ struct ImageMaskEditor: View {
             } message: {
                 Text("The painted mask was prepared locally. No image was uploaded and no edit was requested.")
             }
+            .task { await loadOriginalPixelSize() }
         }
     }
 
@@ -203,6 +213,34 @@ struct ImageMaskEditor: View {
     private func undo() {
         if activeStroke != nil { activeStroke = nil }
         else if !strokes.isEmpty { strokes.removeLast() }
+    }
+
+    @MainActor
+    private func loadOriginalPixelSize() async {
+        do {
+            let bytes = try await app.attachmentStore.data(for: source.attachment)
+            guard let imageSource = CGImageSourceCreateWithData(bytes as CFData, nil),
+                  let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any],
+                  let rawWidth = properties[kCGImagePropertyPixelWidth] as? Int,
+                  let rawHeight = properties[kCGImagePropertyPixelHeight] as? Int else {
+                error = "The original picture dimensions could not be read. The mask was not prepared."
+                return
+            }
+            let orientation = properties[kCGImagePropertyOrientation] as? Int ?? 1
+            let swapsAxes = (5...8).contains(orientation)
+            let width = swapsAxes ? rawHeight : rawWidth
+            let height = swapsAxes ? rawWidth : rawHeight
+            guard width > 0, height > 0,
+                  width <= ImageEditMaskRasterizer.maximumDimension,
+                  height <= ImageEditMaskRasterizer.maximumDimension,
+                  width <= ImageEditMaskRasterizer.maximumPixels / height else {
+                error = "This original picture is too large for safe mask preparation. The mask was not prepared."
+                return
+            }
+            originalPixelSize = (width, height)
+        } catch {
+            self.error = "The original picture could not be read safely. The mask was not prepared."
+        }
     }
 
     private func prepareMask() {
