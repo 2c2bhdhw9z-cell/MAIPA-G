@@ -235,7 +235,7 @@ struct ImageMaskEditor: View {
         } catch ImageEditMaskRasterError.tooManyPixels {
             error = "This picture is too large for a safe local mask. A supported resize policy is not available yet."
         } catch {
-            error = "The brush mask could not be prepared safely."
+            self.error = "The brush mask could not be prepared safely."
         }
     }
 

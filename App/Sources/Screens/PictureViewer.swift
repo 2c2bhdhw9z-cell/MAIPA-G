@@ -151,7 +151,7 @@ struct PictureViewer: View {
     }
 
     @ViewBuilder
-    private func controls(for _: UIImage) -> some View {
+    private func controls(for currentImage: UIImage) -> some View {
         if let generated {
             Button {
                 preparedMaskData = nil
@@ -192,7 +192,7 @@ struct PictureViewer: View {
                         Text("Before and after").font(.headline)
                         HStack(alignment: .top, spacing: 10) {
                             comparisonCard(title: "Original", image: parentImage)
-                            comparisonCard(title: "Edited", image: image)
+                            comparisonCard(title: "Edited", image: currentImage)
                         }
                         HStack {
                             Button { Task { await saveToPhotos(parentResult) } } label: { Label("Save original", systemImage: "square.and.arrow.down") }
