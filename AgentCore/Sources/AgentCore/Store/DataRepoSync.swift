@@ -204,7 +204,7 @@ public actor DataRepoSync {
         } else {
             remote = [:]
         }
-        let scan = localFiles()
+        let scan = localFiles(remote: remote)
         let local = scan.files
         let base = state.files
         report.problems.append(contentsOf: scan.problems)
@@ -480,7 +480,7 @@ public actor DataRepoSync {
         return LargeFile(url: url, pointer: pointer.encoded(), sha256: sha, size: size)
     }
 
-    private func localFiles() -> LocalScan {
+    private func localFiles(remote: [String: String] = [:]) -> LocalScan {
         var scan = LocalScan()
         let manager = FileManager.default
         guard let enumerator = manager.enumerator(
@@ -503,6 +503,20 @@ public actor DataRepoSync {
                 let size = values.fileSize ?? 0
                 let modDate = values.contentModificationDate ?? .distantPast
                 let modStamp = modDate.timeIntervalSince1970
+                if size >= Self.rememberedFileBytes, Self.managedBlobPrefixes.contains(where: path.hasPrefix) {
+                    if let cached = blobHashes[path], cached.size == size, abs(cached.modified - modStamp) < 0.001 {
+                        scan.files[path] = cached.blobID
+                        continue
+                    }
+                    // Do not read the file. Opening every picture is what was closing the app.
+                    // Reuse the id already agreed, or GitHub's id. A brand-new big file stays on
+                    // the phone until a later save; it is not treated as a deletion.
+                    if let agreed = state.files[path] ?? remote[path] {
+                        blobHashes[path] = CachedBlobHash(size: size, modified: modStamp, blobID: agreed)
+                        scan.files[path] = agreed
+                    }
+                    continue
+                }
                 if size >= largeFileThreshold, Self.managedBlobPrefixes.contains(where: path.hasPrefix) {
                     let large = try largeFile(at: url, path: path, size: size, modified: modDate)
                     let pointerPath = path + Self.pointerSuffix
@@ -513,16 +527,6 @@ public actor DataRepoSync {
                 }
                 if let cached = blobHashes[path], cached.size == size, abs(cached.modified - modStamp) < 0.001 {
                     scan.files[path] = cached.blobID
-                    continue
-                }
-                // Already saved, and big enough that reading it (with every other picture) gets
-                // the app closed. Remember its size and date instead, and only read it if those change.
-                if size >= Self.rememberedFileBytes,
-                   Self.managedBlobPrefixes.contains(where: path.hasPrefix),
-                   blobHashes[path] == nil,
-                   let agreed = state.files[path] {
-                    blobHashes[path] = CachedBlobHash(size: size, modified: modStamp, blobID: agreed)
-                    scan.files[path] = agreed
                     continue
                 }
                 let blobID = try Hashing.gitBlobID(fileAt: url)
