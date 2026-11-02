@@ -69,8 +69,8 @@ struct WorkstationScreen: View {
 
     private var storageKey: String {
         switch target {
-        case .home: return "workstation.layout.home"
-        case .chat(let id): return "workstation.layout.\(id.uuidString)"
+        case .home: return "workstation.layout.v2.home"
+        case .chat(let id): return "workstation.layout.v2.\(id.uuidString)"
         }
     }
 
@@ -228,22 +228,53 @@ struct WorkstationScreen: View {
             ZStack {
                 CanvasDotGrid(pan: effectivePan, zoom: zoom, isDark: colorScheme == .dark)
                     .contentShape(Rectangle())
-                    .onTapGesture {
-                        selectedItemID = nil
-                    }
+                    .gesture(
+                        SpatialTapGesture().onEnded { value in
+                            selectedItemID = items.enumerated().first { index, item in
+                                Self.cardFrame(
+                                    position: position(for: item.id, index: index, count: items.count),
+                                    zoom: zoom,
+                                    pan: effectivePan,
+                                    viewport: geo.size
+                                ).contains(value.location)
+                            }?.element.id
+                        }
+                    )
                     .gesture(canvasBackgroundPanGesture)
 
                 if items.isEmpty {
                     emptyCanvasPlaceholder
+                } else if Self.useOverview(zoom: zoom, itemCount: items.count, viewport: geo.size) {
+                    CanvasOverviewMarks(
+                        items: items,
+                        zoom: zoom,
+                        pan: effectivePan,
+                        viewport: geo.size,
+                        selectedID: selectedItemID,
+                        position: { id, index in position(for: id, index: index, count: items.count) }
+                    )
+                    .allowsHitTesting(false)
                 } else {
+                    let cull = CGRect(origin: .zero, size: geo.size).insetBy(dx: -120, dy: -160)
+                    let visible = items.enumerated().filter { index, item in
+                        Self.cardFrame(
+                            position: position(for: item.id, index: index, count: items.count),
+                            zoom: zoom,
+                            pan: effectivePan,
+                            viewport: geo.size
+                        ).intersects(cull)
+                    }
                     ZStack {
-                        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                            let pos = position(for: item.id, index: index)
+                        ForEach(visible, id: \.element.id) { pair in
+                            let index = pair.offset
+                            let item = pair.element
+                            let pos = position(for: item.id, index: index, count: items.count)
                             WorkstationCanvasCard(
                                 item: item,
                                 isSelected: selectedItemID == item.id,
                                 pointerEnabled: tool == .pointer,
                                 zoom: zoom,
+                                showsPreview: zoom >= 0.72,
                                 onSelect: {
                                     selectedItemID = item.id
                                     Haptics.selection()
@@ -252,7 +283,7 @@ struct WorkstationScreen: View {
                                     previewingItem = item
                                 },
                                 onMove: { delta in
-                                    let current = position(for: item.id, index: index)
+                                    let current = position(for: item.id, index: index, count: items.count)
                                     positions[item.id] = CGPoint(
                                         x: current.x + delta.width / max(zoom, 0.01),
                                         y: current.y + delta.height / max(zoom, 0.01)
@@ -261,6 +292,10 @@ struct WorkstationScreen: View {
                                 onMoveEnd: {
                                     savePositions()
                                 }
+                            )
+                            .frame(
+                                width: max(1, WorkstationCanvasCard.cardWidth * zoom),
+                                height: max(1, WorkstationCanvasCard.cardHeight * zoom)
                             )
                             .position(
                                 x: geo.size.width * 0.5 + effectivePan.width + pos.x * zoom,
@@ -412,13 +447,32 @@ struct WorkstationScreen: View {
         Haptics.selection()
     }
 
+    /// Wide enough to stay roughly square. A hard cap of 8 turned a few hundred cards into a
+    /// single tall strip, which then had to be zoomed until every card was a speck.
     private static func idealGridColumns(for count: Int) -> Int {
         if count <= 1 { return 1 }
-        if count <= 3 { return 2 }
+        if count <= 4 { return 2 }
         if count <= 9 { return 3 }
-        if count <= 16 { return 4 }
-        if count <= 25 { return 5 }
-        return min(8, max(5, Int(ceil(sqrt(Double(count) * 1.3)))))
+        return Int(ceil(sqrt(Double(count))))
+    }
+
+    /// One drawing pass instead of a SwiftUI card per file. Used when a card would be tiny or
+    /// dozens of them would be on screen at once.
+    private static func useOverview(zoom: CGFloat, itemCount: Int, viewport: CGSize) -> Bool {
+        if zoom < 0.4 { return true }
+        let visualW = max(WorkstationCanvasCard.cardWidth * zoom, 1)
+        let visualH = max(WorkstationCanvasCard.cardHeight * zoom, 1)
+        let across = Int(ceil(viewport.width / visualW)) + 1
+        let down = Int(ceil(viewport.height / visualH)) + 1
+        return min(itemCount, across * down) > 28
+    }
+
+    private static func cardFrame(position: CGPoint, zoom: CGFloat, pan: CGSize, viewport: CGSize) -> CGRect {
+        let w = WorkstationCanvasCard.cardWidth * zoom
+        let h = WorkstationCanvasCard.cardHeight * zoom
+        let cx = viewport.width * 0.5 + pan.width + position.x * zoom
+        let cy = viewport.height * 0.46 + pan.height + position.y * zoom
+        return CGRect(x: cx - w / 2, y: cy - h / 2, width: max(w, 1), height: max(h, 1))
     }
 
     private func arrangeAllCards(in viewport: CGSize, items: [WorkstationItem]) {
@@ -443,7 +497,7 @@ struct WorkstationScreen: View {
         var minY: CGFloat = .greatestFiniteMagnitude
         var maxY: CGFloat = -.greatestFiniteMagnitude
         for (idx, item) in items.enumerated() {
-            let p = position(for: item.id, index: idx)
+            let p = position(for: item.id, index: idx, count: items.count)
             minX = min(minX, p.x - 115)
             maxX = max(maxX, p.x + 115)
             minY = min(minY, p.y - 130)
@@ -451,9 +505,9 @@ struct WorkstationScreen: View {
         }
         let spanW = max(240, maxX - minX)
         let spanH = max(260, maxY - minY)
-        let scaleX = max(0.18, (viewport.width - 36) / spanW)
-        let scaleY = max(0.18, (viewport.height - 150) / spanH)
-        let fitted = min(max(min(scaleX, scaleY), 0.20), 1.0)
+        let scaleX = (viewport.width - 36) / spanW
+        let scaleY = (viewport.height - 150) / spanH
+        let fitted = min(max(min(scaleX, scaleY), 0.04), 1.0)
         let midX = (minX + maxX) * 0.5
         let midY = (minY + maxY) * 0.5
         withAnimation(.snappy(duration: 0.28)) {
@@ -476,7 +530,7 @@ struct WorkstationScreen: View {
         var minY: CGFloat = .greatestFiniteMagnitude
         var maxY: CGFloat = -.greatestFiniteMagnitude
         for (idx, item) in items.enumerated() {
-            let p = position(for: item.id, index: idx)
+            let p = position(for: item.id, index: idx, count: items.count)
             minX = min(minX, p.x)
             maxX = max(maxX, p.x)
             minY = min(minY, p.y)
@@ -1270,9 +1324,9 @@ struct WorkstationScreen: View {
 
     // MARK: - Positions & Actions
 
-    private func position(for id: String, index: Int) -> CGPoint {
+    private func position(for id: String, index: Int, count: Int) -> CGPoint {
         if let saved = positions[id] { return saved }
-        let cols = Self.idealGridColumns(for: max(1, canvasItems.count))
+        let cols = Self.idealGridColumns(for: max(1, count))
         let col = index % cols
         let row = index / cols
         let spacingX: CGFloat = 236
@@ -1571,6 +1625,7 @@ private struct WorkstationCanvasCard: View {
     let isSelected: Bool
     let pointerEnabled: Bool
     let zoom: CGFloat
+    var showsPreview: Bool = true
     var onSelect: () -> Void
     var onDoubleTap: () -> Void
     var onMove: (CGSize) -> Void
@@ -1582,13 +1637,14 @@ private struct WorkstationCanvasCard: View {
     @State private var snippet: String?
     @State private var liveDrag: CGSize = .zero
 
-    private let cardWidth: CGFloat = 208
+    static let cardWidth: CGFloat = 208
+    static let cardHeight: CGFloat = 196
     private let previewHeight: CGFloat = 152
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             previewArea
-                .frame(width: cardWidth, height: previewHeight)
+                .frame(width: Self.cardWidth, height: previewHeight)
                 .clipped()
 
             HStack(spacing: 7) {
@@ -1614,7 +1670,7 @@ private struct WorkstationCanvasCard: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-            .frame(width: cardWidth, alignment: .leading)
+            .frame(width: Self.cardWidth, alignment: .leading)
             .background(Theme.surface)
         }
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -1622,7 +1678,7 @@ private struct WorkstationCanvasCard: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(isSelected ? theme.accent : Theme.stroke, lineWidth: isSelected ? 2.5 : 1)
         )
-        .shadow(color: .black.opacity(isSelected ? 0.26 : 0.14), radius: isSelected ? 14 : 7, x: 0, y: 4)
+        .shadow(color: showsPreview ? .black.opacity(isSelected ? 0.26 : 0.10) : .clear, radius: isSelected ? 10 : 4, x: 0, y: 3)
         .scaleEffect(zoom)
         .offset(liveDrag)
         .onTapGesture(count: 2, perform: onDoubleTap)
@@ -1641,24 +1697,29 @@ private struct WorkstationCanvasCard: View {
                     onMoveEnd()
                 }
         )
-        .task(id: item.id) {
+        .task(id: showsPreview ? item.id : "") {
+            guard showsPreview else {
+                thumbnail = nil
+                snippet = nil
+                return
+            }
             if case .stagedChange(let path, let data, _, _) = item.kind {
                 let lower = path.lowercased()
                 if [".png", ".jpg", ".jpeg", ".gif", ".webp"].contains(where: { lower.hasSuffix($0) }) {
-                    thumbnail = ImageDownsampler.image(from: data, maxPixelSize: 640)
+                    thumbnail = ImageDownsampler.image(from: data, maxPixelSize: 360)
                 } else if let str = String(data: data, encoding: .utf8) {
-                    snippet = String(str.prefix(420))
+                    snippet = String(str.prefix(280))
                 }
                 return
             }
             guard let att = item.attachment else { return }
             switch item.kind {
             case .image, .pdf:
-                thumbnail = await ImageDownsampler.attachmentThumbnail(att, store: app.attachmentStore, maxPixelSize: 640)
+                thumbnail = await ImageDownsampler.attachmentThumbnail(att, store: app.attachmentStore, maxPixelSize: 360)
             case .textOrCode:
-                if let slice = (try? await app.attachmentStore.readSlice(for: att, offsetBytes: 0, maxBytes: 8_192))?.data,
+                if let slice = (try? await app.attachmentStore.readSlice(for: att, offsetBytes: 0, maxBytes: 4_096))?.data,
                    let str = AttachmentDataPreviewBody.readableText(from: slice, name: att.name) {
-                    snippet = String(str.prefix(420))
+                    snippet = String(str.prefix(280))
                 }
             default:
                 break
@@ -1670,25 +1731,26 @@ private struct WorkstationCanvasCard: View {
     private var previewArea: some View {
         ZStack {
             Theme.raised
-            if let thumbnail {
+            if showsPreview, let thumbnail {
                 Image(uiImage: thumbnail)
                     .resizable()
                     .scaledToFill()
-                    .frame(width: cardWidth, height: previewHeight)
-            } else if case .mermaid(let code) = item.kind {
-                MermaidBlockView(code: code, compactCardMode: true)
-                    .frame(width: cardWidth, height: previewHeight)
-            } else if let snippet {
-                if item.name.lowercased().hasSuffix(".mmd") || item.name.lowercased().hasSuffix(".mermaid") {
+                    .frame(width: Self.cardWidth, height: previewHeight)
+            } else if showsPreview, let snippet {
+                let lowerName = item.name.lowercased()
+                if lowerName.hasSuffix(".mmd") || lowerName.hasSuffix(".mermaid") {
                     MermaidBlockView(code: snippet, compactCardMode: true)
-                        .frame(width: cardWidth, height: previewHeight)
+                        .frame(width: Self.cardWidth, height: previewHeight)
                 } else {
                     Text(snippet)
                         .font(.system(size: 9.5, design: .monospaced))
                         .foregroundStyle(.primary.opacity(0.86))
                         .padding(10)
-                        .frame(width: cardWidth, height: previewHeight, alignment: .topLeading)
+                        .frame(width: Self.cardWidth, height: previewHeight, alignment: .topLeading)
                 }
+            } else if showsPreview, case .mermaid(let code) = item.kind {
+                MermaidBlockView(code: code, compactCardMode: true)
+                    .frame(width: Self.cardWidth, height: previewHeight)
             } else {
                 VStack(spacing: 8) {
                     Image(systemName: item.icon)
@@ -1700,6 +1762,50 @@ private struct WorkstationCanvasCard: View {
                 }
             }
         }
+    }
+}
+
+private struct CanvasOverviewMarks: View {
+    let items: [WorkstationItem]
+    let zoom: CGFloat
+    let pan: CGSize
+    let viewport: CGSize
+    let selectedID: String?
+    let position: (String, Int) -> CGPoint
+
+    var body: some View {
+        Canvas { context, size in
+            let cardW = max(2, WorkstationCanvasCard.cardWidth * zoom)
+            let cardH = max(2, WorkstationCanvasCard.cardHeight * zoom)
+            let bounds = CGRect(origin: .zero, size: size).insetBy(dx: -30, dy: -30)
+            let showName = zoom >= 0.16 && cardH >= 22
+            for (index, item) in items.enumerated() {
+                let pos = position(item.id, index)
+                let cx = size.width * 0.5 + pan.width + pos.x * zoom
+                let cy = size.height * 0.46 + pan.height + pos.y * zoom
+                let rect = CGRect(x: cx - cardW / 2, y: cy - cardH / 2, width: cardW, height: cardH)
+                guard rect.intersects(bounds) else { continue }
+                let radius = min(8, max(1.5, 10 * zoom))
+                let path = Path(roundedRect: rect, cornerRadius: radius)
+                context.fill(path, with: .color(Color.white.opacity(0.94)))
+                let badgeH = max(1.5, min(rect.height * 0.16, 8))
+                let badge = CGRect(x: rect.minX, y: rect.maxY - badgeH, width: rect.width, height: badgeH)
+                context.fill(Path(roundedRect: badge, cornerRadius: min(radius, badgeH / 2)), with: .color(item.badgeColor))
+                if item.id == selectedID {
+                    context.stroke(path, with: .color(item.badgeColor), lineWidth: max(1, 1.5 * zoom))
+                }
+                if showName {
+                    let title = context.resolve(
+                        Text(item.name)
+                            .font(.system(size: min(11, max(7, 13 * zoom)), weight: .semibold))
+                            .foregroundColor(Color.black.opacity(0.78))
+                    )
+                    let titleRect = CGRect(x: rect.minX + 4, y: rect.minY + 3, width: rect.width - 8, height: min(16, rect.height * 0.4))
+                    context.draw(title, in: titleRect)
+                }
+            }
+        }
+        .frame(width: viewport.width, height: viewport.height)
     }
 }
 
