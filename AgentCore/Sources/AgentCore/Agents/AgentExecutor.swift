@@ -809,7 +809,12 @@ private final class LiveHelperProgressTracker: @unchecked Sendable {
             let body = item.output.isEmpty ? (item.liveThought ?? item.latestActivity ?? "Working…") : item.output
             return "### Sub-agent: \(item.name) (\(toolsWord)\(modelBadge))\nTask: \(item.task)\nStatus: \(item.status.rawValue)\(steps)\n\n\(body)"
         }.joined(separator: "\n\n---\n\n")
-        return ToolLiveUpdate(summary: summary, detail: detail, subagents: items)
+        return ToolLiveUpdate(
+            summary: summary,
+            detail: detail,
+            subagents: items,
+            billedCost: items.reduce(0) { $0 + $1.cost }
+        )
     }
 }
 

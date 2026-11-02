@@ -339,7 +339,7 @@ final class ChatSession: Identifiable {
                         return copy
                     }
                 }
-                if record.result == nil || record.result?.contains("running_in_background") == true {
+                if record.result == nil || hasRunningSubagents {
                     if record.name == "launch_helpers" {
                         let actionsDone = (record.subagents ?? []).reduce(0) { $0 + $1.toolCallCount }
                         let progressNote = actionsDone > 0 ? " after \(actionsDone) actions of partial progress" : ""

@@ -501,8 +501,10 @@ public struct SubagentRunItem: Codable, Sendable, Hashable, Identifiable {
     /// and for older saved chats that predate structured `subagents` persistence.
     public static func resolvedItems(for call: ToolCallRecord) -> [SubagentRunItem] {
         if let stored = call.subagents, !stored.isEmpty {
-            let isBackgroundActive = call.result?.contains("running_in_background") == true
-            guard call.status != .running && call.status != .waitingForUser && !isBackgroundActive else {
+            let helpersStillRunning = stored.contains { $0.status == .running }
+            // A helper whose own status is still running was started in the background.
+            // The tool's result text is a sentence ("not stopped"), not a status, so it must not decide this.
+            if call.status == .running || call.status == .waitingForUser || (call.status == .done && helpersStillRunning) {
                 return stored
             }
             return stored.map { item in
@@ -553,15 +555,37 @@ public struct SubagentRunItem: Codable, Sendable, Hashable, Identifiable {
         }
     }
 
+    /// Uses a recorded status value, never a word found inside a sentence.
+    /// "not stopped" must not become cancelled. With no recorded terminal status, stay running.
     private static func fallbackTerminalStatus(for call: ToolCallRecord) -> Status {
-        let combined = "\(call.summary) \(call.detail ?? "") \(call.result ?? "")".lowercased()
-        if combined.contains("cancel") || combined.contains("stopped") || combined.contains("interrupted") || combined.contains("paused") {
-            return .cancelled
+        if let recorded = exactRecordedStatus(in: call.result) ?? exactRecordedStatus(in: call.detail) {
+            return recorded
         }
-        if call.detail == nil && call.result == nil {
-            return .cancelled
+        switch call.status {
+        case .failed:
+            return .failed
+        case .done, .running, .waitingForUser:
+            return .running
         }
-        return call.status == .done ? .completed : .failed
+    }
+
+    /// The whole text has to be a status, not a sentence that happens to contain one.
+    private static func exactRecordedStatus(in text: String?) -> Status? {
+        guard let text else { return nil }
+        switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "cancelled", "canceled", "interrupted", "stopped", "paused",
+             "interrupted when the app closed.", "interrupted when the app closed",
+             "paused when the app closed.", "paused when the app closed":
+            return .cancelled
+        case "failed":
+            return .failed
+        case "completed", "done":
+            return .completed
+        case "running", "running_in_background":
+            return .running
+        default:
+            return nil
+        }
     }
 }
 
