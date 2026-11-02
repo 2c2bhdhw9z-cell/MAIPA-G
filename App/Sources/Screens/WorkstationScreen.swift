@@ -274,7 +274,7 @@ struct WorkstationScreen: View {
                                 isSelected: selectedItemID == item.id,
                                 pointerEnabled: tool == .pointer,
                                 zoom: zoom,
-                                showsPreview: zoom >= 0.72,
+                                showsPreview: zoom >= 0.42,
                                 onSelect: {
                                     selectedItemID = item.id
                                     Haptics.selection()
@@ -456,15 +456,15 @@ struct WorkstationScreen: View {
         return Int(ceil(sqrt(Double(count))))
     }
 
-    /// One drawing pass instead of a SwiftUI card per file. Used when a card would be tiny or
-    /// dozens of them would be on screen at once.
+    /// One drawing pass instead of a SwiftUI card per file. A medium zoom still uses real
+    /// cards, but only the ones on screen. Farther out, hundreds of cards become one picture.
     private static func useOverview(zoom: CGFloat, itemCount: Int, viewport: CGSize) -> Bool {
-        if zoom < 0.4 { return true }
+        if zoom < 0.22 { return true }
         let visualW = max(WorkstationCanvasCard.cardWidth * zoom, 1)
         let visualH = max(WorkstationCanvasCard.cardHeight * zoom, 1)
         let across = Int(ceil(viewport.width / visualW)) + 1
         let down = Int(ceil(viewport.height / visualH)) + 1
-        return min(itemCount, across * down) > 28
+        return min(itemCount, across * down) > 64
     }
 
     private static func cardFrame(position: CGPoint, zoom: CGFloat, pan: CGSize, viewport: CGSize) -> CGRect {
