@@ -142,7 +142,8 @@ final class SyncCoordinator {
             } catch {
                 activeSyncTask?.cancel()
                 activeSyncTask = nil
-                pendingPaths = await engine.pendingPaths()
+                // Do not re-read every saved file here. That scan loaded the whole library into
+                // memory while the screen still said "Saving…", and iOS closed the app for it.
                 await app?.diagnostics.record(error: error, area: "saving", operation: "sync")
                 if error is SyncTimeoutError {
                     status = lastSaved != nil ? .idle : .failed(Self.describe(error))

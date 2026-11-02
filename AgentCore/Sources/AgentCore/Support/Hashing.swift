@@ -46,6 +46,21 @@ public enum Hashing {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
+    /// Same id as `gitBlobID(_:)`, read in 1 MB pieces so a backup can check a large file without
+    /// pulling the whole thing into memory.
+    public static func gitBlobID(fileAt url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let size = try handle.seekToEnd()
+        try handle.seek(toOffset: 0)
+        var hasher = Insecure.SHA1()
+        hasher.update(data: Data("blob \(size)\u{0}".utf8))
+        while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
     /// Cryptographically random bytes from the system generator.
     public static func randomBytes(_ count: Int) -> Data {
         var generator = SystemRandomNumberGenerator()

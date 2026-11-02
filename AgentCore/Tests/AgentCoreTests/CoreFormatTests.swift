@@ -36,6 +36,16 @@ struct CoreFormatTests {
         #expect(Hashing.gitBlobID(Data()) == "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
     }
 
+    @Test func gitBlobIDFromAFileMatchesTheBytes() throws {
+        let data = Data("hello\n".utf8)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("maipa-g-blob-\(UUID().uuidString)")
+        try data.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try Hashing.gitBlobID(fileAt: url) == Hashing.gitBlobID(data))
+        try Data().write(to: url)
+        #expect(try Hashing.gitBlobID(fileAt: url) == Hashing.gitBlobID(Data()))
+    }
+
     @Test func pkceMatchesTheRFCExample() {
         // Checked with Python: base64url(sha256(verifier)) without padding.
         let pkce = PKCE(verifier: "dBjftJeZ4CVP-mJ92K9rIn2ky-qD9-kOaeH-SiUpY4U")
