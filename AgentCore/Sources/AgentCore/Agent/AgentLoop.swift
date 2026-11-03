@@ -412,7 +412,7 @@ private struct Runner {
                         let wasRunning = turn.steps[sIdx].toolCalls[cIdx].subagents?.contains { $0.status == .running } == true
                         turn.steps[sIdx].toolCalls[cIdx].subagents = subs
                         if wasRunning, !subs.contains(where: { $0.status == .running }) {
-                            turn.steps[sIdx].toolCalls[cIdx].result = patch.update.detail ?? patch.update.summary
+                            turn.steps[sIdx].toolCalls[cIdx].result = Self.capped(patch.update.detail ?? patch.update.summary)
                         }
                     }
                     if patch.update.billedCost > 0 {
@@ -608,11 +608,13 @@ private struct Runner {
                 let tailNote = stillRunning > 0
                     ? "(\(stillRunning) other background sub-agent\(stillRunning == 1 ? " is" : "s are") still running. Do not answer the user and do not start more work until \(stillRunning == 1 ? "that report arrives" : "those reports arrive").)"
                     : "(All background sub-agents have now finished — synthesize the full findings clearly for the user.)"
-                rawMessages.append(.user(
-                    "[Background sub-agent report]\n\n"
-                    + activeBackgroundReports.joined(separator: "\n\n---\n\n")
-                    + "\n\n" + tailNote
-                ))
+                let heading = "[Background sub-agent report]\n\n"
+                let footer = "\n\n" + tailNote
+                let report = Transcript.cappedToolResult(
+                    activeBackgroundReports.joined(separator: "\n\n---\n\n"),
+                    limit: Transcript.maxToolResultCharacters - heading.count - footer.count
+                )
+                rawMessages.append(.user(heading + report + footer))
             }
             if let nudge = activeBlankNudge {
                 rawMessages.append(.user(nudge))
@@ -870,7 +872,7 @@ private struct Runner {
             }
             if call.name == AskUserTool.name {
                 if let answers = call.questions?.answerText {
-                    turn.steps[stepIndex].toolCalls[callIndex].result = answers
+                    turn.steps[stepIndex].toolCalls[callIndex].result = Self.capped(answers)
                     turn.steps[stepIndex].toolCalls[callIndex].status = .done
                     turn.steps[stepIndex].toolCalls[callIndex].summary = "You answered"
                     turn.steps[stepIndex].toolCalls[callIndex].finishedAt = Date()
@@ -1103,15 +1105,14 @@ private struct Runner {
 
     mutating func fail(_ stepIndex: Int, _ callIndex: Int, message: String, summary: String, detail: String? = nil) {
         turn.steps[stepIndex].toolCalls[callIndex].status = .failed
-        turn.steps[stepIndex].toolCalls[callIndex].result = message
+        turn.steps[stepIndex].toolCalls[callIndex].result = Self.capped(message)
         turn.steps[stepIndex].toolCalls[callIndex].summary = summary
         turn.steps[stepIndex].toolCalls[callIndex].detail = detail ?? message
         turn.steps[stepIndex].toolCalls[callIndex].finishedAt = Date()
     }
 
-    static func capped(_ text: String, limit: Int = 80_000) -> String {
-        guard text.count > limit else { return text }
-        return String(text.prefix(limit)) + "\n[Cut off: the rest was too long. Ask for a smaller part.]"
+    static func capped(_ text: String) -> String {
+        Transcript.cappedToolResult(text)
     }
 
     // MARK: Errors in words
