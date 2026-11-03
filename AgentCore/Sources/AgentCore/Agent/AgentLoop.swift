@@ -1036,13 +1036,19 @@ private struct Runner {
             for step in candidate.steps {
                 if !(step.citations ?? []).isEmpty { return true }
                 for call in step.toolCalls where call.result != nil && call.status != .waitingForUser {
-                    if tools[call.name]?.bringsOutsideContent == true || call.name.hasPrefix("mcp_") || Self.outsideContentToolNames.contains(call.name) { return true }
+                    if let tool = tools[call.name] {
+                        if tool.bringsOutsideContent { return true }
+                    } else if call.name.hasPrefix("mcp_") || Self.outsideContentToolNames.contains(call.name) {
+                        return true
+                    }
                 }
             }
         }
         return false
     }
 
+    // Fallback only — used when the tool isn't in `tools` (e.g. a resumed turn).
+    // Prefer `AgentTool.bringsOutsideContent` when the tool object is available.
     static let outsideContentToolNames: Set<String> = [
         "web_search", "read_web_page", "read_file", "search_code", "read_repo_file",
         "read_other_repo_file", "load_repo_rules", "read_attachment",
