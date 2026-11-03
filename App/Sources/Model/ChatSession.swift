@@ -1336,6 +1336,17 @@ final class ChatSession: Identifiable {
                         let word = allCalls.count == 1 ? "action" : "actions"
                         finalText = "Completed \(allCalls.count) \(word)."
                     }
+                    if let pending = finalTurn?.pendingQuestions?.questions.questions.first {
+                        return AgentExecutionResult(
+                            output: "This sub-agent needs your approval before it can continue: \(pending.text)",
+                            model: modelUsed,
+                            cost: cost,
+                            pendingQuestion: AgentExecutionQuestion(text: pending.text, options: pending.options),
+                            toolCallCount: allCalls.count,
+                            toolSummaries: allCalls.map(\.summary),
+                            status: "failed"
+                        )
+                    }
                     return AgentExecutionResult(
                         output: finalText,
                         model: modelUsed,
