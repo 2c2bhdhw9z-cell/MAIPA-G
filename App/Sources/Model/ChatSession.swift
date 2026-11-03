@@ -1065,7 +1065,7 @@ final class ChatSession: Identifiable {
         for problem in hookProblems {
             _ = app.report(RepoHookProblem(message: problem), area: "hooks", operation: "read repo hooks")
         }
-        var computer = await computerContext(app: app, repo: repoContext, stagedPatch: await changeWorkspace?.stagedDiff())
+        var computer = await computerContext(app: app, repo: repoContext, stagedPatch: await changeWorkspace?.stagedDiffForPrompt())
         computer?.appNote = computerNote
         computer?.canSyncStaged = canSyncStaged
 

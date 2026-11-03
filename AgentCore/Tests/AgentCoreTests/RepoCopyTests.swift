@@ -340,7 +340,7 @@ struct RepoCopyTests {
         let key = "sk-or-v1-abcdefghijklmnopqrstuvwxyz123456"
         try await changes.create(path: ".env", text: "OPENROUTER_API_KEY=\(key)\n")
         try await changes.edit(path: "README.md", text: "# New readme line\n")
-        let patch = await changes.stagedDiff()
+        let patch = await changes.stagedDiffForPrompt()
         let computer = SystemPrompt.ComputerContext(
             service: "Sprites", machine: "mcp-maipa-g", repoFullName: "octo/app", cloneURL: "https://github.com/octo/app.git",
             branch: "main", commit: "0123456789abcdef", repoPath: "$HOME/repos/octo/app", stagedPatch: patch
