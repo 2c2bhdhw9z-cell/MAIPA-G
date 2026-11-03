@@ -1787,6 +1787,45 @@ final class ChatSession: Identifiable {
             fail(.other, "Describe the picture you want \(model.shortName) to generate.")
             return
         }
+        // A billed picture goes through `generate_image`'s own approval, the same pause every
+        // other tool uses: a waiting tool call whose first option allows it.
+        let imageTool = GenerateImageTool(client: client, store: app.attachmentStore, model: model.id, maySpend: !model.isFree)
+        var arguments: JSONValue = [
+            "prompt": .string(cleanPrompt),
+            "aspect_ratio": .string(ImageAspectRatio.square.rawValue),
+            "quality": .string(ImageQuality.standard.rawValue),
+        ]
+        var approved = false
+        if let waiting = lastTurn?.steps.last?.toolCalls.last, waiting.name == imageTool.name, let questions = waiting.questions {
+            guard let answer = questions.answers?.first else { return }
+            let normalized = answer.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let affirmative: Set<String> = ["yes", "y", "allow", "approve", "approved", "sure", "ok", "okay", "go ahead", "do it"]
+            guard questions.questions.first?.options.first == answer || affirmative.contains(normalized) else {
+                var turn = lastTurn ?? AssistantTurn()
+                var declinedStep = AssistantStep()
+                declinedStep.model = model.id
+                declinedStep.text = "No picture was generated: the billed request wasn't approved."
+                declinedStep.finishedAt = Date()
+                turn.steps = [declinedStep]
+                turn.status = .done
+                replaceLastTurn(turn)
+                return
+            }
+            arguments = waiting.parsedArguments
+            approved = true
+        } else if let approval = await imageTool.approvalRequest(for: arguments) {
+            var turn = lastTurn ?? AssistantTurn()
+            let argumentText = (try? JSONCoding.encoder().encode(arguments)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            var call = ToolCallRecord(id: UUID().uuidString, name: imageTool.name, arguments: argumentText, summary: "Needs your approval", status: .waitingForUser)
+            call.questions = QuestionSet(questions: [.init(text: approval.question, options: [approval.allowLabel, "Don't allow"])])
+            var waitingStep = AssistantStep()
+            waitingStep.model = model.id
+            waitingStep.toolCalls = [call]
+            turn.steps = [waitingStep]
+            turn.status = .waitingForUser
+            replaceLastTurn(turn)
+            return
+        }
         if var turn = lastTurn {
             turn.status = .running
             var runningStep = AssistantStep()
@@ -1796,31 +1835,13 @@ final class ChatSession: Identifiable {
             replaceLastTurn(turn)
         }
         do {
-            let generated = try await client.generateImages(
-                prompt: cleanPrompt,
-                model: model.id,
-                options: ImageGenerationOptions(aspectRatio: .square, quality: .standard),
-                progress: { _ in }
-            )
-            var savedResults: [GeneratedImageResult] = []
-            for image in generated {
-                let ext = image.mimeType.contains("jpeg") || image.mimeType.contains("jpg") ? "jpg" : (image.mimeType.contains("webp") ? "webp" : "png")
-                let ref = try await app.attachmentStore.importGeneratedImage(
-                    image.data,
-                    name: "picture-\(image.id.uuidString.lowercased()).\(ext)",
-                    mimeType: image.mimeType
-                )
-                let item = GeneratedImageResult(
-                    attachment: ref,
-                    prompt: image.prompt,
-                    model: image.model,
-                    aspectRatio: ImageAspectRatio.square.rawValue,
-                    quality: ImageQuality.standard.rawValue,
-                    cost: image.cost
-                )
-                try? await app.attachmentStore.saveGeneratedMetadata(item)
-                savedResults.append(item)
+            let output: ToolOutput
+            if approved {
+                output = try await imageTool.runApproved(arguments: arguments, progress: { _ in })
+            } else {
+                output = try await imageTool.run(arguments: arguments, progress: { _ in })
             }
+            let savedResults = output.generatedImages
             var turn = lastTurn ?? AssistantTurn()
             var finishedStep = AssistantStep()
             finishedStep.model = model.id
