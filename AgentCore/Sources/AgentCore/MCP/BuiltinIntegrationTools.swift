@@ -772,10 +772,13 @@ private struct ScopedRESTRequestTool: BuiltinDescribedTool {
 
     func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
         let method = (arguments["method"]?.stringValue ?? "GET").uppercased()
-        if method == "DELETE" {
-            return ToolApprovalRequest(question: "Allow MAIPA-G to send DELETE \(arguments["path"]?.stringValue ?? "") to \(configuration.displayName)?", allowLabel: "Allow delete")
+        switch method {
+        case "DELETE", "POST", "PUT", "PATCH":
+            let action = "\(configuration.displayName) · \(method) \(arguments["path"]?.stringValue ?? "")"
+            return ToolApprovalRequest(question: "Allow MAIPA-G to send \(method) to \(configuration.displayName)?\n\(action)", allowLabel: "Allow")
+        default:
+            return nil
         }
-        return nil
     }
 
     func approvalAfterOutsideContent(for arguments: JSONValue) async -> ToolApprovalRequest? {
