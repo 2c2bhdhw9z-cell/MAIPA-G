@@ -1283,6 +1283,11 @@ public enum AIProviderGateway {
         if let id = msg.toolCallID {
             obj["tool_call_id"] = .string(id)
         }
+        // DeepSeek thinking models return HTTP 400 unless every earlier tool-calling assistant
+        // message carries `reasoning_content` (an empty string is accepted).
+        if msg.role == .assistant, let reasoning = msg.reasoningContent {
+            obj["reasoning_content"] = .string(reasoning)
+        }
         return .object(obj)
     }
 

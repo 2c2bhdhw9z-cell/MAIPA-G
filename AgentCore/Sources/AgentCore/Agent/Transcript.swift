@@ -20,9 +20,9 @@ public enum Transcript {
     /// The messages for the next request: the system prompt, then the whole conversation.
     ///
     /// Every tool call gets a result, because the API rejects a call left without one: calls that
-    /// never finished get a short note instead. Thinking blocks are sent back only for the turn in
-    /// progress, which is where models need them to carry on mid-answer; older ones would only
-    /// cost tokens.
+    /// never finished get a short note instead. Thinking blocks are normally sent back only for the
+    /// turn in progress. With `replaysToolCallReasoning`, DeepSeek or another provider that requires
+    /// replay also receives saved reasoning on every older assistant step containing tool calls.
     ///
     /// When the user switches mid-chat to a text-only model (`readsImages == false`), earlier inline
     /// images are automatically converted to clean text notes so the text-only model never fails
@@ -33,7 +33,8 @@ public enum Transcript {
         attachmentData: [UUID: Data] = [:],
         readsImages: Bool = true,
         readsPDFs: Bool = true,
-        toolInlineImages: [String: [ToolInlineImage]] = [:]
+        toolInlineImages: [String: [ToolInlineImage]] = [:],
+        replaysToolCallReasoning: Bool = false
     ) -> [APIMessage] {
         var result: [APIMessage] = [.system(systemPrompt)]
         var firstIncludedIndex = 0
@@ -119,11 +120,18 @@ public enum Transcript {
                     let calls = step.toolCalls
                     let text = step.text.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !text.isEmpty || !calls.isEmpty else { continue }
+                    let replaysThinking = replaysToolCallReasoning && !calls.isEmpty
+                    let reasoningText = step.reasoning.isEmpty
+                        ? step.reasoningDetails.compactMap { detail in
+                            detail["type"]?.stringValue == "reasoning.text" ? detail["text"]?.stringValue : nil
+                        }.joined()
+                        : step.reasoning
                     result.append(APIMessage(
                         role: .assistant,
                         content: text.isEmpty ? nil : step.text,
                         toolCalls: calls.isEmpty ? nil : calls.map { APIToolCall(id: $0.id, name: $0.name, arguments: $0.arguments) },
-                        reasoningDetails: isCurrent && !step.reasoningDetails.isEmpty ? step.reasoningDetails : nil
+                        reasoningDetails: (isCurrent || replaysThinking) && !step.reasoningDetails.isEmpty ? step.reasoningDetails : nil,
+                        reasoningContent: replaysThinking ? reasoningText : nil
                     ))
                     var stepVisionImages: [ToolInlineImage] = []
                     for call in calls {
@@ -151,6 +159,11 @@ public enum Transcript {
             }
         }
         return result
+    }
+
+    /// DeepSeek requires reasoning replay for tool calls, including provider-qualified model IDs.
+    public static func requiresToolCallReasoningReplay(model: String) -> Bool {
+        model.lowercased().contains("deepseek")
     }
 
     static func toolResultText(for call: ToolCallRecord, turnIsCurrent: Bool, isOlderTurn: Bool = false) -> String {

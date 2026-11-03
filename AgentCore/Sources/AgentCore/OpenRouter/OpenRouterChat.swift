@@ -15,14 +15,17 @@ public struct APIMessage: Encodable, Sendable, Hashable {
     /// The model's own thinking blocks, returned exactly as received. Models such as Claude need
     /// them back while a tool-using answer is still in progress, or they lose their train of thought.
     public var reasoningDetails: [JSONValue]?
+    /// Saved plain reasoning for providers that require `reasoning_content` on tool calls.
+    public var reasoningContent: String?
 
-    public init(role: Role, content: String?, contentParts: [JSONValue]? = nil, toolCalls: [APIToolCall]? = nil, toolCallID: String? = nil, reasoningDetails: [JSONValue]? = nil) {
+    public init(role: Role, content: String?, contentParts: [JSONValue]? = nil, toolCalls: [APIToolCall]? = nil, toolCallID: String? = nil, reasoningDetails: [JSONValue]? = nil, reasoningContent: String? = nil) {
         self.role = role
         self.content = content
         self.contentParts = contentParts
         self.toolCalls = toolCalls
         self.toolCallID = toolCallID
         self.reasoningDetails = reasoningDetails
+        self.reasoningContent = reasoningContent
     }
 
     public static func system(_ text: String) -> APIMessage { APIMessage(role: .system, content: text) }
@@ -34,6 +37,7 @@ public struct APIMessage: Encodable, Sendable, Hashable {
         case toolCalls = "tool_calls"
         case toolCallID = "tool_call_id"
         case reasoningDetails = "reasoning_details"
+        case reasoningContent = "reasoning_content"
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -50,6 +54,7 @@ public struct APIMessage: Encodable, Sendable, Hashable {
         if let toolCalls, !toolCalls.isEmpty { try container.encode(toolCalls, forKey: .toolCalls) }
         try container.encodeIfPresent(toolCallID, forKey: .toolCallID)
         if let reasoningDetails, !reasoningDetails.isEmpty { try container.encode(reasoningDetails, forKey: .reasoningDetails) }
+        try container.encodeIfPresent(reasoningContent, forKey: .reasoningContent)
     }
 }
 

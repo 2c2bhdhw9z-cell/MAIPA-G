@@ -601,7 +601,8 @@ private struct Runner {
                 attachmentData: attachmentData,
                 readsImages: route.readsImages,
                 readsPDFs: route.readsPDFs,
-                toolInlineImages: toolInlineImages
+                toolInlineImages: toolInlineImages,
+                replaysToolCallReasoning: Transcript.requiresToolCallReasoningReplay(model: route.model)
             )
             if !activeBackgroundReports.isEmpty {
                 let stillRunning = await steering?.activeBackgroundTaskCount() ?? 0
