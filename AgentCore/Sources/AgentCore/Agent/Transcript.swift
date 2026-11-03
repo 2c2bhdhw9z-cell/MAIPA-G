@@ -92,12 +92,14 @@ public enum Transcript {
                 if !effectiveText.isEmpty { parts.append(["type": "text", "text": .string(effectiveText)]) }
                 for attachment in user.attachments {
                     guard let data = attachmentData[attachment.id] else { continue }
-                    let mime = detectedMimeType(for: data, fallback: attachment.mimeType)
-                    let encoded = "data:\(mime);base64,\(data.base64EncodedString())"
                     switch attachment.kind {
                     case .image where readsImages:
+                        let mime = detectedMimeType(for: data, fallback: attachment.mimeType)
+                        let encoded = "data:\(mime);base64,\(data.base64EncodedString())"
                         parts.append(["type": "image_url", "image_url": ["url": .string(encoded)]])
                     case .pdf where readsPDFs:
+                        let mime = detectedMimeType(for: data, fallback: attachment.mimeType)
+                        let encoded = "data:\(mime);base64,\(data.base64EncodedString())"
                         parts.append(["type": "file", "file": ["filename": .string(attachment.name), "file_data": .string(encoded)]])
                     case .image, .pdf, .text, .file:
                         break

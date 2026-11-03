@@ -390,6 +390,7 @@ public struct ListFilesTool: AgentTool {
             var textFileCount = 0
             var perFile: [(path: String, lines: Int, bytes: Int)] = []
             for entry in matchingFiles {
+                try Task.checkCancellation()
                 let data: Data?
                 if let sc = stagedMap[entry.path] {
                     switch sc {
@@ -400,9 +401,8 @@ public struct ListFilesTool: AgentTool {
                     data = copy.contents(of: entry.path)
                 }
                 guard let data, let doc = TextFileCodec.decode(data) else { continue }
-                var split = doc.text.split(separator: "\n", omittingEmptySubsequences: false)
-                if split.last == "" { split.removeLast() }
-                let count = split.count
+                // Count newlines directly instead of allocating a split array
+                let count = doc.text.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) } + (doc.text.last != "\n" && !doc.text.isEmpty ? 1 : 0)
                 totalLines += count
                 totalBytes += data.count
                 textFileCount += 1

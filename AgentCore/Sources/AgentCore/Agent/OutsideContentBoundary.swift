@@ -91,8 +91,14 @@ extension ShellRisk {
                 }
                 // An inline script is split across segments, so the whole command is checked.
                 let interpreters: Set<String> = ["python", "python3", "node", "deno", "bun", "perl", "ruby", "php"]
-                if interpreters.contains(program) || (shellWrappers.contains(program) && words.dropFirst().map(cleanProgramName).contains(where: interpreters.contains)),
-                   ["http://", "https://", "socket", "fetch(", "urllib", "requests.", "httpx", "aiohttp", "net/http", "XMLHttpRequest"].contains(where: { candidate.contains($0) }) { return true }
+                if interpreters.contains(program) || (shellWrappers.contains(program) && words.dropFirst().map(cleanProgramName).contains(where: interpreters.contains)) {
+                    // Treat script execution as potentially network-capable when inline network markers are present
+                    // or when executing an arbitrary script file that could contain network code
+                    if ["http://", "https://", "socket", "fetch(", "urllib", "requests.", "httpx", "aiohttp", "net/http", "XMLHttpRequest"].contains(where: { candidate.contains($0) }) { return true }
+                    // Executing a script file (not inline -c) is potentially network-capable
+                    let hasFileArg = words.dropFirst().contains(where: { !$0.hasPrefix("-") && ($0.hasSuffix(".py") || $0.hasSuffix(".js") || $0.hasSuffix(".rb") || $0.hasSuffix(".pl") || $0.hasSuffix(".php") || $0.contains("/")) })
+                    if hasFileArg { return true }
+                }
             }
         }
         return false

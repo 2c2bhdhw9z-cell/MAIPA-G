@@ -213,6 +213,7 @@ public struct HookedTool: AgentTool {
         guard !matching.isEmpty else { return output }
         var reports: [String] = []
         for hook in matching {
+            try Task.checkCancellation()
             switch hook.action {
             case .agent(let prompt):
                 reports.append("Hook “\(hook.name)” (\(hook.source)) asks: \(String(prompt.prefix(4_000)))")

@@ -1031,6 +1031,17 @@ private struct Runner {
     }
 
     func outsideContentSeen() -> Bool {
+        // Check for inline image or PDF attachments in any user message
+        for message in chat.messages {
+            if case .user(let user) = message.body {
+                for attachment in user.attachments {
+                    if attachment.kind == .image || attachment.kind == .pdf {
+                        return true
+                    }
+                }
+            }
+        }
+        
         let earlier = chat.messages.dropLast().compactMap(\.assistantTurn)
         for candidate in earlier + [turn] {
             for step in candidate.steps {
