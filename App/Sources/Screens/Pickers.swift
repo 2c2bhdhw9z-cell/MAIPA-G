@@ -13,6 +13,9 @@ struct ModelPicker: View {
     @State private var filter: Filter = .all
     @State private var sort: SortOrder = .newest
     @State private var selectedMaker: String?
+    /// Row data for the whole catalog, built once per catalog load (not per row per frame).
+    @State private var index = ModelPickerIndex.empty
+    @State private var detailRow: ModelRowData?
 
     enum Filter: String, CaseIterable, Identifiable {
         case all = "All"
@@ -53,28 +56,49 @@ struct ModelPicker: View {
         app.openRouter.allSelectableModels.isEmpty ? app.openRouter.models : app.openRouter.allSelectableModels
     }
 
+    /// Gateway display names for the "via …" label, keyed by provider ID.
+    private var providerNames: [String: String] {
+        Dictionary(app.openRouter.externalProviders.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+    }
+
     var body: some View {
         let current = app.model(for: target)
+        let pinned = Set(app.openRouter.pinnedModelIDs)
+        let repoAttached = app.repo(for: target) != nil
+        let matches = index.matching(query: trimmedQuery, filter: filter, sort: sort, maker: selectedMaker, pinned: pinned)
         VStack(spacing: 0) {
             headerBar
             searchAndFiltersBar
 
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
+                // Every result row is a direct child of the LazyVStack, so only on-screen rows are built.
+                LazyVStack(alignment: .leading, spacing: 2) {
                     if trimmedQuery.isEmpty && filter == .all && selectedMaker == nil {
                         smartModesSection(current: current)
-                        pinnedAndRecentSection(current: current)
+                            .padding(.bottom, 12)
+                        pinnedAndRecentSection(current: current, pinned: pinned, repoAttached: repoAttached)
                     } else if trimmedQuery.isEmpty && filter == .images && selectedMaker == nil {
-                        recentImagesSection(current: current)
+                        recentImagesSection(current: current, pinned: pinned, repoAttached: repoAttached)
                     }
 
                     if let customSlug = directSlugCandidate {
                         customSlugCard(slug: customSlug, current: current)
+                            .padding(.bottom, 12)
                     }
 
-                    resultsSection(current: current)
+                    resultsHeader(count: matches.count)
+
+                    if (catalog.isEmpty && app.openRouter.isLoadingModels) || (index.rows.isEmpty && !catalog.isEmpty) {
+                        loadingCard
+                    } else if matches.isEmpty {
+                        emptyCard
+                    } else {
+                        ForEach(matches) { row in
+                            modelRow(row, current: current, pinned: pinned, repoAttached: repoAttached)
+                        }
+                    }
                 }
-                .padding(.horizontal, 16)
+                .padding(.horizontal, 12)
                 .padding(.top, 10)
                 .padding(.bottom, 28)
             }
@@ -82,6 +106,15 @@ struct ModelPicker: View {
         }
         .background(Theme.background.ignoresSafeArea())
         .presentationDragIndicator(.visible)
+        .sheet(item: $detailRow) { row in
+            ModelDetailSheet(data: row, isSelected: current == .model(row.id)) {
+                detailRow = nil
+                select(.model(row.id))
+            }
+        }
+        .onChange(of: catalog, initial: true) { _, newCatalog in
+            index = ModelPickerIndex(catalog: newCatalog, providerNames: providerNames)
+        }
         .task {
             await app.openRouter.loadModels()
         }
@@ -293,47 +326,56 @@ struct ModelPicker: View {
     }
 
     @ViewBuilder
-    private func pinnedAndRecentSection(current: ModelChoice) -> some View {
-        let pinned = app.openRouter.pinnedModelIDs
-            .compactMap { app.openRouter.modelsByID[$0] }
+    private func pinnedAndRecentSection(current: ModelChoice, pinned: Set<String>, repoAttached: Bool) -> some View {
+        let pinnedRows = app.openRouter.pinnedModelIDs
+            .compactMap { index.byID[$0] }
             .filter { !$0.isPureImageModel }
         let recents = app.openRouter.recentModelIDs
-            .filter { !app.openRouter.pinnedModelIDs.contains($0) }
-            .compactMap { app.openRouter.modelsByID[$0] }
+            .filter { !pinned.contains($0) }
+            .compactMap { index.byID[$0] }
             .filter { !$0.isPureImageModel }
             .prefix(4)
 
-        if !pinned.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                sectionHeader("Pinned", count: pinned.count, icon: "star.fill")
-                ForEach(pinned) { model in
-                    modelCard(model, current: current)
+        if !pinnedRows.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                sectionHeader("Pinned", count: pinnedRows.count, icon: "star.fill")
+                    .padding(.horizontal, 4)
+                    .padding(.bottom, 4)
+                ForEach(pinnedRows) { row in
+                    modelRow(row, current: current, pinned: pinned, repoAttached: repoAttached)
                 }
             }
+            .padding(.bottom, 12)
         }
         if !recents.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
                 sectionHeader("Recent", count: recents.count, icon: "clock")
-                ForEach(Array(recents)) { model in
-                    modelCard(model, current: current)
+                    .padding(.horizontal, 4)
+                    .padding(.bottom, 4)
+                ForEach(Array(recents)) { row in
+                    modelRow(row, current: current, pinned: pinned, repoAttached: repoAttached)
                 }
             }
+            .padding(.bottom, 12)
         }
     }
 
     @ViewBuilder
-    private func recentImagesSection(current: ModelChoice) -> some View {
+    private func recentImagesSection(current: ModelChoice, pinned: Set<String>, repoAttached: Bool) -> some View {
         let recentImages = app.openRouter.recentModelIDs
-            .compactMap { app.openRouter.modelsByID[$0] }
+            .compactMap { index.byID[$0] }
             .filter(\.generatesImages)
             .prefix(4)
         if !recentImages.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
                 sectionHeader("Recent", count: recentImages.count, icon: "clock")
-                ForEach(Array(recentImages)) { model in
-                    modelCard(model, current: current)
+                    .padding(.horizontal, 4)
+                    .padding(.bottom, 4)
+                ForEach(Array(recentImages)) { row in
+                    modelRow(row, current: current, pinned: pinned, repoAttached: repoAttached)
                 }
             }
+            .padding(.bottom, 12)
         }
     }
 
@@ -375,58 +417,54 @@ struct ModelPicker: View {
         .buttonStyle(.plain)
     }
 
-    @ViewBuilder
-    private func resultsSection(current: ModelChoice) -> some View {
-        let matches = matchingModels
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                sectionHeader(resultsTitle, count: matches.count, icon: nil)
-                Spacer()
-                Text(sort.rawValue)
-                    .font(.caption2)
-                    .foregroundStyle(Theme.secondaryText)
-            }
+    private func resultsHeader(count: Int) -> some View {
+        HStack {
+            sectionHeader(resultsTitle, count: count, icon: nil)
+            Spacer()
+            Text(sort.rawValue)
+                .font(.caption2)
+                .foregroundStyle(Theme.secondaryText)
+        }
+        .padding(.horizontal, 4)
+        .padding(.bottom, 4)
+    }
 
-            if catalog.isEmpty && app.openRouter.isLoadingModels {
-                HStack(spacing: 10) {
-                    ProgressView()
-                    Text("Loading full OpenRouter model catalog…")
-                        .font(.subheadline)
-                        .foregroundStyle(Theme.secondaryText)
-                }
-                .padding(18)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            } else if matches.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("No models matched \"\(trimmedQuery.isEmpty ? filter.rawValue : trimmedQuery)\".")
-                        .font(.subheadline.weight(.semibold))
-                    HStack(spacing: 10) {
-                        if filter != .all || selectedMaker != nil {
-                            Button("Show all \(catalog.count) models") {
-                                filter = .all
-                                selectedMaker = nil
-                            }
-                            .font(.caption.weight(.semibold))
-                            .buttonStyle(.borderedProminent)
-                        }
-                        Button("Refresh from OpenRouter") {
-                            Task { await app.openRouter.loadModels(force: true) }
-                        }
-                        .font(.caption.weight(.semibold))
-                        .buttonStyle(.bordered)
+    private var loadingCard: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+            Text("Loading full OpenRouter model catalog…")
+                .font(.subheadline)
+                .foregroundStyle(Theme.secondaryText)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var emptyCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("No models matched \"\(trimmedQuery.isEmpty ? filter.rawValue : trimmedQuery)\".")
+                .font(.subheadline.weight(.semibold))
+            HStack(spacing: 10) {
+                if filter != .all || selectedMaker != nil {
+                    Button("Show all \(catalog.count) models") {
+                        filter = .all
+                        selectedMaker = nil
                     }
+                    .font(.caption.weight(.semibold))
+                    .buttonStyle(.borderedProminent)
                 }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Theme.stroke))
-            } else {
-                ForEach(matches) { model in
-                    modelCard(model, current: current)
+                Button("Refresh from OpenRouter") {
+                    Task { await app.openRouter.loadModels(force: true) }
                 }
+                .font(.caption.weight(.semibold))
+                .buttonStyle(.bordered)
             }
         }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Theme.stroke))
     }
 
     private var resultsTitle: String {
@@ -457,104 +495,23 @@ struct ModelPicker: View {
     }
 
     private var makers: [String] {
-        var counts: [String: Int] = [:]
-        for model in catalog {
-            counts[model.maker, default: 0] += 1
-        }
-        return counts.keys.sorted { (counts[$0] ?? 0) != (counts[$1] ?? 0) ? (counts[$0] ?? 0) > (counts[$1] ?? 0) : $0 < $1 }
+        index.makers
     }
 
-    private var matchingModels: [ModelInfo] {
-        let q = trimmedQuery.lowercased()
-        let tokens = q.split(whereSeparator: \.isWhitespace).map(String.init)
-        var scored: [(score: Int, model: ModelInfo)] = []
-        scored.reserveCapacity(catalog.count)
-
-        for model in catalog {
-            if let selectedMaker, model.maker != selectedMaker { continue }
-            // When actively typing a search query and filter == .pinned, don't trap the user in an empty pinned view.
-            let activeFilter = (!tokens.isEmpty && filter == .pinned) ? .all : filter
-            // Exclude pure image-generation models (`Image gen only`) from default chat model lists unless `Images` is active or searching by name.
-            if activeFilter != .images, tokens.isEmpty, model.isPureImageModel { continue }
-            switch activeFilter {
-            case .all: break
-            case .pinned: if !app.openRouter.isPinned(model.id) { continue }
-            case .free: if !model.isFree { continue }
-            case .thinks: if model.thinkingLevels.isEmpty { continue }
-            case .tools: if !model.supportsTools { continue }
-            case .vision: if !model.acceptsImages { continue }
-            case .images: if !model.generatesImages { continue }
-            }
-
-            if tokens.isEmpty {
-                scored.append((0, model))
-                continue
-            }
-
-            let idLower = model.id.lowercased()
-            let nameLower = model.name.lowercased()
-            let shortLower = model.shortName.lowercased()
-            let makerLower = model.maker.lowercased()
-            let summaryLower = model.summary?.lowercased() ?? ""
-            let capabilityTags = [
-                model.isFree ? "free" : "",
-                !model.thinkingLevels.isEmpty ? "thinking reasoning" : "",
-                model.supportsTools ? "tools agent" : "",
-                model.acceptsImages ? "vision image multimodal" : "",
-                model.generatesImages ? "image generation draw" : ""
-            ].joined(separator: " ")
-            let haystack = "\(nameLower) \(idLower) \(makerLower) \(capabilityTags) \(summaryLower)"
-            let compactHaystack = haystack.filter { $0.isLetter || $0.isNumber }
-
-            var matchedAll = true
-            var score = 0
-            for token in tokens {
-                let compactToken = token.filter { $0.isLetter || $0.isNumber }
-                if shortLower == token || idLower == token {
-                    score += 120
-                } else if shortLower.hasPrefix(token) || idLower.hasPrefix(token) {
-                    score += 70
-                } else if nameLower.contains(token) || idLower.contains(token) {
-                    score += 45
-                } else if makerLower.contains(token) {
-                    score += 30
-                } else if haystack.contains(token) || (!compactToken.isEmpty && compactHaystack.contains(compactToken)) {
-                    score += 12
-                } else {
-                    matchedAll = false
-                    break
-                }
-            }
-            if matchedAll {
-                if app.openRouter.isPinned(model.id) { score += 15 }
-                scored.append((score, model))
-            }
-        }
-
-        return scored.sorted { lhs, rhs in
-            if !tokens.isEmpty, lhs.score != rhs.score {
-                return lhs.score > rhs.score
-            }
-            switch sort {
-            case .newest:
-                let ld = lhs.model.created ?? .distantPast
-                let rd = rhs.model.created ?? .distantPast
-                if ld != rd { return ld > rd }
-                return lhs.model.shortName < rhs.model.shortName
-            case .cheapest:
-                let lp = (lhs.model.promptPrice ?? 999) + (lhs.model.completionPrice ?? 999)
-                let rp = (rhs.model.promptPrice ?? 999) + (rhs.model.completionPrice ?? 999)
-                if lp != rp { return lp < rp }
-                return lhs.model.shortName < rhs.model.shortName
-            case .context:
-                let lc = lhs.model.contextLength ?? 0
-                let rc = rhs.model.contextLength ?? 0
-                if lc != rc { return lc > rc }
-                return lhs.model.shortName < rhs.model.shortName
-            case .name:
-                return lhs.model.shortName.localizedCaseInsensitiveCompare(rhs.model.shortName) == .orderedAscending
-            }
-        }.map(\.model)
+    private func modelRow(_ row: ModelRowData, current: ModelChoice, pinned: Set<String>, repoAttached: Bool) -> some View {
+        ModelRow(
+            data: row,
+            isSelected: current == .model(row.id),
+            isPinned: pinned.contains(row.id),
+            showsRepoWarning: repoAttached && !row.supportsTools && !row.isPureImageModel,
+            onSelect: { select(.model(row.id)) },
+            onTogglePin: {
+                app.openRouter.togglePin(row.id)
+                Haptics.selection()
+            },
+            onShowDetails: { detailRow = row }
+        )
+        .equatable()
     }
 
     private func select(_ choice: ModelChoice) {
@@ -564,164 +521,9 @@ struct ModelPicker: View {
         dismiss()
     }
 
-    private func providerIconAsset(for modelID: String) -> String? {
-        if let decoded = AIProviderModelID.decode(modelID) {
-            return AIProviderPreset.matching(decoded.providerID)?.assetName
-        }
-        return "ProviderOpenRouter"
-    }
-
-    private func modelCard(_ model: ModelInfo, current: ModelChoice) -> some View {
-        let isSelected = current == .model(model.id)
-        let isPinned = app.openRouter.isPinned(model.id)
-        let cantReadRepo = app.repo(for: target) != nil && !model.supportsTools
-
-        return HStack(spacing: 10) {
-            Button {
-                select(.model(model.id))
-            } label: {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(alignment: .center, spacing: 6) {
-                        AIProviderIcon(
-                            assetName: providerIconAsset(for: model.id),
-                            fallbackTitle: model.maker,
-                            size: 18
-                        )
-
-                        Text(model.maker)
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(theme.accent)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 2.5)
-                            .background(theme.accent.opacity(0.12), in: Capsule())
-
-                        Text(model.shortName)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-
-                        Spacer(minLength: 4)
-
-                        if isSelected {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(theme.accent)
-                        }
-                    }
-
-                    Text(AIProviderModelID.rawModelID(model.id))
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(Theme.secondaryText)
-                        .lineLimit(1)
-
-                    FlowLayout(spacing: 5, lineSpacing: 5) {
-                        badge(text: price(model), highlight: model.isFree)
-                        if !model.isFree, let cached = model.cacheReadPrice, cached > 0 {
-                            badge(text: "Cache \(perMillionText(cached))", icon: "bolt.fill", highlight: true)
-                        }
-                        if let context = model.contextLength {
-                            badge(text: "\(Self.tokens(context)) ctx")
-                        }
-                        if let maxOut = model.maxCompletionTokens, maxOut >= 16_000 {
-                            badge(text: "\(Self.tokens(maxOut)) out")
-                        }
-                        if model.isPureImageModel {
-                            badge(text: "Image gen only", icon: "paintbrush.fill", highlight: true)
-                        } else {
-                            if !model.thinkingLevels.isEmpty {
-                                badge(text: "Thinks", icon: "brain")
-                            }
-                            if model.supportsTools {
-                                badge(text: "Tools", icon: "wrench.and.screwdriver")
-                            } else {
-                                badge(text: "Chat only · No tools", icon: "bubble.left")
-                            }
-                            if model.acceptsImages {
-                                badge(text: "Vision", icon: "eye")
-                            }
-                            if model.generatesImages {
-                                badge(text: "Image", icon: "photo")
-                            }
-                        }
-                    }
-
-                    if model.isPureImageModel {
-                        Text("Generates pictures directly from your prompt (no chat or repo tools)")
-                            .font(.caption2)
-                            .foregroundStyle(theme.accent)
-                    } else if cantReadRepo {
-                        Text("No tool support — attach no repo or pick a Tools model for repo edits")
-                            .font(.caption2)
-                            .foregroundStyle(Theme.danger)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            Button {
-                app.openRouter.togglePin(model.id)
-                Haptics.selection()
-            } label: {
-                Image(systemName: isPinned ? "star.fill" : "star")
-                    .font(.subheadline)
-                    .foregroundStyle(isPinned ? .yellow : Theme.secondaryText.opacity(0.65))
-                    .frame(width: 32, height: 32)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(isPinned ? "Unpin \(model.shortName)" : "Pin \(model.shortName)")
-        }
-        .padding(12)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(isSelected ? theme.accent : Theme.stroke, lineWidth: isSelected ? 1.6 : 1)
-        )
-    }
-
-    private func badge(text: String, icon: String? = nil, highlight: Bool = false) -> some View {
-        HStack(spacing: 3) {
-            if let icon {
-                Image(systemName: icon)
-                    .font(.system(size: 9, weight: .semibold))
-            }
-            Text(text)
-                .font(.caption2.weight(.medium))
-        }
-        .foregroundStyle(highlight ? .green : Theme.secondaryText)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(highlight ? Color.green.opacity(0.12) : Theme.raised, in: Capsule())
-    }
-
     /// "128K", "1M", "1.5M": uses binary KiB/MiB math (`131,072` -> `128K`, `1,048,576` -> `1M`) when evenly divisible by 1,024.
     static func tokens(_ count: Int) -> String {
         ModelInfo.formattedTokenCount(count)
-    }
-
-    private func perMillionText(_ perToken: Double) -> String {
-        let m = perToken * 1_000_000
-        if m >= 1 { return String(format: "$%.2f/M", m).replacingOccurrences(of: ".00", with: "") }
-        if m >= 0.01 { return String(format: "$%.2f/M", m) }
-        return String(format: "$%.3f/M", m)
-    }
-
-    /// Dollars per million tokens (about 750,000 words), for reading and for writing.
-    private func price(_ model: ModelInfo) -> String {
-        if model.isFree { return "Free" }
-        guard let input = model.promptPrice, let output = model.completionPrice else { return "Variable" }
-        func dollars(_ perToken: Double) -> String {
-            let perMillion = perToken * 1_000_000
-            if perMillion == 0 { return "$0" }
-            if perMillion < 0.01 { return "<$0.01" }
-            if perMillion < 1, abs(perMillion * 100 - (perMillion * 100).rounded()) > 0.001 {
-                return String(format: "$%.3f", perMillion)
-            }
-            let text = String(format: "%.2f", perMillion)
-            return "$" + (text.hasSuffix(".00") ? String(text.dropLast(3)) : text)
-        }
-        return "\(dollars(input))/\(dollars(output))"
     }
 }
 
