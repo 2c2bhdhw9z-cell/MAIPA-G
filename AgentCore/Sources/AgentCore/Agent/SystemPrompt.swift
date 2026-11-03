@@ -221,17 +221,6 @@ public enum SystemPrompt {
         return parts.joined(separator: "\n\n")
     }
 
-    /// Where the computer setup script lives. Only MAIPA-G's own code runs it, from the app's exact
-    /// reviewed commit, after checking `computerSetupSHA256`; the AI is never told to run it.
-    public static let computerSetupURL = "https://raw.githubusercontent.com/2c2bhdhw9z-cell/MAIPA-G/main/docs/computer/setup.sh"
-    /// SHA-256 of docs/computer/setup.sh in this build. CI fails when the file and this differ.
-    public static let computerSetupSHA256 = "e3f2eb89d310046376a6cfa7ca3326581e9011b18867e9fdd1dfe43b1392a565"
-
-    public static func computerSetupURL(revision: String) -> String? {
-        guard revision.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil else { return nil }
-        return "https://raw.githubusercontent.com/2c2bhdhw9z-cell/MAIPA-G/\(revision)/docs/computer/setup.sh"
-    }
-
     static func computerSection(_ computer: ComputerContext) -> String {
         var steps = [
             "- The machine is named `\(computer.machine)` (`mcp-maipa-g`). MAIPA-G's own code checks it with a real command before each message and creates it again when it is missing. If commands fail, say so plainly and suggest Settings → Check everything.",

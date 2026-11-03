@@ -430,7 +430,7 @@ struct GitHubAuthTests {
         #expect(plain.contains("This chat has a real Linux computer through the Sprites connector."))
         #expect(plain.contains("`mcp-maipa-g`"))
         #expect(plain.contains("Do not download or run setup scripts"))
-        #expect(!plain.contains(SystemPrompt.computerSetupURL))
+        #expect(!plain.contains(ComputerSetup.scriptURLBase))
         #expect(!plain.contains("git clone"))
 
         let open = SystemPrompt.make(userLogin: nil, repo: nil, computer: SystemPrompt.ComputerContext(
