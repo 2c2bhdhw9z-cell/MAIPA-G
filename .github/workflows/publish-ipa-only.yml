@@ -1,0 +1,66 @@
+name: Publish IPA only
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful iPhone build run containing the checked IPA artifact
+        required: true
+        type: string
+      pr_head:
+        description: Reviewed commit embedded in the IPA
+        required: true
+        type: string
+      main_sha:
+        description: Merged main commit to publish from
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    name: Publish the checked iPhone IPA
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.main_sha }}
+      - name: Download and verify the iPhone artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+          PR_HEAD: ${{ inputs.pr_head }}
+          MAIN_SHA: ${{ inputs.main_sha }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GH_REPO/commits/$MAIN_SHA" --jq .sha)" = "$MAIN_SHA"
+          test "$(gh api "repos/$GH_REPO/commits/$PR_HEAD" --jq .sha)" = "$PR_HEAD"
+          test "$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq .head_sha)" = "$PR_HEAD"
+          test "$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq .status)" = "completed"
+          test "$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq .conclusion)" = "cancelled"
+          test "$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs?per_page=20" --jq '[.jobs[] | select(.name == "iPhone release candidate" and .conclusion == "success")] | length')" = "1"
+          ARTIFACT_ID="$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[] | select(.name == "MAIPA-G-ipa-126" and .expired == false) | .id' | head -n1)"
+          test -n "$ARTIFACT_ID"
+          mkdir -p artifact extracted
+          gh api "repos/$GH_REPO/actions/artifacts/$ARTIFACT_ID/zip" > artifact.zip
+          unzip -q artifact.zip -d extracted
+          IPA="$(find extracted -name 'MAIPA-G.ipa' -type f -print -quit)"
+          test -n "$IPA"
+          python3 scripts/check-ipa.py "$IPA" --build 126 --version 0.1.0 --revision "$PR_HEAD"
+          cp "$IPA" MAIPA-G-126.ipa
+      - name: Publish the IPA release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          MAIN_SHA: ${{ inputs.main_sha }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          TAG="build-126-$MAIN_SHA"
+          gh release create "$TAG" MAIPA-G-126.ipa --repo "$GH_REPO" --target "$MAIN_SHA" --title "MAIPA-G build 126" --notes "IPA-only publication from iPhone build $RUN_ID. macOS tests, IPA build, and independent IPA check passed. Linux CI was cancelled per owner approval and is not represented as passing."
+          gh release edit "$TAG" --repo "$GH_REPO" --latest
