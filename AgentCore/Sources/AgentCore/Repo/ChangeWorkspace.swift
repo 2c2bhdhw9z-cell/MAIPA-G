@@ -79,10 +79,25 @@ public actor ChangeWorkspace {
         !changes.isEmpty
     }
 
+    /// The real staged diff, for the person's own diff screens.
     public func stagedDiff() async -> String {
+        await stagedDiff(skippingSecretShapedPaths: false)
+    }
+
+    /// The staged diff as it may be shown to an AI: secret-shaped files are replaced with a
+    /// one-line placeholder instead of their contents.
+    public func stagedDiffForPrompt() async -> String {
+        await stagedDiff(skippingSecretShapedPaths: true)
+    }
+
+    private func stagedDiff(skippingSecretShapedPaths: Bool) async -> String {
         guard !changes.isEmpty else { return "No staged changes." }
         var sections: [String] = []
         for change in changes.values.sorted(by: { $0.path < $1.path }) {
+            if skippingSecretShapedPaths, Self.isSecretShapedPath(change.path) {
+                sections.append("[Skipped hunk: \(change.path) matches a secret-shaped path]")
+                continue
+            }
             switch change {
             case .delete(let path, let previous):
                 guard let oldDoc = TextFileCodec.decode(previous) else {
@@ -117,6 +132,16 @@ public actor ChangeWorkspace {
         }
         guard !sections.isEmpty else { return "No staged changes." }
         return String(sections.joined(separator: "\n\n").prefix(200_000))
+    }
+
+    /// Staged files whose contents never go into `stagedDiffForPrompt()`: `.env*`, `*.pem`, `*.key`,
+    /// `id_rsa*`, `id_ed25519*`, anything under a `secrets/` folder, and `credentials*`.
+    public static func isSecretShapedPath(_ path: String) -> Bool {
+        let parts = path.lowercased().split(separator: "/").map(String.init)
+        guard let name = parts.last else { return false }
+        if parts.dropLast().contains("secrets") { return true }
+        return name.hasPrefix(".env") || name.hasSuffix(".pem") || name.hasSuffix(".key")
+            || name.hasPrefix("id_rsa") || name.hasPrefix("id_ed25519") || name.hasPrefix("credentials")
     }
 
     public func stagedChanges() -> [StagedChange] { changes.values.sorted { $0.path < $1.path } }

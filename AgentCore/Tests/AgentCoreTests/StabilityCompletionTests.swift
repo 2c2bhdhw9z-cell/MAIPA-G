@@ -53,6 +53,8 @@ struct StabilityCompletionTests {
         // A server can't talk its way out of an approval by calling a delete tool read-only.
         #expect(ConnectorActionPolicy.risk(for: tool("delete_file", readOnly: true, destructive: false), arguments: [:]) == .deletes)
         #expect(ConnectorActionPolicy.risk(for: tool("start_service", destructive: true), arguments: [:]) == .destructiveHint)
+        #expect(ConnectorActionPolicy.risk(for: tool("list_and_wipe"), arguments: [:]) == .deletes)
+        #expect(ConnectorActionPolicy.risk(for: tool("get_and_delete"), arguments: [:]) == .deletes)
 
         let exec = tool("exec")
         #expect(ConnectorActionPolicy.risk(for: exec, arguments: ["command": "cd /work/app && npm test"]) == nil)
@@ -455,10 +457,10 @@ struct StabilityCompletionTests {
     // Necessary 7: the computer setup runs only from the app's exact reviewed commit, only after
     // its SHA-256 matches the build's own copy, and its downloads are pinned and checksummed.
     @Test func N07_computerSetupIsLockedAndVerifiedByTrustedCode() async throws {
-        #expect(SystemPrompt.computerSetupURL(revision: "main") == nil)
+        #expect(ComputerSetup.scriptURL(revision: "main") == nil)
         let revision = String(repeating: "a", count: 40)
-        #expect(SystemPrompt.computerSetupURL(revision: revision) == "https://raw.githubusercontent.com/2c2bhdhw9z-cell/MAIPA-G/\(revision)/docs/computer/setup.sh")
-        #expect(SystemPrompt.computerSetupSHA256.count == 64)
+        #expect(ComputerSetup.scriptURL(revision: revision) == "https://raw.githubusercontent.com/2c2bhdhw9z-cell/MAIPA-G/\(revision)/docs/computer/setup.sh")
+        #expect(ComputerSetup.scriptSHA256.count == 64)
 
         actor Commands { var last = ""; func set(_ value: String) { last = value } }
         let commands = Commands()
@@ -470,7 +472,7 @@ struct StabilityCompletionTests {
         _ = try await control.startVerifiedSetup(revision: revision)
         let script = await commands.last
         #expect(script.contains("/\(revision)/docs/computer/setup.sh"))
-        #expect(script.contains("\(SystemPrompt.computerSetupSHA256)  ") && script.contains("sha256sum -c -"))
+        #expect(script.contains("\(ComputerSetup.scriptSHA256)  ") && script.contains("sha256sum -c -"))
         // The checksum check comes before running it, and `set -e` stops at a mismatch.
         let check = try #require(script.range(of: "sha256sum -c -")), run = try #require(script.range(of: "nohup bash"))
         #expect(check.lowerBound < run.lowerBound && script.hasPrefix("set -euo pipefail"))

@@ -720,7 +720,7 @@ public struct CloudRunner: Sendable {
             let coder = try await executeCloudAgent(
                 coderAgent,
                 task: "Repair the automatic checks for commit \(commit). Inspect the actual redacted logs, make only the necessary fix, and run the affected local checks. Do not commit or push.",
-                context: repairContext,
+                context: "<untrusted_ci_logs>\n\(repairContext)\n</untrusted_ci_logs>",
                 tools: tools,
                 rules: rules,
                 spendLimit: remaining,
@@ -730,7 +730,7 @@ public struct CloudRunner: Sendable {
             let checker = try await executeCloudAgent(
                 checkerAgent,
                 task: "Check the repair against the failed logs and current workspace. End with a standalone GOAL_MET line only if the repair is complete and local checks support it; otherwise end with GOAL_NOT_MET.",
-                context: coder.output,
+                context: "<helper_report agent=\"coder\">\n\(coder.output)\n</helper_report>",
                 tools: tools,
                 rules: rules,
                 spendLimit: remaining.map { max(0.000_001, $0 - coder.cost) },

@@ -90,9 +90,6 @@ public enum ConnectorActionPolicy {
     public static func risk(for tool: ConnectorToolDefinition, arguments: JSONValue) -> Risk? {
         let nameWords = words(tool.originalName)
         let hinted: Risk? = (tool.destructiveHint == true && tool.readOnlyHint != true) ? .destructiveHint : nil
-        // Tools named for reading (get_, list_, search_…) only read, unless the server itself
-        // marks them destructive.
-        if let first = nameWords.first, readWords.contains(first) { return hinted }
         if nameWords.contains(where: deletingWords.contains) { return .deletes }
         if nameWords.contains(where: commandWords.contains) {
             // exec_list, exec_status, exec_logs… only look at sessions.
@@ -109,6 +106,9 @@ public enum ConnectorActionPolicy {
         // Taking a checkpoint or backup only adds a way back.
         if nameWords.contains(where: protectiveWords.contains) { return nil }
         if nameWords.contains(where: spendingWords.contains) { return .spends }
+        // Tools named for reading (get_, list_, search_…) only read, unless the server itself
+        // marks them destructive. Checked last so `list_and_wipe` can't hide behind a read word.
+        if let first = nameWords.first, readWords.contains(first) { return hinted }
         return hinted
     }
 
@@ -150,6 +150,7 @@ public enum ShellRisk {
     static let riskyPhrases: [String] = ["git push", "git reset --hard", "git clean", "git checkout --", "git branch -d", "git branch -D", "git tag -d", "git filter-", "git rebase", "git stash drop", "git stash clear", "npm publish", "yarn publish", "pnpm publish", "cargo publish", "gem push", "twine upload", "docker rm", "docker rmi", "docker system prune", "docker volume rm", "find -delete", " -delete", "--delete", "> /dev/sd", "chmod -R", "chmod 777", "-X DELETE", "-X POST", "-X PUT", "-X PATCH", "--request DELETE", "--request POST", "--request PUT", "--data", " -d @", "--upload-file", " -T ", ":(){", "~/.ssh", ".ssh/", "authorized_keys", "id_rsa", "id_ed25519", "~/.bashrc", ".bash_profile", "~/.zshrc", ".aws/", "base64 -d", "eval ", "shutil.rmtree", "os.remove(", "os.unlink(", "fs.rmSync(", "fs.unlinkSync("]
 
     static let shellWrappers: Set<String> = ["env", "nohup", "time", "xargs", "exec", "command", "nice", "timeout", "bash", "sh", "zsh", "dash"]
+    static let interpreters: Set<String> = ["python", "python3", "node", "perl", "ruby", "php"]
 
     static func cleanProgramName(_ token: String) -> String {
         let unquoted = token.filter { $0 != "'" && $0 != "\"" && $0 != "\\" }
@@ -188,6 +189,12 @@ public enum ShellRisk {
             let lowered = candidate.lowercased()
             if lowered.contains("curl") || lowered.contains("wget"),
                lowered.range(of: #"\|\s*(sudo\s+)?(-\S+\s+)*(ba|z|da)?sh\b|\|\s*(sudo\s+)?(python3?|node|perl|ruby)\b"#, options: .regularExpression) != nil { return true }
+            for interpreter in Self.interpreters where candidate.contains(interpreter + " -") {
+                let lowered = candidate.lowercased()
+                if ["os.system", "os.remove", "os.unlink", "shutil.rmtree", "subprocess", "child_process", "exec(", "spawn(", "unlink(", "rmdir(", "rmsync(", "fs.unlinksync(", "fs.rmdirsync("].contains(where: lowered.contains) {
+                    return true
+                }
+            }
             for segment in segments(candidate) {
                 let words = segment.split(whereSeparator: \.isWhitespace).map(String.init).filter { !$0.contains("=") || $0.hasPrefix("-") }
                 guard let program = words.first.map(cleanProgramName) else { continue }

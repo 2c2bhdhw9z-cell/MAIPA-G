@@ -200,10 +200,10 @@ public struct ComputerControl: Sendable {
     /// Starts MAIPA-G's tool setup in the background: the script comes from the app's exact
     /// reviewed commit and runs only if its SHA-256 matches the copy compiled into the app.
     public func startVerifiedSetup(revision: String) async throws -> String {
-        guard let url = SystemPrompt.computerSetupURL(revision: revision) else {
+        guard let url = ComputerSetup.scriptURL(revision: revision) else {
             throw Failure.commandFailed("This build has no reviewed commit to take the setup script from.")
         }
-        let sha = SystemPrompt.computerSetupSHA256
+        let sha = ComputerSetup.scriptSHA256
         let script = """
         set -euo pipefail
         mkdir -p "$HOME/.maipa-g"

@@ -69,9 +69,9 @@ for item in reports:
 # The app only runs the computer setup script whose SHA-256 it was built with.
 import hashlib
 setup_sha = hashlib.sha256((ROOT / "docs/computer/setup.sh").read_bytes()).hexdigest()
-prompt = (ROOT / "AgentCore/Sources/AgentCore/Agent/SystemPrompt.swift").read_text()
-if f'computerSetupSHA256 = "{setup_sha}"' not in prompt:
-    errors.append(f"SystemPrompt.computerSetupSHA256 must be {setup_sha}, the SHA-256 of docs/computer/setup.sh")
+setup_code = (ROOT / "AgentCore/Sources/AgentCore/MCP/ComputerSetup.swift").read_text()
+if f'scriptSHA256 = "{setup_sha}"' not in setup_code:
+    errors.append(f"ComputerSetup.scriptSHA256 must be {setup_sha}, the SHA-256 of docs/computer/setup.sh")
 setup = (ROOT / "docs/computer/setup.sh").read_text()
 for moving in ("setup_lts", "sh.rustup.rs", "dot.net/v1", "bun.sh/install", "deno.land/install", "astral.sh/uv/install", "install latest", "playwright install"):
     if moving in setup:
