@@ -83,6 +83,10 @@ public actor ChangeWorkspace {
         guard !changes.isEmpty else { return "No staged changes." }
         var sections: [String] = []
         for change in changes.values.sorted(by: { $0.path < $1.path }) {
+            if Self.isSecretShapedPath(change.path) {
+                sections.append("[Skipped hunk: \(change.path) matches a secret-shaped path]")
+                continue
+            }
             switch change {
             case .delete(let path, let previous):
                 guard let oldDoc = TextFileCodec.decode(previous) else {
@@ -117,6 +121,16 @@ public actor ChangeWorkspace {
         }
         guard !sections.isEmpty else { return "No staged changes." }
         return String(sections.joined(separator: "\n\n").prefix(200_000))
+    }
+
+    /// Staged files whose contents never go into `stagedDiff()`: `.env*`, `*.pem`, `*.key`,
+    /// `id_rsa*`, `id_ed25519*`, anything under a `secrets/` folder, and `credentials*`.
+    public static func isSecretShapedPath(_ path: String) -> Bool {
+        let parts = path.lowercased().split(separator: "/").map(String.init)
+        guard let name = parts.last else { return false }
+        if parts.dropLast().contains("secrets") { return true }
+        return name.hasPrefix(".env") || name.hasSuffix(".pem") || name.hasSuffix(".key")
+            || name.hasPrefix("id_rsa") || name.hasPrefix("id_ed25519") || name.hasPrefix("credentials")
     }
 
     public func stagedChanges() -> [StagedChange] { changes.values.sorted { $0.path < $1.path } }

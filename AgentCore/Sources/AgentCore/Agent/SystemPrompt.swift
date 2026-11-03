@@ -90,7 +90,7 @@ public enum SystemPrompt {
             self.branch = branch
             self.commit = commit
             self.repoPath = repoPath
-            self.stagedPatch = stagedPatch
+            self.stagedPatch = stagedPatch.map { SensitiveDataRedactor().redact($0) }
             self.approximateHourlyCost = approximateHourlyCost
         }
     }

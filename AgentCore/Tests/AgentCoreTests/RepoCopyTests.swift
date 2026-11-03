@@ -312,6 +312,30 @@ struct RepoCopyTests {
         try await inspector.dispatch(repo: RepoRef(owner: "octo", name: "repo"), workflow: "ios.yml", ref: "main", explicitlyRequested: false)
         #expect(transport.requests.isEmpty)
     }
+
+    /// A staged `.env` must never reach the system prompt; an ordinary staged file still does.
+    @Test func stagedSecretFilesStayOutOfTheSystemPrompt() async throws {
+        let github = FakeGitHub()
+        github.commitRemotely(["README.md": Data("# Old\n".utf8)])
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-secret-diff-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let base = RepoWorkspace(repo: RepoRef(owner: "octo", name: "MAIPA-G-data"), branch: "main", commit: try #require(github.head), github: github.client, store: SnapshotStore(root: root))
+        let changes = ChangeWorkspace(base: base)
+        let key = "sk-or-v1-abcdefghijklmnopqrstuvwxyz123456"
+        try await changes.create(path: ".env", text: "OPENROUTER_API_KEY=\(key)\n")
+        try await changes.edit(path: "README.md", text: "# New readme line\n")
+        let patch = await changes.stagedDiff()
+        let computer = SystemPrompt.ComputerContext(
+            service: "Sprites", machine: "mcp-maipa-g", repoFullName: "octo/app", cloneURL: "https://github.com/octo/app.git",
+            branch: "main", commit: "0123456789abcdef", repoPath: "$HOME/repos/octo/app", stagedPatch: patch
+        )
+        let prompt = SystemPrompt.make(userLogin: nil, repo: nil, computer: computer)
+
+        #expect(!prompt.contains(key))
+        #expect(!prompt.contains("OPENROUTER_API_KEY="))
+        #expect(prompt.contains("+# New readme line"))
+        #expect(prompt.contains("[Skipped hunk: .env matches a secret-shaped path]"))
+    }
 }
 
 @Suite("GitHub app sign-in")
