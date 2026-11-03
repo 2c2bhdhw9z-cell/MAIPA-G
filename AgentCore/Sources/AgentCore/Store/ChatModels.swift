@@ -89,6 +89,8 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
     public var previousCompactedThroughMessageID: UUID?
     /// Durable Kiro-style Queue follow-ups waiting to run sequentially after the active turn finishes.
     public var queuedFollowUps: [QueuedFollowUp]?
+    /// Chat workflow runs, mirrored here so a force-quit app still has them.
+    public var activeWorkflowRuns: [ActiveWorkflowRunSnapshot]?
 
     public init(
         id: UUID = UUID(),
@@ -122,6 +124,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         self.previousCompactedSummary = nil
         self.previousCompactedThroughMessageID = nil
         self.queuedFollowUps = nil
+        self.activeWorkflowRuns = nil
     }
 
     enum CodingKeys: String, CodingKey {
@@ -129,7 +132,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         case groupID, saveReceipts, activeJobID, workflowID, specID, memoryContext
         case compactedSummary, compactedThroughMessageID
         case previousCompactedSummary, previousCompactedThroughMessageID
-        case queuedFollowUps
+        case queuedFollowUps, activeWorkflowRuns
     }
 
     public init(from decoder: Decoder) throws {
@@ -155,6 +158,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         previousCompactedSummary = try c.decodeIfPresent(String.self, forKey: .previousCompactedSummary)
         previousCompactedThroughMessageID = try c.decodeIfPresent(UUID.self, forKey: .previousCompactedThroughMessageID)
         queuedFollowUps = try c.decodeIfPresent([QueuedFollowUp].self, forKey: .queuedFollowUps)
+        activeWorkflowRuns = try c.decodeIfPresent([ActiveWorkflowRunSnapshot].self, forKey: .activeWorkflowRuns)
     }
 
     /// Everything the chat has cost so far, in dollars, as OpenRouter reported it.

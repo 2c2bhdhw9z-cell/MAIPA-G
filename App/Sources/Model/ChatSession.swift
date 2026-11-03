@@ -120,6 +120,7 @@ final class ChatSession: Identifiable {
         self.draft = draft?.text ?? ""
         self.draftAttachments = draft?.attachments ?? []
         self.queuedSteering = chat.queuedFollowUps ?? []
+        self.activeWorkflowRuns = chat.activeWorkflowRuns ?? []
     }
 
     var backgroundStatusSubtitle: String {
@@ -2106,6 +2107,7 @@ final class ChatSession: Identifiable {
         } else {
             activeWorkflowRuns.insert(snapshot, at: 0)
         }
+        chat.activeWorkflowRuns = activeWorkflowRuns
     }
 
     private func refreshWorkflowSnapshotFromMessage(runID: String, event: WorkflowMessageEvent) {
@@ -2247,6 +2249,7 @@ final class ChatSession: Identifiable {
         let prompt = snap.checkpoint.request
         let def = snap.definition
         activeWorkflowRuns.removeAll { $0.id == runID }
+        chat.activeWorkflowRuns = activeWorkflowRuns
         workflowEngines[runID] = nil
         let tools: [any AgentTool] = webEnabled ? [WebSearchTool(transport: app.transport), ReadWebPageTool(transport: app.transport)] : []
         Task { [weak self] in
