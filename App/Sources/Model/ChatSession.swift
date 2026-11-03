@@ -495,6 +495,10 @@ final class ChatSession: Identifiable {
             chat.previousCompactedSummary = nil
             chat.previousCompactedThroughMessageID = nil
         }
+        // A summary whose pointer is gone entirely can't be placed in the transcript either.
+        if chat.compactedSummary != nil, chat.compactedThroughMessageID == nil {
+            chat.compactedSummary = nil
+        }
     }
 
     private var compactableRangeEndIndex: Int? {

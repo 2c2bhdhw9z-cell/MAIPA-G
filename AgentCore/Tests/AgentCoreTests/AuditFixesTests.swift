@@ -117,7 +117,7 @@ struct AuditFixesTests {
         chat.compactedThroughMessageID = UUID() // Missing/rewound ID
         chat.messages = [.user("Continue working")]
         let built = Transcript.messages(for: chat, systemPrompt: "System")
-        #expect(built.first?.content?.contains("Preserved summary.") == true)
+        #expect(built.first?.content?.contains("Preserved summary.") == false, "a summary whose pointer does not resolve is dropped")
     }
 
     @Test("2.5 BackgroundCommandRegistry marks stopped commands immediately as non-error stopped")
