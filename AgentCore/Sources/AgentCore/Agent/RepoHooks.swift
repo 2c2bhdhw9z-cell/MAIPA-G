@@ -213,6 +213,7 @@ public struct HookedTool: AgentTool {
         guard !matching.isEmpty else { return output }
         var reports: [String] = []
         for hook in matching {
+            try Task.checkCancellation()
             switch hook.action {
             case .agent(let prompt):
                 reports.append("Hook “\(hook.name)” (\(hook.source)) asks: \(String(prompt.prefix(4_000)))")
@@ -229,6 +230,8 @@ public struct HookedTool: AgentTool {
                 do {
                     let result = try await runCommand(command)
                     reports.append("Hook “\(hook.name)” ran `\(String(command.prefix(300)))`:\n\(Self.headAndTail(result))")
+                } catch is CancellationError {
+                    throw CancellationError()
                 } catch {
                     reports.append("Hook “\(hook.name)” ran `\(String(command.prefix(300)))` and it failed: \(Self.headAndTail(ErrorExplainer.explain(error).message))")
                 }
