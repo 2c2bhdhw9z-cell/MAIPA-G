@@ -1178,7 +1178,7 @@ final class ChatSession: Identifiable {
                     var helperChoice = userChoice
                     if let explicitModel = invocation.preferredModelID, !explicitModel.isEmpty, explicitModel != ModelChoice.freeID {
                         helperChoice = .model(explicitModel)
-                    } else if helperChoice == .auto, invocation.definition.modelPolicy == .differentFromPrimary {
+                    } else if invocation.definition.modelPolicy == .differentFromPrimary {
                         if let alt = catalogue.values.first(where: { (hasOpenRouter || AIProviderModelID.decode($0.id) != nil) && $0.id != primaryModelID && $0.isChatModel && $0.supportsTools && (!route.isFree || $0.isFree) }) {
                             helperChoice = .model(alt.id)
                         }
