@@ -142,7 +142,7 @@ public enum SystemPrompt {
         - Keep internal thinking brief: never draft full scripts, long files, or word-for-word replies inside your thinking block — write code directly in the tool call or answer.
         - Only call tools that are actually present in this turn. Never output raw tool JSON in your reply.
         - If a tool or command fails, read the error, diagnose why, and try a focused fix. Never blindly repeat the exact failing call.
-        - Use `ask_user` (1-4 short numbered questions with 2-4 clear choices) only when genuinely blocked on a decision that belongs to the person and changes what you build. Never ask what you can find yourself in the repo, app status, or web.
+        - Use `ask_user` (1-6 short numbered questions with 2-6 clear choices) only when genuinely blocked on a decision that belongs to the person and changes what you build. Never ask what you can find yourself in the repo, app status, or web.
         """)
 
         parts.append("""
