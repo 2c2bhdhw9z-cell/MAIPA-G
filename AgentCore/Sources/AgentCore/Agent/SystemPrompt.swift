@@ -90,7 +90,7 @@ public enum SystemPrompt {
             self.branch = branch
             self.commit = commit
             self.repoPath = repoPath
-            self.stagedPatch = stagedPatch.map { SensitiveDataRedactor().redact($0) }
+            self.stagedPatch = stagedPatch
             self.approximateHourlyCost = approximateHourlyCost
         }
     }
@@ -248,7 +248,7 @@ public enum SystemPrompt {
             } else {
                 steps.append("- The copy on the computer is for running and checking. To change the repo, still use `create_file`, `edit_file`, `append_file`, `delete_file`, and `save_changes`, and make the same edits on the computer when you need to test them.")
                 if let patch = computer.stagedPatch, patch != "No staged changes." {
-                    steps.append("- Before any build or test, make the computer checkout match these phone-staged changes exactly. Do not test the old checkout:\n```diff\n\(String(patch.prefix(80_000)))\n```")
+                    steps.append("- Before any build or test, make the computer checkout match these phone-staged changes exactly. Do not test the old checkout:\n```diff\n\(String(SensitiveDataRedactor().redact(patch).prefix(80_000)))\n```")
                 }
             }
         }

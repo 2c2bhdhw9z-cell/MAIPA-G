@@ -305,6 +305,22 @@ struct RepoCopyTests {
         }
     }
 
+    /// The staged patch is redacted when the prompt is built, so setting it after creating the
+    /// context can't slip a secret past the redactor.
+    @Test func stagedPatchSetAfterInitIsStillRedacted() {
+        let key = "sk-or-v1-abcdefghijklmnopqrstuvwxyz123456"
+        var computer = SystemPrompt.ComputerContext(
+            service: "Sprites", machine: "mcp-maipa-g", repoFullName: "octo/app", cloneURL: "https://github.com/octo/app.git",
+            branch: "main", commit: "0123456789abcdef", repoPath: "$HOME/repos/octo/app"
+        )
+        computer.stagedPatch = "--- a/config.txt\n+++ b/config.txt\n@@ -1 +1 @@\n-token=old\n+token=\(key)\n"
+        let prompt = SystemPrompt.make(userLogin: nil, repo: nil, computer: computer)
+
+        #expect(!prompt.contains(key))
+        #expect(prompt.contains(SensitiveDataRedactor.marker))
+        #expect(prompt.contains("+++ b/config.txt"))
+    }
+
     @Test func buildInspectionDoesNotDispatch() async throws {
         let transport = ActionsTransport()
         let client = GitHubClient(transport: transport, tokens: FixedGitHubToken())
