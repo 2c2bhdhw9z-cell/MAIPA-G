@@ -90,9 +90,6 @@ public enum ConnectorActionPolicy {
     public static func risk(for tool: ConnectorToolDefinition, arguments: JSONValue) -> Risk? {
         let nameWords = words(tool.originalName)
         let hinted: Risk? = (tool.destructiveHint == true && tool.readOnlyHint != true) ? .destructiveHint : nil
-        // Tools named for reading (get_, list_, search_…) only read, unless the server itself
-        // marks them destructive.
-        if let first = nameWords.first, readWords.contains(first) { return hinted }
         if nameWords.contains(where: deletingWords.contains) { return .deletes }
         if nameWords.contains(where: commandWords.contains) {
             // exec_list, exec_status, exec_logs… only look at sessions.
@@ -109,6 +106,9 @@ public enum ConnectorActionPolicy {
         // Taking a checkpoint or backup only adds a way back.
         if nameWords.contains(where: protectiveWords.contains) { return nil }
         if nameWords.contains(where: spendingWords.contains) { return .spends }
+        // Tools named for reading (get_, list_, search_…) only read, unless the server itself
+        // marks them destructive. Checked last so `list_and_wipe` can't hide behind a read word.
+        if let first = nameWords.first, readWords.contains(first) { return hinted }
         return hinted
     }
 

@@ -53,6 +53,8 @@ struct StabilityCompletionTests {
         // A server can't talk its way out of an approval by calling a delete tool read-only.
         #expect(ConnectorActionPolicy.risk(for: tool("delete_file", readOnly: true, destructive: false), arguments: [:]) == .deletes)
         #expect(ConnectorActionPolicy.risk(for: tool("start_service", destructive: true), arguments: [:]) == .destructiveHint)
+        #expect(ConnectorActionPolicy.risk(for: tool("list_and_wipe"), arguments: [:]) == .deletes)
+        #expect(ConnectorActionPolicy.risk(for: tool("get_and_delete"), arguments: [:]) == .deletes)
 
         let exec = tool("exec")
         #expect(ConnectorActionPolicy.risk(for: exec, arguments: ["command": "cd /work/app && npm test"]) == nil)
