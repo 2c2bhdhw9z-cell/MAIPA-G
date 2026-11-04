@@ -8,21 +8,61 @@ License source: https://raw.githubusercontent.com/lobehub/lobe-icons/ea434b96e75
 License: MIT; full upstream notice bundled in LobeIcons-LICENSE.txt.
 Copyright (c) 2023 LobeHub
 
-Unmodified upstream SVG artwork -> Assets.xcassets imageset:
-openai.svg -> AIModelOpenAI.imageset
-xai.svg -> AIModelXAI.imageset
-anthropic.svg -> AIModelAnthropic.imageset
-gemini.svg -> AIModelGemini.imageset
-deepseek.svg -> AIModelDeepSeek.imageset
-meta.svg -> AIModelMeta.imageset
-mistral.svg -> AIModelMistral.imageset
-qwen.svg -> AIModelQwen.imageset
-kimi.svg -> AIModelKimi.imageset
+Upstream SVG -> bundled imageset / referenced filename:
+openai.svg -> AIModelOpenAI / openai.svg
+grok.svg -> AIModelXAI / xai.svg
+claude-color.svg -> AIModelAnthropic / anthropic.svg
+gemini-color.svg -> AIModelGemini / gemini.svg
+deepseek-color.svg -> AIModelDeepSeek / deepseek.svg
+meta-color.svg -> AIModelMeta / meta.svg
+mistral-color.svg -> AIModelMistral / mistral-color.svg
+qwen-color.svg -> AIModelQwen / qwen-color.svg
+kimi-color.svg -> AIModelKimi / kimi-color.svg
+minimax-color.svg -> AIModelMiniMax / minimax-color.svg
+nvidia-color.svg -> AIModelNVIDIA / nvidia-color.svg
+zhipu-color.svg -> AIModelZhipu / zhipu-color.svg
+cohere-color.svg -> AIModelCohere / cohere-color.svg
+perplexity-color.svg -> AIModelPerplexity / perplexity-color.svg
+microsoft-color.svg -> AIModelMicrosoft / microsoft-color.svg
+nova-color.svg -> AIModelAmazon / nova-color.svg
+baidu-color.svg -> AIModelBaidu / baidu-color.svg
+tencent-color.svg -> AIModelTencent / tencent-color.svg
+bytedance-color.svg -> AIModelByteDance / bytedance-color.svg
+stepfun-color.svg -> AIModelStepFun / stepfun-color.svg
+xiaomimimo.svg -> AIModelXiaomi / xiaomimimo.svg
+ling-color.svg -> AIModelInclusionAI / ling-color.svg
+ai21.svg -> AIModelAI21 / ai21.svg
+ibm.svg -> AIModelIBM / ibm.svg
+ai2-color.svg -> AIModelAllenAI / ai2-color.svg
+liquid.svg -> AIModelLiquid / liquid.svg
+snowflake-color.svg -> AIModelSnowflake / snowflake-color.svg
+reka.svg -> AIModelReka / reka.svg
+upstage-color.svg -> AIModelUpstage / upstage-color.svg
+dbrx-color.svg -> AIModelDatabricks / dbrx-color.svg
+nousresearch-text.svg -> AIModelNousResearch / nousresearch-text.svg
 
-These are the upstream monochrome variants, not recreated paths or SF Symbols.
-Each imageset uses universal vector data and template rendering. AIModelIcon
-inherits the caller's foreground style so the marks remain visible in either
-appearance. No remote logo fetch, runtime SVG parser, or build dependency is used.
+31 of the 32 named model brands have bundled upstream artwork. No Thinking
+Machines icon was found at this pinned revision: thinkingmachines.svg,
+thinkingmachines-color.svg, and thinking-machines.svg returned HTTP 404.
+AIModelThinkingMachines is not supplied; no substitute artwork was invented.
+
+SVG artwork is copied without recolouring or redrawing. Existing filenames are
+retained where possible. Claude uses its orange asterisk, not the Anthropic
+lettermark; xAI uses the Grok glyph. Amazon uses Nova, InclusionAI uses Ling,
+Databricks uses DBRX, and Xiaomi uses XiaomiMiMo. Nous Research uses the upstream
+NOUS wordmark; the larger portrait SVG could not be retrieved in full through
+the available page reader and was not copied in truncated form.
+
+Colour variants are used where available. OpenAI, Grok, XiaomiMiMo, AI21, IBM,
+Liquid, Reka, and the NOUS wordmark retain upstream monochrome artwork. Kimi's
+colour SVG includes both a blue accent and currentColor paths. No fabricated
+brand colours are applied. All supplied imagesets preserve vector data and omit
+template-rendering-intent. Native asset compilation and light/dark appearance
+still require validation in the app build.
+
+Unreferenced legacy kimi.svg, mistral.svg, and qwen.svg are retained alongside
+the colour variants. No files were deleted. No runtime logo fetch, SVG parser,
+or new build dependency is needed.
 
 Brand names and logos belong to their respective owners. Inclusion identifies
 models and does not imply sponsorship or endorsement.

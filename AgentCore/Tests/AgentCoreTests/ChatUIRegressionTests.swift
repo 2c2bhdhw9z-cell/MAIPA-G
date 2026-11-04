@@ -83,6 +83,7 @@ struct ChatUIRegressionTests {
         let icon = try source("App/Sources/Design/AIModelIcon.swift")
         #expect(icon.contains("if let assetName = brand.assetName"))
         #expect(icon.contains("Image(assetName)"))
-        #expect(icon.contains("AIModelBrand.initials(for: modelID)"))
+        #expect(!icon.contains("Text(AIModelBrand.initials"))
+        #expect(icon.contains(".renderingMode(.original)"))
     }
 }
