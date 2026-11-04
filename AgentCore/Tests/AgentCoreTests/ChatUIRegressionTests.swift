@@ -26,6 +26,9 @@ struct ChatUIRegressionTests {
     func floatingReviewEntry() throws {
         let chat = try source("App/Sources/Screens/ChatScreen.swift")
         #expect(chat.components(separatedBy: "\"Review Changes\"").count - 1 == 1)
+        let visibility = compact(try section(chat, from: "private var hasPendingSave", to: "private func bottomInset"))
+        #expect(visibility.contains("ifsession.hasStagedChanges{returntrue}"))
+        #expect(visibility.contains("receipt.resolution==nil&&(receipt.pullRequest!=nil||receipt.undoneAt==nil)"))
         let bottom = try section(chat, from: "private func bottomInset", to: "private func messageRows")
         let label = try #require(bottom.range(of: "Label(\"Review Changes\""))
         let button = try #require(bottom.range(of: "Button {", options: .backwards,

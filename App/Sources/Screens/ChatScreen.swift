@@ -207,7 +207,7 @@ struct ChatScreen: View {
     private var hasPendingSave: Bool {
         if session.hasStagedChanges { return true }
         guard let receipt = session.chat.saveReceipts?.last else { return false }
-        return receipt.resolution == nil && receipt.undoneAt == nil
+        return receipt.resolution == nil && (receipt.pullRequest != nil || receipt.undoneAt == nil)
     }
 
     // MARK: - Bottom Inset (`↓` Jump Button + Solid Save Banner + Composer)
