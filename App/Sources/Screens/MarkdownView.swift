@@ -58,21 +58,61 @@ struct MarkdownView: View {
     var isStreaming: Bool = false
 
     var body: some View {
-        let document = MarkdownCache.shared.document(for: text, cacheable: !isStreaming)
-        VStack(alignment: .leading, spacing: 12) {
-            ForEach(Array(document.blocks.enumerated()), id: \.offset) { index, block in
-                let blockIsLive = isStreaming && index == document.blocks.count - 1
-                MarkdownBlockView(block: block, isStreaming: blockIsLive)
+        Group {
+            if isStreaming {
+                StreamingMarkdownView(text: text)
+            } else {
+                // Completion/Stop always parses the exact final source synchronously. A late
+                // live parse cannot replace it, and code/Mermaid regain their full renderer.
+                MarkdownBlocksView(document: MarkdownCache.shared.document(for: text))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-struct MarkdownBlockView: View {
+private struct StreamingMarkdownView: View {
+    let text: String
+    @State private var worker = StreamingMarkdownWorker()
+
+    var body: some View {
+        Group {
+            if let document = worker.document {
+                MarkdownBlocksView(document: document, isStreaming: true)
+            } else {
+                Text(verbatim: text)
+                    .textSelection(.enabled)
+            }
+        }
+        .onAppear { worker.submit(text) }
+        .onChange(of: text) { _, source in worker.submit(source) }
+        .onDisappear { worker.cancel() }
+    }
+}
+
+private struct MarkdownBlocksView: View {
+    let document: MarkdownDocument
+    var isStreaming = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(Array(document.blocks.enumerated()), id: \.offset) { index, block in
+                let blockIsLive = isStreaming && index == document.blocks.count - 1
+                MarkdownBlockView(block: block, isStreaming: blockIsLive)
+                    .equatable()
+            }
+        }
+    }
+}
+
+struct MarkdownBlockView: View, Equatable {
     var block: MarkdownBlock
     var isStreaming: Bool = false
     @Environment(\.theme) private var theme
+
+    nonisolated static func == (lhs: MarkdownBlockView, rhs: MarkdownBlockView) -> Bool {
+        lhs.block == rhs.block && lhs.isStreaming == rhs.isStreaming
+    }
 
     var body: some View {
         switch block {
@@ -100,7 +140,8 @@ struct MarkdownBlockView: View {
                 RoundedRectangle(cornerRadius: 2).fill(theme.accent.opacity(0.7)).frame(width: 3)
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(Array(blocks.enumerated()), id: \.offset) { _, child in
-                        MarkdownBlockView(block: child)
+                        MarkdownBlockView(block: child, isStreaming: isStreaming)
+                            .equatable()
                     }
                 }
                 .foregroundStyle(Theme.secondaryText)
@@ -113,7 +154,8 @@ struct MarkdownBlockView: View {
                         marker(list: list, offset: offset, item: item)
                         VStack(alignment: .leading, spacing: 6) {
                             ForEach(Array(item.blocks.enumerated()), id: \.offset) { _, child in
-                                MarkdownBlockView(block: child)
+                                MarkdownBlockView(block: child, isStreaming: isStreaming)
+                                    .equatable()
                             }
                         }
                     }
@@ -223,7 +265,9 @@ struct CodeBlockView: View {
     }
 
     private var highlighted: AttributedString {
-        MarkdownCache.shared.highlighted(code: code, language: language, dark: colorScheme == .dark, cacheable: !isStreaming)
+        // Highlight only settled code, not the entire growing fence on every frame.
+        if isStreaming { return AttributedString(code) }
+        return MarkdownCache.shared.highlighted(code: code, language: language, dark: colorScheme == .dark)
     }
 }
 

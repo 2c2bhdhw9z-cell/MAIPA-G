@@ -582,11 +582,9 @@ struct ModelPicker: View {
             } label: {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(alignment: .center, spacing: 6) {
-                        AIProviderIcon(
-                            assetName: providerIconAsset(for: model.id),
-                            fallbackTitle: model.maker,
-                            size: 18
-                        )
+                        AIModelIcon(modelID: model.id, size: 20)
+                            .foregroundStyle(.primary)
+                            .accessibilityHidden(true)
 
                         Text(model.maker)
                             .font(.caption2.weight(.bold))

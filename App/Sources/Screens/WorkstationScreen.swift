@@ -1018,8 +1018,9 @@ struct WorkstationScreen: View {
                                         }
                                     } label: {
                                         HStack(spacing: 6) {
-                                            Image(systemName: "cpu")
+                                            AIModelIcon(modelID: run.checkpoint.defaultModelID ?? ModelChoice.autoID, size: 18)
                                                 .foregroundStyle(theme.accent)
+                                                .accessibilityHidden(true)
                                             Text("Switch default AI: \(app.openRouter.displayName(forModelID: run.checkpoint.defaultModelID ?? ModelChoice.autoID))")
                                                 .font(.caption.weight(.semibold))
                                             Image(systemName: "chevron.down")

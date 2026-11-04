@@ -1,0 +1,28 @@
+Lobe Icons — bundled model-brand artwork
+
+Project: https://github.com/lobehub/lobe-icons
+Pinned revision: ea434b96e75813517b377825e01c0df61dee8836
+Source directory: packages/static-svg/icons
+Source URL: https://github.com/lobehub/lobe-icons/tree/ea434b96e75813517b377825e01c0df61dee8836/packages/static-svg/icons
+License source: https://raw.githubusercontent.com/lobehub/lobe-icons/ea434b96e75813517b377825e01c0df61dee8836/LICENSE
+License: MIT; full upstream notice bundled in LobeIcons-LICENSE.txt.
+Copyright (c) 2023 LobeHub
+
+Unmodified upstream SVG artwork -> Assets.xcassets imageset:
+openai.svg -> AIModelOpenAI.imageset
+xai.svg -> AIModelXAI.imageset
+anthropic.svg -> AIModelAnthropic.imageset
+gemini.svg -> AIModelGemini.imageset
+deepseek.svg -> AIModelDeepSeek.imageset
+meta.svg -> AIModelMeta.imageset
+mistral.svg -> AIModelMistral.imageset
+qwen.svg -> AIModelQwen.imageset
+kimi.svg -> AIModelKimi.imageset
+
+These are the upstream monochrome variants, not recreated paths or SF Symbols.
+Each imageset uses universal vector data and template rendering. AIModelIcon
+inherits the caller's foreground style so the marks remain visible in either
+appearance. No remote logo fetch, runtime SVG parser, or build dependency is used.
+
+Brand names and logos belong to their respective owners. Inclusion identifies
+models and does not imply sponsorship or endorsement.

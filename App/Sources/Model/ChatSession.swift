@@ -42,7 +42,13 @@ final class ChatSession: Identifiable {
     @ObservationIgnored weak var app: AppModel?
     @ObservationIgnored private var run: AgentRun?
     @ObservationIgnored private var workspace: RepoWorkspace?
-    @ObservationIgnored private var changeWorkspace: ChangeWorkspace?
+    /// Observable without a receipt: true while the in-memory workspace has edits.
+    private(set) var hasStagedChanges = false
+    @ObservationIgnored private var stagedChangesRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private var stagedChangesRefreshGeneration = 0
+    @ObservationIgnored private var changeWorkspace: ChangeWorkspace? {
+        didSet { refreshStagedChanges() }
+    }
     @ObservationIgnored private var workflowEngines: [String: WorkflowEngine] = [:]
     @ObservationIgnored private var workflowTasks: [String: Task<Void, Never>] = [:]
     var currentChangeWorkspace: ChangeWorkspace? { changeWorkspace }
@@ -105,8 +111,8 @@ final class ChatSession: Identifiable {
     @ObservationIgnored private var lastComputerSync: String?
     @ObservationIgnored private var lastComputerCheck: Date?
     @ObservationIgnored private var changeSession: ChangeSession?
-    @ObservationIgnored private var pendingTurn: AssistantTurn?
-    @ObservationIgnored private var flushScheduled = false
+    @ObservationIgnored private var streamedTurns = StreamingUpdateBuffer<AssistantTurn>()
+    @ObservationIgnored private var flushTask: Task<Void, Never>?
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored private var draftSaveTask: Task<Void, Never>?
     @ObservationIgnored private var lastSaved = Date()
@@ -139,7 +145,7 @@ final class ChatSession: Identifiable {
     }
 
     func checkpointNow() async {
-        flush()
+        flush(scheduleSave: false)
         guard let app else { return }
         lastSaved = Date()
         await app.library.save(chat)
@@ -390,8 +396,30 @@ final class ChatSession: Identifiable {
         await changeWorkspace?.stagedDiff() ?? "No staged changes in this turn."
     }
 
+    /// Cheap actor query, never awaited by the token-delivery path. A replaced workspace
+    /// or newer refresh invalidates the old result before it can change visibility.
+    func refreshStagedChanges() {
+        stagedChangesRefreshGeneration &+= 1
+        let generation = stagedChangesRefreshGeneration
+        stagedChangesRefreshTask?.cancel()
+        stagedChangesRefreshTask = nil
+        guard let changes = changeWorkspace else {
+            hasStagedChanges = false
+            return
+        }
+        stagedChangesRefreshTask = Task { [weak self] in
+            let hasChanges = await changes.hasStagedChanges()
+            guard !Task.isCancelled, let self,
+                  self.stagedChangesRefreshGeneration == generation,
+                  self.changeWorkspace === changes else { return }
+            self.hasStagedChanges = hasChanges
+            self.stagedChangesRefreshTask = nil
+        }
+    }
+
     func currentStagedChanges() async -> [StagedChange] {
-        await changeWorkspace?.stagedChanges() ?? []
+        defer { refreshStagedChanges() }
+        return await changeWorkspace?.stagedChanges() ?? []
     }
 
     func branchDiff() async -> String {
@@ -431,6 +459,7 @@ final class ChatSession: Identifiable {
         pausedInBackground = false
         userStoppedExplicitly = true
         pendingSteers.removeAll()
+        flush()
         guard isRunning else {
             settleWaitingTurn()
             return
@@ -857,6 +886,8 @@ final class ChatSession: Identifiable {
 
     private func runTurn() async {
         defer {
+            flush()
+            refreshStagedChanges()
             isRunning = false
             run = nil
             saveSoon(immediately: true)
@@ -1470,6 +1501,7 @@ final class ChatSession: Identifiable {
             guard case .updated(let turn, let milestone) = event else { continue }
             receive(turn, milestone: milestone)
         }
+        flush()
         // `KiroCrew#20549`: If a live steer arrived right as the turn finished without another step boundary,
         // promote it immediately so the model answers it instead of stranding it!
         if !userStoppedExplicitly, !pausedInBackground {
@@ -1509,39 +1541,44 @@ final class ChatSession: Identifiable {
         await nameChatIfNeeded()
     }
 
-    /// Streamed updates are drawn at most every 45 ms; finished steps and tools at once.
+    /// Publish the first snapshot immediately, then at most 30 times/second. Always deliver
+    /// the latest trailing snapshot even if the provider pauses. Milestones never wait.
     private func receive(_ turn: AssistantTurn, milestone: Bool) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let ready = streamedTurns.receive(turn, immediate: milestone || turn.status != .running, at: now) {
+            flushTask?.cancel()
+            flushTask = nil
+            publish(ready, milestone: milestone)
+        } else if flushTask == nil {
+            let delay = UInt64(streamedTurns.delay(at: now) * 1_000_000_000)
+            flushTask = Task { [weak self] in
+                do { try await Task.sleep(nanoseconds: delay) } catch { return }
+                guard !Task.isCancelled else { return }
+                self?.flush()
+            }
+        }
+    }
+
+    private func flush(scheduleSave: Bool = true) {
+        flushTask?.cancel()
+        flushTask = nil
+        guard let turn = streamedTurns.flush(at: ProcessInfo.processInfo.systemUptime) else { return }
+        publish(turn, milestone: turn.status != .running, scheduleSave: scheduleSave)
+    }
+
+    private func publish(_ turn: AssistantTurn, milestone: Bool, scheduleSave: Bool = true) {
+        // Scanning all steps for steering on every token defeated the UI throttle.
         if !pendingSteers.isEmpty {
             let consumed = Set(turn.steps.flatMap { $0.steeredMessages ?? [] })
             if !consumed.isEmpty {
                 pendingSteers.removeAll { consumed.contains($0.text) }
             }
         }
-        if milestone {
-            pendingTurn = nil
-            replaceLastTurn(turn)
+        replaceLastTurn(turn)
+        if milestone || turn.status != .running { refreshStagedChanges() }
+        if milestone || turn.status != .running || Date().timeIntervalSince(lastSaved) >= 4.0 {
             chat.updatedAt = Date()
-            saveSoon()
-            return
-        }
-        pendingTurn = turn
-        guard !flushScheduled else { return }
-        flushScheduled = true
-        Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 45_000_000)
-            self?.flush()
-        }
-    }
-
-    private func flush() {
-        flushScheduled = false
-        if let turn = pendingTurn {
-            pendingTurn = nil
-            replaceLastTurn(turn)
-            if Date().timeIntervalSince(lastSaved) >= 4.0 {
-                chat.updatedAt = Date()
-                saveSoon()
-            }
+            if scheduleSave { saveSoon() }
         }
     }
 
@@ -1750,6 +1787,7 @@ final class ChatSession: Identifiable {
         saveTask = Task { [weak self] in
             if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
             guard !Task.isCancelled, let self, let app = self.app else { return }
+            self.flush(scheduleSave: false)
             self.lastSaved = Date()
             await app.library.save(self.chat)
         }
