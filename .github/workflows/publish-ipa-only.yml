@@ -53,6 +53,7 @@ jobs:
           test -n "$IPA"
           python3 scripts/check-ipa.py "$IPA" --build 126 --version 0.1.0 --revision "$PR_HEAD"
           cp "$IPA" MAIPA-G-126.ipa
+          cp "$IPA" MAIPA-G.ipa
       - name: Publish the IPA release
         env:
           GH_TOKEN: ${{ github.token }}
