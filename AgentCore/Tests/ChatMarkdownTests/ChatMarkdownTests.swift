@@ -119,3 +119,109 @@ struct SyntaxHighlighterTests {
         #expect(tokens.map(\.1) == [.keyword, .attribute, .string, .keyword])
     }
 }
+
+@Suite("Streaming Markdown parser")
+struct StreamingMarkdownParserTests {
+    @Test func liveParserMatchesFinalParserForCodeAndMermaid() async throws {
+        let text = "Intro\n\n```mermaid\ngraph TD; A-->B\n```\n\n```swift\nlet x = 1\n```"
+        let parser = StreamingMarkdownParser()
+        // Reuse one live parser across incomplete fences and final source.
+        for end in text.indices {
+            let prefix = String(text[..<end])
+            #expect(try await parser.parse(prefix) == MarkdownDocument(parsing: prefix))
+        }
+        let live = try await parser.parse(text)
+        #expect(live == MarkdownDocument(parsing: text))
+        #expect(live.blocks[1] == .code(language: "mermaid", text: "graph TD; A-->B"))
+    }
+
+    @Test func cancelledLiveParseIsSkipped() async {
+        let task = Task {
+            // Keep cancellation set but continue to the parser's own cancellation check.
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            return try await StreamingMarkdownParser().parse("late")
+        }
+        task.cancel()
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
+    }
+}
+
+@Suite("Streaming Markdown coalescing", .timeLimit(.minutes(1)))
+@MainActor
+struct StreamingMarkdownWorkerTests {
+    @Test func slowParsePublishesIntermediateThenLatestWithoutQueueingDrafts() async {
+        let gate = MarkdownParseGate()
+        let worker = StreamingMarkdownWorker { await gate.parse($0) }
+        worker.submit("first")
+        await gate.waitForStarts(1)
+        for index in 1...100 { worker.submit("draft \(index)") }
+        worker.submit("latest **complete**")
+        gate.finish("first")
+        await gate.waitForStarts(2)
+        #expect(worker.document == MarkdownDocument(parsing: "first"))
+        #expect(gate.sources == ["first", "latest **complete**"])
+        let task = worker.task
+        gate.finish("latest **complete**")
+        await task?.value
+        #expect(worker.document == MarkdownDocument(parsing: "latest **complete**"))
+        #expect(worker.task == nil)
+        // Identical input doesn't start unnecessary work after the worker drains.
+        worker.submit("latest **complete**")
+        #expect(worker.task == nil)
+    }
+
+    @Test func teardownRejectsOldCompletionAndAllowsReappearance() async {
+        let gate = MarkdownParseGate()
+        let worker = StreamingMarkdownWorker { await gate.parse($0) }
+        worker.submit("old")
+        await gate.waitForStarts(1)
+        let oldTask = worker.task
+        worker.submit("discarded pending")
+        worker.cancel()
+        worker.submit("new")
+        await gate.waitForStarts(2)
+        let newTask = worker.task
+        gate.finish("new")
+        await newTask?.value
+        // Simulate a parser which cannot interrupt its synchronous work on cancellation.
+        gate.finish("old")
+        await oldTask?.value
+        #expect(gate.sources == ["old", "new"])
+        #expect(worker.document == MarkdownDocument(parsing: "new"))
+        #expect(worker.task == nil)
+        worker.cancel()
+        worker.submit("new")
+        await gate.waitForStarts(3)
+        let restartedTask = worker.task
+        gate.finish("new")
+        await restartedTask?.value
+        #expect(worker.document == MarkdownDocument(parsing: "new"))
+    }
+}
+
+/// Deterministic slow parser; no wall-clock sleeps or scheduler timing assumptions.
+@MainActor
+private final class MarkdownParseGate {
+    private(set) var sources: [String] = []
+    private var completions: [String: CheckedContinuation<MarkdownDocument, Never>] = [:]
+    private var started: CheckedContinuation<Void, Never>?
+
+    func parse(_ source: String) async -> MarkdownDocument {
+        await withCheckedContinuation { continuation in
+            completions[source] = continuation
+            sources.append(source)
+            started?.resume()
+            started = nil
+        }
+    }
+
+    func waitForStarts(_ count: Int) async {
+        while sources.count < count {
+            await withCheckedContinuation { started = $0 }
+        }
+    }
+
+    func finish(_ source: String) {
+        completions.removeValue(forKey: source)?.resume(returning: MarkdownDocument(parsing: source))
+    }
+}

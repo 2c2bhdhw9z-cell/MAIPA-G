@@ -26,6 +26,7 @@ struct Composer: View {
     @Binding var autonomous: Bool
     var busySendMode: Binding<ChatSession.BusySendMode>? = nil
     var modelLabel: String
+    var modelID: String
     var supportsTools = true
     var isImageOnlyModel = false
     var contextUsedTokens: Int
@@ -334,8 +335,9 @@ struct Composer: View {
     private var modelButton: some View {
         Button(action: onPickModel) {
             HStack(spacing: 4) {
-                Image(systemName: modelLabel == "Auto" ? "wand.and.stars" : "cpu")
+                AIModelIcon(modelID: modelID, size: 16)
                     .foregroundStyle(theme.accent)
+                    .accessibilityHidden(true)
                 Text(modelLabel)
                     .lineLimit(1)
                     .truncationMode(.tail)

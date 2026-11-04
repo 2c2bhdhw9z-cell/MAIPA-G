@@ -16,6 +16,7 @@ struct ChatScreen: View {
     @State private var editingMessageID: UUID?
     @State private var editedMessageText = ""
     @State private var showingDiff = false
+    @State private var userIsScrolling = false
 
     private let bottomID = "chat-bottom-anchor"
 
@@ -42,13 +43,18 @@ struct ChatScreen: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 10)
                 .padding(.bottom, 8)
+                .background {
+                    GeometryReader { geometry in
+                        Color.clear.preference(key: RenderedChatHeightKey.self, value: geometry.size.height)
+                    }
+                }
                 .animation(theme.messagesSlideIn ? .snappy : nil, value: session.chat.messages.count)
             }
             .scrollDismissesKeyboard(.interactively)
             .modifier(BottomEdgeScrollCompatibilityModifier(bottomID: bottomID, animatedJumpCount: animatedJumpCount, instantJumpCount: instantJumpCount))
-            .modifier(BottomScrollTrackingModifier(followsBottom: $followsBottom, messages: session.chat.messages) { anchorID in
+            .modifier(BottomScrollTrackingModifier(followsBottom: $followsBottom, messages: session.chat.messages, onAnchorChange: { anchorID in
                 session.savedAnchorMessageID = anchorID
-            })
+            }, onUserScrollingChange: { userIsScrolling = $0 }))
             .onAppear {
                 followsBottom = session.savedFollowsBottom
                 if session.savedFollowsBottom {
@@ -69,8 +75,8 @@ struct ChatScreen: View {
                 session.savedFollowsBottom = newValue
                 if newValue { session.savedAnchorMessageID = nil }
             }
-            .onChange(of: contentSize) { _, _ in
-                if followsBottom { scrollToBottomWithoutAnimation(proxy) }
+            .onPreferenceChange(RenderedChatHeightKey.self) { _ in
+                if followsBottom, !userIsScrolling { scrollToBottomWithoutAnimation(proxy) }
             }
             .safeAreaInset(edge: .top, spacing: 0) {
                 topBar
@@ -81,6 +87,9 @@ struct ChatScreen: View {
         }
         .background(Theme.background.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
+        .onChange(of: session.isRunning) { _, running in
+            if !running { session.refreshStagedChanges() }
+        }
         .alert("Checks did not pass", isPresented: Binding(get: { session.mergeWarning != nil }, set: { if !$0 { session.cancelMergeWarning() } })) {
             Button("Add it anyway", role: .destructive) { Task { await session.addLastSave(force: true) } }
             Button("Cancel", role: .cancel) { session.cancelMergeWarning() }
@@ -196,6 +205,7 @@ struct ChatScreen: View {
     }
 
     private var hasPendingSave: Bool {
+        if session.hasStagedChanges { return true }
         guard let receipt = session.chat.saveReceipts?.last else { return false }
         return receipt.resolution == nil && receipt.undoneAt == nil
     }
@@ -317,43 +327,21 @@ struct ChatScreen: View {
                     .padding(.horizontal, 12)
                 }
 
-                if let receipt = session.chat.saveReceipts?.last,
-                   (receipt.pullRequest != nil && receipt.resolution == nil) || (receipt.undoneAt == nil && receipt.resolution == nil) {
-                    HStack(spacing: 8) {
-                        if receipt.pullRequest != nil, receipt.resolution == nil {
-                            Button("Add it") { Task { await session.addLastSave() } }
-                                .buttonStyle(.borderedProminent)
-                                .buttonBorderShape(.capsule)
-                            Button("Throw away", role: .destructive) { Task { await session.throwAwayLastSave() } }
-                                .buttonStyle(.bordered)
-                                .buttonBorderShape(.capsule)
-                        }
-                        if receipt.undoneAt == nil, receipt.resolution == nil {
-                            Button("Undo") { Task { await session.undoLastSave() } }
-                                .buttonStyle(.bordered)
-                                .buttonBorderShape(.capsule)
-                        }
-                        if let status = session.mergeCheckStatus {
-                            Text(status)
-                                .font(.caption)
-                                .foregroundStyle(status == "Checks passed" || status == "No automatic checks" ? .green : .orange)
-                                .lineLimit(1)
-                        }
-                        Spacer(minLength: 4)
-                        Button {
-                            app.sheet = .workstation(.chat(session.id), .changes)
-                        } label: {
-                            Label("Diff", systemImage: "doc.text.magnifyingglass")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(theme.accent)
-                        }
-                        .buttonStyle(.plain)
+                if hasPendingSave {
+                    Button {
+                        app.sheet = .workstation(.chat(session.id), .changes)
+                    } label: {
+                        Label("Review Changes", systemImage: "doc.text.magnifyingglass")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(theme.accent)
+                            .padding(.horizontal, 18)
+                            .frame(minHeight: 44)
+                            .glassPanel(cornerRadius: 22, interactive: false)
+                            .contentShape(Capsule())
+                            .shadow(color: .black.opacity(0.16), radius: 8, y: 3)
                     }
-                    .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Theme.stroke))
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Review the diff and choose whether to keep or discard changes")
                     .padding(.horizontal, 12)
                 }
 
@@ -364,6 +352,7 @@ struct ChatScreen: View {
                     autonomous: $session.autonomous,
                     busySendMode: $session.busySendMode,
                     modelLabel: app.openRouter.label(for: session.chat.model),
+                    modelID: session.chat.model.storedValue,
                     supportsTools: app.openRouter.supportsTools(session.chat.model),
                     isImageOnlyModel: app.openRouter.isImageOnlyModel(session.chat.model),
                     contextUsedTokens: session.contextUsedTokens,
@@ -476,20 +465,6 @@ struct ChatScreen: View {
         }
     }
 
-    /// Changes whenever the conversation grows, to keep the newest words in view.
-    private var contentSize: Int {
-        let messages = session.chat.messages
-        var size = messages.count * 1_000_003
-        if let turn = messages.last?.assistantTurn {
-            for step in turn.steps {
-                size += step.text.count + step.reasoning.count / 4 + step.toolCalls.count * 7
-            }
-            if turn.pendingQuestions != nil { size += 11 }
-            if turn.failure != nil { size += 13 }
-        }
-        return size
-    }
-
     private func modelName(_ id: String) -> String {
         app.openRouter.displayName(forModelID: id)
     }
@@ -516,6 +491,13 @@ struct ChatScreen: View {
             openURL: { openURL($0) },
             toggleStar: { session.toggleStar($0) }
         )
+    }
+}
+
+private struct RenderedChatHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
@@ -562,10 +544,16 @@ private struct BottomScrollTrackingModifier: ViewModifier {
     @Binding var followsBottom: Bool
     var messages: [ChatMessage]
     var onAnchorChange: (UUID?) -> Void
+    var onUserScrollingChange: (Bool) -> Void
+    @State private var userIsScrolling = false
 
     func body(content: Content) -> some View {
         if #available(iOS 18.0, *) {
             content
+                .onScrollPhaseChange { _, phase in
+                    userIsScrolling = phase == .tracking || phase == .interacting || phase == .decelerating
+                    onUserScrollingChange(userIsScrolling)
+                }
                 .onScrollGeometryChange(for: Int.self) { geo in
                     guard geo.contentSize.height > 0 else { return 0 }
                     // `visibleRect.maxY` already accounts for safe-area and bottom composer insets!
@@ -574,6 +562,8 @@ private struct BottomScrollTrackingModifier: ViewModifier {
                     let ratio = min(1.0, max(0.0, Double(geo.visibleRect.midY) / Double(max(1, geo.contentSize.height))))
                     return 1 + Int((ratio * 1000.0).rounded())
                 } action: { _, bucket in
+                    // Async Markdown layout must not be mistaken for the person scrolling away.
+                    guard userIsScrolling else { return }
                     let nearBottom = (bucket == 0)
                     if nearBottom != followsBottom {
                         followsBottom = nearBottom
@@ -586,6 +576,11 @@ private struct BottomScrollTrackingModifier: ViewModifier {
                 }
         } else {
             content
+                .onChange(of: messages.count) { _, _ in
+                    if !userIsScrolling, let last = messages.last {
+                        onAnchorChange(last.id)
+                    }
+                }
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 12).onChanged { value in
                         if value.translation.height > 16 { followsBottom = false }

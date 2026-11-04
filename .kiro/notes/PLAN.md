@@ -1,6 +1,6 @@
 # MAIPA-G plan
 
-**Status (1 November 2026, 2:05 AM ET): Shipped Build 88 to `main` (PR #27), combining all Build 85/86 fixes and all S1/S2/S3 findings from `MAIPA-G-AUDIT.md` (verified across 197 Linux + macOS tests with `-strict-concurrency=complete`).**
+**Status (3 November 2026): Owner authorized this batch end-to-end: replace the inline save bar with a floating Review Changes entry; bundle LobeHub model-brand logos; coalesce live text updates and parse Markdown off-main; run CI tests and iPhone validation, squash-merge the batch PR, then publish its verified IPA. Implementation and regression coverage are staged; CI/build validation is pending. Build 126 previously shipped the payload-cap and audit fixes.**
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
 saving works (Settings and the side menu showed "Saved just now", and the 173 MB Continuum .ipa is

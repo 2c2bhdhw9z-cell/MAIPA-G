@@ -27,6 +27,7 @@ struct HomeScreen: View {
                     webEnabled: $home.webEnabled,
                     autonomous: $home.autonomous,
                     modelLabel: app.openRouter.label(for: home.model),
+                    modelID: home.model.storedValue,
                     supportsTools: app.openRouter.supportsTools(home.model),
                     isImageOnlyModel: app.openRouter.isImageOnlyModel(home.model),
                     contextUsedTokens: 0,
