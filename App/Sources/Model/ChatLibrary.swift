@@ -71,6 +71,7 @@ final class ChatLibrary {
                 draft: await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: chat.id.uuidString.lowercased()))
             )
             session.resumeFromRelaunchIfSafe()
+            session.settleInterruptedWorkflowRunsOnLaunch()
             sessions[chat.id] = session
             loadedSummaries[index] = ChatSummary(session.chat)
         }

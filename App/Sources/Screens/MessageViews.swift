@@ -1463,10 +1463,10 @@ struct ActiveWorkflowsInlineCard: View {
                 .background(theme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
 
-            if let err = run.errorMessage, !err.isEmpty {
+            if let err = run.errorMessage, !err.isEmpty, !run.isRunning {
                 Text(err)
                     .font(.caption)
-                    .foregroundStyle(Theme.danger)
+                    .foregroundStyle(err.contains("app restart") ? Theme.secondaryText : Theme.danger)
                     .lineLimit(3)
             }
 
@@ -1590,6 +1590,7 @@ struct ActiveWorkflowsInlineCard: View {
             if run.isRunning { return ("Running", theme.accent) }
             if run.checkpoint.isCancelled { return ("Stopped", Theme.secondaryText) }
             if run.checkpoint.pendingQuestion != nil || run.checkpoint.isPausedByUser { return ("Paused", .orange) }
+            if let err = run.errorMessage, err.contains("app restart") { return ("Stopped", Theme.secondaryText) }
             if run.errorMessage != nil { return ("Failed", Theme.danger) }
             return ("Done", .green)
         }()

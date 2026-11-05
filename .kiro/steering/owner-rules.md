@@ -8,18 +8,18 @@ These come straight from the owner. His general rules are in Kiro's global memor
 here too: plain English, iPhone only, never assume, ask short numbered questions, do only what he
 asks, one build per batch with the .ipa link and test steps, Eastern time.
 
-## Branches and pull requests: allowed here, kept clean
-Owner, 27 October 2026: "for this you can make branches and PRs. Just keep that shit clean ...
-because I don't understand how they work".
-- This repo is the only exception. All his other repos still get no branches and no PRs.
-- Use one branch and one PR per batch of app work, with a plain-English name and description.
-- When the batch is finished and its build check passes, squash-merge it into main yourself and
-  delete the branch straight away.
-- Never have more than one open at a time. At the start of a session, finish or close any
-  leftover branch or PR before starting anything new.
-- Notes and rules files (like this one) can go straight to main.
-- Never ask the owner to do anything with branches or PRs. If they come up, explain them in
-  plain words: a branch is a side copy, and a PR is the request to fold it into the main copy.
+## Branches and pull requests: straight to main
+Owner, 5 November 2026: "Everyone should only ever push the main ... There should not be branches or
+PRs ... It's just fucking shit up." This replaces the 27 October exception entirely.
+- Commit straight to `main`. Never open a branch or a pull request, and never ask the owner about
+  them. If a stale branch or PR already exists, close/delete it rather than using it.
+- The app's "saves directly" setting is the way to do this: turn off pull-request saving for this
+  repository so every save lands on `main`.
+- The build still has to be checked before it reaches him. `ios.yml` runs on `workflow_dispatch`
+  as well as on pull requests, and it embeds `github.sha` when there is no pull request, so a
+  checked build of `main` is still possible without a PR.
+- Keep `.github/workflows/publish-verified-ipa.sh`'s "PR and main trees must match" proof intact:
+  when there is no pull request, the tree of the published commit equals itself, so it still holds.
 
 ## "However you do it" means Kiro's factory defaults
 Owner, 27 October 2026, correcting answer 11: "the way you normally are programmed, like the way

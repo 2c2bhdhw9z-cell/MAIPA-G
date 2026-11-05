@@ -228,6 +228,11 @@ public struct ChatMessage: Codable, Sendable, Identifiable, Hashable {
         return nil
     }
 
+    public var userAttachments: [AttachmentReference] {
+        if case .user(let message) = body { return message.attachments }
+        return []
+    }
+
     public var assistantTurn: AssistantTurn? {
         get {
             if case .assistant(let turn) = body { return turn }

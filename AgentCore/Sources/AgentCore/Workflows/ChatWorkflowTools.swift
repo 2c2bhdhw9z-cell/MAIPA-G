@@ -28,6 +28,9 @@ public struct ActiveWorkflowRunSnapshot: Codable, Sendable, Hashable, Identifiab
             if isRunning { return "RUNNING" }
             if checkpoint.isCancelled { return "STOPPED" }
             if checkpoint.pendingQuestion != nil || checkpoint.isPausedByUser { return "PAUSED" }
+            // A run settled because the app restarted is stopped, not failed: it died, and the person
+            // can retry it. Without this it showed a red "Error: Interrupted by app restart".
+            if let errorMessage, errorMessage.contains("app restart") { return "STOPPED" }
             if errorMessage != nil { return "FAILED" }
             return "COMPLETED"
         }()

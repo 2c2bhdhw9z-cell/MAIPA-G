@@ -106,7 +106,8 @@ public enum SystemPrompt {
         workflowContext: String? = nil,
         memories: [String] = [],
         connectedRepositories: [String] = [],
-        isAutonomous: Bool = false
+        isAutonomous: Bool = false,
+        skippedAttachments: [String] = []
     ) -> String {
         var formatter = Date.FormatStyle(date: .complete, time: .shortened)
         formatter.timeZone = timeZone
@@ -181,6 +182,15 @@ public enum SystemPrompt {
             """)
         } else if !connectedRepositories.isEmpty {
             parts.append("Connected GitHub repositories (use `read_other_repo_file` by exact or repo name when needed, or `create_repository` with approval): " + connectedRepositories.prefix(30).joined(separator: ", ") + (connectedRepositories.count > 30 ? ", …" : ""))
+        }
+
+        if !skippedAttachments.isEmpty {
+            parts.append("""
+            Attachments that could NOT be sent to you this turn (each is larger than the 32 MB limit or was unreadable):
+            \(skippedAttachments.map { "- \($0)" }.joined(separator: "\n"))
+
+            Their contents are not available. Never claim to have read them or guess what they say. Tell the person plainly which file was too large to send and that they can attach a smaller version or a link instead.
+            """)
         }
 
         if let computer {

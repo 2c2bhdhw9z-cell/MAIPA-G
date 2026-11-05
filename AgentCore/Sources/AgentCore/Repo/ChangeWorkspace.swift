@@ -131,8 +131,14 @@ public actor ChangeWorkspace {
             }
         }
         guard !sections.isEmpty else { return "No staged changes." }
-        return String(sections.joined(separator: "\n\n").prefix(200_000))
+        return Self.capped(sections.joined(separator: "\n\n"), hint: "Use read_file to see the rest of the file.")
     }
+
+    /// Cuts text at `limit` characters and says so, so a cut-off list never looks like the whole answer.
+    /// A plain `prefix` silently dropped everything after the limit, mid-line and mid-file.
+    public static func capped(_ text: String, limit: Int = 200_000, hint: String) -> String {
+        guard text.count > limit else { return text }
+        return text.prefix(limit) + "\n\n[WARNING: Output truncated at \(limit) characters. \(hint)]"    }
 
     /// Staged files whose contents never go into `stagedDiffForPrompt()`: `.env*`, `*.pem`, `*.key`,
     /// `id_rsa*`, `id_ed25519*`, anything under a `secrets/` folder, and `credentials*`.
