@@ -909,10 +909,11 @@ final class ChatSession: Identifiable {
         if case .model(let pickedID) = chat.model,
            let pickedModel = app.openRouter.modelsByID[pickedID],
            pickedModel.isPureImageModel {
-            await runPureImageTurn(model: pickedModel, prompt: lastMessage, attachments: chat.messages.last(where: { $0.userText != nil }).flatMap { message in
+            let attachments: [AttachmentReference] = chat.messages.reversed().compactMap { message -> [AttachmentReference]? in
                 if case .user(let user) = message.body { return user.attachments }
-                return []
-            }, client: aiClient, app: app)
+                return nil
+            }.first ?? []
+            await runPureImageTurn(model: pickedModel, prompt: lastMessage, attachments: attachments, client: aiClient, app: app)
             return
         }
         let changeAuthorization = ChangeAuthorization(request: lastMessage)
@@ -1848,7 +1849,12 @@ final class ChatSession: Identifiable {
             "quality": .string(ImageQuality.standard.rawValue),
         ]
         if model.acceptsImages, !inputImages.isEmpty {
-            arguments["input_images"] = .array(inputImages.map(JSONValue.string))
+            arguments = .object([
+                "prompt": .string(cleanPrompt),
+                "aspect_ratio": .string(ImageAspectRatio.square.rawValue),
+                "quality": .string(ImageQuality.standard.rawValue),
+                "input_images": .array(inputImages.map(JSONValue.string)),
+            ])
         }
         var approved = false
         if let waiting = lastTurn?.steps.last?.toolCalls.last, waiting.name == imageTool.name, let questions = waiting.questions {

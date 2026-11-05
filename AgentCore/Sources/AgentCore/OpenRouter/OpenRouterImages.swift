@@ -143,15 +143,17 @@ public extension OpenRouterClient {
         inputImages: [String] = [],
         progress: @escaping @Sendable (String) -> Void
     ) async throws -> [GeneratedImage] {
+        var content: [JSONValue] = [["type": "text", "text": .string(prompt)]]
+        content += inputImages.map { url -> JSONValue in
+            ["type": "image_url", "image_url": ["url": .string(url)]]
+        }
         let body: JSONValue = [
             "model": .string(model),
             "stream": .bool(false),
             "modalities": ["image", "text"],
             "image_config": ["aspect_ratio": .string(options.aspectRatio.rawValue)],
             "messages": [
-                ["role": "user", "content": inputImages.isEmpty
-                    ? .string(prompt)
-                    : .array([.init(["type": "text", "text": .string(prompt)])] + inputImages.map { .init(["type": "image_url", "image_url": ["url": .string($0)]]) })],
+                ["role": "user", "content": inputImages.isEmpty ? .string(prompt) : .array(content)],
             ],
         ]
         let req = try HTTPRequest.json("POST", Self.apiBase.appendingPathComponent("chat/completions"), body: body, headers: headers(forModel: model), idleTimeout: 300)
