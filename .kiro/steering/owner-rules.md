@@ -8,13 +8,19 @@ These come straight from the owner. His general rules are in Kiro's global memor
 here too: plain English, iPhone only, never assume, ask short numbered questions, do only what he
 asks, one build per batch with the .ipa link and test steps, Eastern time.
 
+No pull requests.
+
 ## Branches and pull requests: straight to main
 Owner, 5 November 2026: "Everyone should only ever push the main ... There should not be branches or
 PRs ... It's just fucking shit up." This replaces the 27 October exception entirely.
-- Commit straight to `main`. Never open a branch or a pull request, and never ask the owner about
-  them. If a stale branch or PR already exists, close/delete it rather than using it.
-- The app's "saves directly" setting is the way to do this: turn off pull-request saving for this
-  repository so every save lands on `main`.
+- Never open a branch or a pull request, and never ask the owner about them. If a stale branch or
+  PR already exists, close or delete it rather than using it.
+- The line above (`No pull requests.`) is deliberately worded that way: the app only turns on
+  direct saves for a repository whose rules contain one of a fixed set of exact sentences, and
+  `no pull requests` is one of them. Paraphrases such as "commit straight to main" are NOT
+  recognised and leave the default side-branch-and-PR behaviour in place. Do not reword it.
+- Do not rely on the app's "Save straight to branch" switch. It is off by default, off means
+  pull request, and the owner has never turned it on.
 - The build still has to be checked before it reaches him. `ios.yml` runs on `workflow_dispatch`
   as well as on pull requests, and it embeds `github.sha` when there is no pull request, so a
   checked build of `main` is still possible without a PR.
