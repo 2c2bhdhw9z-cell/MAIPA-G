@@ -1,6 +1,11 @@
+import Foundation
+import Testing
+@testable import AgentCore
 
 @Suite("Build 127 — visible truncation, silent attachment drops, and restart-settled workflow runs")
 struct Build127Tests {
+    private var utc: TimeZone { TimeZone(identifier: "UTC") ?? TimeZone.current }
+
     @Test("A long diff is cut with a visible warning instead of ending silently")
     func cappedDiffWarns() {
         let short = String(repeating: "a", count: 100)
@@ -16,12 +21,12 @@ struct Build127Tests {
 
     @Test("A skipped attachment is named in the system prompt so the AI cannot pretend it read it")
     func skippedAttachmentsReachSystemPrompt() {
-        let plain = SystemPrompt.make(now: Date(), timeZone: .gmt, userLogin: "someone", repo: nil)
+        let plain = SystemPrompt.make(now: Date(), timeZone: utc, userLogin: "someone", repo: nil)
         #expect(!plain.contains("could NOT be sent"))
 
         let noted = SystemPrompt.make(
             now: Date(),
-            timeZone: .gmt,
+            timeZone: utc,
             userLogin: "someone",
             repo: nil,
             skippedAttachments: ["huge.pdf"]
