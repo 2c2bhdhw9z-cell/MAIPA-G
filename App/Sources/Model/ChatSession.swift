@@ -127,6 +127,9 @@ final class ChatSession: Identifiable {
         self.draftAttachments = draft?.attachments ?? []
         self.queuedSteering = chat.queuedFollowUps ?? []
         self.activeWorkflowRuns = chat.activeWorkflowRuns ?? []
+        // Any run still marked "running" when a session is built has no in-memory engine behind it,
+        // so settle it here: every load path builds a session, and the card would otherwise be stuck.
+        settleInterruptedWorkflowRunsOnLaunch()
     }
 
     var backgroundStatusSubtitle: String {
@@ -428,9 +431,12 @@ final class ChatSession: Identifiable {
         do {
             let comparison = try await github.compare(repo.ref, base: repo.defaultBranch, head: branch)
             if comparison.files.isEmpty { return "No branch changes." }
-            return String(comparison.files.map { file in
-                "--- \(file.status): \(file.path)\n" + (file.patch ?? "GitHub did not provide a text patch for this file.")
-            }.joined(separator: "\n\n").prefix(200_000))
+            return ChangeWorkspace.capped(
+                comparison.files.map { file in
+                    "--- \(file.status): \(file.path)\n" + (file.patch ?? "GitHub did not provide a text patch for this file.")
+                }.joined(separator: "\n\n"),
+                hint: "\(comparison.files.count) files changed on this branch; open the file on GitHub to see the rest."
+            )
         } catch {
             return ErrorExplainer.explain(error).message
         }
@@ -909,7 +915,14 @@ final class ChatSession: Identifiable {
         if case .model(let pickedID) = chat.model,
            let pickedModel = app.openRouter.modelsByID[pickedID],
            pickedModel.isPureImageModel {
-            await runPureImageTurn(model: pickedModel, prompt: lastMessage, client: aiClient, app: app)
+            let lastUserMessage = chat.messages.last { $0.userText != nil }
+            await runPureImageTurn(
+                model: pickedModel,
+                prompt: lastUserMessage?.userText ?? "",
+                attachments: lastUserMessage?.userAttachments ?? [],
+                client: aiClient,
+                app: app
+            )
             return
         }
         let changeAuthorization = ChangeAuthorization(request: lastMessage)
@@ -918,9 +931,14 @@ final class ChatSession: Identifiable {
             return []
         }
         var attachmentData: [UUID: Data] = [:]
+        var skippedAttachments: [String] = []
         for attachment in allAttachments where attachment.kind == .image || attachment.kind == .pdf {
             guard attachment.bytes <= 32 * 1_048_576,
-                  let raw = try? await app.attachmentStore.data(for: attachment) else { continue }
+                  let raw = try? await app.attachmentStore.data(for: attachment) else {
+                // Dropping a file silently made a too-big PDF look like it had been read.
+                skippedAttachments.append(attachment.name)
+                continue
+            }
             if attachment.kind == .image, raw.count > 420_000 {
                 attachmentData[attachment.id] = Self.compactWireImageData(raw)
             } else {
@@ -1458,7 +1476,8 @@ final class ChatSession: Identifiable {
                 activeModel: activeModelSummary,
                 memories: chat.memoryContext,
                 connectedRepositories: app.github.repos.map(\.fullName),
-                isAutonomous: isAutonomousTurn
+                isAutonomous: isAutonomousTurn,
+                skippedAttachments: skippedAttachments
             ),
             tools: tools,
             allowTools: app.openRouter.supportsTools(chat.model),
@@ -1822,12 +1841,19 @@ final class ChatSession: Identifiable {
     private func runPureImageTurn(
         model: ModelInfo,
         prompt: String,
+        attachments: [AttachmentReference] = [],
         client: OpenRouterClient,
         app: AppModel
     ) async {
         let cleanPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        // `generate_image` only takes a text prompt, so an attached picture cannot be sent here.
+        // Saying so beats letting the turn look like the picture was taken into account.
+        let ignoredNote = attachments.isEmpty
+            ? ""
+            : "Not sent to \(model.shortName): \(attachments.map(\.name).joined(separator: ", ")). \(model.shortName) only takes a written description here, so describe what you want instead."
         guard !cleanPrompt.isEmpty else {
-            fail(.other, "Describe the picture you want \(model.shortName) to generate.")
+            fail(.other, "Describe the picture you want \(model.shortName) to generate."
+                + (attachments.isEmpty ? "" : " " + ignoredNote))
             return
         }
         // A billed picture goes through `generate_image`'s own approval, the same pause every
@@ -1889,6 +1915,9 @@ final class ChatSession: Identifiable {
             var finishedStep = AssistantStep()
             finishedStep.model = model.id
             finishedStep.text = savedResults.isEmpty ? "No picture was returned by \(model.shortName)." : "Generated with **\(model.shortName)**."
+            if !ignoredNote.isEmpty {
+                finishedStep.text += "\n\n" + ignoredNote
+            }
             finishedStep.generatedImages = savedResults.isEmpty ? nil : savedResults
             finishedStep.finishedAt = Date()
             turn.steps = [finishedStep]
@@ -2143,6 +2172,22 @@ final class ChatSession: Identifiable {
         return finalSnapshot
     }
 
+    /// Stops every workflow run left marked "running" by a previous app session. Their engines are
+    /// gone, so their Pause/Stop buttons could never work; nothing else clears them.
+    func settleInterruptedWorkflowRunsOnLaunch() {
+        var changed = false
+        for idx in activeWorkflowRuns.indices where activeWorkflowRuns[idx].isRunning {
+            guard workflowEngines[activeWorkflowRuns[idx].id] == nil else { continue }
+            activeWorkflowRuns[idx].isRunning = false
+            activeWorkflowRuns[idx].checkpoint.isCancelled = true
+            activeWorkflowRuns[idx].errorMessage = "Interrupted by app restart"
+            changed = true
+        }
+        guard changed else { return }
+        chat.activeWorkflowRuns = activeWorkflowRuns
+        saveSoon(immediately: true)
+    }
+
     private func upsertWorkflowSnapshot(_ snapshot: ActiveWorkflowRunSnapshot) {
         if let idx = activeWorkflowRuns.firstIndex(where: { $0.id == snapshot.id }) {
             activeWorkflowRuns[idx] = snapshot
@@ -2186,13 +2231,14 @@ final class ChatSession: Identifiable {
     func replaceRemainingWorkflowSteps(runID: String?, steps: [WorkflowNode]) async throws -> String {
         let targetID = runID ?? activeWorkflowRuns.first?.id
         guard let targetID, let engine = workflowEngines[targetID] else {
-            throw ToolInputError("No active workflow run found to update.")
+            throw ToolInputError("No active workflow run found to update. A run left over from a previous app session can only be stopped or retried, not edited.")
         }
         let updated = try await engine.replaceRemainingSteps(steps)
         let cp = await engine.state
         if let idx = activeWorkflowRuns.firstIndex(where: { $0.id == targetID }) {
             activeWorkflowRuns[idx].definition = updated
             activeWorkflowRuns[idx].checkpoint = cp
+            chat.activeWorkflowRuns = activeWorkflowRuns
         }
         return "Updated workflow `\(updated.name)` (`\(targetID)`): now \(updated.steps.count) total top-level steps."
     }
@@ -2200,14 +2246,31 @@ final class ChatSession: Identifiable {
     // UI Controls for Inline `ACTIVE WORKFLOWS` Tree Card & `Workstation` `Workflows` Tab
 
     func pauseWorkflowRun(_ runID: String) {
-        guard let engine = workflowEngines[runID] else { return }
+        guard let engine = workflowEngines[runID] else {
+            // Only a restarted run reaches here. Asking to pause it must still settle it, otherwise
+            // Pause is a button that never does anything.
+            stopWorkflowRun(runID)
+            return
+        }
         Task { await engine.requestPause() }
     }
 
     func stopWorkflowRun(_ runID: String) {
         workflowTasks[runID]?.cancel()
         workflowTasks[runID] = nil
-        guard let engine = workflowEngines[runID] else { return }
+        guard let engine = workflowEngines[runID] else {
+            // The workflow engine only lives in memory, so after an app restart a chat can reload a
+            // run marked "running" with nothing behind it. Stopping that run used to do nothing at
+            // all, leaving a card whose Stop/Pause never worked and a chat the app treated as busy
+            // forever. Settle it by hand instead of silently returning.
+            guard let idx = activeWorkflowRuns.firstIndex(where: { $0.id == runID }) else { return }
+            activeWorkflowRuns[idx].isRunning = false
+            activeWorkflowRuns[idx].checkpoint.isCancelled = true
+            activeWorkflowRuns[idx].errorMessage = "Interrupted by app restart"
+            chat.activeWorkflowRuns = activeWorkflowRuns
+            saveSoon(immediately: true)
+            return
+        }
         Task {
             await engine.cancel()
             let cp = await engine.state
@@ -2227,19 +2290,30 @@ final class ChatSession: Identifiable {
             await MainActor.run {
                 if let idx = self.activeWorkflowRuns.firstIndex(where: { $0.id == runID }) {
                     self.activeWorkflowRuns[idx].checkpoint = cp
+                    self.chat.activeWorkflowRuns = self.activeWorkflowRuns
                 }
             }
         }
     }
 
     func setWorkflowRunModel(_ runID: String, modelID: String, effort: ThinkingLevel? = nil) {
-        guard modelID != ModelChoice.freeID, let engine = workflowEngines[runID] else { return }
+        guard modelID != ModelChoice.freeID else { return }
+        guard let engine = workflowEngines[runID] else {
+            // A restarted run has no engine left to switch, so record the choice for a later resume.
+            guard let idx = activeWorkflowRuns.firstIndex(where: { $0.id == runID }) else { return }
+            activeWorkflowRuns[idx].checkpoint.defaultModelID = modelID
+            activeWorkflowRuns[idx].checkpoint.defaultEffort = effort
+            chat.activeWorkflowRuns = activeWorkflowRuns
+            saveSoon(immediately: true)
+            return
+        }
         Task {
             try? await engine.setDefaultModel(modelID, effort: effort)
             let cp = await engine.state
             await MainActor.run {
                 if let idx = self.activeWorkflowRuns.firstIndex(where: { $0.id == runID }) {
                     self.activeWorkflowRuns[idx].checkpoint = cp
+                    self.chat.activeWorkflowRuns = self.activeWorkflowRuns
                 }
             }
         }
