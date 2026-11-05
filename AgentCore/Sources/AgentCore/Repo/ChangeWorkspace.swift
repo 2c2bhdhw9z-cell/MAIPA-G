@@ -131,7 +131,10 @@ public actor ChangeWorkspace {
             }
         }
         guard !sections.isEmpty else { return "No staged changes." }
-        return String(sections.joined(separator: "\n\n").prefix(200_000))
+        let diff = sections.joined(separator: "\n\n")
+        let limit = 200_000
+        guard diff.count > limit else { return diff }
+        return String(diff.prefix(limit)) + "\n\n[WARNING: Diff truncated at 200,000 characters. Use read_file to see the rest of the file.]"
     }
 
     /// Staged files whose contents never go into `stagedDiffForPrompt()`: `.env*`, `*.pem`, `*.key`,

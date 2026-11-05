@@ -909,7 +909,10 @@ final class ChatSession: Identifiable {
         if case .model(let pickedID) = chat.model,
            let pickedModel = app.openRouter.modelsByID[pickedID],
            pickedModel.isPureImageModel {
-            await runPureImageTurn(model: pickedModel, prompt: lastMessage, client: aiClient, app: app)
+            await runPureImageTurn(model: pickedModel, prompt: lastMessage, attachments: chat.messages.last(where: { $0.userText != nil }).flatMap { message in
+                if case .user(let user) = message.body { return user.attachments }
+                return []
+            }, client: aiClient, app: app)
             return
         }
         let changeAuthorization = ChangeAuthorization(request: lastMessage)
@@ -919,7 +922,7 @@ final class ChatSession: Identifiable {
         }
         var attachmentData: [UUID: Data] = [:]
         for attachment in allAttachments where attachment.kind == .image || attachment.kind == .pdf {
-            guard attachment.bytes <= 32 * 1_048_576,
+            guard attachment.bytes <= 5 * 1_048_576,
                   let raw = try? await app.attachmentStore.data(for: attachment) else { continue }
             if attachment.kind == .image, raw.count > 420_000 {
                 attachmentData[attachment.id] = Self.compactWireImageData(raw)
@@ -1822,6 +1825,7 @@ final class ChatSession: Identifiable {
     private func runPureImageTurn(
         model: ModelInfo,
         prompt: String,
+        attachments: [AttachmentReference],
         client: OpenRouterClient,
         app: AppModel
     ) async {
@@ -1830,14 +1834,22 @@ final class ChatSession: Identifiable {
             fail(.other, "Describe the picture you want \(model.shortName) to generate.")
             return
         }
-        // A billed picture goes through `generate_image`'s own approval, the same pause every
-        // other tool uses: a waiting tool call whose first option allows it.
-        let imageTool = GenerateImageTool(client: client, store: app.attachmentStore, model: model.id, maySpend: !model.isFree)
+        var inputImages: [String] = []
+        for attachment in attachments where attachment.kind == .image && attachment.bytes <= 5 * 1_048_576 {
+            guard let raw = try? await app.attachmentStore.data(for: attachment) else { continue }
+            let compacted = Self.compactWireImageData(raw)
+            let mime = compacted == raw ? attachment.mimeType : "image/jpeg"
+            inputImages.append("data:\(mime);base64,\(compacted.base64EncodedString())")
+        }
+        let imageTool = GenerateImageTool(client: client, store: app.attachmentStore, model: model.id, maySpend: !model.isFree, inputImages: model.acceptsImages ? inputImages : [])
         var arguments: JSONValue = [
             "prompt": .string(cleanPrompt),
             "aspect_ratio": .string(ImageAspectRatio.square.rawValue),
             "quality": .string(ImageQuality.standard.rawValue),
         ]
+        if model.acceptsImages, !inputImages.isEmpty {
+            arguments["input_images"] = .array(inputImages.map(JSONValue.string))
+        }
         var approved = false
         if let waiting = lastTurn?.steps.last?.toolCalls.last, waiting.name == imageTool.name, let questions = waiting.questions {
             guard let answer = questions.answers?.first else { return }
@@ -2207,7 +2219,15 @@ final class ChatSession: Identifiable {
     func stopWorkflowRun(_ runID: String) {
         workflowTasks[runID]?.cancel()
         workflowTasks[runID] = nil
-        guard let engine = workflowEngines[runID] else { return }
+        guard let engine = workflowEngines[runID] else {
+            if let idx = activeWorkflowRuns.firstIndex(where: { $0.id == runID }) {
+                activeWorkflowRuns[idx].isRunning = false
+                activeWorkflowRuns[idx].errorMessage = "Interrupted by app restart"
+                chat.activeWorkflowRuns = activeWorkflowRuns
+                saveSoon(immediately: true)
+            }
+            return
+        }
         Task {
             await engine.cancel()
             let cp = await engine.state

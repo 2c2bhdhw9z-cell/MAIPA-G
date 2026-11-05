@@ -45,11 +45,14 @@ public extension OpenRouterClient {
         prompt: String,
         model: String,
         options: ImageGenerationOptions = .init(),
+        inputImages: [String] = [],
         progress: @escaping @Sendable (String) -> Void = { _ in }
     ) async throws -> [GeneratedImage] {
         let clean = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { throw ToolInputError("An image prompt is required.") }
         progress("Generating picture…")
+        // Reference photos use the multimodal chat-completions path. Provider-specific image endpoints
+        // accept prompts only, so input images are intentionally not sent to those routes.
         if let routed = providerEndpoint(for: model) {
             let images = try await AIProviderGateway.generateImages(
                 prompt: clean,
@@ -67,9 +70,10 @@ public extension OpenRouterClient {
         let prefersChatImagesEndpoint = (catalogEntry?.isChatModel == true && catalogEntry?.generatesImages == true)
             || lowerModel.contains("gemini-") && lowerModel.contains("image")
             || lowerModel.contains("gpt-5-image")
+            || !inputImages.isEmpty
 
         if prefersChatImagesEndpoint {
-            return try await generateImagesViaChatCompletions(prompt: clean, model: model, options: options, progress: progress)
+            return try await generateImagesViaChatCompletions(prompt: clean, model: model, options: options, inputImages: inputImages, progress: progress)
         }
 
         let body: JSONValue = [
@@ -85,7 +89,7 @@ public extension OpenRouterClient {
         if !response.isSuccess,
            (response.status == 400 || response.status == 404 || response.status == 405),
            catalogEntry?.outputModalities.contains("text") == true {
-            return try await generateImagesViaChatCompletions(prompt: clean, model: model, options: options, progress: progress)
+            return try await generateImagesViaChatCompletions(prompt: clean, model: model, options: options, inputImages: inputImages, progress: progress)
         }
         guard response.isSuccess else { throw OpenRouterAPIError(status: response.status, body: response.body, headers: response.headers) }
         guard let root = JSONValue.parse(response.body), let values = root["data"]?.arrayValue else {
@@ -136,6 +140,7 @@ public extension OpenRouterClient {
         prompt: String,
         model: String,
         options: ImageGenerationOptions,
+        inputImages: [String] = [],
         progress: @escaping @Sendable (String) -> Void
     ) async throws -> [GeneratedImage] {
         let body: JSONValue = [
@@ -144,7 +149,9 @@ public extension OpenRouterClient {
             "modalities": ["image", "text"],
             "image_config": ["aspect_ratio": .string(options.aspectRatio.rawValue)],
             "messages": [
-                ["role": "user", "content": .string(prompt)],
+                ["role": "user", "content": inputImages.isEmpty
+                    ? .string(prompt)
+                    : .array([.init(["type": "text", "text": .string(prompt)])] + inputImages.map { .init(["type": "image_url", "image_url": ["url": .string($0)]]) })],
             ],
         ]
         let req = try HTTPRequest.json("POST", Self.apiBase.appendingPathComponent("chat/completions"), body: body, headers: headers(forModel: model), idleTimeout: 300)
@@ -218,9 +225,10 @@ public struct GenerateImageTool: AgentTool {
     public let store: AttachmentStore
     public let model: String
     public let maySpend: Bool
+    public let inputImages: [String]
     public let name = "generate_image"
-    public init(client: OpenRouterClient, store: AttachmentStore, model: String, maySpend: Bool) { self.client = client; self.store = store; self.model = model; self.maySpend = maySpend }
-    public var spec: ToolSpec { ToolSpec(name: name, description: "Generate and save a real picture.", parameters: ["type": "object", "properties": ["prompt": ["type": "string"], "aspect_ratio": ["type": "string", "enum": ["1:1", "3:4", "4:3", "16:9", "9:16"]], "quality": ["type": "string", "enum": ["standard", "high"]]], "required": ["prompt"]]) }
+    public init(client: OpenRouterClient, store: AttachmentStore, model: String, maySpend: Bool, inputImages: [String] = []) { self.client = client; self.store = store; self.model = model; self.maySpend = maySpend; self.inputImages = inputImages }
+    public var spec: ToolSpec { ToolSpec(name: name, description: "Generate and save a real picture. Optional `input_images` contains data URLs for image-to-image models.", parameters: ["type": "object", "properties": ["prompt": ["type": "string"], "aspect_ratio": ["type": "string", "enum": ["1:1", "3:4", "4:3", "16:9", "9:16"]], "quality": ["type": "string", "enum": ["standard", "high"]], "input_images": ["type": "array", "items": ["type": "string"]]], "required": ["prompt"]]) }
     public func runningSummary(for arguments: JSONValue) -> String { "Generating a picture…" }
     public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
         guard maySpend else { return nil }
@@ -231,7 +239,8 @@ public struct GenerateImageTool: AgentTool {
         let prompt = try arguments.requiredString("prompt")
         let aspect = arguments.optionalString("aspect_ratio").flatMap(ImageAspectRatio.init(rawValue:)) ?? .square
         let quality = arguments.optionalString("quality").flatMap(ImageQuality.init(rawValue:)) ?? .standard
-        let generated = try await client.generateImages(prompt: prompt, model: model, options: ImageGenerationOptions(aspectRatio: aspect, quality: quality), progress: progress)
+        let inputImages = arguments["input_images"]?.arrayValue?.compactMap(\.stringValue) ?? self.inputImages
+        let generated = try await client.generateImages(prompt: prompt, model: model, options: ImageGenerationOptions(aspectRatio: aspect, quality: quality), inputImages: inputImages, progress: progress)
         var results: [GeneratedImageResult] = []
         for image in generated {
             let ext = image.mimeType.contains("jpeg") || image.mimeType.contains("jpg") ? "jpg" : (image.mimeType.contains("webp") ? "webp" : "png")

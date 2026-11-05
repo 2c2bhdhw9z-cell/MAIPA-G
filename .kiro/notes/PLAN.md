@@ -1,6 +1,6 @@
 # MAIPA-G plan
 
-**Status (3 November 2026): Owner authorized this batch end-to-end: replace the inline save bar with a floating Review Changes entry; bundle LobeHub model-brand logos; coalesce live text updates and parse Markdown off-main; run CI tests and iPhone validation, squash-merge the batch PR, then publish its verified IPA. Implementation and regression coverage are staged; CI/build validation is pending. Build 126 previously shipped the payload-cap and audit fixes.**
+**Status (5 November 2026): Owner approved a new fixes batch: add an explicit warning when staged diffs exceed 200,000 characters; cap image/PDF loading at 5 MiB; settle workflow runs with missing engines after restart; and pass image attachments to image-capable pure-image generation. Validation, merge, and publication of the checked IPA are pending.**
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
 saving works (Settings and the side menu showed "Saved just now", and the 173 MB Continuum .ipa is
