@@ -837,10 +837,11 @@ H. Safety, code, order
   - The PR check also opens every screen in the simulator, in Dark and Light, and keeps the
     screenshots.
 
-## Chat-first rewrite (started 6 November 2026, awaiting your OK)
+## Chat-first rewrite (6 November 2026)
 
-**Status: planned, not built.** Nothing below gets written until the owner answers the
-questions at the end.
+**Status: agreed in principle with the owner; questions at the end still need answers before code.**
+Owner: "Yes" to the chat deciding, plus three additions of his own: Kiro's mode picker in the chat
+box, easier GitHub settings, and workflows off by default in Settings.
 
 ### Why
 Four separate places — Specs, Agents, Workflows, Jobs — each start work from a menu. The owner
@@ -862,16 +863,28 @@ through and become places you can look at what happened, if you ever want to.
    another screen. Keep it conservative — if it is not clearly a multi-step job, answer normally.
    Never silently start something expensive: a workflow that would spend money still asks first.
 
-2. **A per-chat mode picker, like Kiro's.** At the start of a chat the box offers a small choice
-   (roughly: "Just answer", "Build with a spec", "Run a workflow"). Default is "Just answer".
-   The mode is a *hint*, not a cage: the chat can still decide a plain request needs a plan.
-   Exact wording to be agreed with the owner; Kiro's own labels may not be copyable.
+2. **A per-chat mode picker, like Kiro's.** At the start of a chat the box offers a small choice, the
+   same idea as Kiro's Spec and Vibe modes. Kiro's own words, for reference: **Spec** (writes
+   Requirements, Design and an Implementation Plan before building — Kiro's recommended mode) and
+   **Vibe** (freeform, just build it). MAIPA-G would use plain-English equivalents rather than
+   copying someone else's labels:
+   - **Just answer** — plain chat, no plan, no workflow. The default.
+   - **Plan it first** — write the plan (what Kiro's Spec mode does), show it, then build on OK.
+   - **Run a workflow** — use one of the saved step-by-step plans.
+   The mode is a *hint*, not a cage: the chat can still decide a plain request needs a plan. It
+   lives in the chat box next to the model and thinking pills, and is remembered per chat.
 
-3. **One settings section for all of it.** "Easy GitHub settings": the direct-save switch, the
-   repo list, and a single **Workflows** switch that is **off by default**. With it off, no
-   workflow can start from anywhere, and the chat routes to plain answers instead. Same for
-   Specs and Autonomous jobs, each with its own off-by-default switch. One screen, plain words,
-   no per-repo hunting.
+3. **One settings section for all of it.** "GitHub" becomes one plain section: connect, pick the
+   repo, and a direct-save switch on the same screen (today it is buried in "Repository saving" →
+   a second screen with a switch per repo). Below it, one **Features** group with a switch each for
+   **Workflows**, **Specs** and **Autonomous jobs**, every one of them **off by default**:
+   - Workflows off → nothing can start a workflow from anywhere, and the chat answers plainly.
+   - Specs off → "Plan it first" is hidden and the chat plans inline instead of creating a spec.
+   - Autonomous off → no repo jobs; the Jobs screen is reachable but empty and says so.
+
+   Owner, 6 November 2026: "the ability to turn workflows off and or on in settings off by default".
+   He has never used Specs, Agents, Workflows or Jobs and does not trust that they work; off by
+   default means the app behaves like a plain chat with a repo until he chooses otherwise.
 
 4. **Screens become read-only history.** Specs, Agents, Workflows and Jobs stay reachable so
    nothing is lost, but they no longer need to be visited to *start* anything.
@@ -883,14 +896,13 @@ through and become places you can look at what happened, if you ever want to.
 - Image-to-image for picture models.
 
 ### Questions for the owner (answer before any code)
-1. **Mode picker wording.** Keep it to three: "Just answer", "Plan it first", "Run a workflow"?
-   Or different words you'd actually use?
-2. **Off by default.** With Workflows, Specs and Autonomous each off by default, the app behaves
-   like a plain chat with a repo until you switch them on. Is that what you want?
+1. **Mode picker wording.** "Just answer", "Plan it first", "Run a workflow" — or words you would
+   actually use? (Kiro calls its two Spec and Vibe; I am not copying those names.)
+2. **"A bunch of other stuff".** You said there is more we will have to figure out. Anything you
+   can already name goes here before I build, rather than me guessing at it later.
 3. **Spending.** If the chat decides a job needs a workflow, should it just run, or always ask
    first when it would cost money?
-4. **Order.** Do 1 and 3 first (chat routes, settings switches) and leave the mode picker until
-   after — or all of it in one build?
+4. **Order.** Settings switches and chat routing first, then the mode picker — or all in one build?
 
 ### How it will be checked
 Chat routing gets unit tests for the same reasons as everything else: a plain question must not
