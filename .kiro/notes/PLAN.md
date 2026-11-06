@@ -908,3 +908,31 @@ through and become places you can look at what happened, if you ever want to.
 Chat routing gets unit tests for the same reasons as everything else: a plain question must not
 start a workflow, and a clear "plan this out" must. Build only runs the four screens' own tests
 after the rewrite. Nothing publishes unless Linux and macOS both pass.
+### Added 6 November 2026: replies that stop early (found while answering him, not built)
+
+Owner hit this twice in one session and had to press retry each time.
+
+**What the code does now**
+- `AgentLoop` adds a notice only when `finishReason == "length"` ("This reply hit its length
+  limit and may be cut off"). That one case is handled.
+- Every other early ending — dropped connection, signal loss, server closing the stream mid-reply —
+  adds nothing. `AgentLoop` keeps the partial text and finishes the turn as if complete, so a
+  half-written reply looks finished.
+- `ChatSession.retryAnswer` deletes the whole turn (`removeSubrange(index...)`) and starts fresh.
+  The AI is never told it was a retry or that the previous attempt was cut off.
+- "Keep going" sends the literal message "Please keep going.", so the AI sees its own partial
+  reply and a request to continue, but never learns *why* it stopped.
+
+**What it should do**
+- Any ending that is not a normal finish gets one notice: "This reply stopped early. Tap retry."
+  Same wording pattern as the existing length notice, so there is nothing new to learn.
+- A retry after an early stop tells the model plainly: the previous attempt was cut off, here is
+  where it stopped, carry on from there. Do not start over.
+- Retry and Keep going must be distinguishable to the model. Today they are not.
+- Staged file changes already survive a retry and are shown to the AI, so edits on disk are safe.
+  What is lost is the model's own reasoning and any file reads it had done — worth saying in the
+  notice so the cost is not surprising.
+
+**Open question for the owner**
+5. After an early stop, should retry carry on from where it stopped (recommended), or start the
+   turn again from scratch?
