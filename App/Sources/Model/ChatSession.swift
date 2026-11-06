@@ -1046,7 +1046,7 @@ final class ChatSession: Identifiable {
                     changeWorkspace = changes
                 }
                 let service = GitHubChangeService(github: github)
-                let rules = await service.resolveRules(in: workspace, directSaveSetting: app.settings.savesDirectly(to: repo.ref))
+                let rules = await service.resolveRules(in: workspace, directSaveSetting: app.settings.savesDirectly(to: repo.ref), requestText: lastMessage)
                 let loadedHooks = await RepoHooks.load(from: workspace)
                 repoHooks = loadedHooks.hooks
                 hookProblems = loadedHooks.problems

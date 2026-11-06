@@ -73,7 +73,7 @@ final class JobCoordinator {
         do { commit = try await github.resolveCommit(repo.ref, ref: repo.branch) }
         catch { lastError = app.github.describe(error); return nil }
         let ruleWorkspace = RepoWorkspace(repo: repo.ref, branch: repo.branch, commit: commit, github: github, store: app.snapshots)
-        let rules = await GitHubChangeService(github: github).resolveRules(in: ruleWorkspace, directSaveSetting: app.settings.savesDirectly(to: repo.ref))
+        let rules = await GitHubChangeService(github: github).resolveRules(in: ruleWorkspace, directSaveSetting: app.settings.savesDirectly(to: repo.ref), requestText: request)
         var state: [String: JSONValue] = [
             "request": .string(request),
             "effectiveDirectSave": .bool(rules.directSave),

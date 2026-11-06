@@ -786,7 +786,12 @@ public struct CloudRunner: Sendable {
             let leftDepth = $0.0.split(separator: "/").count, rightDepth = $1.0.split(separator: "/").count
             return leftDepth == rightDepth ? $0.0 < $1.0 : leftDepth < rightDepth
         }
-        var resolved = RepoWriteRules.resolve(documents: documents, directSaveSetting: directSave)
+        // The job's own request is checked last, so telling it "only push to main" beats any default.
+        var resolved = RepoWriteRules.resolve(
+            documents: documents,
+            directSaveSetting: directSave,
+            requestText: job.state["request"]?.stringValue
+        )
         if directSave, let directReason { resolved.reason = directReason }
         return resolved
     }

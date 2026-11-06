@@ -37,7 +37,31 @@ public struct RepoWriteRules: Sendable, Hashable {
         scopes.contains("") || scopes.contains { path == $0 || path.hasPrefix($0 + "/") }
     }
 
-    public static func resolve(documents values: [(path: String, text: String)], directSaveSetting: Bool) -> RepoWriteRules {
+    /// Sentences in a rule document that mean "save straight to the default branch".
+    public static let directSaveStatements: Set<String> = [
+        "no branches", "do not create branches", "never create branches", "never create a branch",
+        "commit directly to main", "commit directly to master", "push directly to main", "push directly to master",
+        "save directly to main", "save directly to master", "do not open pull requests", "never open pull requests",
+        "no pull requests", "no pull request",
+    ]
+
+    /// True when the person's own message asks for main-only saves.
+    ///
+    /// Whether a save becomes a pull request used to be decided only by a settings switch and by
+    /// rule documents, so saying "only push to main" in the chat changed nothing. What the person
+    /// asks for outranks both: it is the most direct instruction there is.
+    public static func requestsDirectSave(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        guard lower.contains("main") || lower.contains("master") else { return false }
+        guard ["push", "commit", "save", "merge", "ship"].contains(where: lower.contains) else { return false }
+        let restrictors = [
+            "only", "just", "directly", "straight", "always",
+            "no branch", "no pr", "no pull request", "without a pr", "without a pull request",
+        ]
+        return restrictors.contains(where: lower.contains)
+    }
+
+    public static func resolve(documents values: [(path: String, text: String)], directSaveSetting: Bool, requestText: String? = nil) -> RepoWriteRules {
         let documents = values.map(RepoRuleDocument.init)
         var result = RepoWriteRules(directSave: directSaveSetting, reason: directSaveSetting ? "Direct save is on for this repo." : nil, documents: documents)
         for document in documents {
@@ -49,13 +73,7 @@ public struct RepoWriteRules: Sendable, Hashable {
             // Only an unconditional, repository-wide statement selects direct mode. A sentence
             // such as "notes files can go straight to main" is scoped to those files and must not
             // silently send an unrelated README change to the default branch.
-            let directStatements: Set<String> = [
-                "no branches", "do not create branches", "never create branches", "never create a branch",
-                "commit directly to main", "commit directly to master", "push directly to main", "push directly to master",
-                "save directly to main", "save directly to master", "do not open pull requests", "never open pull requests",
-                "no pull requests", "no pull request",
-            ]
-            if document.scope.isEmpty, statements.contains(where: directStatements.contains) {
+            if document.scope.isEmpty, statements.contains(where: directSaveStatements.contains) {
                 result.directSave = true
                 result.reason = "\(document.path) requires direct saves."
             }
@@ -65,6 +83,11 @@ public struct RepoWriteRules: Sendable, Hashable {
             if lines.contains(where: { line in ["do not change build setup", "never change build setup", "must not change build setup", "build setup is read-only"].contains(where: line.contains) }) {
                 result.buildSetupDeniedScopes.insert(document.scope)
             }
+        }
+        // The person's own request is checked last so it wins over every default.
+        if let requestText, requestsDirectSave(requestText) {
+            result.directSave = true
+            result.reason = "You asked for main-only saves in this message."
         }
         return result
     }
@@ -87,7 +110,7 @@ public actor GitHubChangeService {
     private let github: GitHubClient
     public init(github: GitHubClient) { self.github = github }
 
-    public func resolveRules(in workspace: RepoWorkspace, directSaveSetting: Bool) async -> RepoWriteRules {
+    public func resolveRules(in workspace: RepoWorkspace, directSaveSetting: Bool, requestText: String? = nil) async -> RepoWriteRules {
         guard let tree = try? await workspace.tree() else { return RepoWriteRules(directSave: directSaveSetting, reason: directSaveSetting ? "Direct save is on for this repo." : nil) }
         let candidates = tree.entries.filter { entry in
             let lower = entry.path.lowercased()
@@ -101,7 +124,7 @@ public actor GitHubChangeService {
             guard case .text(let text, _) = try? await workspace.readFile(entry.path) else { continue }
             documents.append((entry.path, text))
         }
-        return RepoWriteRules.resolve(documents: documents, directSaveSetting: directSaveSetting)
+        return RepoWriteRules.resolve(documents: documents, directSaveSetting: directSaveSetting, requestText: requestText)
     }
 
     public func save(
