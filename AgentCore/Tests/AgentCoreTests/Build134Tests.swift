@@ -1,3 +1,6 @@
+import Foundation
+import Testing
+@testable import AgentCore
 
 @Suite("Build 134 — what the person asks for decides how a save lands")
 struct Build134Tests {
@@ -10,6 +13,7 @@ struct Build134Tests {
             "always save straight to main",
             "do it with no pull request",
             "no PRs, just main",
+            "commit to the master branch directly",
         ] {
             #expect(RepoWriteRules.requestsDirectSave(phrase), "should match: \(phrase)")
         }
@@ -23,6 +27,7 @@ struct Build134Tests {
             "the main screen is broken",
             "explain the master branch layout",
             "fix the login bug",
+            "push the button on the main screen",
             "",
         ] {
             #expect(!RepoWriteRules.requestsDirectSave(phrase), "should not match: \(phrase)")

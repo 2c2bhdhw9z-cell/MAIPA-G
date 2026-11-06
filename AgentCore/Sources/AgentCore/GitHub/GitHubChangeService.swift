@@ -51,14 +51,23 @@ public struct RepoWriteRules: Sendable, Hashable {
     /// rule documents, so saying "only push to main" in the chat changed nothing. What the person
     /// asks for outranks both: it is the most direct instruction there is.
     public static func requestsDirectSave(_ text: String) -> Bool {
-        let lower = text.lowercased()
-        guard lower.contains("main") || lower.contains("master") else { return false }
-        guard ["push", "commit", "save", "merge", "ship"].contains(where: lower.contains) else { return false }
-        let restrictors = [
-            "only", "just", "directly", "straight", "always",
-            "no branch", "no pr", "no pull request", "without a pr", "without a pull request",
-        ]
-        return restrictors.contains(where: lower.contains)
+        let words = text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+
+        // "no pull request", "no PRs", "without a PR" name the thing to avoid, so they need no verb.
+        for (index, word) in words.enumerated() where word == "no" || word == "without" {
+            guard index + 1 < words.count else { continue }
+            let next = words[index + 1]
+            if next == "pr" || next == "prs" { return true }
+            if next == "pull", index + 2 < words.count, words[index + 2].hasPrefix("request") { return true }
+        }
+
+        // Otherwise a save only needs the default branch if the message names one with a verb.
+        guard words.contains("main") || words.contains("master") else { return false }
+        let saves = ["push", "commit", "save", "merged", "merge", "ship", "land"]
+        guard saves.contains(where: words.contains) else { return false }
+        return ["only", "just", "directly", "straight", "always"].contains(where: words.contains)
     }
 
     public static func resolve(documents values: [(path: String, text: String)], directSaveSetting: Bool, requestText: String? = nil) -> RepoWriteRules {
