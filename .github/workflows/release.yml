@@ -55,7 +55,10 @@ jobs:
           fi
           MAIN_SHA="${{ github.sha }}"
           PR_HEAD=$(gh api "repos/${{ github.repository }}/commits/$MAIN_SHA/pulls" --jq '[.[] | select(.merged_at != null)][0].head.sha')
-          if [ -z "$PR_HEAD" ] || [ "$PR_HEAD" = "null" ]; then echo "::error::no merged pull request for $MAIN_SHA"; exit 1; fi
+          # Saves now go straight to main with no pull request, so there may be no merged PR at all.
+          # In that case the checked commit IS the main commit: the tree comparison in
+          # publish-verified-ipa.sh then compares it with itself and still holds.
+          if [ -z "$PR_HEAD" ] || [ "$PR_HEAD" = "null" ]; then PR_HEAD="$MAIN_SHA"; fi
           # The newest completed check run of that exact commit whose complete build matrix passed.
           RUN_ID=""
           for id in $(gh api "repos/${{ github.repository }}/actions/workflows/ios.yml/runs?head_sha=$PR_HEAD&per_page=10" --jq '.workflow_runs[] | select(.status=="completed" and .conclusion=="success") | .id'); do
