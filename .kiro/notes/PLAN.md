@@ -836,3 +836,63 @@ H. Safety, code, order
   - Markdown: Apple's swift-markdown, drawn by MAIPA-G's own SwiftUI renderer and highlighter.
   - The PR check also opens every screen in the simulator, in Dark and Light, and keeps the
     screenshots.
+
+## Chat-first rewrite (started 6 November 2026, awaiting your OK)
+
+**Status: planned, not built.** Nothing below gets written until the owner answers the
+questions at the end.
+
+### Why
+Four separate places — Specs, Agents, Workflows, Jobs — each start work from a menu. The owner
+never uses any of them and has said plainly that this is not how he works. Kiro works the other
+way round: you type, and the agent decides what that means. One of these is not merely unused,
+it is switched off in code: `JobCoordinator.routedWorkflow` returns `nil` with the comment "Chat
+messages always stay inside the chat; workflows only run when explicitly started from
+Workflows". So the chat currently cannot start a workflow even in principle.
+
+### What "like Kiro" means here
+The chat decides. You type; the app works out whether that is an answer, a repo change, a spec,
+a workflow, or an autonomous job, and does it. The four screens stop being doors you must go
+through and become places you can look at what happened, if you ever want to.
+
+### Pieces
+
+1. **The chat chooses.** Replace the `nil` stub with real routing: on each turn, decide whether
+   the request needs a workflow or a spec, and start it inside the chat rather than pointing at
+   another screen. Keep it conservative — if it is not clearly a multi-step job, answer normally.
+   Never silently start something expensive: a workflow that would spend money still asks first.
+
+2. **A per-chat mode picker, like Kiro's.** At the start of a chat the box offers a small choice
+   (roughly: "Just answer", "Build with a spec", "Run a workflow"). Default is "Just answer".
+   The mode is a *hint*, not a cage: the chat can still decide a plain request needs a plan.
+   Exact wording to be agreed with the owner; Kiro's own labels may not be copyable.
+
+3. **One settings section for all of it.** "Easy GitHub settings": the direct-save switch, the
+   repo list, and a single **Workflows** switch that is **off by default**. With it off, no
+   workflow can start from anywhere, and the chat routes to plain answers instead. Same for
+   Specs and Autonomous jobs, each with its own off-by-default switch. One screen, plain words,
+   no per-repo hunting.
+
+4. **Screens become read-only history.** Specs, Agents, Workflows and Jobs stay reachable so
+   nothing is lost, but they no longer need to be visited to *start* anything.
+
+### Deliberately not in this batch
+- Multi-repo editing (Kiro can select several repos and edit across them; MAIPA-G chats hold one
+  repo and can only read files from others). Big separate job, plan it after this lands.
+- GitLab (not present in the app at all).
+- Image-to-image for picture models.
+
+### Questions for the owner (answer before any code)
+1. **Mode picker wording.** Keep it to three: "Just answer", "Plan it first", "Run a workflow"?
+   Or different words you'd actually use?
+2. **Off by default.** With Workflows, Specs and Autonomous each off by default, the app behaves
+   like a plain chat with a repo until you switch them on. Is that what you want?
+3. **Spending.** If the chat decides a job needs a workflow, should it just run, or always ask
+   first when it would cost money?
+4. **Order.** Do 1 and 3 first (chat routes, settings switches) and leave the mode picker until
+   after — or all of it in one build?
+
+### How it will be checked
+Chat routing gets unit tests for the same reasons as everything else: a plain question must not
+start a workflow, and a clear "plan this out" must. Build only runs the four screens' own tests
+after the rewrite. Nothing publishes unless Linux and macOS both pass.
