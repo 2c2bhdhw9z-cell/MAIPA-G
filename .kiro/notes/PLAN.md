@@ -863,14 +863,17 @@ through and become places you can look at what happened, if you ever want to.
    another screen. Keep it conservative — if it is not clearly a multi-step job, answer normally.
    Never silently start something expensive: a workflow that would spend money still asks first.
 
-2. **A per-chat mode picker, like Kiro's.** At the start of a chat the box offers a small choice, the
-   same idea as Kiro's Spec and Vibe modes. Kiro's own words, for reference: **Spec** (writes
-   Requirements, Design and an Implementation Plan before building — Kiro's recommended mode) and
-   **Vibe** (freeform, just build it). MAIPA-G would use plain-English equivalents rather than
-   copying someone else's labels:
-   - **Just answer** — plain chat, no plan, no workflow. The default.
-   - **Plan it first** — write the plan (what Kiro's Spec mode does), show it, then build on OK.
-   - **Run a workflow** — use one of the saved step-by-step plans.
+2. **A per-chat mode picker: Spec and Vibe, two modes.** Owner, 6 November 2026: "Can I use
+   theirs. It's not like they came up with the terms." Correct — "vibe coding" was coined by Andrej
+   Karpathy in February 2025 and made Collins Word of the Year, and "spec" is short for
+   specification. Neither belongs to Kiro, so the picker uses those two words:
+   - **Vibe** — just does it. The default.
+   - **Spec** — writes requirements and a plan first, shows it, then builds once the owner says go.
+
+   There is deliberately **no third mode**. An earlier draft had "Run a workflow" as a third choice;
+   the owner said "theirs not 3", and it is unnecessary anyway: Workflows now has its own off-by-
+   default switch in Settings, so it never needs a slot in the picker.
+
    The mode is a *hint*, not a cage: the chat can still decide a plain request needs a plan. It
    lives in the chat box next to the model and thinking pills, and is remembered per chat.
 
@@ -896,10 +899,10 @@ through and become places you can look at what happened, if you ever want to.
 - Image-to-image for picture models.
 
 ### Questions for the owner (answer before any code)
-1. **Mode picker wording.** "Just answer", "Plan it first", "Run a workflow" — or words you would
-   actually use? (Kiro calls its two Spec and Vibe; I am not copying those names.)
-2. **"A bunch of other stuff".** You said there is more we will have to figure out. Anything you
-   can already name goes here before I build, rather than me guessing at it later.
+1. ~~Mode picker wording.~~ **Answered 6 November 2026:** two modes only, called **Spec** and
+   **Vibe**. No third choice.
+2. **"A bunch of other stuff".** Owner named "actual connectors and integrations" as one. Anything
+   else you can name goes here before I build, rather than me guessing later.
 3. **Spending.** If the chat decides a job needs a workflow, should it just run, or always ask
    first when it would cost money?
 4. **Order.** Settings switches and chat routing first, then the mode picker — or all in one build?
