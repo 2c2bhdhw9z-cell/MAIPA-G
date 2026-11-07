@@ -936,3 +936,65 @@ Owner hit this twice in one session and had to press retry each time.
 **Open question for the owner**
 5. After an early stop, should retry carry on from where it stopped (recommended), or start the
    turn again from scratch?
+### Added 6 November 2026: the cost figure is not real (found, not built)
+
+Owner: "I know for a fact it's not showing how much I'm actually spending." He is right. This is the
+one thing he most wants fixed, ahead of the chat-first rewrite.
+
+**What the app does now** (`AIProviderGateway.fallbackCost`, `AIProviderGateway.swift:1076`)
+- It takes the cost the provider reports. If there is none, it *calculates* one from a table of
+  per-million-token prices. That is arithmetic, not what he was billed.
+- Line 1095: if the model is not found in the price table, it returns nothing, and nothing is shown.
+- Line 1098: if the model's input and output prices are both zero, it returns **exactly 0**, so a
+  paid model can display as free. Neither case warns the person.
+- Lines 1102-1103: cache pricing is invented when the provider does not report it — cached reads are
+  assumed to cost 10% of normal and cache writes 125%. On a long, cached chat this is where the
+  error gets large.
+
+**Consequence:** the per-turn and per-chat figures are estimates against a price list, and for the
+active model (`oneprovider::deepseek-v4.1-flash-1017`) they are only meaningful if that exact model
+ID exists in the OneProvider price table. If it does not match exactly, the figure is blank or zero.
+
+**The real number already exists.** The app already asks OneProvider for the account balance — it
+reports `$78.12` in live status. Real spend is starting balance minus current balance. That is the
+true figure and it needs no price table.
+
+**What it should do**
+- Show real spend from balance deltas as the headline number.
+- Label anything calculated as "estimated", plainly.
+- When a model has no known price, say so instead of showing `$0`.
+- Record a balance reading per turn so a turn's real cost can be diffed, not guessed.
+
+**Open question for the owner**
+6. Should the per-turn figure show the real balance-delta (accurate, but only readable after the
+   turn ends) or the estimate immediately (fast, can be wrong)? Recommended: estimate live, then
+   replace it with the real number when the turn ends.
+
+### Added 6 November 2026: turns take ten minutes and cost dollars (found, not built)
+
+Owner hit a turn that ran 11m 41s for $0.40, then a second that sat on a blank "Thinking…" bubble
+for over seven minutes. Answering five short numbered questions should take seconds.
+
+**Rules checked and ruled out**
+- `waitForActivity()` (`AgentLoop.swift:152`) can wait forever for backgrounded sub-agents, but
+  **no sub-agents were running**, so it is not the cause here.
+- Retries (`AgentLoop.swift:826-828`) sleep up to 60s, three times, so 3 minutes at most — not 7+.
+
+**Still unexplained, and what to look at**
+- `maxSteps: 400` per turn (`ChatSession.swift:1268`, `:2100`) with thinking effort on **Max**: every
+  step is a full model call at maximum reasoning length, so hundreds of slow, billed calls are
+  allowed for one message.
+- The whole transcript plus every tool schema is re-sent on each step, so a long chat gets slower and
+  dearer per turn.
+- A dead turn can still show "Working…" in the header while its own card shows "Retry this answer":
+  `AgentLoop.swift:687` throws `empty_reply` when nothing arrived, but the two states are set in
+  different places and can disagree.
+
+**Evidence needed before any fix:** the affected chat's step count, the prompt-token number on the
+hanging step, and whether the hang is inside the model call or after it. Do not guess a fix for this
+one — it is the owner's biggest complaint and a wrong fix wastes his time.
+
+### Correction from the owner, 6 November 2026
+Workflows cost far more than sub-agents — each step is a full model call re-sending context, so a
+five-step workflow costs more than eight parallel sub-agents. Earlier reasoning in this file had it
+backwards. This is a second reason Workflows defaults to off.
