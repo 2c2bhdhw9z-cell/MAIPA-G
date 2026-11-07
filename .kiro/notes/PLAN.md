@@ -882,7 +882,7 @@ through and become places you can look at what happened, if you ever want to.
    a second screen with a switch per repo). Below it, one **Features** group with a switch each for
    **Workflows**, **Specs** and **Autonomous jobs**, every one of them **off by default**:
    - Workflows off → nothing can start a workflow from anywhere, and the chat answers plainly.
-   - Specs off → "Plan it first" is hidden and the chat plans inline instead of creating a spec.
+   - Specs off → **Spec** is hidden from the picker and the chat plans inline instead of creating a spec.
    - Autonomous off → no repo jobs; the Jobs screen is reachable but empty and says so.
 
    Owner, 6 November 2026: "the ability to turn workflows off and or on in settings off by default".
@@ -905,7 +905,9 @@ through and become places you can look at what happened, if you ever want to.
    else you can name goes here before I build, rather than me guessing later.
 3. **Spending.** If the chat decides a job needs a workflow, should it just run, or always ask
    first when it would cost money?
-4. **Order.** Settings switches and chat routing first, then the mode picker — or all in one build?
+4. ~~Order.~~ **Answered 6 November 2026:** "??" — the owner does not care and does not want to be
+   asked. Decide it ourselves: one build, settings switches and chat routing first, picker second
+   within the same batch. Do not ask him this kind of question again.
 
 ### How it will be checked
 Chat routing gets unit tests for the same reasons as everything else: a plain question must not
