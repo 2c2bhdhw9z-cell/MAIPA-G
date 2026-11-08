@@ -319,7 +319,10 @@ list. These 13 requirements are additional to the tools, stability list and repo
     match” when search finds nothing, while preserving Retry for a failed request. Today an empty
     repo spins forever and no search matches give a blank screen.
 
-## Build 24 test reports (29 October 2026, all fixed in build 25)
+## Build 24 test reports (29 October 2026 — all fixed in build 25; kept only as history)
+Owner, 6 November 2026: "What is build 24 shit." It is a week-old list of bug reports from a build
+that no longer exists; every item was fixed in build 25. Nothing here is outstanding and nothing
+here needs doing. Read it only when you want the reasoning behind a fix that shipped days ago.
 1. **10:04 AM: the connector logos aren't the real ones.** "CAN I PLEASE JUST HAVE THE NORMAL
    ICONS/LOGOS". He circled the logo column in Discover and compared it with Grok, Claude and a
    third AI app. Build 24 drew one-colour Simple Icons shapes on brand-tinted tiles. The other apps
@@ -861,7 +864,12 @@ through and become places you can look at what happened, if you ever want to.
 1. **The chat chooses.** Replace the `nil` stub with real routing: on each turn, decide whether
    the request needs a workflow or a spec, and start it inside the chat rather than pointing at
    another screen. Keep it conservative — if it is not clearly a multi-step job, answer normally.
-   Never silently start something expensive: a workflow that would spend money still asks first.
+   **Do not stop to ask before spending.** Owner, 6 November 2026: "They don't stop to say it cost
+   money.. because it just Fucking runs. It don't stop when sub agents run? So Why the fuck stop
+   for a workflow. When it's Literally just sub agents that run for an Extended period." A workflow
+   is sub-agents running longer, so it starts the same way they do. The existing spend limit and
+   stop-and-ask setting still apply as they do everywhere else — but routing must not add a second
+   confirmation of its own.
 
 2. **A per-chat mode picker: Spec and Vibe, two modes.** Owner, 6 November 2026: "Can I use
    theirs. It's not like they came up with the terms." Correct — "vibe coding" was coined by Andrej
@@ -901,10 +909,12 @@ through and become places you can look at what happened, if you ever want to.
 ### Questions for the owner (answer before any code)
 1. ~~Mode picker wording.~~ **Answered 6 November 2026:** two modes only, called **Spec** and
    **Vibe**. No third choice.
-2. **"A bunch of other stuff".** Owner named "actual connectors and integrations" as one. Anything
-   else you can name goes here before I build, rather than me guessing later.
-3. **Spending.** If the chat decides a job needs a workflow, should it just run, or always ask
-   first when it would cost money?
+2. ~~"A bunch of other stuff".~~ **Answered 6 November 2026:** "actual connectors and integrations"
+   was the whole list. He named it, that is the answer, and this question is closed. Nothing else is
+   being held back waiting on him.
+3. ~~Spending.~~ **Answered 6 November 2026:** it just runs, exactly like sub-agents do. A workflow is
+   sub-agents running longer; there is no extra confirmation for it. Existing spend limit and
+   stop-and-ask settings still apply as they do everywhere else.
 4. ~~Order.~~ **Answered 6 November 2026:** "??" — the owner does not care and does not want to be
    asked. Decide it ourselves: one build, settings switches and chat routing first, picker second
    within the same batch. Do not ask him this kind of question again.
