@@ -697,17 +697,22 @@ final class JobCoordinator {
 
     /// After the OpenRouter key or the GitHub app's key changes, every recorded repo gets the new
     /// values, so no repo keeps a revoked or old credential.
+    ///
+    /// Stops dead when Autonomous is off. This used to run regardless of the switch: it blanked the
+    /// secret values but still rotated, and rotating writes `.github/workflows/maipa-g.yml`, so a
+    /// repo got an Autonomous workflow committed into it while the feature was off. Off now means
+    /// nothing is written anywhere.
     func rotateAutonomousSecrets() async {
         guard let app, let github = app.github.client, let credentials = app.github.credentials else { return }
+        guard app.settings.autonomousEnabled else { return }
         let records = await provisioningStore.loadAll()
         guard !records.isEmpty else { return }
         var values = [
             "MAIPAG_APP_ID": String(credentials.appID),
             "MAIPAG_APP_PRIVATE_KEY": credentials.privateKeyPEM,
         ]
-        if let key = app.openRouter.autonomousSecretKey, app.settings.autonomousEnabled { values["OPENROUTER_API_KEY"] = key }
+        if let key = app.openRouter.autonomousSecretKey { values["OPENROUTER_API_KEY"] = key }
         if let connectors = app.connectors.autonomousSecretsJSON() { values["MAIPAG_MCP_SECRETS"] = connectors }
-        if !app.settings.autonomousEnabled { values = [:] }
         let result = await AutonomousSecretLedger.rotate(
             records: records, values: values,
             put: { repo, name, value in try await github.putActionsSecret(repo, name: name, value: value) },

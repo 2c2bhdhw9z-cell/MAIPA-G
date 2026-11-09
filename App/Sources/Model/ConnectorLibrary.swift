@@ -579,14 +579,23 @@ final class ConnectorLibrary {
 
     func computerConnector() -> ConnectorConfiguration? {
         guard let settings = app?.settings, !settings.chatComputerOff else { return nil }
-        let ready = connected.filter { $0.kind == .remote && states[$0.id] == .connected }
+        // A connector whose live session dropped is still the chat's computer. It must be
+        // reclaimable, not treated as if no computer existed: that filter is what silently cost a
+        // whole turn its shell while the machine itself was up the entire time.
+        let remotes = connected.filter { $0.kind == .remote }
+        let live = remotes.filter { states[$0.id] == .connected }
         if let chosen = settings.chatComputerServer {
-            return ready.first { $0.serverID == chosen && canRunCommands($0) }
+            if let exact = live.first(where: { $0.serverID == chosen && canRunCommands($0) }) { return exact }
+            return remotes.first { $0.serverID == chosen && canRunCommands($0) }
         }
-        return ready.first { connector in
-            guard let host = connector.endpoint?.host?.lowercased() else { return false }
-            return host == "sprites.dev" || host.hasSuffix(".sprites.dev")
-        } ?? ready.first(where: canRunCommands)
+        func sprites(_ list: [ConnectorConfiguration]) -> ConnectorConfiguration? {
+            list.first { connector in
+                guard let host = connector.endpoint?.host?.lowercased() else { return false }
+                return host == "sprites.dev" || host.hasSuffix(".sprites.dev")
+            }
+        }
+        return sprites(live) ?? sprites(remotes)
+            ?? live.first(where: canRunCommands) ?? remotes.first(where: canRunCommands)
     }
 
     func canRunCommands(_ configuration: ConnectorConfiguration) -> Bool {
