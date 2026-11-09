@@ -343,6 +343,9 @@ private struct Runner {
     var fallbackModels: [String]
     let requiresInitialSpendApproval: Bool
     let steering: SteeringInbox?
+    /// False for sub-agents, workflow steps and background helpers, which can never show a person
+    /// an approval prompt. A tool needing one must fail honestly instead of parking forever.
+    let allowAskUser: Bool
     let environment: AgentEnvironment
     let continuation: AsyncStream<AgentEvent>.Continuation
     var maxPayloadBytes = Transcript.defaultMaxPayloadBytes
@@ -388,6 +391,7 @@ private struct Runner {
         fallbackModels = input.fallbackModels.filter { $0 != input.route.model }
         requiresInitialSpendApproval = input.requiresInitialSpendApproval
         steering = input.steering
+        allowAskUser = input.allowAskUser
         self.environment = environment
         self.continuation = continuation
     }
@@ -925,6 +929,20 @@ private struct Runner {
                 }
                 wasApproved = true
             } else if let approval = pendingApproval {
+                // A turn that can never ask the person must never park waiting for them.
+                //
+                // Sub-agents, workflow steps and background helpers run with `allowAskUser` off,
+                // because nobody is watching their card to tap Allow. Parking them on an approval
+                // meant they sat until they were killed and then reported "failed" — which looked
+                // like the work broke, when in truth it was never allowed to start. Say so plainly
+                // instead, so the report names the real cause and the main agent can decide to ask.
+                if !allowAskUser {
+                    turn.steps[stepIndex].toolCalls[callIndex].result = "Not run: this step cannot ask for approval, and it needs it. \(approval.question)"
+                    turn.steps[stepIndex].toolCalls[callIndex].status = .failed
+                    turn.steps[stepIndex].toolCalls[callIndex].summary = "Needs a person's approval, which this step cannot ask for"
+                    turn.steps[stepIndex].toolCalls[callIndex].finishedAt = Date()
+                    continue
+                }
                 turn.steps[stepIndex].toolCalls[callIndex].questions = QuestionSet(questions: [
                     .init(text: approval.question, options: [approval.allowLabel, "Don't allow"]),
                 ])

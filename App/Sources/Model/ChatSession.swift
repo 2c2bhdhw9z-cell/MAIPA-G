@@ -1417,14 +1417,16 @@ final class ChatSession: Identifiable {
                         finalText = "Completed \(allCalls.count) \(word)."
                     }
                     if let pending = finalTurn?.pendingQuestions?.questions.questions.first {
+                        // Only reachable for a turn that genuinely can ask. Reported as stopped
+                        // rather than failed: nothing is broken and nothing ran — it is waiting.
                         return AgentExecutionResult(
-                            output: "This sub-agent needs your approval before it can continue: \(pending.text)",
+                            output: "This sub-agent stopped because it needs a person's approval to continue: \(pending.text)",
                             model: modelUsed,
                             cost: cost,
                             pendingQuestion: AgentExecutionQuestion(text: pending.text, options: pending.options),
                             toolCallCount: allCalls.count,
                             toolSummaries: allCalls.map(\.summary),
-                            status: "failed"
+                            status: "stopped"
                         )
                     }
                     return AgentExecutionResult(
