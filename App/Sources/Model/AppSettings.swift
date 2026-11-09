@@ -43,6 +43,41 @@ struct Effects: Codable, Equatable, Sendable {
     }
 }
 
+/// How the chat behaves when you type. Two modes, no third.
+///
+/// **Vibe** just does it. **Spec** writes the requirements and a plan first, shows them, and builds
+/// after you say go. Both words are ordinary English — "vibe coding" was coined by Andrej Karpathy
+/// in February 2025, and "spec" is short for specification — so neither name belongs to another
+/// app. The mode is a hint, not a cage: the chat can still decide a plain request needs a plan.
+enum ChatMode: String, Codable, CaseIterable, Sendable, Identifiable {
+    case vibe
+    case spec
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .vibe: return "Vibe"
+        case .spec: return "Spec"
+        }
+    }
+
+    /// One line, in plain words, for the picker.
+    var explanation: String {
+        switch self {
+        case .vibe: return "just does it"
+        case .spec: return "writes the plan first, then builds once you say go"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .vibe: return "bolt"
+        case .spec: return "list.bullet.rectangle"
+        }
+    }
+}
+
 enum WorkflowPolicy: String, Codable, CaseIterable, Sendable, Identifiable {
     case whenAsked
     case bigJobs
@@ -77,8 +112,14 @@ struct AppSettings: Codable, Equatable, Sendable {
     var directSaveRepos: [String: Bool] = [:]
     /// When work moves to an Autonomous GitHub runner. Big jobs too is the factory default.
     var workflowPolicy: WorkflowPolicy = .bigJobs
+    /// Workflows off means nothing can start a workflow from anywhere and the chat answers plainly.
+    /// Off to start with, because these have never been used and it is not known that they work.
+    var workflowsEnabled = false
+    /// Specs off hides Spec from the mode picker and makes the chat plan inline instead.
+    var specsEnabled = false
     /// Global Autonomous switch. Turning it off removes MAIPA-G-managed Actions secrets.
-    var autonomousEnabled = true
+    /// Off to start with, so the app behaves like a plain chat with a repo until it is turned on.
+    var autonomousEnabled = false
     /// Master switch for adding enabled memories to newly started chats.
     var memoriesOn = true
     /// The connector (its serverID) that gives chats a Linux computer to run commands on. Nil is
@@ -107,7 +148,9 @@ struct AppSettings: Codable, Equatable, Sendable {
         notificationsOn = try c.decodeIfPresent(Bool.self, forKey: .notificationsOn) ?? true
         directSaveRepos = try c.decodeIfPresent([String: Bool].self, forKey: .directSaveRepos) ?? [:]
         workflowPolicy = (try? c.decodeIfPresent(WorkflowPolicy.self, forKey: .workflowPolicy)) ?? .bigJobs
-        autonomousEnabled = try c.decodeIfPresent(Bool.self, forKey: .autonomousEnabled) ?? true
+        workflowsEnabled = try c.decodeIfPresent(Bool.self, forKey: .workflowsEnabled) ?? false
+        specsEnabled = try c.decodeIfPresent(Bool.self, forKey: .specsEnabled) ?? false
+        autonomousEnabled = try c.decodeIfPresent(Bool.self, forKey: .autonomousEnabled) ?? false
         memoriesOn = try c.decodeIfPresent(Bool.self, forKey: .memoriesOn) ?? true
         chatComputerServer = try? c.decodeIfPresent(String.self, forKey: .chatComputerServer)
         chatComputerOff = (try? c.decodeIfPresent(Bool.self, forKey: .chatComputerOff)) ?? false

@@ -747,6 +747,22 @@ final class ChatSession: Identifiable {
         touch()
     }
 
+    /// This chat's mode: Vibe unless the chat was set to Spec. Remembered per chat, so a chat that
+    /// plans keeps planning and a chat that just does it keeps doing it.
+    var mode: ChatMode {
+        get { ChatMode(rawValue: chat.mode ?? "") ?? .vibe }
+        set {
+            chat.mode = newValue.rawValue
+            touch()
+        }
+    }
+
+    /// The modes the picker offers. Spec is hidden when Specs is off, so the switch really turns the
+    /// feature off instead of leaving a mode that cannot do what it says.
+    var availableModes: [ChatMode] {
+        app?.settings.specsEnabled == true ? [.vibe, .spec] : [.vibe]
+    }
+
     func setRepo(_ repo: ChatRepo?) {
         chat.repo = repo
         workspace = nil

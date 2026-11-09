@@ -45,9 +45,36 @@ final class JobCoordinator {
         app?.sheet = .jobs
     }
 
-    /// Chat messages always stay inside the chat; workflows only run when explicitly started from Workflows.
+    /// The chat decides what a request is, like Kiro: you type, and the app works out whether that
+    /// is an answer, a repo change, or a multi-step job, and does it inside the chat.
+    ///
+    /// Deliberately conservative. A plain question must never start a workflow, so this returns nil
+    /// unless the words clearly ask for multi-step work, and it returns nil whenever the Workflows
+    /// switch is off. It never adds a second spending confirmation: a workflow is sub-agents running
+    /// longer, so it starts the same way they do, and the existing spend limit and stop-and-ask
+    /// setting still apply as they do everywhere else.
     func routedWorkflow(request: String, repo: ChatRepo?) -> WorkflowDefinition? {
-        nil
+        guard let app, app.settings.workflowsEnabled else { return nil }
+        let text = request.lowercased()
+        guard text.count >= 12 else { return nil }
+        // A question is an answer, not a job, whatever else it says.
+        let isQuestion = text.contains("?")
+            || text.hasPrefix("what ") || text.hasPrefix("why ") || text.hasPrefix("who ")
+            || text.hasPrefix("when ") || text.hasPrefix("how do ") || text.hasPrefix("where ")
+        guard !isQuestion else { return nil }
+        let multiStepCues = [
+            "workflow", "step by step", "step-by-step", "end to end", "end-to-end",
+            "full feature", "implement the whole", "build the whole", "do all of",
+        ]
+        let planCues = ["plan out", "plan this out", "write a plan", "make a plan", "break this down into steps"]
+        let asksForMultiStep = multiStepCues.contains { text.contains($0) }
+        let asksForPlan = planCues.contains { text.contains($0) }
+        guard asksForMultiStep || asksForPlan else { return nil }
+        // A plan request is a plan, not a feature build.
+        if asksForPlan && !asksForMultiStep {
+            return BuiltInWorkflows.named("look-into-something")
+        }
+        return BuiltInWorkflows.named("full-feature")
     }
 
     @discardableResult

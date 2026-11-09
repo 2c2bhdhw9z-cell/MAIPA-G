@@ -91,6 +91,9 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
     public var queuedFollowUps: [QueuedFollowUp]?
     /// Chat workflow runs, mirrored here so a force-quit app still has them.
     public var activeWorkflowRuns: [ActiveWorkflowRunSnapshot]?
+    /// How this chat behaves when you type: Vibe (just do it) or Spec (plan first). Remembered per
+    /// chat. Stored as a plain string so AgentCore needs no app-level type.
+    public var mode: String?
 
     public init(
         id: UUID = UUID(),
@@ -125,6 +128,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         self.previousCompactedThroughMessageID = nil
         self.queuedFollowUps = nil
         self.activeWorkflowRuns = nil
+        self.mode = nil
     }
 
     enum CodingKeys: String, CodingKey {
@@ -132,7 +136,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         case groupID, saveReceipts, activeJobID, workflowID, specID, memoryContext
         case compactedSummary, compactedThroughMessageID
         case previousCompactedSummary, previousCompactedThroughMessageID
-        case queuedFollowUps, activeWorkflowRuns
+        case queuedFollowUps, activeWorkflowRuns, mode
     }
 
     public init(from decoder: Decoder) throws {
@@ -159,6 +163,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         previousCompactedThroughMessageID = try c.decodeIfPresent(UUID.self, forKey: .previousCompactedThroughMessageID)
         queuedFollowUps = try c.decodeIfPresent([QueuedFollowUp].self, forKey: .queuedFollowUps)
         activeWorkflowRuns = try c.decodeIfPresent([ActiveWorkflowRunSnapshot].self, forKey: .activeWorkflowRuns)
+        mode = try c.decodeIfPresent(String.self, forKey: .mode)
     }
 
     /// Everything the chat has cost so far, in dollars, as OpenRouter reported it.
