@@ -11,7 +11,13 @@ struct JobsScreen: View {
         NavigationStack {
             List {
                 if app.jobs.jobs.isEmpty {
-                    ContentUnavailableView("No jobs yet", systemImage: "gearshape.2", description: Text("Autonomous repo work shows up here."))
+                    ContentUnavailableView(
+                        "No jobs yet",
+                        systemImage: "gearshape.2",
+                        description: Text(app.settings.autonomousEnabled
+                            ? "Autonomous repo work shows up here."
+                            : "Autonomous jobs are off in Settings → Features, so none can run. This screen is history: it shows what already ran.")
+                    )
                 } else {
                     ForEach(app.jobs.jobs) { job in
                         NavigationLink(value: job.id) { JobRow(job: job) }

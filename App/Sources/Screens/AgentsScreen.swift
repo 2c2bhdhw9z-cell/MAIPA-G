@@ -33,7 +33,7 @@ struct AgentsScreen: View {
                         }
                     }
                 } header: {
-                    Text("Specialists with one clear job — tap any agent to give it a task.")
+                    Text("Specialists with one clear job. The chat starts them — you type, and it decides what to delegate. This screen is history.")
                         .font(.footnote)
                         .foregroundStyle(Theme.secondaryText)
                         .textCase(nil)

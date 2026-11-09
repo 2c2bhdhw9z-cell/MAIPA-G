@@ -925,6 +925,16 @@ final class ChatSession: Identifiable {
             )
             return
         }
+        // The chat decides, like Kiro: only a message that is clearly asking for multi-step work
+        // starts a workflow, and only when the Workflows switch is on. There is deliberately no
+        // extra spending confirmation here — a workflow is sub-agents running longer, so it starts
+        // the way they do, and the ordinary spend limit and stop-and-ask setting still apply.
+        // A failed start falls through to answering normally rather than leaving the chat empty.
+        if mode == .vibe,
+           let workflow = app.jobs.routedWorkflow(request: lastMessage, repo: chat.repo),
+           chat.repo != nil {
+            if await runRoutedWorkflow(workflow, request: lastMessage, app: app) { return }
+        }
         let changeAuthorization = ChangeAuthorization(request: lastMessage)
         let allAttachments = chat.messages.flatMap { message -> [AttachmentReference] in
             if case .user(let user) = message.body { return user.attachments }
@@ -1604,6 +1614,31 @@ final class ChatSession: Identifiable {
     private func replaceLastTurn(_ turn: AssistantTurn) {
         guard let index = chat.messages.indices.last, chat.messages[index].assistantTurn != nil else { return }
         chat.messages[index].assistantTurn = turn
+    }
+
+    /// Runs a workflow the chat itself decided on, and reports it inside the chat.
+    ///
+    /// Returns true when the workflow actually ran, so the caller knows not to answer again. It
+    /// returns false on any refusal, which lets the chat answer normally instead of going silent.
+    private func runRoutedWorkflow(_ workflow: WorkflowDefinition, request: String, app: AppModel) async -> Bool {
+        guard var turn = lastTurn else { return false }
+        turn.status = .running
+        turn.routeLabel = "Workflow · \(workflow.name)"
+        replaceLastTurn(turn)
+        let started = await app.automations.run(workflow, request: request, repo: chat.repo)
+        guard started else {
+            turn.status = .done
+            if let error = app.automations.lastError {
+                turn.notices.append("Workflow didn't start: \(error) Answered normally instead.")
+                app.automations.clearError()
+            }
+            replaceLastTurn(turn)
+            return false
+        }
+        turn.status = .done
+        turn.notices.append("Started the \(workflow.name) workflow inside this chat. Progress is in Jobs.")
+        replaceLastTurn(turn)
+        return true
     }
 
     private func fail(_ kind: TurnFailure.Kind, _ message: String) {
