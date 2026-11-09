@@ -603,6 +603,26 @@ final class ConnectorLibrary {
         }
     }
 
+    /// True when a chat computer is configured at all, even if its session has not been opened yet.
+    ///
+    /// `computerControl()` returns nil until a live session exists, and the session is only opened
+    /// once at the start of a turn by `reconnectIfNeeded()`. A single failed restore therefore cost
+    /// the whole turn its shell, with no retry and no explanation, while the machine itself was
+    /// running the entire time. This answers "is there meant to be a computer here" separately from
+    /// "is it connected right this second", so the turn can reconnect and try again instead of
+    /// silently going without.
+    var hasConfiguredComputer: Bool { computerConnector() != nil }
+
+    /// Opens the session again if it went away mid-turn, so a dropped connection costs one retry
+    /// rather than every command after it.
+    @discardableResult
+    func ensureComputerSession() async -> ComputerControl? {
+        if let control = computerControl(), control.commandTool != nil { return control }
+        guard hasConfiguredComputer else { return nil }
+        await reconnectIfNeeded()
+        return computerControl()
+    }
+
     static func toolsReadyDefaultsKey(_ machine: String) -> String { "computerToolsReady.\(machine)" }
 
     func keepComputerAwakeDuringSetup(resetReadyCache: Bool = false) {

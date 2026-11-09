@@ -1131,10 +1131,19 @@ final class ChatSession: Identifiable {
                 return try await control.run("cd \"$HOME/\(homePath)\" && \(command)")
             }
         }
-        if let control = app.connectors.computerControl(), control.commandTool != nil, app.openRouter.supportsTools(chat.model) {
-            let repoHome = repoContext.map { "repos/\($0.ref.owner)/\($0.ref.name)" }
-            tools.append(RunCommandTool(control: control, homePath: repoHome))
-            tools.append(ComputerTaskTool(control: control, homePath: repoHome))
+        // Attach the shell, reconnecting first if the session dropped. It used to be skipped
+        // silently whenever no live session existed, so one failed restore cost the whole turn its
+        // computer while the machine was running the entire time, with nothing said.
+        if app.openRouter.supportsTools(chat.model), app.connectors.hasConfiguredComputer {
+            if let control = await app.connectors.ensureComputerSession(), control.commandTool != nil {
+                let repoHome = repoContext.map { "repos/\($0.ref.owner)/\($0.ref.name)" }
+                tools.append(RunCommandTool(control: control, homePath: repoHome))
+                tools.append(ComputerTaskTool(control: control, homePath: repoHome))
+            } else if var turn = lastTurn {
+                // Say it out loud. A missing computer must never look like work that simply failed.
+                turn.notices.append("The chat computer is configured but couldn't be reached, so commands can't run in this reply. The machine itself may still be on.")
+                replaceLastTurn(turn)
+            }
         }
         tools = HookedTool.wrap(tools, hooks: repoHooks, runCommand: hookRunner)
         for problem in hookProblems {
