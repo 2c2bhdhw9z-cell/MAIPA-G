@@ -19,6 +19,10 @@ public actor SteeringInbox {
     private var backgroundTasks: [UUID: Task<Void, Never>] = [:]
     private var steerWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var activityWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var activityTimers: [UUID: Task<Void, Never>] = [:]
+    private var timedOutActivityWaiters: Set<UUID> = []
+    /// Helpers whose completion arrived before they were registered here.
+    private var finishedBeforeRegistration: Set<UUID> = []
     private var yieldAfterStep = false
 
     public init() {}
@@ -85,6 +89,10 @@ public actor SteeringInbox {
     }
 
     public func registerBackgroundTask(_ id: UUID, task: Task<Void, Never>) {
+        // A helper can finish between being detached and being registered here (two separate
+        // awaits in AgentExecutor). Its completion already arrived, so registering it now would
+        // leave a task that never completes, and the turn would wait on it forever.
+        if finishedBeforeRegistration.remove(id) != nil { return }
         backgroundTasks[id] = task
     }
 
@@ -102,7 +110,9 @@ public actor SteeringInbox {
         report: String?,
         finalPatch: BackgroundSubagentCardPatch?
     ) {
-        backgroundTasks.removeValue(forKey: id)
+        if backgroundTasks.removeValue(forKey: id) == nil {
+            finishedBeforeRegistration.insert(id)
+        }
         if let finalPatch {
             if let idx = pendingCardPatches.firstIndex(where: { $0.callID == finalPatch.callID }) {
                 pendingCardPatches[idx] = finalPatch
@@ -149,9 +159,13 @@ public actor SteeringInbox {
 
     /// Waits while backgrounded sub-agents are still working until a live steer, card patch, or completion arrives.
     /// A "finish after this step" flag does not wake this: the main agent stays here until the helpers actually finish.
-    public func waitForActivity() async {
+    ///
+    /// With a `timeout`, gives up after that many seconds with nothing arriving and returns false,
+    /// so a helper that went quiet can't hold the reply on "Thinking…" forever. Returns true otherwise.
+    @discardableResult
+    public func waitForActivity(timeout: TimeInterval? = nil) async -> Bool {
         if !pendingMessages.isEmpty || !completedBackgroundReports.isEmpty || !pendingCardPatches.isEmpty || backgroundTasks.isEmpty || Task.isCancelled {
-            return
+            return true
         }
         let id = UUID()
         await withTaskCancellationHandler {
@@ -160,15 +174,30 @@ public actor SteeringInbox {
                     cont.resume()
                 } else {
                     activityWaiters[id] = cont
+                    if let timeout {
+                        activityTimers[id] = Task { [weak self] in
+                            try? await Task.sleep(nanoseconds: UInt64(max(timeout, 0) * 1_000_000_000))
+                            if Task.isCancelled { return }
+                            await self?.timeOutActivityWaiter(id)
+                        }
+                    }
                 }
             }
         } onCancel: {
             Task { await self.cancelActivityWaiter(id) }
         }
+        activityTimers.removeValue(forKey: id)?.cancel()
+        return timedOutActivityWaiters.remove(id) == nil
     }
 
     private func cancelActivityWaiter(_ id: UUID) {
         activityWaiters.removeValue(forKey: id)?.resume()
+    }
+
+    private func timeOutActivityWaiter(_ id: UUID) {
+        guard let waiter = activityWaiters.removeValue(forKey: id) else { return }
+        timedOutActivityWaiters.insert(id)
+        waiter.resume()
     }
 
     private func wakeSteerWaiters() {
@@ -244,6 +273,12 @@ public struct AgentEnvironment: Sendable {
     public var onModelRestricted: @Sendable (String) async -> Void = { _ in }
     /// Saves inline images streamed directly by multimodal image-generating chat models (`choices[0].message.images`).
     public var saveInlineGeneratedImage: (@Sendable (_ data: Data, _ mimeType: String, _ prompt: String, _ model: String) async -> GeneratedImageResult?)?
+    /// Longest a model request may go with nothing at all arriving (keep-alives don't count)
+    /// before the step ends with the early-stop notice instead of sitting on "Thinking…".
+    public var modelSilenceLimit: TimeInterval = 300
+    /// Longest the turn waits on background sub-agents that send nothing at all before it stops
+    /// them and answers with what it has.
+    public var backgroundHelperSilenceLimit: TimeInterval = 600
 
     public init(
         openRouter: OpenRouterClient,
@@ -367,6 +402,16 @@ public enum AgentLoop {
         return "Slow reply (\(time(elapsed))), measured: \(calls.count) model call\(calls.count == 1 ? "" : "s") took \(time(modelTime)) (first words after \(time(averageFirst)) on average, slowest \(time(slowestFirst)); longest silence mid-reply \(time(longestStall))). Tools \(time(toolTime)). Waiting on sub-agents \(time(waiting)). Retry waits \(time(retryWait)) over \(attempts) request\(attempts == 1 ? "" : "s"). Largest prompt \(biggestPrompt) tokens."
     }
 
+    /// "5 minutes", "1 minute", "45 seconds".
+    static func spokenDuration(_ seconds: TimeInterval) -> String {
+        if seconds >= 60 {
+            let minutes = Int((seconds / 60).rounded())
+            return "\(minutes) minute\(minutes == 1 ? "" : "s")"
+        }
+        let whole = max(Int(seconds.rounded()), 1)
+        return "\(whole) second\(whole == 1 ? "" : "s")"
+    }
+
     /// True for the ways a reply normally ends. "length" has its own notice.
     static func isNormalFinish(_ reason: String?) -> Bool {
         guard let reason = reason?.lowercased() else { return false }
@@ -448,6 +493,16 @@ private struct Runner {
     mutating func markStoppedEarly() {
         turn.stoppedEarly = true
         if !turn.notices.contains(AgentLoop.stoppedEarlyNotice) { turn.notices.append(AgentLoop.stoppedEarlyNotice) }
+    }
+
+    /// Background sub-agents sent nothing for the whole wait: stop them, and tell both the person
+    /// and the model, so the turn answers with what it has instead of waiting forever.
+    mutating func stopSilentBackgroundHelpers() async {
+        await steering?.cancelAllBackgroundTasks()
+        let span = AgentLoop.spokenDuration(environment.backgroundHelperSilenceLimit)
+        turn.notices.append("Background sub-agents sent nothing for \(span), so I stopped them and carried on with what they had reported.")
+        pendingBackgroundReports.append("[Background sub-agents stopped] The background sub-agents that were still running sent nothing for \(span), so the app stopped them and their work did not finish. Answer the person now with what you have, and say plainly which parts are missing.")
+        emit(milestone: true)
     }
 
     /// Adds measured seconds to one of a step's timings (the last step when `index` is nil).
@@ -534,8 +589,9 @@ private struct Runner {
                 // reply, or another helper, while they are running.
                 if (await steering?.activeBackgroundTaskCount() ?? 0) > 0 {
                     let waitStartedAt = Date()
-                    await steering?.waitForActivity()
+                    let heardBack = await steering?.waitForActivity(timeout: environment.backgroundHelperSilenceLimit)
                     addTiming(\.waitingSeconds, since: waitStartedAt)
+                    if heardBack == false { await stopSilentBackgroundHelpers() }
                     continue
                 }
                 if injectedSteeringNotes.isEmpty, pendingBackgroundReports.isEmpty, newSteps > 0, await steering?.shouldYieldAfterStep() == true {
@@ -548,8 +604,9 @@ private struct Runner {
                         // Fall through to next step with `injectedSteeringNotes` / `pendingBackgroundReports`.
                     } else if (await steering?.activeBackgroundTaskCount() ?? 0) > 0 {
                         let waitStartedAt = Date()
-                        await steering?.waitForActivity()
+                        let heardBack = await steering?.waitForActivity(timeout: environment.backgroundHelperSilenceLimit)
                         addTiming(\.waitingSeconds, since: waitStartedAt)
+                        if heardBack == false { await stopSilentBackgroundHelpers() }
                         await applyBackgroundCardPatches()
                         continue
                     } else {
@@ -559,6 +616,12 @@ private struct Runner {
                             autoContinuedBlankReply = true
                             pendingBlankReplyNudge = "You completed the previous step without writing a visible reply to the user. Now write your clear plain-language answer based on the tool outputs and findings above."
                         } else {
+                            if visibleText.isEmpty && !hasGeneratedImages {
+                                // Only thinking (or nothing) came back, even after the nudge.
+                                // Ending as a plain "done" left a reply with no answer and no
+                                // sign that anything went wrong.
+                                markStoppedEarly()
+                            }
                             turn.status = .done
                             break
                         }
@@ -762,7 +825,10 @@ private struct Runner {
                 )
             }
             do {
-                let stream = try await environment.openRouter.stream(request)
+                let openRouter = environment.openRouter
+                let stream = SilenceWatchdog.watch(limit: environment.modelSilenceLimit) {
+                    try await openRouter.stream(request)
+                }
                 for try await chunk in stream {
                     let arrivedAt = Date()
                     if firstByteAt == nil {
@@ -822,6 +888,12 @@ private struct Runner {
                     throw error
                 }
                 turn.steps.remove(at: index)
+                if error is ModelWentSilent {
+                    // Nothing came back at all. Waiting on, or quietly retrying, is how a reply sat
+                    // on "Thinking…" for many minutes. End it with the notice; Retry carries on.
+                    markStoppedEarly()
+                    throw error
+                }
                 switch await recovery(for: error, attempt: attempt) {
                 case .retry(let delay):
                     retryWaitSeconds += delay
@@ -1299,6 +1371,13 @@ private struct Runner {
                 let explanation = ErrorExplainer.explain(api)
                 return TurnFailure(kind: .other, message: explanation.message, detail: api.description)
             }
+        }
+        if let silent = error as? ModelWentSilent {
+            return TurnFailure(
+                kind: .providerFailed,
+                message: "The AI sent nothing for \(AgentLoop.spokenDuration(silent.seconds)), so I stopped waiting. Try again, or pick another AI.",
+                detail: silent.description
+            )
         }
         if let http = error as? HTTPError {
             let explanation = ErrorExplainer.explain(http)
