@@ -792,6 +792,11 @@ private struct Runner {
         // Every provider an attempt at this step went to: a retry can switch provider (a
         // fallback, or the free AIs), and an attempt that failed partway may still have cost.
         var providersTried: [String] = []
+        // Time this step's attempts have spent waiting with nothing at all arriving. It carries
+        // over retries: a request whose connection times out (180 s) before the 5-minute watchdog
+        // used to be retried with a fresh watchdog each time, so a provider that never answered
+        // kept the reply on "Thinking…" for about nine minutes before anything was said.
+        var silentSeconds: TimeInterval = 0
         while true {
             attempt += 1
             turn.steps.append(AssistantStep(steeredMessages: stepSteered))
@@ -887,7 +892,7 @@ private struct Runner {
             }
             do {
                 let openRouter = environment.openRouter
-                let stream = SilenceWatchdog.watch(limit: environment.modelSilenceLimit) {
+                let stream = SilenceWatchdog.watch(limit: max(0.05, environment.modelSilenceLimit - silentSeconds)) {
                     try await openRouter.stream(request)
                 }
                 for try await chunk in stream {
@@ -955,11 +960,17 @@ private struct Runner {
                     throw error
                 }
                 turn.steps.remove(at: index)
-                if error is ModelWentSilent {
+                if firstByteAt == nil {
+                    silentSeconds += Date().timeIntervalSince(sentAt)
+                } else {
+                    // Something did arrive (thinking, say), so this attempt wasn't silence.
+                    silentSeconds = 0
+                }
+                if error is ModelWentSilent || silentSeconds >= environment.modelSilenceLimit {
                     // Nothing came back at all. Waiting on, or quietly retrying, is how a reply sat
                     // on "Thinking…" for many minutes. End it with the notice; Retry carries on.
                     markStoppedEarly()
-                    throw error
+                    throw ModelWentSilent(seconds: max(silentSeconds, (error as? ModelWentSilent)?.seconds ?? 0))
                 }
                 switch await recovery(for: error, attempt: attempt) {
                 case .retry(let delay):

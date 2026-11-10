@@ -42,6 +42,30 @@ final class KeepAliveOnlyTransport: HTTPTransport, @unchecked Sendable {
     var ended: Int { lock.withLock { streamsEnded } }
 }
 
+/// A provider that never answers: each request waits, then its connection times out, the way
+/// URLSession ends a request whose response headers never come.
+final class TimingOutTransport: HTTPTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private let delay: TimeInterval
+    private var streamsOpened = 0
+
+    init(delay: TimeInterval) {
+        self.delay = delay
+    }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        HTTPResponse(status: 404)
+    }
+
+    func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse {
+        lock.withLock { streamsOpened += 1 }
+        try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        throw HTTPError.transport("The request timed out.", isOffline: false)
+    }
+
+    var opened: Int { lock.withLock { streamsOpened } }
+}
+
 /// "All it does is say Thinking, but then it never actually responds" (owner, 10 November 2026).
 @Suite("Replies never hang on Thinking…")
 struct ThinkingHangTests {
@@ -207,5 +231,24 @@ struct ThinkingHangTests {
         #expect(hang.isCancelled)
         let body = try #require(transport.sentBodies.first)
         #expect(body["messages"]?.jsonString().contains("Background sub-agents stopped") == true)
+    }
+
+    @Test("Silence is counted across retries, so timed-out requests can't each restart the wait")
+    func silenceCountsAcrossTimedOutRetries() async throws {
+        // Build 148, 10 November 2026: a Claude reply sat on "Thinking…" for minutes. A request
+        // times out (180 s) before the watchdog (300 s), and each retry used to get a fresh
+        // watchdog, so three silent attempts ran back to back with nothing said.
+        let transport = TimingOutTransport(delay: 0.3)
+        let turn = await Self.lastTurn(
+            AgentTurnInput(chat: AgentLoopTests.newChat("Hi"), route: AgentLoopTests.route(), systemPrompt: "system", tools: []),
+            Self.environment(transport, modelSilence: 0.5)
+        )
+        let finished = try #require(turn)
+        #expect(finished.status == .failed)
+        #expect(finished.stoppedEarly == true)
+        #expect(finished.notices.contains(AgentLoop.stoppedEarlyNotice))
+        #expect(finished.failure?.message.contains("sent nothing") == true)
+        // The second attempt only gets what is left of the limit; there is no third.
+        #expect(transport.opened == 2)
     }
 }

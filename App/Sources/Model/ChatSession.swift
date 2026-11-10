@@ -1193,8 +1193,16 @@ final class ChatSession: Identifiable {
             }
             do {
                 var activeReceipt = (chat.saveReceipts ?? []).last { $0.repo == repo.ref && $0.pullRequest != nil && $0.resolution == nil }
+                // Opening the repo counts against the same getting-ready limit as everything else.
+                // These steps used to wait on GitHub with no limit at all, after the connectors
+                // and the computer had been given theirs, so a slow GitHub (or staged changes being
+                // carried onto a branch that had moved) held the reply on "Thinking…" with no
+                // request sent to the AI yet. Rules, hooks and the diff get at least 30 seconds.
+                let repoDeadline = max(setupDeadline, Date().addingTimeInterval(30))
                 if let candidate = activeReceipt, let pull = candidate.pullRequest {
-                    if let current = try? await github.pullRequest(repo.ref, number: pull.number), current.state != "open" {
+                    let ref = repo.ref, number = pull.number
+                    let current: GitHubPullRequest? = await setupStep(repoDeadline, fallback: nil) { try? await github.pullRequest(ref, number: number) }
+                    if let current, current.state != "open" {
                         if var receipts = chat.saveReceipts, let idx = receipts.firstIndex(where: { $0.id == candidate.id }) {
                             receipts[idx].resolution = "closed"
                             chat.saveReceipts = receipts
@@ -1205,7 +1213,10 @@ final class ChatSession: Identifiable {
                 }
                 let workingBranch = activeReceipt?.branch ?? repo.branch
                 let workingRepo = ChatRepo(ref: repo.ref, branch: workingBranch, defaultBranch: repo.defaultBranch, isPrivate: repo.isPrivate)
-                let commit = try await github.resolveCommit(repo.ref, ref: workingBranch)
+                let commitRef = repo.ref
+                let commit = try await AgentLoop.bounded(seconds: max(repoDeadline.timeIntervalSinceNow, 30), label: "Opening \(repo.ref.fullName) on \(repo.ref.hostName)") {
+                    try await github.resolveCommit(commitRef, ref: workingBranch)
+                }
                 let workspace = workspaceFor(repo: workingRepo, commit: commit, github: github, store: app.snapshots)
                 await setupStep(setupDeadline, fallback: ()) { await workspace.prefetch() }
                 let changes: ChangeWorkspace
@@ -1213,7 +1224,9 @@ final class ChatSession: Identifiable {
                     if existing.base.commit == commit && existing.base.repo == workspace.repo {
                         changes = existing
                     } else if existing.base.repo == workspace.repo {
-                        let rebased = await existing.rebased(onto: workspace)
+                        // Carrying staged edits onto the moved branch reads each file again; if
+                        // that can't finish in time, keep them on the commit they were made on.
+                        let rebased = await setupStep(repoDeadline, fallback: existing) { await existing.rebased(onto: workspace) }
                         changes = rebased
                         changeWorkspace = rebased
                     } else {
@@ -1225,11 +1238,15 @@ final class ChatSession: Identifiable {
                     changeWorkspace = changes
                 }
                 let service = GitHubChangeService(github: github)
-                let rules = await service.resolveRules(in: workspace, directSaveSetting: app.settings.savesDirectly(to: repo.ref), requestText: lastMessage)
-                let loadedHooks = await RepoHooks.load(from: workspace)
+                let directSaveSetting = app.settings.savesDirectly(to: repo.ref)
+                // Rules that couldn't be read in time never mean saving straight to the branch.
+                let rules = await setupStep(repoDeadline, fallback: RepoWriteRules(directSave: false, reason: "The repo's rules couldn't be read in time, so changes save as a pull request.")) {
+                    await service.resolveRules(in: workspace, directSaveSetting: directSaveSetting, requestText: lastMessage)
+                }
+                let loadedHooks = await setupStep(repoDeadline, fallback: (hooks: [RepoHook](), problems: [String]())) { await RepoHooks.load(from: workspace) }
                 repoHooks = loadedHooks.hooks
                 hookProblems = loadedHooks.problems
-                repoLocalAgents = await RepoAgentLoader.loadAgents(from: workspace)
+                repoLocalAgents = await setupStep(repoDeadline, fallback: []) { await RepoAgentLoader.loadAgents(from: workspace) }
                 let saves = changeSession ?? ChangeSession(receipts: chat.saveReceipts ?? [])
                 changeSession = saves
                 let listTool = ListFilesTool(workspace: workspace, changes: changes)
@@ -1329,10 +1346,17 @@ final class ChatSession: Identifiable {
         for problem in hookProblems {
             _ = app.report(RepoHookProblem(message: problem), area: "hooks", operation: "read repo hooks")
         }
-        var stagedPatch = await changeWorkspace?.stagedDiffForPrompt()
+        // Building the staged diff reads each changed file's original from GitHub, so it has a
+        // limit too; without one the Review Changes state alone could hold the reply up.
+        let diffDeadline = max(setupDeadline, Date().addingTimeInterval(30))
+        let diffUnavailable = "Staged changes exist, but their diff couldn't be built in time. Use read_file to see the staged files."
+        var stagedPatch: String?
+        if let primary = changeWorkspace {
+            stagedPatch = await setupStep(diffDeadline, fallback: diffUnavailable) { await primary.stagedDiffForPrompt() }
+        }
         for extra in allChangeWorkspaces.dropFirst() {
             guard await extra.hasStagedChanges() else { continue }
-            let patch = await extra.stagedDiffForPrompt()
+            let patch = await setupStep(diffDeadline, fallback: diffUnavailable) { await extra.stagedDiffForPrompt() }
             stagedPatch = (stagedPatch.map { $0 + "\n\n" } ?? "") + "Staged in \(extra.base.repo.fullName):\n" + patch
         }
         let contextRepo = repoContext
