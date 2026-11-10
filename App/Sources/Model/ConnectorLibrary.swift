@@ -20,6 +20,8 @@ final class ConnectorLibrary {
     @ObservationIgnored private let store: ProductStore<ConnectorRecord>
     @ObservationIgnored private var sessions: [UUID: MCPConnectorSession] = [:]
     @ObservationIgnored private var setupKeepAwakeTask: Task<Void, Never>?
+    /// Failed reconnects in a row, and when the last one failed, so a broken connector backs off.
+    @ObservationIgnored private var reconnectFailures: [UUID: (count: Int, at: Date)] = [:]
 
     init(transport: any HTTPTransport, paths: AppPaths) {
         self.transport = transport; cacheURL = paths.connectorCatalogue
@@ -418,9 +420,19 @@ final class ConnectorLibrary {
             do {
                 let tools = try await session.tools()
                 toolDefinitions[configuration.id] = tools; states[configuration.id] = .connected; errors[configuration.id] = nil
+                reconnectFailures[configuration.id] = nil
             } catch {
-                states[configuration.id] = credential == nil ? .authorizationNeeded : .failed
-                errors[configuration.id] = ErrorExplainer.explain(error).message
+                let previous = reconnectFailures[configuration.id]?.count ?? 0
+                reconnectFailures[configuration.id] = (previous + 1, Date())
+                if credential != nil, ConnectorReconnectPolicy.isSignInRefused(error) {
+                    // The saved sign-in was revoked or ran out. It used to stay "failed" and be
+                    // retried at the start of every reply, which held each reply up.
+                    states[configuration.id] = .authorizationNeeded
+                    errors[configuration.id] = "\(configuration.displayName) no longer accepts MAIPA-G's sign-in. Sign in again in Connectors."
+                } else {
+                    states[configuration.id] = credential == nil ? .authorizationNeeded : .failed
+                    errors[configuration.id] = ErrorExplainer.explain(error).message
+                }
             }
         }
     }
@@ -479,14 +491,26 @@ final class ConnectorLibrary {
 
     /// Automatically restores any remote connector (such as Sprites) that dropped to `.failed` or `.disconnected`
     /// while holding a valid Keychain credential or refresh token, so the user never has to manually reconnect.
+    /// Reconnects dropped connectors, all at once. A connector that keeps failing is tried less
+    /// often (`ConnectorReconnectPolicy`), and one whose sign-in was refused waits for the person.
+    /// They used to be tried one after another at the start of every reply.
     func reconnectIfNeeded() async {
+        var due: [ConnectorConfiguration] = []
         for configuration in connected where configuration.kind == .remote {
             let state = states[configuration.id]
             let credential = Keychain.value(ConnectorCredential.self, account: credentialKey(configuration.id))
-            if (state == .failed || state == .disconnected || state == nil), credential != nil {
-                await restore(configuration)
+            let failures = reconnectFailures[configuration.id]
+            if (state == .failed || state == .disconnected || state == nil), credential != nil,
+               ConnectorReconnectPolicy.shouldRetry(state: state, consecutiveFailures: failures?.count ?? 0, lastFailureAt: failures?.at) {
+                due.append(configuration)
             } else if state == .connected, let credential, credential.needsRefresh(), credential.refreshToken != nil {
-                await restore(configuration)
+                due.append(configuration)
+            }
+        }
+        guard !due.isEmpty else { return }
+        await withTaskGroup(of: Void.self) { group in
+            for configuration in due {
+                group.addTask { await self.restore(configuration) }
             }
         }
     }

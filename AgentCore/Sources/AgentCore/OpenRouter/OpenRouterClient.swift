@@ -159,6 +159,11 @@ public struct OpenRouterAPIError: Error, Sendable, Hashable, CustomStringConvert
             if lowered.contains("moderation") || lowered.contains("flagged") { return .moderated }
             return .other
         case 429:
+            // OneProvider answers an empty balance with 429 "insufficient_quota". Waiting can't
+            // fix that, so it isn't retried like a real rate limit.
+            if code == "insufficient_quota" || code == "insufficient_balance" || lowered.contains("insufficient balance") || lowered.contains("insufficient_quota") {
+                return .outOfCredits
+            }
             if lowered.contains("per-day") || lowered.contains("per day") || lowered.contains("daily") { return .freeDailyLimit }
             return .rateLimited
         case 413:

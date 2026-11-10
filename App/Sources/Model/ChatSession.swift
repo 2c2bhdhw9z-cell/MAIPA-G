@@ -1066,8 +1066,13 @@ final class ChatSession: Identifiable {
         }
         let setupDeadline = Date().addingTimeInterval(Self.setupTimeLimit)
         setupRanOut = false
+        setupTimer = ReplySetupTimer()
         let connectors = app.connectors
-        await setupStep(setupDeadline, fallback: ()) { await connectors.reconnectIfNeeded() }
+        // Only a short wait: reconnecting goes on in the background, and a connector that comes
+        // back is there for the next reply. Waiting for every broken connector first is how a
+        // reply sat on "Thinking…" with nothing sent to the AI yet.
+        let connectorDeadline = min(setupDeadline, Date().addingTimeInterval(ConnectorReconnectPolicy.replyWaitLimit))
+        await setupStep(connectorDeadline, fallback: (), label: "reconnecting connectors", countsAsRanOut: false) { await connectors.reconnectIfNeeded() }
         let aiClient = app.openRouter.client
         let hasOpenRouter = app.openRouter.hasOpenRouterKey
 
@@ -1201,7 +1206,7 @@ final class ChatSession: Identifiable {
                 let repoDeadline = max(setupDeadline, Date().addingTimeInterval(30))
                 if let candidate = activeReceipt, let pull = candidate.pullRequest {
                     let ref = repo.ref, number = pull.number
-                    let current: GitHubPullRequest? = await setupStep(repoDeadline, fallback: nil) { try? await github.pullRequest(ref, number: number) }
+                    let current: GitHubPullRequest? = await setupStep(repoDeadline, fallback: nil, label: "checking the pull request") { try? await github.pullRequest(ref, number: number) }
                     if let current, current.state != "open" {
                         if var receipts = chat.saveReceipts, let idx = receipts.firstIndex(where: { $0.id == candidate.id }) {
                             receipts[idx].resolution = "closed"
@@ -1218,7 +1223,7 @@ final class ChatSession: Identifiable {
                     try await github.resolveCommit(commitRef, ref: workingBranch)
                 }
                 let workspace = workspaceFor(repo: workingRepo, commit: commit, github: github, store: app.snapshots)
-                await setupStep(setupDeadline, fallback: ()) { await workspace.prefetch() }
+                await setupStep(setupDeadline, fallback: (), label: "reading the repo") { await workspace.prefetch() }
                 let changes: ChangeWorkspace
                 if let existing = changeWorkspace {
                     if existing.base.commit == commit && existing.base.repo == workspace.repo {
@@ -1226,7 +1231,7 @@ final class ChatSession: Identifiable {
                     } else if existing.base.repo == workspace.repo {
                         // Carrying staged edits onto the moved branch reads each file again; if
                         // that can't finish in time, keep them on the commit they were made on.
-                        let rebased = await setupStep(repoDeadline, fallback: existing) { await existing.rebased(onto: workspace) }
+                        let rebased = await setupStep(repoDeadline, fallback: existing, label: "updating staged changes") { await existing.rebased(onto: workspace) }
                         changes = rebased
                         changeWorkspace = rebased
                     } else {
@@ -1240,13 +1245,13 @@ final class ChatSession: Identifiable {
                 let service = GitHubChangeService(github: github)
                 let directSaveSetting = app.settings.savesDirectly(to: repo.ref)
                 // Rules that couldn't be read in time never mean saving straight to the branch.
-                let rules = await setupStep(repoDeadline, fallback: RepoWriteRules(directSave: false, reason: "The repo's rules couldn't be read in time, so changes save as a pull request.")) {
+                let rules = await setupStep(repoDeadline, fallback: RepoWriteRules(directSave: false, reason: "The repo's rules couldn't be read in time, so changes save as a pull request."), label: "reading the repo's rules") {
                     await service.resolveRules(in: workspace, directSaveSetting: directSaveSetting, requestText: lastMessage)
                 }
-                let loadedHooks = await setupStep(repoDeadline, fallback: (hooks: [RepoHook](), problems: [String]())) { await RepoHooks.load(from: workspace) }
+                let loadedHooks = await setupStep(repoDeadline, fallback: (hooks: [RepoHook](), problems: [String]()), label: "reading repo hooks") { await RepoHooks.load(from: workspace) }
                 repoHooks = loadedHooks.hooks
                 hookProblems = loadedHooks.problems
-                repoLocalAgents = await setupStep(repoDeadline, fallback: []) { await RepoAgentLoader.loadAgents(from: workspace) }
+                repoLocalAgents = await setupStep(repoDeadline, fallback: [], label: "reading repo agents") { await RepoAgentLoader.loadAgents(from: workspace) }
                 let saves = changeSession ?? ChangeSession(receipts: chat.saveReceipts ?? [])
                 changeSession = saves
                 let listTool = ListFilesTool(workspace: workspace, changes: changes)
@@ -1303,7 +1308,7 @@ final class ChatSession: Identifiable {
         }
         let prewarmRepo = repoContext
         let prewarmAutonomous = autonomous && app.settings.autonomousEnabled
-        let computerNote: String? = await setupStep(setupDeadline, fallback: nil) {
+        let computerNote: String? = await setupStep(setupDeadline, fallback: nil, label: "starting the computer") {
             await self.prepareComputer(app: app, repo: prewarmRepo, lastUserMessage: lastMessage, isAutonomous: prewarmAutonomous)
         }
         var canSyncStaged = false
@@ -1332,7 +1337,7 @@ final class ChatSession: Identifiable {
         // silently whenever no live session existed, so one failed restore cost the whole turn its
         // computer while the machine was running the entire time, with nothing said.
         if app.openRouter.supportsTools(chat.model), app.connectors.hasConfiguredComputer {
-            if let control = await setupStep(setupDeadline, fallback: nil, { await connectors.ensureComputerSession() }), control.commandTool != nil {
+            if let control = await setupStep(setupDeadline, fallback: nil, label: "connecting the computer", { await connectors.ensureComputerSession() }), control.commandTool != nil {
                 let repoHome = repoContext.map { "repos/\($0.ref.owner)/\($0.ref.name)" }
                 tools.append(RunCommandTool(control: control, homePath: repoHome))
                 tools.append(ComputerTaskTool(control: control, homePath: repoHome))
@@ -1352,16 +1357,16 @@ final class ChatSession: Identifiable {
         let diffUnavailable = "Staged changes exist, but their diff couldn't be built in time. Use read_file to see the staged files."
         var stagedPatch: String?
         if let primary = changeWorkspace {
-            stagedPatch = await setupStep(diffDeadline, fallback: diffUnavailable) { await primary.stagedDiffForPrompt() }
+            stagedPatch = await setupStep(diffDeadline, fallback: diffUnavailable, label: "building the staged diff") { await primary.stagedDiffForPrompt() }
         }
         for extra in allChangeWorkspaces.dropFirst() {
             guard await extra.hasStagedChanges() else { continue }
-            let patch = await setupStep(diffDeadline, fallback: diffUnavailable) { await extra.stagedDiffForPrompt() }
+            let patch = await setupStep(diffDeadline, fallback: diffUnavailable, label: "building the staged diff") { await extra.stagedDiffForPrompt() }
             stagedPatch = (stagedPatch.map { $0 + "\n\n" } ?? "") + "Staged in \(extra.base.repo.fullName):\n" + patch
         }
         let contextRepo = repoContext
         let allStagedPatches = stagedPatch
-        var computer: SystemPrompt.ComputerContext? = await setupStep(setupDeadline, fallback: nil) {
+        var computer: SystemPrompt.ComputerContext? = await setupStep(setupDeadline, fallback: nil, label: "reading the computer") {
             await self.computerContext(app: app, repo: contextRepo, stagedPatch: allStagedPatches)
         }
         computer?.appNote = computerNote
@@ -1370,7 +1375,7 @@ final class ChatSession: Identifiable {
         let hasRepo = chat.repo != nil
         var difficulty = TaskDifficulty.estimate(lastMessage, hasRepo: hasRepo)
         if chat.model == .auto, app.openRouter.accountState.paidAllowed(),
-           let judged = await setupStep(setupDeadline, fallback: nil, { await OnDeviceAI.difficulty(of: lastMessage, hasRepo: hasRepo) }) {
+           let judged = await setupStep(setupDeadline, fallback: nil, label: "judging the request", { await OnDeviceAI.difficulty(of: lastMessage, hasRepo: hasRepo) }) {
             difficulty = judged
         }
         let catalogue = app.openRouter.modelsByID
@@ -1714,6 +1719,12 @@ final class ChatSession: Identifiable {
             turn.notices.append(Self.setupRanOutNotice)
             replaceLastTurn(turn)
         }
+        // Where a slow start's time went, so it is never mistaken for a slow AI.
+        if let notice = setupTimer.notice(), var turn = lastTurn {
+            turn.notices.removeAll { $0.hasPrefix("Getting ready took ") && $0 != Self.setupRanOutNotice }
+            turn.notices.append(notice)
+            replaceLastTurn(turn)
+        }
         // Stop pressed while getting ready: there is no run to cancel yet, so honour it here.
         if userStoppedExplicitly { return }
         if let workflow = routedWorkflow, let context = inChatWorkflowContext {
@@ -1845,18 +1856,27 @@ final class ChatSession: Identifiable {
     static let setupTimeLimit: TimeInterval = 120
     static let setupRanOutNotice = "Getting ready took over 2 minutes (connectors, the repo copy or the computer), so the reply started without waiting for the rest."
     @ObservationIgnored private var setupRanOut = false
+    @ObservationIgnored private var setupTimer = ReplySetupTimer()
 
     /// Runs one getting-ready step within what is left of `deadline`, or returns `fallback`.
-    private func setupStep<T: Sendable>(_ deadline: Date, fallback: T, _ work: @escaping @Sendable () async -> T) async -> T {
+    private func setupStep<T: Sendable>(
+        _ deadline: Date,
+        fallback: T,
+        label: String = "getting ready",
+        countsAsRanOut: Bool = true,
+        _ work: @escaping @Sendable () async -> T
+    ) async -> T {
         let remaining = deadline.timeIntervalSinceNow
         guard remaining > 0 else {
-            setupRanOut = true
+            if countsAsRanOut { setupRanOut = true }
             return fallback
         }
+        let started = Date()
+        defer { setupTimer.record(label, seconds: Date().timeIntervalSince(started)) }
         do {
             return try await AgentLoop.bounded(seconds: remaining, label: "Getting ready") { await work() }
         } catch {
-            if !(error is CancellationError) { setupRanOut = true }
+            if countsAsRanOut, !(error is CancellationError) { setupRanOut = true }
             return fallback
         }
     }
@@ -1868,7 +1888,7 @@ final class ChatSession: Identifiable {
         let provider = turn.balanceProvider ?? AIProviderModelID.providerID(modelID)
         if turn.balanceBefore == nil {
             let account = app.openRouter
-            await setupStep(deadline, fallback: ()) { await account.refreshKeyInfo() }
+            await setupStep(deadline, fallback: (), label: "reading balances") { await account.refreshKeyInfo() }
             guard var current = lastTurn, chat.messages.last?.id == messageID,
                   let balance = app.openRouter.balance(forProvider: provider) else { return }
             current.balanceBefore = balance
