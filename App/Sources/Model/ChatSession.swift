@@ -1721,6 +1721,8 @@ final class ChatSession: Identifiable {
                   let balance = app.openRouter.balance(forProvider: provider) else { return }
             current.balanceBefore = balance
             current.balanceProvider = provider
+            // Every provider's balance too: a fallback can move the reply to another provider.
+            current.balancesBefore = app.openRouter.balancesByProvider
             replaceLastTurn(current)
         }
         app.balanceOverlaps.begin(messageID, provider: provider)
@@ -1768,11 +1770,12 @@ final class ChatSession: Identifiable {
     }
 
     /// Records the provider balance read after a turn, so the turn shows what it really cost.
-    func recordBalanceAfter(_ balance: Double, messageID: UUID, shared: Bool = false) {
+    func recordBalanceAfter(_ balance: Double?, balances: [String: Double]?, messageID: UUID, shared: Bool = false) {
         guard let index = chat.messages.firstIndex(where: { $0.id == messageID }),
               var turn = chat.messages[index].assistantTurn,
               turn.balanceBefore != nil, turn.status != .running else { return }
-        turn.balanceAfter = balance
+        if let balance { turn.balanceAfter = balance }
+        if let balances, turn.balancesBefore != nil { turn.balancesAfter = balances }
         if shared { turn.balanceShared = true }
         chat.messages[index].assistantTurn = turn
         saveSoon()
@@ -1794,6 +1797,8 @@ final class ChatSession: Identifiable {
         turn.steps.append(step)
         replaceLastTurn(turn)
         let stepID = step.id
+        routedWorkflowStepID = stepID
+        defer { routedWorkflowStepID = nil }
         let snapshot = await executeChatWorkflow(
             definition: workflow,
             prompt: request,
@@ -1801,9 +1806,7 @@ final class ChatSession: Identifiable {
             allAgents: agents,
             toolPool: toolPool,
             repoContext: repoContext,
-            progress: { [weak self] _ in
-                Task { @MainActor [weak self] in self?.showWorkflowProgress(workflowID: workflow.id, stepID: stepID) }
-            }
+            progress: { _ in }
         )
         guard var finished = lastTurn else { return }
         if let index = finished.steps.firstIndex(where: { $0.id == stepID }) {
@@ -1814,10 +1817,12 @@ final class ChatSession: Identifiable {
         replaceLastTurn(finished)
     }
 
-    private func showWorkflowProgress(workflowID: String, stepID: UUID) {
-        guard var turn = lastTurn, turn.status == .running,
-              let index = turn.steps.firstIndex(where: { $0.id == stepID }),
-              let run = activeWorkflowRuns.first(where: { $0.isRunning && $0.definition.id == workflowID }) else { return }
+    /// The step of this chat's turn that shows a chat-started workflow's progress, while it runs.
+    @ObservationIgnored private var routedWorkflowStepID: UUID?
+
+    private func showRoutedWorkflowProgress(_ run: ActiveWorkflowRunSnapshot) {
+        guard let stepID = routedWorkflowStepID, var turn = lastTurn, turn.status == .running,
+              let index = turn.steps.firstIndex(where: { $0.id == stepID }) else { return }
         turn.steps[index].text = run.chatProgressLine()
         replaceLastTurn(turn)
     }
@@ -2366,6 +2371,8 @@ final class ChatSession: Identifiable {
                 await MainActor.run {
                     guard let self, let idx = self.activeWorkflowRuns.firstIndex(where: { $0.id == runID }) else { return }
                     self.activeWorkflowRuns[idx].checkpoint = cp
+                    // Same checkpoint as the card, at the same moment, so the line never lags it.
+                    self.showRoutedWorkflowProgress(self.activeWorkflowRuns[idx])
                 }
             }
         )

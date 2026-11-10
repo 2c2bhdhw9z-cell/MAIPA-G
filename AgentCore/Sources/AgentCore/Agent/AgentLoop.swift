@@ -279,8 +279,10 @@ public struct AgentEnvironment: Sendable {
     /// Longest the turn waits on background sub-agents that send nothing at all before it stops
     /// them and answers with what it has.
     public var backgroundHelperSilenceLimit: TimeInterval = 600
-    /// Longest one tool call may run before it is stopped and reported as failed. Tools that run
-    /// other agents (`toolTimeLimitExempt`) are exempt: each of their own steps has these limits.
+    /// Longest one tool call may go without any output or progress before it is stopped and
+    /// reported as failed. A tool that keeps reporting progress is never cut off, however long it
+    /// runs. Tools that run other agents (`toolTimeLimitExempt`) are exempt: each of their own
+    /// steps has these limits.
     public var toolTimeLimit: TimeInterval = 1_200
 
     public init(
@@ -412,15 +414,24 @@ public enum AgentLoop {
     /// Runs `work`, but returns as soon as the task is stopped or `seconds` pass (0 means no time
     /// limit), even when the work itself ignores cancellation: it is cancelled and left to wind
     /// down on its own, so a tool that never checks for Stop can't keep the reply running.
-    public static func bounded<T: Sendable>(seconds: TimeInterval, label: String, _ work: @escaping @Sendable () async throws -> T) async throws -> T {
+    /// With `activity`, the limit counts from the last `activity.touch()` instead of the start, so
+    /// work that keeps reporting progress is never cut off.
+    public static func bounded<T: Sendable>(seconds: TimeInterval, label: String, activity: ActivityClock? = nil, _ work: @escaping @Sendable () async throws -> T) async throws -> T {
         let gate = OneShot<T>()
         let worker = Task {
             do { gate.resume(.success(try await work())) } catch { gate.resume(.failure(error)) }
         }
         let timer: Task<Void, Never>? = seconds > 0 && seconds.isFinite ? Task {
-            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            if Task.isCancelled { return }
-            gate.resume(.failure(ToolTimedOut(tool: label, seconds: seconds)))
+            var wait = seconds
+            while true {
+                try? await Task.sleep(nanoseconds: UInt64(max(wait, 0.01) * 1_000_000_000))
+                if Task.isCancelled { return }
+                guard let activity else { break }
+                let quiet = activity.secondsSinceLastActivity()
+                if quiet >= seconds { break }
+                wait = seconds - quiet
+            }
+            gate.resume(.failure(ToolTimedOut(tool: label, seconds: seconds, sinceLastActivity: activity != nil)))
             worker.cancel()
         } : nil
         defer { timer?.cancel() }
@@ -890,6 +901,7 @@ private struct Runner {
                     turn.steps[index].text = accumulator.text
                     turn.steps[index].reasoning = accumulator.reasoning
                     if let model = accumulator.model { turn.steps[index].model = model }
+                    turn.steps[index].provider = AIProviderModelID.providerID(route.model)
                     // Every new piece of text goes out at once, so words never wait for the next
                     // ones (a model can pause mid-reply). The app draws at most once a frame.
                     if changed || !emittedInitialStep {
@@ -1010,6 +1022,7 @@ private struct Runner {
         step.reasoning = accumulator.reasoning
         step.reasoningDetails = accumulator.reasoningDetails
         step.model = accumulator.model ?? step.model
+        step.provider = AIProviderModelID.providerID(route.model)
         if !fallbackModels.isEmpty,
            AIProviderModelID.decode(route.model) == nil,
            let actual = accumulator.model, actual != route.model,
@@ -1223,15 +1236,20 @@ private struct Runner {
                             let output: ToolOutput
                             let tool = job.tool
                             let limit = AgentLoop.toolTimeLimitExempt.contains(tool.name) ? 0 : toolLimit
+                            // Any progress from the tool restarts its clock: the limit is for a
+                            // tool that has gone quiet, not one that is still working.
+                            let activity = ActivityClock()
                             if job.approved {
-                                output = try await AgentLoop.bounded(seconds: limit, label: tool.name) {
+                                output = try await AgentLoop.bounded(seconds: limit, label: tool.name, activity: activity) {
                                     try await tool.runApprovedLive(arguments: job.arguments, callID: job.callID, existingSubagents: job.existingSubagents) { update in
+                                        activity.touch()
                                         sink.yield(.progress(job.callIndex, update))
                                     }
                                 }
                             } else {
-                                output = try await AgentLoop.bounded(seconds: limit, label: tool.name) {
+                                output = try await AgentLoop.bounded(seconds: limit, label: tool.name, activity: activity) {
                                     try await tool.runLive(arguments: job.arguments, callID: job.callID, existingSubagents: job.existingSubagents) { update in
+                                        activity.touch()
                                         sink.yield(.progress(job.callIndex, update))
                                     }
                                 }

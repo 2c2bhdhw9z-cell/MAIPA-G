@@ -353,6 +353,10 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
     /// Another turn on the same provider was running between the two readings, so their
     /// difference includes its spend too and is not this turn's exact cost.
     public var balanceShared: Bool?
+    /// Every provider's balance read before and after the turn, by provider id, so a reply that
+    /// switched provider partway through is costed on each provider it used.
+    public var balancesBefore: [String: Double]?
+    public var balancesAfter: [String: Double]?
 
     public init(status: Status = .running, steps: [AssistantStep] = [], failure: TurnFailure? = nil, notices: [String] = [], routeLabel: String? = nil) {
         self.status = status
@@ -377,7 +381,26 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
         return balanceDifference
     }
 
+    /// The providers whose balance this turn spent: each step's provider, else the one it started on.
+    public var providersUsed: Set<String> {
+        var used = Set(steps.compactMap(\.provider))
+        if used.isEmpty, let balanceProvider { used.insert(balanceProvider) }
+        return used
+    }
+
+    /// Per provider: the drop in each provider the turn used, added up. Nil when any of them
+    /// lacks a reading. Older turns use the single pair of readings.
     private var balanceDifference: Double? {
+        if let before = balancesBefore, let after = balancesAfter {
+            let used = providersUsed
+            guard !used.isEmpty else { return nil }
+            var total = 0.0
+            for provider in used {
+                guard let start = before[provider], let end = after[provider] else { return nil }
+                total += max(0, start - end)
+            }
+            return total
+        }
         guard let before = balanceBefore, let after = balanceAfter else { return nil }
         return max(0, before - after)
     }
@@ -409,35 +432,79 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
     }
 }
 
-/// Which running turns read the same provider's balance at the same time.
+/// Which turns read the same provider's balance at overlapping times.
 ///
-/// Real spend is one provider's balance before a turn minus after it. Two turns on the same
-/// provider at once each see the other's spend in that difference, so a turn that overlapped
-/// another on its provider is marked shared, and its figure is shown as estimated.
+/// Real spend is a provider's balance before a turn minus after it. Providers can charge a few
+/// seconds late, so the app reads again `settleWindow` after the turn. Two turns on one provider
+/// whose spans (start to end plus that window) overlap each see the other's spend, so both are
+/// marked shared and their figures are shown as estimated. That covers a reply that starts while
+/// the previous one's recheck is still pending, which would otherwise leak into it.
 public struct BalanceOverlapTracker: Sendable {
-    private var active: [UUID: (provider: String, shared: Bool)] = [:]
+    public static let settleWindow: TimeInterval = 20
+
+    private struct Entry: Sendable {
+        var providers: Set<String>
+        var started: Date
+        var ended: Date?
+        var shared: Bool
+    }
+
+    private var entries: [UUID: Entry] = [:]
 
     public init() {}
 
-    /// Starts watching a turn. Any turn already running on the same provider, and this one, become shared.
-    public mutating func begin(_ turnID: UUID, provider: String) {
-        var shared = active[turnID]?.shared ?? false
-        for (id, entry) in active where id != turnID && entry.provider == provider {
-            active[id] = (entry.provider, true)
-            shared = true
+    /// Starts (or resumes) watching a turn on `provider`.
+    public mutating func begin(_ turnID: UUID, provider: String, at now: Date = Date()) {
+        if var entry = entries[turnID] {
+            entry.providers.insert(provider)
+            entry.ended = nil
+            entries[turnID] = entry
+        } else {
+            entries[turnID] = Entry(providers: [provider], started: now, ended: nil, shared: false)
         }
-        active[turnID] = (provider, shared)
+        prune(now: now)
+        markOverlaps(of: turnID)
     }
 
-    /// Stops watching a turn and says whether another turn on its provider overlapped it.
+    /// Stops watching a turn, adding every provider it ended up using, and says whether another
+    /// turn overlapped it on any of them.
     @discardableResult
-    public mutating func end(_ turnID: UUID) -> Bool {
-        active.removeValue(forKey: turnID)?.shared ?? false
+    public mutating func end(_ turnID: UUID, providers: Set<String> = [], at now: Date = Date()) -> Bool {
+        guard var entry = entries[turnID] else { return false }
+        entry.providers.formUnion(providers)
+        entry.ended = now
+        entries[turnID] = entry
+        markOverlaps(of: turnID)
+        return entries[turnID]?.shared ?? false
     }
+
+    /// True once another turn has overlapped this one, including one that started during its recheck window.
+    public func isShared(_ turnID: UUID) -> Bool { entries[turnID]?.shared ?? false }
 
     /// True while any watched turn is running on `provider`.
     public func isActive(provider: String) -> Bool {
-        active.values.contains { $0.provider == provider }
+        entries.values.contains { $0.ended == nil && $0.providers.contains(provider) }
+    }
+
+    private mutating func markOverlaps(of turnID: UUID) {
+        guard let entry = entries[turnID] else { return }
+        let window = Self.settleWindow
+        for (id, other) in entries where id != turnID && !other.providers.isDisjoint(with: entry.providers) {
+            let entryEnd = entry.ended.map { $0.addingTimeInterval(window) } ?? .distantFuture
+            let otherEnd = other.ended.map { $0.addingTimeInterval(window) } ?? .distantFuture
+            if entry.started < otherEnd && other.started < entryEnd {
+                entries[id]?.shared = true
+                entries[turnID]?.shared = true
+            }
+        }
+    }
+
+    /// Forgets turns that ended long enough ago that nothing can overlap them any more.
+    private mutating func prune(now: Date) {
+        entries = entries.filter { _, entry in
+            guard let ended = entry.ended else { return true }
+            return now.timeIntervalSince(ended) < Self.settleWindow * 15
+        }
     }
 }
 
@@ -545,6 +612,8 @@ public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
     public var steeredMessages: [String]?
     /// Where this step's time went, measured, so a slow turn shows its real cause.
     public var timing: StepTiming?
+    /// Whose balance this step spent: "openrouter" or a connected gateway's id.
+    public var provider: String?
 
     public init(id: UUID = UUID(), startedAt: Date = Date(), steeredMessages: [String]? = nil) {
         self.id = id

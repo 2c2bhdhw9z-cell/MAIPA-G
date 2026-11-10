@@ -100,6 +100,11 @@ final class OpenRouterAccount {
         return providerBalanceItems.first { $0.id == id }?.balance
     }
 
+    /// Every provider's balance by id, so a reply that switches provider is costed on each.
+    var balancesByProvider: [String: Double] {
+        Dictionary(providerBalanceItems.map { ($0.id, $0.balance) }, uniquingKeysWith: { first, _ in first })
+    }
+
     var activeProviderSummary: String {
         var names: [String] = []
         if hasOpenRouterKey { names.append("OpenRouter") }

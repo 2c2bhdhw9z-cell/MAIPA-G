@@ -12,6 +12,20 @@ struct SelfCancellingTool: AgentTool {
     }
 }
 
+/// A tool that works for a while, reporting progress all along, and then finishes.
+struct BusyTool: AgentTool {
+    let name = "read_file"
+    var spec: ToolSpec { ToolSpec(name: name, description: "Read", parameters: ["type": "object"]) }
+    func runningSummary(for arguments: JSONValue) -> String { "Reading…" }
+    func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        for index in 1...10 {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            progress("Part \(index)")
+        }
+        return ToolOutput(forModel: "all of it", summary: "Read all of it")
+    }
+}
+
 /// A tool that never finishes and ignores cancellation, like a request with no timeout of its own.
 struct StuckTool: AgentTool {
     let name = "read_file"
@@ -63,7 +77,41 @@ struct HangAndChatFlowTests {
         #expect(turn.status == .done)
         let call = try #require(turn.steps.first?.toolCalls.first)
         #expect(call.status == .failed)
-        #expect(call.result?.contains("still running after") == true)
+        #expect(call.result?.contains("sent no output or progress") == true)
+    }
+
+    @Test("A tool that keeps reporting progress is never cut off, however long it runs")
+    func busyToolIsNotCutOff() async throws {
+        let transport = ScriptedTransport([
+            .events([Self.readCall, AgentLoopTests.toolsDone]),
+            .events([AgentLoopTests.text("Done."), AgentLoopTests.done]),
+        ])
+        // Runs about 1 second in all, with progress every 0.1 seconds, against a 0.4 second limit.
+        let turn = try #require(await Self.run(transport, tools: [BusyTool()], toolLimit: 0.4))
+        #expect(turn.status == .done)
+        let call = try #require(turn.steps.first?.toolCalls.first)
+        #expect(call.status == .done)
+        #expect(call.summary == "Read all of it")
+    }
+
+    @Test("bounded with an activity clock counts from the last sign of life")
+    func boundedByInactivity() async throws {
+        let clock = ActivityClock()
+        let value = try await AgentLoop.bounded(seconds: 0.3, label: "busy", activity: clock) {
+            for _ in 0..<8 {
+                try await Task.sleep(nanoseconds: 100_000_000)
+                clock.touch()
+            }
+            return 5
+        }
+        #expect(value == 5)
+        let quiet = ActivityClock()
+        await #expect(throws: ToolTimedOut.self) {
+            try await AgentLoop.bounded(seconds: 0.2, label: "quiet", activity: quiet) {
+                await Task.detached { try? await Task.sleep(nanoseconds: 30_000_000_000) }.value
+                return 1
+            }
+        }
     }
 
     @Test("Stop ends a turn at once even while a tool ignores cancellation")
@@ -207,18 +255,70 @@ struct HangAndChatFlowTests {
     @Test("Turns overlapping on one provider are shared; other providers are not")
     func balanceOverlaps() {
         var tracker = BalanceOverlapTracker()
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
         let a = UUID(), b = UUID(), c = UUID()
-        tracker.begin(a, provider: "openrouter")
-        tracker.begin(c, provider: "anthropic")
+        tracker.begin(a, provider: "openrouter", at: t0)
+        tracker.begin(c, provider: "anthropic", at: t0)
         #expect(tracker.isActive(provider: "openrouter"))
-        tracker.begin(b, provider: "openrouter")
-        #expect(tracker.end(b) == true)
-        #expect(tracker.end(a) == true)
-        #expect(tracker.end(c) == false)
+        tracker.begin(b, provider: "openrouter", at: t0.addingTimeInterval(1))
+        #expect(tracker.end(b, at: t0.addingTimeInterval(2)) == true)
+        #expect(tracker.end(a, at: t0.addingTimeInterval(3)) == true)
+        #expect(tracker.end(c, at: t0.addingTimeInterval(3)) == false)
         #expect(!tracker.isActive(provider: "openrouter"))
-        tracker.begin(a, provider: "openrouter")
-        tracker.begin(a, provider: "openrouter")
-        #expect(tracker.end(a) == false)
+    }
+
+    @Test("A reply that starts during the previous one's recheck window makes both estimated")
+    func recheckWindowOverlap() {
+        var tracker = BalanceOverlapTracker()
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        let first = UUID(), second = UUID(), later = UUID()
+        tracker.begin(first, provider: "openrouter", at: t0)
+        #expect(tracker.end(first, at: t0.addingTimeInterval(10)) == false)
+        // Starts 5 seconds after the first ended: inside its 20-second recheck window.
+        tracker.begin(second, provider: "openrouter", at: t0.addingTimeInterval(15))
+        #expect(tracker.isShared(first))
+        #expect(tracker.end(second, at: t0.addingTimeInterval(20)) == true)
+        // Long after both settled: clean.
+        tracker.begin(later, provider: "openrouter", at: t0.addingTimeInterval(100))
+        #expect(tracker.end(later, at: t0.addingTimeInterval(110)) == false)
+    }
+
+    @Test("A provider a reply switched to mid-turn counts for overlap when it ends")
+    func switchedProviderOverlap() {
+        var tracker = BalanceOverlapTracker()
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        let a = UUID(), b = UUID()
+        tracker.begin(a, provider: "openrouter", at: t0)
+        tracker.begin(b, provider: "oneprovider", at: t0.addingTimeInterval(1))
+        #expect(tracker.end(a, providers: ["openrouter", "oneprovider"], at: t0.addingTimeInterval(5)) == true)
+        #expect(tracker.isShared(b))
+    }
+
+    @Test("A reply that switched provider costs the drop on each provider it used, added up")
+    func multiProviderRealCost() {
+        var first = AssistantStep()
+        first.provider = "openrouter"
+        var second = AssistantStep()
+        second.provider = "oneprovider"
+        var turn = AssistantTurn(status: .done, steps: [first, second])
+        turn.balanceBefore = 10
+        turn.balanceProvider = "openrouter"
+        turn.balancesBefore = ["openrouter": 10, "oneprovider": 5, "unused": 3]
+        turn.balancesAfter = ["openrouter": 9.75, "oneprovider": 4.5, "unused": 1]
+        turn.balanceAfter = 9.75
+        #expect(turn.providersUsed == ["openrouter", "oneprovider"])
+        #expect(abs((turn.realCost ?? 0) - 0.75) < 0.000_001)
+        // A provider with no reading leaves the real cost unknown rather than undercounted.
+        turn.balancesAfter = ["openrouter": 9.75]
+        #expect(turn.realCost == nil)
+    }
+
+    @Test("Each step records whose balance it spent")
+    func stepsRecordTheirProvider() async throws {
+        let transport = ScriptedTransport([.events([AgentLoopTests.text("Hi."), AgentLoopTests.done])])
+        let turn = try #require(await Self.run(transport, tools: []))
+        #expect(turn.steps.first?.provider == "openrouter")
+        #expect(turn.providersUsed == ["openrouter"])
     }
 
     @Test("A shared balance difference is an estimate, never a real cost")

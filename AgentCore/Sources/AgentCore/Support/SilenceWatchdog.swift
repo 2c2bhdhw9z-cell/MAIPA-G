@@ -62,15 +62,19 @@ enum SilenceWatchdog {
     }
 }
 
-private final class ActivityClock: @unchecked Sendable {
+/// When something last showed signs of life. Safe to touch from any task. Also restarts a tool's
+/// inactivity limit (`AgentLoop.bounded(activity:)`).
+public final class ActivityClock: @unchecked Sendable {
     private let lock = NSLock()
     private var last = ProcessInfo.processInfo.systemUptime
 
-    func touch() {
+    public init() {}
+
+    public func touch() {
         lock.withLock { last = ProcessInfo.processInfo.systemUptime }
     }
 
-    func secondsSinceLastActivity() -> TimeInterval {
+    public func secondsSinceLastActivity() -> TimeInterval {
         lock.withLock { ProcessInfo.processInfo.systemUptime - last }
     }
 }
@@ -79,11 +83,16 @@ private final class ActivityClock: @unchecked Sendable {
 public struct ToolTimedOut: Error, Sendable, CustomStringConvertible {
     public let tool: String
     public let seconds: TimeInterval
+    /// True when the limit counted from the tool's last progress rather than from its start.
+    public var sinceLastActivity = false
 
     public var description: String {
-        "\(tool) was still running after \(AgentLoop.spokenDuration(seconds)), so it was stopped."
+        sinceLastActivity
+            ? "\(tool) sent no output or progress for \(AgentLoop.spokenDuration(seconds)), so it was stopped."
+            : "\(tool) was still running after \(AgentLoop.spokenDuration(seconds)), so it was stopped."
     }
 }
+
 
 /// Hands one result to one waiter; later results are ignored. Safe to resume before `wait()`.
 final class OneShot<T: Sendable>: @unchecked Sendable {
