@@ -473,6 +473,10 @@ final class ChatSession: Identifiable {
             settleWaitingTurn()
             return
         }
+        // A workflow the chat started runs in the chat with no agent run to cancel; Stop stops it.
+        if run == nil, let routeLabel = lastTurn?.routeLabel, routeLabel.hasPrefix("Workflow · ") {
+            for workflowRun in activeWorkflowRuns where workflowRun.isRunning { stopWorkflowRun(workflowRun.id) }
+        }
         run?.cancel()
     }
 
@@ -737,6 +741,12 @@ final class ChatSession: Identifiable {
     /// Runs the last message again, after a failure.
     func retry() {
         guard !isRunning, let last = chat.messages.last, last.assistantTurn != nil else { return }
+        // "Try again" on a reply that stopped early carries it on, the same as "Retry this answer",
+        // instead of throwing away what it already did.
+        if last.assistantTurn?.stoppedEarly == true {
+            retryAnswer(last.id)
+            return
+        }
         chat.messages[chat.messages.count - 1] = ChatMessage(body: .assistant(AssistantTurn()))
         touch()
         start()
@@ -943,6 +953,12 @@ final class ChatSession: Identifiable {
         pendingResumeNote = nil
         defer {
             flush()
+            // Every way out of here settles the turn. Early returns used to leave a new turn in
+            // its default "running" state, so the card said "Thinking…" with nothing running.
+            if var turn = lastTurn, turn.status == .running {
+                turn.status = .stopped
+                replaceLastTurn(turn)
+            }
             refreshStagedChanges()
             isRunning = false
             run = nil
@@ -957,16 +973,10 @@ final class ChatSession: Identifiable {
             fail(.signInNeeded, "Connect an AI provider (OpenRouter, OneProvider, SayGM, TeamoRouter, or OmniRoute) in Settings first.")
             return
         }
-        await app.connectors.reconnectIfNeeded()
-        // Real spend: read the provider balance before the turn, so the turn's cost can be taken
-        // from the balance after it. A resumed turn keeps its first reading.
-        if lastTurn?.balanceBefore == nil {
-            await app.openRouter.refreshKeyInfo()
-            if let balance = app.openRouter.totalBalance, var turn = lastTurn {
-                turn.balanceBefore = balance
-                replaceLastTurn(turn)
-            }
-        }
+        let setupDeadline = Date().addingTimeInterval(Self.setupTimeLimit)
+        setupRanOut = false
+        let connectors = app.connectors
+        await setupStep(setupDeadline, fallback: ()) { await connectors.reconnectIfNeeded() }
         let aiClient = app.openRouter.client
         let hasOpenRouter = app.openRouter.hasOpenRouterKey
 
@@ -974,6 +984,7 @@ final class ChatSession: Identifiable {
         if case .model(let pickedID) = chat.model,
            let pickedModel = app.openRouter.modelsByID[pickedID],
            pickedModel.isPureImageModel {
+            await readBalanceBefore(modelID: pickedModel.id, app: app, deadline: setupDeadline)
             let lastUserMessage = chat.messages.last { $0.userText != nil }
             await runPureImageTurn(
                 model: pickedModel,
@@ -989,11 +1000,12 @@ final class ChatSession: Identifiable {
         // extra spending confirmation here — a workflow is sub-agents running longer, so it starts
         // the way they do, and the ordinary spend limit and stop-and-ask setting still apply.
         // A failed start falls through to answering normally rather than leaving the chat empty.
-        if resumeNote == nil, effectiveMode == .vibe,
-           let workflow = app.jobs.routedWorkflow(request: lastMessage, repo: chat.repo),
-           chat.repo != nil {
-            if await runRoutedWorkflow(workflow, request: lastMessage, app: app) { return }
-        }
+        // It runs here in the chat (executeChatWorkflow), so the Workflows switch alone is enough
+        // and its progress and result show in this chat. Autonomous only governs Autonomous jobs.
+        let routedWorkflow: WorkflowDefinition? = (resumeNote == nil && effectiveMode == .vibe && chat.repo != nil)
+            ? app.jobs.routedWorkflow(request: lastMessage, repo: chat.repo)
+            : nil
+        var inChatWorkflowContext: (agents: [AgentDefinition], tools: [any AgentTool], repo: SystemPrompt.RepoContext?)?
         let changeAuthorization = ChangeAuthorization(request: lastMessage)
         let allAttachments = chat.messages.flatMap { message -> [AttachmentReference] in
             if case .user(let user) = message.body { return user.attachments }
@@ -1097,7 +1109,7 @@ final class ChatSession: Identifiable {
                 let workingRepo = ChatRepo(ref: repo.ref, branch: workingBranch, defaultBranch: repo.defaultBranch, isPrivate: repo.isPrivate)
                 let commit = try await github.resolveCommit(repo.ref, ref: workingBranch)
                 let workspace = workspaceFor(repo: workingRepo, commit: commit, github: github, store: app.snapshots)
-                await workspace.prefetch()
+                await setupStep(setupDeadline, fallback: ()) { await workspace.prefetch() }
                 let changes: ChangeWorkspace
                 if let existing = changeWorkspace {
                     if existing.base.commit == commit && existing.base.repo == workspace.repo {
@@ -1151,7 +1163,11 @@ final class ChatSession: Identifiable {
                 return
             }
         }
-        let computerNote = await prepareComputer(app: app, repo: repoContext, lastUserMessage: lastMessage, isAutonomous: autonomous && app.settings.autonomousEnabled)
+        let prewarmRepo = repoContext
+        let prewarmAutonomous = autonomous && app.settings.autonomousEnabled
+        let computerNote: String? = await setupStep(setupDeadline, fallback: nil) {
+            await self.prepareComputer(app: app, repo: prewarmRepo, lastUserMessage: lastMessage, isAutonomous: prewarmAutonomous)
+        }
         var canSyncStaged = false
         if let repoContext, let workspace = changeWorkspace, let control = app.connectors.computerControl(), control.commandTool != nil, app.openRouter.supportsTools(chat.model) {
             tools.append(SyncStagedToComputerTool(
@@ -1178,7 +1194,7 @@ final class ChatSession: Identifiable {
         // silently whenever no live session existed, so one failed restore cost the whole turn its
         // computer while the machine was running the entire time, with nothing said.
         if app.openRouter.supportsTools(chat.model), app.connectors.hasConfiguredComputer {
-            if let control = await app.connectors.ensureComputerSession(), control.commandTool != nil {
+            if let control = await setupStep(setupDeadline, fallback: nil, { await connectors.ensureComputerSession() }), control.commandTool != nil {
                 let repoHome = repoContext.map { "repos/\($0.ref.owner)/\($0.ref.name)" }
                 tools.append(RunCommandTool(control: control, homePath: repoHome))
                 tools.append(ComputerTaskTool(control: control, homePath: repoHome))
@@ -1192,14 +1208,18 @@ final class ChatSession: Identifiable {
         for problem in hookProblems {
             _ = app.report(RepoHookProblem(message: problem), area: "hooks", operation: "read repo hooks")
         }
-        var computer = await computerContext(app: app, repo: repoContext, stagedPatch: await changeWorkspace?.stagedDiffForPrompt())
+        let stagedPatch = await changeWorkspace?.stagedDiffForPrompt()
+        let contextRepo = repoContext
+        var computer: SystemPrompt.ComputerContext? = await setupStep(setupDeadline, fallback: nil) {
+            await self.computerContext(app: app, repo: contextRepo, stagedPatch: stagedPatch)
+        }
         computer?.appNote = computerNote
         computer?.canSyncStaged = canSyncStaged
 
         let hasRepo = chat.repo != nil
         var difficulty = TaskDifficulty.estimate(lastMessage, hasRepo: hasRepo)
         if chat.model == .auto, app.openRouter.accountState.paidAllowed(),
-           let judged = await OnDeviceAI.difficulty(of: lastMessage, hasRepo: hasRepo) {
+           let judged = await setupStep(setupDeadline, fallback: nil, { await OnDeviceAI.difficulty(of: lastMessage, hasRepo: hasRepo) }) {
             difficulty = judged
         }
         let catalogue = app.openRouter.modelsByID
@@ -1505,6 +1525,7 @@ final class ChatSession: Identifiable {
                 })
                 // Workflows off means nothing can start a workflow from anywhere, the chat included.
                 if app.settings.workflowsEnabled {
+                inChatWorkflowContext = (helperDefinitions, workflowToolsSnapshot, repoContextSnapshot)
                 tools.append(RunWorkflowTool(
                     resolveWorkflow: { [weak app] id in
                         await MainActor.run {
@@ -1536,6 +1557,17 @@ final class ChatSession: Identifiable {
             }
         }
 
+        await readBalanceBefore(modelID: route.model, app: app, deadline: setupDeadline)
+        if setupRanOut, var turn = lastTurn {
+            turn.notices.append(Self.setupRanOutNotice)
+            replaceLastTurn(turn)
+        }
+        // Stop pressed while getting ready: there is no run to cancel yet, so honour it here.
+        if userStoppedExplicitly { return }
+        if let workflow = routedWorkflow, let context = inChatWorkflowContext {
+            await runRoutedWorkflow(workflow, request: lastMessage, defaultModelID: route.model, agents: context.agents, toolPool: context.tools, repoContext: context.repo)
+            return
+        }
         let routeModelInfo = catalogue[route.model]
         let activeModelSummary = SystemPrompt.ActiveModelSummary(
             modelName: app.openRouter.displayName(forModelID: route.model),
@@ -1640,8 +1672,58 @@ final class ChatSession: Identifiable {
             turn.status = .stopped
             replaceLastTurn(turn)
         }
+        // A plan written in Spec mode is also a Specs entry for this chat, kept up to date.
+        if effectiveMode == .spec, app.settings.specsEnabled, let repo = chat.repo,
+           let turn = lastTurn, let plan = SpecModePlan.extract(from: turn) {
+            let title = chat.title.isEmpty ? Self.provisionalTitle(lastMessage) : chat.title
+            if let saved = await app.specs.recordChatPlan(chatID: chat.id, title: title, request: lastMessage, plan: plan, repo: repo),
+               var current = lastTurn {
+                let notice = "Saved this plan to Specs as \u{201C}\(saved.title)\u{201D}."
+                if !current.notices.contains(notice) { current.notices.append(notice) }
+                replaceLastTurn(current)
+            }
+        }
         chat.updatedAt = Date()
         await nameChatIfNeeded()
+    }
+
+    /// Getting ready (connectors, the repo copy, the computer, the balance) may take this long in
+    /// all before the AI is asked. Any of those waiting on a slow service used to hold the reply on
+    /// "Thinking…" with nothing running yet.
+    static let setupTimeLimit: TimeInterval = 120
+    static let setupRanOutNotice = "Getting ready took over 2 minutes (connectors, the repo copy or the computer), so the reply started without waiting for the rest."
+    @ObservationIgnored private var setupRanOut = false
+
+    /// Runs one getting-ready step within what is left of `deadline`, or returns `fallback`.
+    private func setupStep<T: Sendable>(_ deadline: Date, fallback: T, _ work: @escaping @Sendable () async -> T) async -> T {
+        let remaining = deadline.timeIntervalSinceNow
+        guard remaining > 0 else {
+            setupRanOut = true
+            return fallback
+        }
+        do {
+            return try await AgentLoop.bounded(seconds: remaining, label: "Getting ready") { await work() }
+        } catch {
+            if !(error is CancellationError) { setupRanOut = true }
+            return fallback
+        }
+    }
+
+    /// Real spend: reads the balance of the one provider this turn spends from, before it starts,
+    /// and tells the app the turn is running on it, so turns that overlap on it are told apart.
+    private func readBalanceBefore(modelID: String, app: AppModel, deadline: Date) async {
+        guard let messageID = chat.messages.last?.id, let turn = lastTurn else { return }
+        let provider = turn.balanceProvider ?? AIProviderModelID.providerID(modelID)
+        if turn.balanceBefore == nil {
+            let account = app.openRouter
+            await setupStep(deadline, fallback: ()) { await account.refreshKeyInfo() }
+            guard var current = lastTurn, chat.messages.last?.id == messageID,
+                  let balance = app.openRouter.balance(forProvider: provider) else { return }
+            current.balanceBefore = balance
+            current.balanceProvider = provider
+            replaceLastTurn(current)
+        }
+        app.balanceOverlaps.begin(messageID, provider: provider)
     }
 
     /// Publish the first snapshot immediately, then at most 30 times/second. Always deliver
@@ -1686,11 +1768,12 @@ final class ChatSession: Identifiable {
     }
 
     /// Records the provider balance read after a turn, so the turn shows what it really cost.
-    func recordBalanceAfter(_ balance: Double, messageID: UUID) {
+    func recordBalanceAfter(_ balance: Double, messageID: UUID, shared: Bool = false) {
         guard let index = chat.messages.firstIndex(where: { $0.id == messageID }),
               var turn = chat.messages[index].assistantTurn,
               turn.balanceBefore != nil, turn.status != .running else { return }
         turn.balanceAfter = balance
+        if shared { turn.balanceShared = true }
         chat.messages[index].assistantTurn = turn
         saveSoon()
     }
@@ -1700,29 +1783,43 @@ final class ChatSession: Identifiable {
         chat.messages[index].assistantTurn = turn
     }
 
-    /// Runs a workflow the chat itself decided on, and reports it inside the chat.
-    ///
-    /// Returns true when the workflow actually ran, so the caller knows not to answer again. It
-    /// returns false on any refusal, which lets the chat answer normally instead of going silent.
-    private func runRoutedWorkflow(_ workflow: WorkflowDefinition, request: String, app: AppModel) async -> Bool {
-        guard var turn = lastTurn else { return false }
+    /// Runs a workflow the chat itself decided on, here in the chat. The run's card shows each
+    /// step live, this turn says how far it has got, and the result is the turn's reply.
+    private func runRoutedWorkflow(_ workflow: WorkflowDefinition, request: String, defaultModelID: String, agents: [AgentDefinition], toolPool: [any AgentTool], repoContext: SystemPrompt.RepoContext?) async {
+        guard var turn = lastTurn else { return }
         turn.status = .running
         turn.routeLabel = "Workflow · \(workflow.name)"
+        var step = AssistantStep()
+        step.text = "Running the \(workflow.name) workflow in this chat…"
+        turn.steps.append(step)
         replaceLastTurn(turn)
-        let started = await app.automations.run(workflow, request: request, repo: chat.repo)
-        guard started else {
-            turn.status = .done
-            if let error = app.automations.lastError {
-                turn.notices.append("Workflow didn't start: \(error) Answered normally instead.")
-                app.automations.clearError()
+        let stepID = step.id
+        let snapshot = await executeChatWorkflow(
+            definition: workflow,
+            prompt: request,
+            defaultModelID: defaultModelID,
+            allAgents: agents,
+            toolPool: toolPool,
+            repoContext: repoContext,
+            progress: { [weak self] _ in
+                Task { @MainActor [weak self] in self?.showWorkflowProgress(workflowID: workflow.id, stepID: stepID) }
             }
-            replaceLastTurn(turn)
-            return false
+        )
+        guard var finished = lastTurn else { return }
+        if let index = finished.steps.firstIndex(where: { $0.id == stepID }) {
+            finished.steps[index].text = snapshot.chatReply()
+            finished.steps[index].finishedAt = Date()
         }
-        turn.status = .done
-        turn.notices.append("Started the \(workflow.name) workflow inside this chat. Progress is in Jobs.")
+        finished.status = userStoppedExplicitly ? .stopped : .done
+        replaceLastTurn(finished)
+    }
+
+    private func showWorkflowProgress(workflowID: String, stepID: UUID) {
+        guard var turn = lastTurn, turn.status == .running,
+              let index = turn.steps.firstIndex(where: { $0.id == stepID }),
+              let run = activeWorkflowRuns.first(where: { $0.isRunning && $0.definition.id == workflowID }) else { return }
+        turn.steps[index].text = run.chatProgressLine()
         replaceLastTurn(turn)
-        return true
     }
 
     private func fail(_ kind: TurnFailure.Kind, _ message: String) {

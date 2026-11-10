@@ -168,7 +168,7 @@ struct ThinkingHangTests {
     @Test("Waiting on silent helpers gives up after the limit")
     func activityWaitTimesOut() async {
         let inbox = SteeringInbox()
-        let hang = Task { try? await Task.sleep(nanoseconds: 60_000_000_000) }
+        let hang = Task { _ = try? await Task.sleep(nanoseconds: 60_000_000_000) }
         await inbox.registerBackgroundTask(UUID(), task: hang)
         let started = Date()
         let heardBack = await inbox.waitForActivity(timeout: 0.2)
@@ -181,7 +181,7 @@ struct ThinkingHangTests {
     @Test("Activity still wakes a bounded wait straight away")
     func activityWakesABoundedWait() async {
         let inbox = SteeringInbox()
-        let hang = Task { try? await Task.sleep(nanoseconds: 60_000_000_000) }
+        let hang = Task { _ = try? await Task.sleep(nanoseconds: 60_000_000_000) }
         await inbox.registerBackgroundTask(UUID(), task: hang)
         let waiter = Task { await inbox.waitForActivity(timeout: 30) }
         try? await Task.sleep(nanoseconds: 50_000_000)
@@ -193,7 +193,7 @@ struct ThinkingHangTests {
     @Test("Background helpers that go silent are stopped and the turn still answers")
     func silentBackgroundHelpersDoNotHangTheTurn() async throws {
         let inbox = SteeringInbox()
-        let hang = Task { try? await Task.sleep(nanoseconds: 60_000_000_000) }
+        let hang = Task { _ = try? await Task.sleep(nanoseconds: 60_000_000_000) }
         await inbox.registerBackgroundTask(UUID(), task: hang)
         let transport = ScriptedTransport([.events([AgentLoopTests.text("Here is what I have."), AgentLoopTests.done])])
         let turn = await Self.lastTurn(

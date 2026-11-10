@@ -337,6 +337,8 @@ public struct SpecRecord: ProductRecord, Hashable {
     public var activeJobID: UUID?
     public var activeTaskID: UUID?
     public var saveReceipt: SaveReceipt?
+    /// The chat whose Spec-mode plan made this spec, if a chat made it.
+    public var chatID: UUID?
     public var createdAt: Date
     public var updatedAt: Date
 
@@ -385,7 +387,7 @@ public struct SpecRecord: ProductRecord, Hashable {
     enum CodingKeys: String, CodingKey {
         case format, id, repo, branch, defaultBranch, slug, title, request, stage, requirements
         case design, checkedDesign, tasksDocument, tasks, approvedStages, activeJobID, activeTaskID
-        case saveReceipt, createdAt, updatedAt
+        case saveReceipt, chatID, createdAt, updatedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -408,6 +410,7 @@ public struct SpecRecord: ProductRecord, Hashable {
         activeJobID = try c.decodeIfPresent(UUID.self, forKey: .activeJobID)
         activeTaskID = try c.decodeIfPresent(UUID.self, forKey: .activeTaskID)
         saveReceipt = try c.decodeIfPresent(SaveReceipt.self, forKey: .saveReceipt)
+        chatID = try c.decodeIfPresent(UUID.self, forKey: .chatID)
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
     }

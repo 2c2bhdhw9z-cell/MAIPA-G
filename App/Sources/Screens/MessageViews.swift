@@ -454,7 +454,12 @@ struct AssistantTurnView: View {
                     Text(real.dollars)
                 } else if let cost = turn.usage.cost {
                     Text("·")
-                    Text(turn.usage.costIsEstimate == true ? "\(cost.dollars) estimated" : cost.dollars)
+                    Text(turn.usage.costIsEstimate == true || turn.balanceShared == true ? "\(cost.dollars) estimated" : cost.dollars)
+                } else if let shared = turn.sharedBalanceCost {
+                    // Another reply on the same provider ran at the same time, so the balance
+                    // difference is shared between them: an estimate, not this reply's exact cost.
+                    Text("·")
+                    Text("\(shared.dollars) estimated")
                 } else if turn.usage.priceUnknown == true {
                     Text("·")
                     Text("price unknown")

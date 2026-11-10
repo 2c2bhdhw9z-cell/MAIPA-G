@@ -74,3 +74,42 @@ private final class ActivityClock: @unchecked Sendable {
         lock.withLock { ProcessInfo.processInfo.systemUptime - last }
     }
 }
+
+/// A tool call ran past `AgentEnvironment.toolTimeLimit` and was stopped.
+public struct ToolTimedOut: Error, Sendable, CustomStringConvertible {
+    public let tool: String
+    public let seconds: TimeInterval
+
+    public var description: String {
+        "\(tool) was still running after \(AgentLoop.spokenDuration(seconds)), so it was stopped."
+    }
+}
+
+/// Hands one result to one waiter; later results are ignored. Safe to resume before `wait()`.
+final class OneShot<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<T, Error>?
+    private var waiter: CheckedContinuation<T, Error>?
+
+    func resume(_ value: Result<T, Error>) {
+        let target: CheckedContinuation<T, Error>? = lock.withLock {
+            guard result == nil else { return nil }
+            result = value
+            let w = waiter
+            waiter = nil
+            return w
+        }
+        target?.resume(with: value)
+    }
+
+    func wait() async throws -> T {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+            let ready: Result<T, Error>? = lock.withLock {
+                if let result { return result }
+                waiter = continuation
+                return nil
+            }
+            if let ready { continuation.resume(with: ready) }
+        }
+    }
+}

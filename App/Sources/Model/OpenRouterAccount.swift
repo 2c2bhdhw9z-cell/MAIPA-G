@@ -93,6 +93,13 @@ final class OpenRouterAccount {
         return items.isEmpty ? nil : items.reduce(0) { $0 + $1.balance }
     }
 
+    /// One provider's balance ("openrouter" or a gateway's id), or the total when `id` is nil
+    /// (turns saved before readings were per provider).
+    func balance(forProvider id: String?) -> Double? {
+        guard let id else { return totalBalance }
+        return providerBalanceItems.first { $0.id == id }?.balance
+    }
+
     var activeProviderSummary: String {
         var names: [String] = []
         if hasOpenRouterKey { names.append("OpenRouter") }

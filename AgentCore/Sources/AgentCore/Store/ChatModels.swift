@@ -189,8 +189,12 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
                 if let cost = usage.cost {
                     summary.dollars = (summary.dollars ?? 0) + cost
                     if usage.costIsEstimate == true { summary.hasEstimate = true }
+                } else if let shared = turn.sharedBalanceCost {
+                    summary.dollars = (summary.dollars ?? 0) + shared
                 }
-                if usage.priceUnknown == true { summary.hasUnknownPrice = true }
+                // Overlapping turns on one provider can't be told apart in its balance.
+                if turn.balanceShared == true { summary.hasEstimate = true }
+                if usage.priceUnknown == true, turn.sharedBalanceCost == nil { summary.hasUnknownPrice = true }
             }
         }
         return summary
@@ -343,6 +347,12 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
     public var balanceBefore: Double?
     /// Total provider balance, in dollars, read after the turn ended.
     public var balanceAfter: Double?
+    /// Whose balance the two readings are: "openrouter" or a connected gateway's id. Nil on older
+    /// turns, whose readings were the total across every provider.
+    public var balanceProvider: String?
+    /// Another turn on the same provider was running between the two readings, so their
+    /// difference includes its spend too and is not this turn's exact cost.
+    public var balanceShared: Bool?
 
     public init(status: Status = .running, steps: [AssistantStep] = [], failure: TurnFailure? = nil, notices: [String] = [], routeLabel: String? = nil) {
         self.status = status
@@ -357,9 +367,21 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
     /// What the turn really cost: the provider balance before it minus the balance after it. Nil
     /// until both readings exist. This is what was billed, not a figure from a price list.
     public var realCost: Double? {
+        guard balanceShared != true else { return nil }
+        return balanceDifference
+    }
+
+    /// The balance difference when it was shared with an overlapping turn: an estimate at best.
+    public var sharedBalanceCost: Double? {
+        guard balanceShared == true else { return nil }
+        return balanceDifference
+    }
+
+    private var balanceDifference: Double? {
         guard let before = balanceBefore, let after = balanceAfter else { return nil }
         return max(0, before - after)
     }
+
 
     /// The AIs that answered, in order, without repeats.
     public var modelsUsed: [String] {
@@ -384,6 +406,38 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
             }
         }
         return nil
+    }
+}
+
+/// Which running turns read the same provider's balance at the same time.
+///
+/// Real spend is one provider's balance before a turn minus after it. Two turns on the same
+/// provider at once each see the other's spend in that difference, so a turn that overlapped
+/// another on its provider is marked shared, and its figure is shown as estimated.
+public struct BalanceOverlapTracker: Sendable {
+    private var active: [UUID: (provider: String, shared: Bool)] = [:]
+
+    public init() {}
+
+    /// Starts watching a turn. Any turn already running on the same provider, and this one, become shared.
+    public mutating func begin(_ turnID: UUID, provider: String) {
+        var shared = active[turnID]?.shared ?? false
+        for (id, entry) in active where id != turnID && entry.provider == provider {
+            active[id] = (entry.provider, true)
+            shared = true
+        }
+        active[turnID] = (provider, shared)
+    }
+
+    /// Stops watching a turn and says whether another turn on its provider overlapped it.
+    @discardableResult
+    public mutating func end(_ turnID: UUID) -> Bool {
+        active.removeValue(forKey: turnID)?.shared ?? false
+    }
+
+    /// True while any watched turn is running on `provider`.
+    public func isActive(provider: String) -> Bool {
+        active.values.contains { $0.provider == provider }
     }
 }
 

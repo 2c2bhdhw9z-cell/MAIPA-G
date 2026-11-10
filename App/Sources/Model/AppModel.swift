@@ -144,6 +144,8 @@ final class AppModel {
     let memories: MemoryLibrary
     let groups: GroupLibrary
     let specs: SpecCoordinator
+    /// Which running turns are reading the same provider's balance, for honest real spend.
+    var balanceOverlaps = BalanceOverlapTracker()
     let connectors: ConnectorLibrary
     let previews: PreviewCoordinator
     let backgroundJobs = BackgroundJobs()
@@ -422,15 +424,21 @@ final class AppModel {
     func turnFinished(in session: ChatSession) {
         // Real spend: read the balance again after the turn, and once more a little later because
         // providers can take a few seconds to charge. The turn's real cost is the difference.
+        // Only the provider the turn used is read; a turn that overlapped another on that provider
+        // is marked shared, so its figure shows as estimated rather than exact.
         let finishedTurnID = session.chat.messages.last?.id
+        let provider = session.lastTurn?.balanceProvider
         let account = openRouter
-        Task { [weak session] in
+        Task { [weak self, weak session] in
             await account.refreshKeyInfo(force: true)
-            if let id = finishedTurnID, let balance = account.totalBalance { session?.recordBalanceAfter(balance, messageID: id) }
+            let shared = finishedTurnID.map { self?.balanceOverlaps.end($0) ?? false } ?? false
+            if let id = finishedTurnID, let balance = account.balance(forProvider: provider) { session?.recordBalanceAfter(balance, messageID: id, shared: shared) }
             try? await Task.sleep(nanoseconds: 20_000_000_000)
             guard let session, !session.isRunning, session.chat.messages.last?.id == finishedTurnID else { return }
+            // A turn now running on the same provider would leak into a later reading.
+            if let provider, self?.balanceOverlaps.isActive(provider: provider) == true { return }
             await account.refreshKeyInfo(force: true)
-            if let id = finishedTurnID, let balance = account.totalBalance { session.recordBalanceAfter(balance, messageID: id) }
+            if let id = finishedTurnID, let balance = account.balance(forProvider: provider) { session.recordBalanceAfter(balance, messageID: id, shared: shared) }
         }
         sync.request(after: 2.5)
         if session.lastTurn?.status == .done || session.lastTurn?.status == .waitingForUser {

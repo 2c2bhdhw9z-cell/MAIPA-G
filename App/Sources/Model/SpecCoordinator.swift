@@ -34,6 +34,17 @@ final class SpecCoordinator {
         } catch { lastError = ErrorExplainer.explain(error).message; return nil }
     }
 
+    /// Saves a chat's Spec-mode plan as that chat's Specs entry, creating or updating it.
+    @discardableResult
+    func recordChatPlan(chatID: UUID, title: String, request: String, plan: String, repo: ChatRepo) async -> SpecRecord? {
+        do {
+            let record = try await core.recordChatPlan(chatID: chatID, title: title, request: request, plan: plan, repo: repo.ref, branch: repo.branch, defaultBranch: repo.defaultBranch)
+            specs = await core.all()
+            app?.sync.request()
+            return record
+        } catch { lastError = ErrorExplainer.explain(error).message; return nil }
+    }
+
     func draft(_ record: SpecRecord) async {
         guard let app else { return }
         let context = context(for: record)

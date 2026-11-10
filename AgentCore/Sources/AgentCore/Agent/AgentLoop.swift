@@ -279,6 +279,9 @@ public struct AgentEnvironment: Sendable {
     /// Longest the turn waits on background sub-agents that send nothing at all before it stops
     /// them and answers with what it has.
     public var backgroundHelperSilenceLimit: TimeInterval = 600
+    /// Longest one tool call may run before it is stopped and reported as failed. Tools that run
+    /// other agents (`toolTimeLimitExempt`) are exempt: each of their own steps has these limits.
+    public var toolTimeLimit: TimeInterval = 1_200
 
     public init(
         openRouter: OpenRouterClient,
@@ -402,6 +405,33 @@ public enum AgentLoop {
         return "Slow reply (\(time(elapsed))), measured: \(calls.count) model call\(calls.count == 1 ? "" : "s") took \(time(modelTime)) (first words after \(time(averageFirst)) on average, slowest \(time(slowestFirst)); longest silence mid-reply \(time(longestStall))). Tools \(time(toolTime)). Waiting on sub-agents \(time(waiting)). Retry waits \(time(retryWait)) over \(attempts) request\(attempts == 1 ? "" : "s"). Largest prompt \(biggestPrompt) tokens."
     }
 
+    /// Tools that run other agents. Each of their agents' own model calls and tools has its own
+    /// limits, so a wall-clock limit on the whole tool would only cut off healthy long work.
+    static let toolTimeLimitExempt: Set<String> = ["launch_helpers", "run_workflow"]
+
+    /// Runs `work`, but returns as soon as the task is stopped or `seconds` pass (0 means no time
+    /// limit), even when the work itself ignores cancellation: it is cancelled and left to wind
+    /// down on its own, so a tool that never checks for Stop can't keep the reply running.
+    public static func bounded<T: Sendable>(seconds: TimeInterval, label: String, _ work: @escaping @Sendable () async throws -> T) async throws -> T {
+        let gate = OneShot<T>()
+        let worker = Task {
+            do { gate.resume(.success(try await work())) } catch { gate.resume(.failure(error)) }
+        }
+        let timer: Task<Void, Never>? = seconds > 0 && seconds.isFinite ? Task {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            if Task.isCancelled { return }
+            gate.resume(.failure(ToolTimedOut(tool: label, seconds: seconds)))
+            worker.cancel()
+        } : nil
+        defer { timer?.cancel() }
+        return try await withTaskCancellationHandler {
+            try await gate.wait()
+        } onCancel: {
+            gate.resume(.failure(CancellationError()))
+            worker.cancel()
+        }
+    }
+
     /// "5 minutes", "1 minute", "45 seconds".
     static func spokenDuration(_ seconds: TimeInterval) -> String {
         if seconds >= 60 {
@@ -488,6 +518,13 @@ private struct Runner {
             turn.stoppedEarly = nil
             turn.notices.removeAll { $0 == AgentLoop.stoppedEarlyNotice }
         }
+    }
+
+    /// A later step that finished normally means the reply did not stop early after all.
+    mutating func clearStoppedEarly() {
+        guard turn.stoppedEarly == true else { return }
+        turn.stoppedEarly = nil
+        turn.notices.removeAll { $0 == AgentLoop.stoppedEarlyNotice }
     }
 
     mutating func markStoppedEarly() {
@@ -661,6 +698,8 @@ private struct Runner {
             stopRunningTools(reason: "Didn't finish")
             turn.status = .failed
             turn.failure = Self.describe(error)
+            // An empty reply is an early stop too: say so, and let Retry carry on.
+            if (error as? OpenRouterAPIError)?.code == "empty_reply" { markStoppedEarly() }
             if let api = error as? OpenRouterAPIError, api.kind == .appRestricted {
                 await environment.onModelRestricted(route.model)
             }
@@ -871,6 +910,11 @@ private struct Runner {
                     // The stream ended without the model saying it was done: a dropped connection
                     // or a server closing mid-reply. The text so far must not look finished.
                     markStoppedEarly()
+                } else if accumulator.finishReason != "length",
+                          !accumulator.toolCalls.isEmpty || !accumulator.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // A normal finish with something in it: an earlier step's early stop (or a
+                    // reasoning-only step before it) no longer describes this reply.
+                    clearStoppedEarly()
                 }
                 emit(milestone: true)
                 return
@@ -1170,25 +1214,41 @@ private struct Runner {
                 case finished(Int, Result<ToolOutput, Error>)
             }
             let (events, sink) = AsyncStream<ToolEvent>.makeStream()
+            let toolLimit = environment.toolTimeLimit
             try await withThrowingTaskGroup(of: Void.self) { group in
                 for job in jobs {
                     group.addTask {
                         let result: Result<ToolOutput, Error>
                         do {
                             let output: ToolOutput
+                            let tool = job.tool
+                            let limit = AgentLoop.toolTimeLimitExempt.contains(tool.name) ? 0 : toolLimit
                             if job.approved {
-                                output = try await job.tool.runApprovedLive(arguments: job.arguments, callID: job.callID, existingSubagents: job.existingSubagents) { update in
-                                    sink.yield(.progress(job.callIndex, update))
+                                output = try await AgentLoop.bounded(seconds: limit, label: tool.name) {
+                                    try await tool.runApprovedLive(arguments: job.arguments, callID: job.callID, existingSubagents: job.existingSubagents) { update in
+                                        sink.yield(.progress(job.callIndex, update))
+                                    }
                                 }
                             } else {
-                                output = try await job.tool.runLive(arguments: job.arguments, callID: job.callID, existingSubagents: job.existingSubagents) { update in
-                                    sink.yield(.progress(job.callIndex, update))
+                                output = try await AgentLoop.bounded(seconds: limit, label: tool.name) {
+                                    try await tool.runLive(arguments: job.arguments, callID: job.callID, existingSubagents: job.existingSubagents) { update in
+                                        sink.yield(.progress(job.callIndex, update))
+                                    }
                                 }
                             }
                             result = .success(output)
                         } catch {
-                            if error is CancellationError || Task.isCancelled { throw CancellationError() }
-                            result = .failure(error)
+                            // Only a real Stop ends quietly. A tool can throw CancellationError
+                            // by itself (a dropped URL request maps to it); re-throwing that left
+                            // the loop below waiting forever for a result that never came.
+                            if Task.isCancelled { throw CancellationError() }
+                            if let timedOut = error as? ToolTimedOut {
+                                result = .failure(ToolInputError(timedOut.description))
+                            } else if error is CancellationError {
+                                result = .failure(ToolInputError("The tool's request was cancelled before it finished."))
+                            } else {
+                                result = .failure(error)
+                            }
                         }
                         sink.yield(.finished(job.callIndex, result))
                     }

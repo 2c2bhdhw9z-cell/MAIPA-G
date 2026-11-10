@@ -1,5 +1,29 @@
 import Foundation
 
+/// Finds the plan in a reply written in a chat's Spec mode.
+public enum SpecModePlan {
+    /// Tools that change files. A reply that used one is building, not presenting a plan.
+    static let changingTools: Set<String> = ["create_file", "edit_file", "append_file", "delete_file", "save_changes"]
+
+    /// The plan text, or nil when the reply is not a plan: it didn't finish, it changed files, or it
+    /// has no numbered plan (Spec mode answers plain questions directly).
+    public static func extract(from turn: AssistantTurn) -> String? {
+        guard turn.status == .done, turn.stoppedEarly != true else { return nil }
+        let calls = turn.steps.flatMap(\.toolCalls)
+        guard !calls.contains(where: { changingTools.contains($0.name) && $0.status == .done }) else { return nil }
+        guard let text = turn.steps.last(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?.text
+            .trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        let numbered = text.components(separatedBy: .newlines).filter { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let digits = trimmed.prefix { $0.isNumber }
+            guard !digits.isEmpty, digits.count <= 3 else { return false }
+            let rest = trimmed.dropFirst(digits.count)
+            return rest.hasPrefix(". ") || rest.hasPrefix(") ")
+        }
+        return numbered.count >= 2 ? text : nil
+    }
+}
+
 /// Durable ordered spec state plus the repository artifact writer.
 public actor SpecCoordinator {
     private let store: ProductStore<SpecRecord>
@@ -39,6 +63,29 @@ public actor SpecCoordinator {
             title: String(clean.prefix(100)),
             request: request.trimmingCharacters(in: .whitespacesAndNewlines)
         )
+        try await store.save(record)
+        return record
+    }
+
+    /// A plan written in a chat's Spec mode becomes that chat's spec: the first one creates the
+    /// entry, and a revised plan replaces its requirements while they are still unapproved. Once the
+    /// entry has moved on, a new plan from the same chat starts a new entry rather than undoing it.
+    @discardableResult
+    public func recordChatPlan(chatID: UUID, title: String, request: String, plan: String, repo: RepoRef, branch: String, defaultBranch: String) async throws -> SpecRecord {
+        let clean = plan.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { throw SpecFailure.emptyArtifact(.requirements) }
+        let all = await store.loadAll()
+        if var existing = all.filter({ $0.chatID == chatID && $0.repo == repo })
+            .sorted(by: { $0.updatedAt > $1.updatedAt })
+            .first(where: { $0.stage == .requirements && $0.approvedStages.isEmpty && $0.activeJobID == nil }) {
+            existing.requirements = clean
+            existing.updatedAt = Date()
+            try await store.save(existing)
+            return existing
+        }
+        var record = try await create(title: title.isEmpty ? "Chat plan" : title, request: request, repo: repo, branch: branch, defaultBranch: defaultBranch)
+        record.chatID = chatID
+        record.requirements = clean
         try await store.save(record)
         return record
     }

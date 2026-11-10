@@ -22,6 +22,31 @@ public struct ActiveWorkflowRunSnapshot: Codable, Sendable, Hashable, Identifiab
         self.errorMessage = errorMessage
     }
 
+    /// One line of progress for the chat that started this run: "Running Full feature: 2 of 5 steps done (now: Build it)".
+    public func chatProgressLine() -> String {
+        func flatten(_ nodes: [WorkflowNode]) -> [WorkflowNode] { nodes.flatMap { [$0] + flatten($0.children) } }
+        let nodes = flatten(definition.steps)
+        let done = nodes.filter { checkpoint.statuses[$0.id] == .completed }.count
+        let current = nodes.first { checkpoint.statuses[$0.id] == .running }.map { " (now: \($0.title))" } ?? ""
+        return "Running the \(definition.name) workflow in this chat: \(done) of \(nodes.count) steps done\(current)."
+    }
+
+    /// What the chat that started this run says once it has ended: the result, or why there isn't one.
+    public func chatReply() -> String {
+        if isRunning { return chatProgressLine() }
+        if let pending = checkpoint.pendingQuestion {
+            return "The \(definition.name) workflow is paused and needs an answer: \(pending.text)"
+        }
+        if let errorMessage, !errorMessage.isEmpty {
+            return "The \(definition.name) workflow didn't finish: \(errorMessage)"
+        }
+        if checkpoint.isCancelled || checkpoint.isPausedByUser {
+            return "The \(definition.name) workflow was stopped before it finished."
+        }
+        let result = checkpoint.outputs.last?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return result.isEmpty ? "The \(definition.name) workflow finished." : result
+    }
+
     public func formattedTreeSummary() -> String {
         var lines: [String] = []
         let stateLabel: String = {
