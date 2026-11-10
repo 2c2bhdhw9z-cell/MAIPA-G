@@ -58,6 +58,7 @@ jobs:
           ON_MAIN=$(gh api "repos/$REPO/compare/$SHA...$MAIN_HEAD" --jq .status)
           case "$ON_MAIN" in identical|ahead) ;; *) skip "$SHA is not on main (compare: $ON_MAIN), so there is nothing to publish";; esac
           # [skip ci] commits get no iOS run on purpose, so there is nothing checked to publish.
+          # GitHub honours the marker anywhere in the message, the body included.
           MESSAGE=$(gh api "repos/$REPO/commits/$SHA" --jq .commit.message)
           if printf '%s' "$MESSAGE" | grep -qiE '\[(skip ci|ci skip|no ci|skip actions|actions skip)\]'; then
             skip "$SHA is a [skip ci] commit, so it is not built or published"
