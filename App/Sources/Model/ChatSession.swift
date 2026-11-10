@@ -1336,8 +1336,9 @@ final class ChatSession: Identifiable {
             stagedPatch = (stagedPatch.map { $0 + "\n\n" } ?? "") + "Staged in \(extra.base.repo.fullName):\n" + patch
         }
         let contextRepo = repoContext
+        let allStagedPatches = stagedPatch
         var computer: SystemPrompt.ComputerContext? = await setupStep(setupDeadline, fallback: nil) {
-            await self.computerContext(app: app, repo: contextRepo, stagedPatch: stagedPatch)
+            await self.computerContext(app: app, repo: contextRepo, stagedPatch: allStagedPatches)
         }
         computer?.appNote = computerNote
         computer?.canSyncStaged = canSyncStaged
