@@ -41,6 +41,10 @@ final class SyncCoordinator {
         var errorDescription: String? { "GitHub backup took too long and timed out. MAIPA-G will retry automatically." }
     }
 
+    /// A save that makes no progress for this long is stopped and tried again. It counts from the
+    /// last file sent, not from the start, so a big backlog that keeps moving is never cut off.
+    nonisolated static let quietLimit: TimeInterval = 180
+
     init(paths: AppPaths) {
         self.paths = paths
     }
@@ -114,7 +118,15 @@ final class SyncCoordinator {
                     return try await engine.sync()
                 }
                 activeSyncTask = worker
-                let report = try await Self.awaitWithTimeout(seconds: 180, task: worker)
+                let report: DataRepoSync.Report
+                do {
+                    report = try await AgentLoop.bounded(seconds: Self.quietLimit, label: "GitHub backup", activity: engine.activity) {
+                        try await worker.value
+                    }
+                } catch is ToolTimedOut {
+                    worker.cancel()
+                    throw SyncTimeoutError()
+                }
                 activeSyncTask = nil
                 if repo == nil {
                     repo = await engine.state.repo ?? RepoRef(owner: owner, name: DataRepoSync.repoName)
@@ -134,6 +146,12 @@ final class SyncCoordinator {
                 if !report.downloaded.isEmpty || !report.deletedHere.isEmpty {
                     await app?.dataChangedFromGitHub(report)
                 }
+                if report.hasMoreToSave {
+                    // This pass saved what it could in one go; the rest follows straight away.
+                    runAgain = false
+                    request(after: 1)
+                    return
+                }
                 if runAgain, passes >= 2 {
                     runAgain = false
                     request(after: 6)
@@ -148,6 +166,12 @@ final class SyncCoordinator {
                 if error is SyncTimeoutError {
                     status = lastSaved != nil ? .idle : .failed(Self.describe(error))
                     request(after: 20)
+                } else if let wait = Self.rateLimitRetryDelay(error) {
+                    // GitHub stops answering for the rest of the hour. Trying again before then
+                    // only uses up the next hour too, so wait for the reset; this used to say it
+                    // would try again but never did.
+                    status = .failed(Self.describe(error))
+                    retryAfterLimit(seconds: wait)
                 } else {
                     status = .failed(Self.describe(error))
                 }
@@ -156,25 +180,23 @@ final class SyncCoordinator {
         } while runAgain
     }
 
-    private nonisolated static func awaitWithTimeout<T: Sendable>(
-        seconds: Double,
-        task: Task<T, Error>
-    ) async throws -> T {
-        try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask {
-                try await task.value
-            }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                task.cancel()
-                throw SyncTimeoutError()
-            }
-            guard let first = try await group.next() else {
-                task.cancel()
-                throw SyncTimeoutError()
-            }
-            group.cancelAll()
-            return first
+    /// Seconds until GitHub's hourly limit resets (at least a minute, at most an hour), or nil
+    /// when `error` isn't that limit.
+    nonisolated static func rateLimitRetryDelay(_ error: Error, now: Date = Date()) -> Double? {
+        guard let error = error as? GitHubAPIError, error.isRateLimited else { return nil }
+        let wait = error.rateLimitResetsAt.map { $0.timeIntervalSince(now) + 5 } ?? 600
+        return min(max(wait, 60), 3600)
+    }
+
+    /// `request(after:)` caps its wait at 30 seconds so edits are saved quickly; a wait for the
+    /// hourly limit has to be longer, so it is scheduled here instead.
+    private func retryAfterLimit(seconds: Double) {
+        scheduled?.cancel()
+        burstStartedAt = nil
+        scheduled = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) } catch { return }
+            guard !Task.isCancelled else { return }
+            await self?.runScheduledSync()
         }
     }
 

@@ -27,9 +27,7 @@ public enum Hashing {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
-        while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
-            hasher.update(data: chunk)
-        }
+        while try Self.readPiece(handle, into: { hasher.update(data: $0) }) {}
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
@@ -55,10 +53,25 @@ public enum Hashing {
         try handle.seek(toOffset: 0)
         var hasher = Insecure.SHA1()
         hasher.update(data: Data("blob \(size)\u{0}".utf8))
-        while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
-            hasher.update(data: chunk)
-        }
+        while try Self.readPiece(handle, into: { hasher.update(data: $0) }) {}
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Reads the next 1 MB of `handle` into `use`; false at the end. On Apple platforms each piece
+    /// is released straight away instead of piling up until the whole file has been read, which
+    /// is how reading many big pictures in one go used to use enough memory for iOS to close the app.
+    static func readPiece(_ handle: FileHandle, into use: (Data) -> Void) throws -> Bool {
+        #if canImport(ObjectiveC)
+        return try autoreleasepool {
+            guard let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty else { return false }
+            use(chunk)
+            return true
+        }
+        #else
+        guard let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty else { return false }
+        use(chunk)
+        return true
+        #endif
     }
 
     /// Cryptographically random bytes from the system generator.

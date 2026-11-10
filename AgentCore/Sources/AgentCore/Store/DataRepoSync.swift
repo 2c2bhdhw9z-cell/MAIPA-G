@@ -47,6 +47,11 @@ public actor DataRepoSync {
         public var deletedThere: [String] = []
         public var problems: [FileProblem] = []
         public var commit: String?
+        /// Files left for the next pass because this one reached its size, count or time budget.
+        /// The caller runs another pass straight away; nothing here is lost or counted as deleted.
+        public var deferred: [String] = []
+
+        public var hasMoreToSave: Bool { !deferred.isEmpty }
 
         public var changedAnything: Bool { !(downloaded.isEmpty && uploaded.isEmpty && deletedHere.isEmpty && deletedThere.isEmpty) }
     }
@@ -78,6 +83,48 @@ public actor DataRepoSync {
     /// Pictures and other big attachments at least this size are not read again when this phone
     /// already agreed on their id. Reading all of them on open is what was closing the app.
     private static let rememberedFileBytes = 1024 * 1024
+    /// How many bytes of brand-new big files one scan may read to work out their ids. The rest
+    /// wait for the next pass, so a big import never means reading every file at once.
+    var newFileReadBudget = 48 * 1024 * 1024
+
+    /// One pass uploads at most this much and then commits it, so a backlog is saved in pieces.
+    /// Before, every pending file had to go up inside a single 3-minute window and nothing was
+    /// committed until all of them had; a big backlog timed out, threw the finished uploads
+    /// away and started again from nothing, every time (and used up GitHub's hourly limit).
+    var uploadFileLimit = 120
+    var uploadByteLimit = 40 * 1024 * 1024
+    var uploadTimeLimit: TimeInterval = 75
+
+    /// Touched after every step that reached GitHub, so whoever is waiting can tell a slow but
+    /// moving save from a stuck one.
+    public nonisolated let activity = ActivityClock()
+    private var running: Task<Void, Never>?
+
+    /// A big file's upload or download sends no progress of its own, so it keeps `activity` alive
+    /// for as long as that many bytes may fairly take (100 KB/s at the slowest, at least 3 minutes);
+    /// past that it counts as stuck like anything else.
+    private func withHeartbeat(bytes: Int, _ work: @Sendable () async throws -> Void) async throws {
+        let clock = activity
+        let allowance = max(180, Double(bytes) / 100_000)
+        let beat = Task {
+            let started = ProcessInfo.processInfo.systemUptime
+            while !Task.isCancelled, ProcessInfo.processInfo.systemUptime - started < allowance {
+                clock.touch()
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+            }
+        }
+        defer { beat.cancel() }
+        try await work()
+        clock.touch()
+    }
+
+    /// For tests: smaller passes.
+    func setPassLimits(files: Int? = nil, bytes: Int? = nil, seconds: TimeInterval? = nil, newFileReadBytes: Int? = nil) {
+        if let files { uploadFileLimit = files }
+        if let bytes { uploadByteLimit = bytes }
+        if let seconds { uploadTimeLimit = seconds }
+        if let newFileReadBytes { newFileReadBudget = newFileReadBytes }
+    }
 
     public init(github: GitHubClient, dataDirectory: URL, stateURL: URL, largeFileThreshold: Int = DataRepoSync.defaultLargeFileThreshold) {
         self.github = github
@@ -176,6 +223,16 @@ public actor DataRepoSync {
     /// Brings the phone and GitHub into line. Safe to call often; does nothing when nothing changed.
     @discardableResult
     public func sync() async throws -> Report {
+        // A sync the app stopped waiting for (it went quiet too long) may still be winding down.
+        // Two at once would each commit from the same starting point, so wait for it.
+        while let previous = running { await previous.value }
+        let (finished, finish) = AsyncStream<Void>.makeStream()
+        let marker = Task { for await _ in finished {} }
+        running = marker
+        defer {
+            finish.finish()
+            if running == marker { running = nil }
+        }
         var attempt = 0
         while true {
             attempt += 1
@@ -192,7 +249,9 @@ public actor DataRepoSync {
     private func syncOnce() async throws -> Report {
         guard let repo = state.repo, let branch = state.branch else { throw Failure.notSetUp }
         var report = Report()
+        activity.touch()
         let head = try await github.branchHead(repo, branch: branch)
+        activity.touch()
 
         var remote: [String: String]
         if head == state.lastCommit {
@@ -299,7 +358,8 @@ public actor DataRepoSync {
                         throw GitHubAPIError(status: 0, message: "The saved pointer for \(Self.realPath(forPointer: path)) can't be read")
                     }
                     if downloadStore == nil { downloadStore = try await LargeFileStore(github: github, repo: repo) }
-                    try await downloadStore?.fetch(pointer, into: dataDirectory)
+                    let fetchStore = downloadStore, directory = dataDirectory
+                    try await withHeartbeat(bytes: pointer.size) { try await fetchStore?.fetch(pointer, into: directory) }
                     downloadedSuccessfully.append(path)
                 } catch {
                     skipped.insert(path)
@@ -368,14 +428,30 @@ public actor DataRepoSync {
         var changes: [GitHubClient.TreeChange] = []
         var successfulUploads: [String] = []
         var store: LargeFileStore?
-        for path in uploads {
+        let passStarted = ProcessInfo.processInfo.systemUptime
+        var startedUploads = 0
+        var startedBytes = 0
+        for path in Self.uploadOrder(uploads) {
             try Task.checkCancellation()
             let url = dataDirectory.appendingPathComponent(path)
+            // Past this pass's budget: leave the rest for the next pass, which starts as soon as
+            // this one is committed. At least one file always goes, so every pass makes progress.
+            if startedUploads > 0,
+               startedUploads >= uploadFileLimit || startedBytes >= uploadByteLimit
+                || ProcessInfo.processInfo.systemUptime - passStarted >= uploadTimeLimit {
+                agreed[path] = base[path]
+                report.deferred.append(path)
+                continue
+            }
+            startedUploads += 1
+            startedBytes += scan.largeFiles[path]?.size
+                ?? ((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
             do {
                 let data: Data
                 if let large = scan.largeFiles[path] {
                     if store == nil { store = try await LargeFileStore(github: github, repo: repo) }
-                    try await store?.ensure(large)
+                    let largeStore = store
+                    try await withHeartbeat(bytes: large.size) { try await largeStore?.ensure(large) }
                     data = large.pointer
                 } else {
                     let raw = try Data(contentsOf: url)
@@ -397,8 +473,13 @@ public actor DataRepoSync {
                     }
                 }
                 let blob = try await github.createBlob(repo, contents: data)
+                activity.touch()
                 changes.append(GitHubClient.TreeChange(path: path, blobSHA: blob))
                 successfulUploads.append(path)
+            } catch let error as GitHubAPIError where error.isRateLimited {
+                // Every further request would be refused too (and each waits before failing),
+                // so stop here; the coordinator tries again once the limit resets.
+                throw error
             } catch where Self.isMissingFile(error) {
                 // Deleted or replaced on the phone after this sync looked at it: not a failure.
                 // The next sync sees what is there now.
@@ -411,6 +492,7 @@ public actor DataRepoSync {
         // A file moving from Git to the files release keeps its Git copy until the release copy
         // and its pointer are saved.
         let unsavedLargeFiles = Set(uploads.filter { Self.isPointer($0) && !successfulUploads.contains($0) }.map(Self.realPath(forPointer:)))
+        report.deferred = Array(Set(report.deferred).union(scan.deferred)).sorted()
         let committedDeletes = deleteThere.filter { remote[$0] != nil && !unsavedLargeFiles.contains($0) }
         for path in deleteThere where unsavedLargeFiles.contains(path) { agreed[path] = base[path] }
         for path in committedDeletes {
@@ -424,7 +506,9 @@ public actor DataRepoSync {
             var baseTree: String?
             if let head { baseTree = try await github.commitTree(repo, commit: head) }
             let tree = try await github.createTree(repo, base: baseTree, changes: changes.sorted { $0.path < $1.path })
+            activity.touch()
             let commit = try await github.createCommit(repo, message: Self.commitMessage(uploads: successfulUploads, deletes: committedDeletes), tree: tree, parents: head.map { [$0] } ?? [])
+            activity.touch()
             if head == nil {
                 _ = try await github.send("POST", GitHubClient.path(repo, "/git/refs"), body: ["ref": .string("refs/heads/\(branch)"), "sha": .string(commit)])
             } else {
@@ -450,6 +534,20 @@ public actor DataRepoSync {
         var largeFiles: [String: LargeFile] = [:]
         /// Where those big files really are.
         var largeRealPaths: Set<String> = []
+        /// New big files left unread to keep this scan's reading bounded; a later pass reads them.
+        var deferred: Set<String> = []
+    }
+
+    /// Settings and chats first, then everything else, smallest kinds before pictures and files,
+    /// so a pass that stops at its budget has saved what matters most.
+    static func uploadOrder(_ paths: [String]) -> [String] {
+        func rank(_ path: String) -> Int {
+            if managedFiles.contains(path) { return 0 }
+            if path.hasPrefix("chats/") { return 1 }
+            if path.hasSuffix(".json"), managedJSONPrefixes.contains(where: path.hasPrefix) { return 2 }
+            return 3
+        }
+        return paths.sorted { (rank($0), $0) < (rank($1), $1) }
     }
 
     static func isPointer(_ path: String) -> Bool {
@@ -467,14 +565,28 @@ public actor DataRepoSync {
         return false
     }
 
+    private static func sha256CacheKey(_ path: String) -> String { "sha256:" + path }
+
+    private func cachedSHA256(path: String, size: Int, modified: Double) -> String? {
+        if let cached = largeHashes[path], cached.size == size, abs(cached.modified.timeIntervalSince1970 - modified) < 0.001 {
+            return cached.sha256
+        }
+        if let cached = blobHashes[Self.sha256CacheKey(path)], cached.size == size, abs(cached.modified - modified) < 0.001 {
+            return cached.blobID
+        }
+        return nil
+    }
+
     /// The pointer for a big file, from a cached SHA-256 while its size and date are unchanged.
     private func largeFile(at url: URL, path: String, size: Int, modified: Date) throws -> LargeFile {
         let sha: String
-        if let cached = largeHashes[path], cached.size == size, cached.modified == modified {
-            sha = cached.sha256
+        if let cached = cachedSHA256(path: path, size: size, modified: modified.timeIntervalSince1970) {
+            sha = cached
         } else {
             sha = try Hashing.sha256Hex(fileAt: url)
             largeHashes[path] = (size, modified, sha)
+            // Kept with the blob ids, so a big file isn't read again every time the app opens.
+            blobHashes[Self.sha256CacheKey(path)] = CachedBlobHash(size: size, modified: modified.timeIntervalSince1970, blobID: sha)
         }
         let pointer = LargeFilePointer(path: path, size: size, sha256: sha)
         return LargeFile(url: url, pointer: pointer.encoded(), sha256: sha, size: size)
@@ -482,6 +594,7 @@ public actor DataRepoSync {
 
     private func localFiles(remote: [String: String] = [:]) -> LocalScan {
         var scan = LocalScan()
+        var readBudget = newFileReadBudget
         let manager = FileManager.default
         guard let enumerator = manager.enumerator(
             at: dataDirectory,
@@ -503,23 +616,23 @@ public actor DataRepoSync {
                 let size = values.fileSize ?? 0
                 let modDate = values.contentModificationDate ?? .distantPast
                 let modStamp = modDate.timeIntervalSince1970
-                if size >= Self.rememberedFileBytes, Self.managedBlobPrefixes.contains(where: path.hasPrefix) {
-                    if let cached = blobHashes[path], cached.size == size, abs(cached.modified - modStamp) < 0.001 {
-                        scan.files[path] = cached.blobID
+                let isBlobFile = Self.managedBlobPrefixes.contains(where: path.hasPrefix)
+                // A file too big for Git is saved as a pointer. This comes before the check
+                // below: that one skipped every big file it had no id for, so on the first save
+                // after the app opened, each pointer looked deleted here and was removed from
+                // GitHub (all nine on 2 November), and new big files were never saved at all.
+                if size >= largeFileThreshold, isBlobFile {
+                    let pointerPath = path + Self.pointerSuffix
+                    let known = cachedSHA256(path: path, size: size, modified: modStamp)
+                    if known == nil, size > readBudget, readBudget < newFileReadBudget {
+                        // Read it on a later pass; until then it's neither saved nor deleted.
+                        scan.unreadablePaths.insert(path)
+                        scan.unreadablePaths.insert(pointerPath)
+                        scan.deferred.insert(pointerPath)
                         continue
                     }
-                    // Do not read the file. Opening every picture is what was closing the app.
-                    // Reuse the id already agreed, or GitHub's id. A brand-new big file stays on
-                    // the phone until a later save; it is not treated as a deletion.
-                    if let agreed = state.files[path] ?? remote[path] {
-                        blobHashes[path] = CachedBlobHash(size: size, modified: modStamp, blobID: agreed)
-                        scan.files[path] = agreed
-                    }
-                    continue
-                }
-                if size >= largeFileThreshold, Self.managedBlobPrefixes.contains(where: path.hasPrefix) {
+                    if known == nil { readBudget -= size }
                     let large = try largeFile(at: url, path: path, size: size, modified: modDate)
-                    let pointerPath = path + Self.pointerSuffix
                     scan.files[pointerPath] = Hashing.gitBlobID(large.pointer)
                     scan.largeFiles[pointerPath] = large
                     scan.largeRealPaths.insert(path)
@@ -528,6 +641,22 @@ public actor DataRepoSync {
                 if let cached = blobHashes[path], cached.size == size, abs(cached.modified - modStamp) < 0.001 {
                     scan.files[path] = cached.blobID
                     continue
+                }
+                if size >= Self.rememberedFileBytes, isBlobFile {
+                    // Do not read every big file again. Reuse the id already agreed, or GitHub's.
+                    if let agreed = state.files[path] ?? remote[path] {
+                        blobHashes[path] = CachedBlobHash(size: size, modified: modStamp, blobID: agreed)
+                        scan.files[path] = agreed
+                        continue
+                    }
+                    // A brand-new big file is read once, a piece at a time, within this scan's
+                    // budget; the rest wait for the next pass. They used to be skipped for good.
+                    if size > readBudget, readBudget < newFileReadBudget {
+                        scan.unreadablePaths.insert(path)
+                        scan.deferred.insert(path)
+                        continue
+                    }
+                    readBudget -= size
                 }
                 let blobID = try Hashing.gitBlobID(fileAt: url)
                 blobHashes[path] = CachedBlobHash(size: size, modified: modStamp, blobID: blobID)
@@ -674,14 +803,22 @@ actor LargeFileStore {
 
     /// Uploads the file unless the release already has these exact bytes.
     func ensure(_ file: LargeFile) async throws {
-        if let existing = assets[file.assetName], existing.size == file.size { return }
+        if let existing = assets[file.assetName] {
+            if existing.isUploaded, existing.size == file.size { return }
+            // A cut-off earlier upload ("starter") reports the full size but holds nothing, and
+            // blocks the name. Remove it so the whole file goes up.
+            if !existing.isUploaded {
+                try await github.deleteReleaseAsset(repo, assetID: existing.id)
+                assets[file.assetName] = nil
+            }
+        }
         let uploaded = try await github.uploadReleaseAsset(repo, releaseID: releaseID, name: file.assetName, file: file.url)
         assets[uploaded.name] = uploaded
     }
 
     /// Downloads the file a pointer names, checks its size and SHA-256, then puts it in place.
     func fetch(_ pointer: LargeFilePointer, into dataDirectory: URL) async throws {
-        guard let asset = assets[pointer.sha256 + ".bin"] else {
+        guard let asset = assets[pointer.sha256 + ".bin"], asset.isUploaded else {
             throw GitHubAPIError(status: 404, message: "\(pointer.path) isn't in MAIPA-G-data's files release yet; the phone that has it will upload it")
         }
         let destination = dataDirectory.appendingPathComponent(pointer.path)

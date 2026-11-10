@@ -24,6 +24,13 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
     var releases: [Int: (tag: String, assets: [Int: (name: String, data: Data)])] = [:]
     var assetUploads = 0
     var failAssetUploads = false
+    /// Asset ids whose upload was cut off: GitHub lists them as "starter", with no usable bytes.
+    var starterAssets: Set<Int> = []
+    /// Answers blob uploads as GitHub does once the hourly limit is used up.
+    var blobRateLimitResetsAt: Date?
+    private(set) var blobRequests = 0
+    /// Commits made by saving (not by `commitRemotely`).
+    private(set) var savedCommits = 0
 
     struct Tokens: GitHubTokenProvider {
         func installationToken() async throws -> String { "installation" }
@@ -133,6 +140,14 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
             head = sha
             return json(["object": ["sha": .string(sha)]])
         case ("POST", prefix + "/git/blobs"):
+            blobRequests += 1
+            if let reset = blobRateLimitResetsAt {
+                return HTTPResponse(status: 403, headers: [
+                    "content-type": "application/json",
+                    "x-ratelimit-remaining": "0",
+                    "x-ratelimit-reset": String(Int(reset.timeIntervalSince1970)),
+                ], body: Data(#"{"message":"API rate limit exceeded for installation."}"#.utf8))
+            }
             if temporaryBlobFailures > 0 {
                 temporaryBlobFailures -= 1
                 return json(["message": "Server Error"], status: 502)
@@ -156,6 +171,7 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
             trees[id] = tree
             return json(["sha": .string(id)], status: 201)
         case ("POST", prefix + "/git/commits"):
+            savedCommits += 1
             let id = newID("commit")
             commits[id] = (body?["tree"]?.stringValue ?? "", body?["parents"]?.arrayValue?.first?.stringValue)
             return json(["sha": .string(id)], status: 201)
@@ -169,7 +185,7 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
             if path.hasPrefix(prefix + "/releases/"), path.hasSuffix("/assets"),
                let id = Int(path.dropFirst((prefix + "/releases/").count).dropLast("/assets".count)), releases[id] != nil {
                 if request.method == "GET" {
-                    return json(.array(releases[id]!.assets.sorted { $0.key < $1.key }.map { ["id": .number(Double($0.key)), "name": .string($0.value.name), "size": .number(Double($0.value.data.count))] }))
+                    return json(.array(releases[id]!.assets.sorted { $0.key < $1.key }.map { ["id": .number(Double($0.key)), "name": .string($0.value.name), "size": .number(Double($0.value.data.count)), "state": .string(starterAssets.contains($0.key) ? "starter" : "uploaded")] }))
                 }
                 if request.method == "POST", request.url.host == "uploads.github.com" {
                     if failAssetUploads { return json(["message": "fixture refused the upload"], status: 500) }
@@ -180,6 +196,11 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
                     releases[id]!.assets[assetID] = (name, request.body ?? Data())
                     return json(["id": .number(Double(assetID)), "name": .string(name), "size": .number(Double(request.body?.count ?? 0))], status: 201)
                 }
+            }
+            if request.method == "DELETE", path.hasPrefix(prefix + "/releases/assets/"), let id = Int(path.dropFirst((prefix + "/releases/assets/").count)) {
+                for key in releases.keys { releases[key]!.assets[id] = nil }
+                starterAssets.remove(id)
+                return HTTPResponse(status: 204)
             }
             if request.method == "GET", path.hasPrefix(prefix + "/releases/assets/"), let id = Int(path.dropFirst((prefix + "/releases/assets/").count)) {
                 guard !request.followsRedirects, request.headers["Accept"] == "application/octet-stream" else { return json(["message": "Expected a download request"], status: 400) }
@@ -403,6 +424,87 @@ struct DataRepoSyncTests {
         let retry = try await setup.sync.sync()
         #expect(retry.uploaded == [badPath])
         #expect(setup.github.remoteFile(badPath) == bad)
+    }
+
+    /// 9 November 2026: about a thousand pictures arrived at once. Every save had to send all of
+    /// them before it committed anything, took longer than the time allowed, was thrown away and
+    /// started over, until GitHub's hourly limit ran out; nothing was saved after that.
+    @Test func aBigBacklogIsSavedInPiecesThatEachCommit() async throws {
+        let setup = try await Setup()
+        defer { try? FileManager.default.removeItem(at: setup.directory) }
+        await setup.sync.setPassLimits(files: 4)
+        for index in 0..<10 {
+            try await setup.store.saveBlob(Data("picture \(index)".utf8), at: "attachments/import/\(index).jpg")
+        }
+        let chat = Self.chat("written during the import", updated: Date())
+        try await setup.store.save(chat)
+
+        let first = try await setup.sync.sync()
+        #expect(first.uploaded.count == 4 && first.commit != nil, "the first piece is committed on its own")
+        #expect(first.uploaded.contains(ChatStore.relativePath(for: chat.id)), "chats go before pictures")
+        #expect(first.hasMoreToSave && first.deferred.count == 7)
+        #expect(setup.github.remoteFile(ChatStore.relativePath(for: chat.id)) != nil)
+
+        var passes = 1
+        var last = first
+        while last.hasMoreToSave, passes < 10 {
+            last = try await setup.sync.sync()
+            passes += 1
+            #expect(last.problems.isEmpty, "\(last.problems)")
+        }
+        #expect(passes == 3)
+        #expect(!last.hasMoreToSave)
+        #expect(setup.github.savedCommits == 3)
+        for index in 0..<10 {
+            #expect(setup.github.remoteFile("attachments/import/\(index).jpg") == Data("picture \(index)".utf8))
+        }
+        #expect(await setup.sync.pendingPaths().isEmpty)
+        let idle = try await setup.sync.sync()
+        #expect(!idle.changedAnything && !idle.hasMoreToSave)
+    }
+
+    /// Once GitHub's hourly limit is used up, each refused upload used to wait and try again
+    /// before giving up, so the save could only time out. It now stops at the first refusal.
+    @Test func reachingGitHubsHourlyLimitStopsTheSaveAtOnce() async throws {
+        let setup = try await Setup()
+        defer { try? FileManager.default.removeItem(at: setup.directory) }
+        for index in 0..<5 {
+            try await setup.store.saveBlob(Data("picture \(index)".utf8), at: "attachments/limit/\(index).jpg")
+        }
+        setup.github.blobRateLimitResetsAt = Date().addingTimeInterval(1_800)
+        let started = Date()
+        var caught: GitHubAPIError?
+        do { _ = try await setup.sync.sync() } catch let error as GitHubAPIError { caught = error }
+        #expect(caught?.isRateLimited == true)
+        #expect(caught?.rateLimitResetsAt != nil)
+        #expect(setup.github.blobRequests == 1)
+        #expect(Date().timeIntervalSince(started) < 10)
+        #expect(setup.github.savedCommits == 0)
+
+        // After the reset everything goes in one save.
+        setup.github.blobRateLimitResetsAt = nil
+        let saved = try await setup.sync.sync()
+        #expect(saved.uploaded.count == 5 && saved.problems.isEmpty)
+    }
+
+    /// New pictures of 1 MB or more were skipped by the scan and never saved.
+    @Test func newAttachmentsOverAMegabyteAreSaved() async throws {
+        let setup = try await Setup()
+        defer { try? FileManager.default.removeItem(at: setup.directory) }
+        // Room to read one of them per scan; the other waits for the next pass.
+        await setup.sync.setPassLimits(newFileReadBytes: 1_300_000)
+        let one = SaveEverythingTests.bytes(1_200_000), two = SaveEverythingTests.bytes(1_100_000)
+        try await setup.store.saveBlob(one, at: "attachments/big/one.jpg")
+        try await setup.store.saveBlob(two, at: "attachments/big/two.jpg")
+
+        let first = try await setup.sync.sync()
+        #expect(first.uploaded.count == 1 && first.hasMoreToSave, "\(first.uploaded) \(first.deferred)")
+        #expect(first.problems.isEmpty)
+        let second = try await setup.sync.sync()
+        #expect(second.uploaded.count == 1 && !second.hasMoreToSave)
+        #expect(setup.github.remoteFile("attachments/big/one.jpg") == one)
+        #expect(setup.github.remoteFile("attachments/big/two.jpg") == two)
+        #expect(await setup.sync.pendingPaths().isEmpty)
     }
 
     @Test func commitMessagesAreReadable() {

@@ -40,6 +40,48 @@ struct SaveEverythingTests {
         return Data((0..<count).map { _ in UInt8.random(in: 0...255, using: &generator) })
     }
 
+    /// After the app reopened, a big file's pointer looked deleted (the scan skipped every file of
+    /// 1 MB or more it had no id for), so the next save removed it from GitHub. That is how all
+    /// nine pointers went on 2 November.
+    @Test func bigFilePointersSurviveTheAppReopening() async throws {
+        let phones = try await TwoPhones()
+        defer { try? FileManager.default.removeItem(at: phones.root) }
+        let big = Self.bytes(1_100_000)
+        let bigPath = "attachments/reopen/video.mov"
+        let pointerPath = bigPath + DataRepoSync.pointerSuffix
+        try phones.write(big, to: bigPath, in: phones.first)
+        let saved = try await phones.phoneOne.sync()
+        #expect(saved.uploaded == [pointerPath])
+
+        let reopened = DataRepoSync(github: phones.github.client, dataDirectory: phones.first, stateURL: phones.root.appendingPathComponent("one/state.json"), largeFileThreshold: 1_024)
+        let next = try await reopened.sync()
+        #expect(next.deletedThere.isEmpty && !next.changedAnything, "\(next.deletedThere)")
+        #expect(phones.github.remoteFile(pointerPath) != nil)
+        #expect(await reopened.pendingPaths().isEmpty)
+    }
+
+    /// A cut-off upload stays in the release as a "starter" asset with the full size but no bytes.
+    /// It used to count as saved, so the file was never sent and other phones couldn't get it.
+    @Test func aCutOffUploadIsSentAgain() async throws {
+        let phones = try await TwoPhones()
+        defer { try? FileManager.default.removeItem(at: phones.root) }
+        let big = Self.bytes(40_000)
+        let bigPath = "attachments/cut/file.zip"
+        try phones.write(big, to: bigPath, in: phones.first)
+        phones.github.releases[1] = (GitHubClient.filesReleaseTag, [900: (Hashing.sha256Hex(big) + ".bin", Data(count: big.count))])
+        phones.github.starterAssets = [900]
+
+        let saved = try await phones.phoneOne.sync()
+        #expect(saved.problems.isEmpty, "\(saved.problems)")
+        #expect(phones.github.assetUploads == 1)
+        #expect(phones.github.asset(named: Hashing.sha256Hex(big) + ".bin") == big)
+        #expect(phones.github.starterAssets.isEmpty)
+
+        let restored = try await phones.phoneTwo.sync()
+        #expect(restored.problems.isEmpty, "\(restored.problems)")
+        #expect(try Data(contentsOf: phones.second.appendingPathComponent(bigPath)) == big)
+    }
+
     @Test func bigAttachmentsSaveToTheFilesReleaseAndComeBackOnAnotherPhone() async throws {
         let phones = try await TwoPhones()
         defer { try? FileManager.default.removeItem(at: phones.root) }

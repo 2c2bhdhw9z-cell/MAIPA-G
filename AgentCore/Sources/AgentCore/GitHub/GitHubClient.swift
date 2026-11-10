@@ -406,6 +406,11 @@ public struct GitHubClient: Sendable {
         public var id: Int
         public var name: String
         public var size: Int
+        /// "uploaded" once GitHub has every byte. An upload that was cut off leaves a "starter"
+        /// asset that already reports the full size, so the size alone never means it's saved.
+        public var state: String = "uploaded"
+
+        public var isUploaded: Bool { state == "uploaded" }
     }
 
     public func releaseAssets(_ repo: RepoRef, releaseID: Int) async throws -> [ReleaseAsset] {
@@ -416,7 +421,7 @@ public struct GitHubClient: Sendable {
             let items = JSONValue.parse(response.body)?.arrayValue ?? []
             assets += items.compactMap { item in
                 guard let id = item["id"]?.intValue, let name = item["name"]?.stringValue else { return nil }
-                return ReleaseAsset(id: id, name: name, size: item["size"]?.intValue ?? 0)
+                return ReleaseAsset(id: id, name: name, size: item["size"]?.intValue ?? 0, state: item["state"]?.stringValue ?? "uploaded")
             }
             if items.count < 100 { break }
             page += 1
@@ -438,12 +443,23 @@ public struct GitHubClient: Sendable {
             headers["Content-Type"] = "application/octet-stream"
             let response = try await transport.upload(HTTPRequest(method: "POST", url: url, headers: headers, idleTimeout: 300, followsRedirects: false), fromFile: file)
             if response.status == 422, let existing = try await releaseAssets(repo, releaseID: releaseID).first(where: { $0.name == name }) {
+                // Only a finished earlier upload counts. A cut-off one is removed so the next
+                // attempt can put the whole file there.
+                guard existing.isUploaded else {
+                    try await deleteReleaseAsset(repo, assetID: existing.id)
+                    throw GitHubAPIError(status: 409, message: "An earlier upload of \(name) was cut off; it was removed so the file can be uploaded again.")
+                }
                 return existing
             }
             guard response.isSuccess else { throw GitHubAPIError(response: response) }
             guard let item = JSONValue.parse(response.body), let id = item["id"]?.intValue else { throw GitHubAPIError(status: response.status, message: "GitHub didn't return the uploaded file's id") }
             return ReleaseAsset(id: id, name: name, size: item["size"]?.intValue ?? 0)
         }
+    }
+
+    /// Removes one asset from a release (a cut-off upload, so the file can go up again).
+    public func deleteReleaseAsset(_ repo: RepoRef, assetID: Int) async throws {
+        _ = try await send("DELETE", Self.path(repo, "/releases/assets/\(assetID)"), allow: [404])
     }
 
     /// Streams an asset to `destination`. GitHub answers with a short-lived storage address;
