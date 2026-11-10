@@ -146,6 +146,14 @@ struct HealthCheckScreen: View {
         } else {
             items.append(Item(id: "github", title: "GitHub App", detail: app.github.reposError ?? "Not connected.", nextStep: "Connect or sign in again in Settings.", state: .failed, action: .github))
         }
+        if app.gitlab.isConnected {
+            await app.gitlab.refresh()
+            if let error = app.gitlab.reposError {
+                items.append(Item(id: "gitlab", title: "GitLab", detail: error, nextStep: "Connect GitLab again in Settings with a token that has the api scope.", state: .failed))
+            } else {
+                items.append(Item(id: "gitlab", title: "GitLab", detail: "Connected to \(app.gitlab.host) as \(app.gitlab.login ?? "your account"), \(app.gitlab.repos.count) projects.", state: .good))
+            }
+        }
 
         await app.openRouter.refreshKeyInfo(force: true)
         if app.openRouter.hasOpenRouterKey, app.openRouter.keyInfo != nil {

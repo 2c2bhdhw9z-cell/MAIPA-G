@@ -348,7 +348,12 @@ public struct ComputerControl: Sendable {
     }
 
     static func isPublicCloneURL(_ url: String) -> Bool {
-        url.hasPrefix("https://github.com/") && !url.contains("@") && url.allSatisfy { $0.isLetter || $0.isNumber || ":/._-".contains($0) }
+        // GitHub or a GitLab server (gitlab.com or self-hosted): https only, no credentials, and only
+        // characters that are safe inside the single-quoted clone command.
+        guard url.hasPrefix("https://"), !url.contains("@"), !url.contains(".."),
+              url.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || ":/._-".contains($0)) }),
+              let host = URL(string: url)?.host, !host.isEmpty, url.hasSuffix(".git") || url.hasPrefix("https://github.com/") else { return false }
+        return true
     }
 
     public func createCheckpoint(comment: String) async throws -> String {

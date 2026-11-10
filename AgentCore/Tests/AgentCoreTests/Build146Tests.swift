@@ -252,6 +252,16 @@ struct Build146Tests {
         #expect(await session.activeReceipt(for: other) == nil)
     }
 
+    @Test("A public GitLab project can be cloned onto the chat's computer like a GitHub repo")
+    func gitLabCloneURLs() {
+        #expect(ComputerControl.isPublicCloneURL("https://github.com/a/b.git"))
+        #expect(ComputerControl.isPublicCloneURL(Self.repo.webURL.absoluteString + ".git"))
+        #expect(ComputerControl.isPublicCloneURL("https://gitlab.com/grp/sub/proj.git"))
+        #expect(!ComputerControl.isPublicCloneURL("http://gitlab.com/a/b.git"))
+        #expect(!ComputerControl.isPublicCloneURL("https://oauth2:secret@gitlab.com/a/b.git"))
+        #expect(!ComputerControl.isPublicCloneURL("https://gitlab.com/a/b.git'; rm -rf ~; '"))
+    }
+
     // MARK: Pictures as input
 
     @Test("Asking to change the earlier picture is recognised; a fresh request is not")
