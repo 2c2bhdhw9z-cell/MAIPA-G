@@ -710,9 +710,6 @@ final class AppModel {
             specs.preview([spec])
             library.preview(summaries: summaries, open: nil)
             sheet = .specReview(spec.id)
-        case "menu-agents", "menu-workflows":
-            library.preview(summaries: summaries, open: nil)
-            isMenuOpen = true
         case "connect":
             library.preview(summaries: [], open: nil)
             sheet = .connectGitHub

@@ -6,26 +6,15 @@ struct SideMenu: View {
     @Environment(AppModel.self) private var app
     @Environment(\.theme) private var theme
     @State private var query = ""
-    @State private var tab: MenuTab = {
-        switch PreviewScenes.scene {
-        case "menu-agents": return .agents
-        case "menu-workflows": return .workflows
-        case "menu-specs", "menu-memories": return .specs
-        default: return .chats
-        }
-    }()
     @State private var selected: ChatSummary?
     @State private var showRename = false
     @State private var showDelete = false
-    @State private var deletingAgent: CustomAgentRecord?
-    @State private var deletingWorkflow: WorkflowRecord?
     @State private var newTitle = ""
     @AccessibilityFocusState(for: .voiceOver) private var newChatFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
             header
-            tabs
             search
             list
             footer
@@ -53,28 +42,6 @@ struct SideMenu: View {
         } message: {
             Text("It stays in Recently Deleted for 30 days.")
         }
-        .alert("Delete this agent?", isPresented: Binding(get: { deletingAgent != nil }, set: { if !$0 { deletingAgent = nil } })) {
-            Button("Delete", role: .destructive) {
-                if let record = deletingAgent {
-                    deletingAgent = nil
-                    Task { await app.automations.deleteAgent(record.id) }
-                }
-            }
-            Button("Cancel", role: .cancel) { deletingAgent = nil }
-        } message: {
-            Text("It stays in Recently Deleted for 30 days.")
-        }
-        .alert("Delete this workflow?", isPresented: Binding(get: { deletingWorkflow != nil }, set: { if !$0 { deletingWorkflow = nil } })) {
-            Button("Delete", role: .destructive) {
-                if let record = deletingWorkflow {
-                    deletingWorkflow = nil
-                    Task { await app.automations.deleteWorkflow(record.id) }
-                }
-            }
-            Button("Cancel", role: .cancel) { deletingWorkflow = nil }
-        } message: {
-            Text("It stays in Recently Deleted for 30 days.")
-        }
     }
 
     private func rename(_ chat: ChatSummary) {
@@ -88,10 +55,6 @@ struct SideMenu: View {
         showDelete = true
     }
 
-    private var activeSidebarRepo: ChatRepo? {
-        app.library.openSession?.chat.repo ?? app.home.repo
-    }
-
     private var header: some View {
         HStack(spacing: 8) {
             Spark(size: 34)
@@ -99,49 +62,6 @@ struct SideMenu: View {
                 .font(.rounded(.title3, weight: .bold))
                 .accessibilityAddTraits(.isHeader)
             Spacer()
-            if tab == .agents {
-                Button {
-                    app.sheet = .agentEditor(nil)
-                    app.isMenuOpen = false
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(theme.accent)
-                        .frame(width: 36, height: 36)
-                        .background(Theme.raised, in: Circle())
-                        .overlay(Circle().strokeBorder(Theme.stroke))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Create agent")
-            } else if tab == .workflows {
-                Button {
-                    app.sheet = .workflowEditor(nil)
-                    app.isMenuOpen = false
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(theme.accent)
-                        .frame(width: 36, height: 36)
-                        .background(Theme.raised, in: Circle())
-                        .overlay(Circle().strokeBorder(Theme.stroke))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Build workflow")
-            } else if tab == .specs {
-                Button {
-                    app.sheet = .specs(activeSidebarRepo, startCreating: true)
-                    app.isMenuOpen = false
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(theme.accent)
-                        .frame(width: 36, height: 36)
-                        .background(Theme.raised, in: Circle())
-                        .overlay(Circle().strokeBorder(Theme.stroke))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("New spec")
-            }
             Button {
                 app.newChat()
             } label: {
@@ -160,27 +80,10 @@ struct SideMenu: View {
         .padding(.bottom, 10)
     }
 
-    private enum MenuTab: String, CaseIterable, Identifiable {
-        case chats = "Chats"
-        case specs = "Specs"
-        case agents = "Agents"
-        case workflows = "Workflows"
-        var id: String { rawValue }
-    }
-
-    private var tabs: some View {
-        Picker("Library", selection: $tab) {
-            ForEach(MenuTab.allCases) { Text($0.rawValue).tag($0) }
-        }
-        .pickerStyle(.segmented)
-        .padding(.horizontal, 16)
-        .padding(.bottom, 8)
-    }
-
     private var search: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(Theme.secondaryText)
-            TextField("Search \(tab.rawValue.lowercased())", text: $query)
+            TextField("Search chats", text: $query)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
             if !query.isEmpty {
@@ -195,218 +98,26 @@ struct SideMenu: View {
         .padding(.bottom, 8)
     }
 
-    @ViewBuilder private var list: some View {
-        switch tab {
-        case .chats:
-            let groups = groupedChats
-            List {
-                if !app.library.isLoaded {
-                    ProgressView().frame(maxWidth: .infinity).listRowBackground(Color.clear)
-                } else if groups.isEmpty {
-                    Text(query.isEmpty ? "Your chats will show up here." : "No chats match.")
-                        .font(.subheadline).foregroundStyle(Theme.secondaryText).listRowBackground(Color.clear)
-                }
-                ForEach(groups, id: \.id) { group in
-                    Section {
-                        ForEach(group.chats) { chat in row(chat) }
-                    } header: {
-                        Text(group.title).font(.caption.weight(.semibold)).foregroundStyle(Theme.secondaryText).textCase(nil)
-                    }
-                }
+    /// Only the chats. Owner, 10 November 2026: the Chats/Specs/Agents/Workflows/Jobs tabs are gone
+    /// for good, and no switch brings them back. Those screens stay reachable from the chat itself.
+    private var list: some View {
+        let groups = groupedChats
+        return List {
+            if !app.library.isLoaded {
+                ProgressView().frame(maxWidth: .infinity).listRowBackground(Color.clear)
+            } else if groups.isEmpty {
+                Text(query.isEmpty ? "Your chats will show up here." : "No chats match.")
+                    .font(.subheadline).foregroundStyle(Theme.secondaryText).listRowBackground(Color.clear)
             }
-            .listStyle(.plain).scrollContentBackground(.hidden).environment(\.defaultMinListRowHeight, 44)
-        case .agents:
-            let filteredAgents = app.automations.agents.filter { query.isEmpty || ($0.name + " " + $0.summary).localizedCaseInsensitiveContains(query) }
-            List {
+            ForEach(groups, id: \.id) { group in
                 Section {
-                    if filteredAgents.isEmpty {
-                        Text("No agents match.")
-                            .font(.subheadline).foregroundStyle(Theme.secondaryText).listRowBackground(Color.clear)
-                    }
-                    ForEach(filteredAgents) { agent in
-                        Button {
-                            app.sheet = .agentDetail(agent.id)
-                            app.isMenuOpen = false
-                        } label: {
-                            HStack(spacing: 8) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack(spacing: 6) {
-                                        Text(agent.name).font(.subheadline.weight(.medium))
-                                        if !agent.isBuiltIn {
-                                            Text("Custom").font(.caption2).foregroundStyle(Theme.secondaryText)
-                                        }
-                                    }
-                                    Text(agent.summary).font(.caption).foregroundStyle(Theme.secondaryText).lineLimit(2)
-                                }
-                                Spacer(minLength: 4)
-                                Image(systemName: "chevron.right")
-                                    .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(Theme.secondaryText)
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            if let record = app.automations.agentRecord(for: agent) {
-                                Button(role: .destructive) { deletingAgent = record } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
-                                .tint(Theme.danger)
-                            }
-                        }
-                    }
-                    Button {
-                        app.sheet = .agents
-                        app.isMenuOpen = false
-                    } label: {
-                        Label("Manage or create agents", systemImage: "slider.horizontal.3")
-                    }
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
+                    ForEach(group.chats) { chat in row(chat) }
                 } header: {
-                    Text("Specialists for one job — tap one to run it.")
-                        .font(.caption)
-                        .foregroundStyle(Theme.secondaryText)
-                        .textCase(nil)
+                    Text(group.title).font(.caption.weight(.semibold)).foregroundStyle(Theme.secondaryText).textCase(nil)
                 }
             }
-            .listStyle(.plain).scrollContentBackground(.hidden)
-        case .workflows:
-            let filteredWorkflows = app.automations.workflows.filter { query.isEmpty || ($0.name + " " + $0.summary).localizedCaseInsensitiveContains(query) }
-            List {
-                Section {
-                    if filteredWorkflows.isEmpty {
-                        Text("No workflows match.")
-                            .font(.subheadline).foregroundStyle(Theme.secondaryText).listRowBackground(Color.clear)
-                    }
-                    ForEach(filteredWorkflows) { workflow in
-                        Button {
-                            app.sheet = .workflowDetail(workflow.id)
-                            app.isMenuOpen = false
-                        } label: {
-                            HStack(spacing: 8) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack(spacing: 6) {
-                                        Text(workflow.name).font(.subheadline.weight(.medium))
-                                        if !workflow.isBuiltIn {
-                                            Text(workflow.isApproved ? "Custom" : "Draft")
-                                                .font(.caption2)
-                                                .foregroundStyle(Theme.secondaryText)
-                                        }
-                                    }
-                                    Text(workflow.summary).font(.caption).foregroundStyle(Theme.secondaryText).lineLimit(2)
-                                }
-                                Spacer(minLength: 4)
-                                Image(systemName: "chevron.right")
-                                    .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(Theme.secondaryText)
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            if let record = app.automations.workflowRecord(for: workflow) {
-                                Button(role: .destructive) { deletingWorkflow = record } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
-                                .tint(Theme.danger)
-                            }
-                        }
-                    }
-                    Button {
-                        app.sheet = .workflows
-                        app.isMenuOpen = false
-                    } label: {
-                        Label("Manage or build workflows", systemImage: "slider.horizontal.3")
-                    }
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-                } header: {
-                    Text("Step-by-step plans that chain agents — tap one to run it.")
-                        .font(.caption)
-                        .foregroundStyle(Theme.secondaryText)
-                        .textCase(nil)
-                }
-            }
-            .listStyle(.plain).scrollContentBackground(.hidden)
-        case .specs:
-            let filteredSpecs = app.specs.specs.filter {
-                query.isEmpty
-                    || $0.title.localizedCaseInsensitiveContains(query)
-                    || $0.repo.fullName.localizedCaseInsensitiveContains(query)
-            }
-            List {
-                Section {
-                    if filteredSpecs.isEmpty {
-                        Text(query.isEmpty ? "No specs yet. Tap + above to start one." : "No specs match.")
-                            .font(.subheadline)
-                            .foregroundStyle(Theme.secondaryText)
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
-                    }
-                    ForEach(filteredSpecs) { spec in
-                        Button {
-                            app.sheet = .specReview(spec.id)
-                            app.isMenuOpen = false
-                        } label: {
-                            HStack(spacing: 10) {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    HStack(spacing: 6) {
-                                        Text(spec.title)
-                                            .font(.subheadline.weight(.semibold))
-                                            .lineLimit(1)
-                                        Text(spec.stage.title)
-                                            .font(.system(size: 10, weight: .semibold))
-                                            .foregroundStyle(theme.accent)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(theme.accent.opacity(0.12), in: Capsule())
-                                    }
-                                    Text(spec.repo.fullName)
-                                        .font(.caption)
-                                        .foregroundStyle(Theme.secondaryText)
-                                        .lineLimit(1)
-                                    if spec.stage == .execution || spec.stage == .completed {
-                                        ProgressView(
-                                            value: Double(spec.tasks.filter(\.isComplete).count),
-                                            total: Double(max(spec.tasks.count, 1))
-                                        )
-                                        .padding(.top, 2)
-                                    }
-                                }
-                                Spacer(minLength: 4)
-                                Image(systemName: "chevron.right")
-                                    .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(Theme.secondaryText)
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                    }
-                    Button {
-                        app.sheet = .specs(activeSidebarRepo)
-                        app.isMenuOpen = false
-                    } label: {
-                        Label("Manage or start a spec", systemImage: "list.clipboard")
-                    }
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-                } header: {
-                    Text("Structured feature plans with requirements, design, and tasks.")
-                        .font(.caption)
-                        .foregroundStyle(Theme.secondaryText)
-                        .textCase(nil)
-                }
-            }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
         }
+        .listStyle(.plain).scrollContentBackground(.hidden).environment(\.defaultMinListRowHeight, 44)
     }
 
     private func row(_ chat: ChatSummary) -> some View {
@@ -491,26 +202,6 @@ struct SideMenu: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Connectors")
-                    Button {
-                        app.jobs.show()
-                    } label: {
-                        Image(systemName: "gearshape.2")
-                            .font(.body.weight(.semibold))
-                            .frame(width: 36, height: 36)
-                            .background(Theme.raised, in: Circle())
-                            .overlay(Circle().strokeBorder(Theme.stroke))
-                            .overlay(alignment: .topTrailing) {
-                                if app.jobs.activeCount > 0 {
-                                    Text("\(min(app.jobs.activeCount, 9))")
-                                        .font(.system(size: 9, weight: .bold))
-                                        .foregroundStyle(.white)
-                                        .frame(width: 16, height: 16)
-                                        .background(theme.accent, in: Circle())
-                                }
-                            }
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Jobs")
                     Button {
                         app.sheet = .settings
                     } label: {

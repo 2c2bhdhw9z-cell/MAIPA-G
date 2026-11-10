@@ -900,6 +900,13 @@ through and become places you can look at what happened, if you ever want to.
 4. **Screens become read-only history.** Specs, Agents, Workflows and Jobs stay reachable so
    nothing is lost, but they no longer need to be visited to *start* anything.
 
+   **Owner, 10 November 2026: the side menu's tab strip is removed entirely, and nothing brings it
+   back.** He had already said this was not what he wants, yet "Chats | Specs | Agents | Workflows"
+   (with "tap one to run it" lists) was still at the top of the side menu. The side menu is now only
+   the chats list with "Search chats"; its footer Jobs button is gone too. No Features switch,
+   setting or condition puts any tab back. The screens, their data and their tests are kept: Specs
+   opens from the chat's mode picker, Workflows from the Workstation, and Jobs from the chat box.
+
 ### Deliberately not in this batch
 - Multi-repo editing (Kiro can select several repos and edit across them; MAIPA-G chats hold one
   repo and can only read files from others). Big separate job, plan it after this lands.
