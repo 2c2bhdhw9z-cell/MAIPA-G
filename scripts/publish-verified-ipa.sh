@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Publishes the already-checked ready-PR artifact after proving the squash merge has the same tree.
+# Publishes an already-checked iOS run's artifact for a main commit. The checked commit is usually
+# the main commit itself; when it differs (a pull request head), the two trees must match.
 set -euo pipefail
 
 [ "$#" -eq 3 ] || { echo "usage: $0 <run-id> <pr-head-sha> <main-sha>" >&2; exit 2; }
@@ -56,6 +57,7 @@ printf '**MAIPA-G** checked by iOS run %s and published from main commit `%s`.\n
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   gh release upload "$TAG" "$TMP/MAIPA-G.ipa" "$TMP/MAIPA-G-$RUN_NUMBER.ipa" --repo "$REPO" --clobber
 else
-  gh release create "$TAG" "$TMP/MAIPA-G.ipa" "$TMP/MAIPA-G-$RUN_NUMBER.ipa" --repo "$REPO" --target "$MAIN_SHA" --title "MAIPA-G build $RUN_NUMBER" --notes-file "$NOTES"
+  # An older main commit finishing after a newer one must not take over "latest".
+  gh release create "$TAG" "$TMP/MAIPA-G.ipa" "$TMP/MAIPA-G-$RUN_NUMBER.ipa" --repo "$REPO" --target "$MAIN_SHA" --title "MAIPA-G build $RUN_NUMBER" --notes-file "$NOTES" --latest="${MAIPAG_LATEST:-true}"
 fi
 echo "published $TAG from verified tree $MAIN_TREE"

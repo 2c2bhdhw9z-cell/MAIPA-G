@@ -47,6 +47,31 @@ release = (ROOT / "scripts/publish-verified-ipa.sh").read_text()
 for required in ("AgentCore tests (Linux)", "iPhone release candidate"):
     if required not in release:
         errors.append(f"publish-verified-ipa.sh: missing release gate {required}")
+# Release gate: a main commit is published, however it landed (pull request merge, direct push or
+# manual run), only from a green iOS run of that exact commit, and never twice.
+ios_on = ios.split("\nconcurrency:", 1)[0]
+if "push:" not in ios_on or "branches: [main]" not in ios_on:
+    errors.append("ios.yml: must run on every push to main so each main commit gets checked")
+if "github.event.pull_request.draft == false" in ios and "github.event_name != 'pull_request' || github.event.pull_request.draft == false" not in ios:
+    errors.append("ios.yml: the Linux checks must not be skipped on pushes or manual runs")
+release_workflow = (ROOT / ".github/workflows/release.yml").read_text()
+for required, why in (
+    ("workflow_run:", "must publish when an iOS run finishes"),
+    ("workflows: [iOS]", "must follow the iOS workflow"),
+    ("github.event.workflow_run.conclusion == 'success'", "must never publish from a failed iOS run"),
+    ("actions/workflows/ios.yml/runs?head_sha=$SHA", "must find the iOS run of the exact commit"),
+    ('.name=="AgentCore tests (Linux)"', "must require the Linux tests"),
+    ('.name=="iPhone release candidate"', "must require the iPhone build"),
+    ('.conclusion=="success"', "must require green jobs"),
+    ("compare/$SHA...$MAIN_HEAD", "must only publish commits on main"),
+    ("is already published as", "must not publish a commit twice"),
+    ("skip ci", "must skip [skip ci] commits instead of failing"),
+    ("scripts/publish-verified-ipa.sh", "must publish through the verifying script"),
+):
+    if required not in release_workflow:
+        errors.append(f"release.yml: {why} ({required})")
+if "pulls --jq" in release_workflow or "merged_at" in release_workflow:
+    errors.append("release.yml: must not require a merged pull request; the gate is a green iOS run of the commit")
 manifest = json.loads((ROOT / "docs/regressions/2026-10-29.json").read_text())
 reports = manifest.get("reports", [])
 expected_ids = {f"OCT29-{number:02d}" for number in range(1, 19)}

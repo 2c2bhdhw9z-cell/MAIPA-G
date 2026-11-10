@@ -1,10 +1,19 @@
 name: iOS
 
-# The complete release candidate is built once, on the ready pull request. A squash merge does not
-# rebuild it: release.yml runs scripts/publish-verified-ipa.sh, which proves the PR and main trees
-# match before publishing this run's checked artifact. It only publishes when every job here passed.
+# Builds and checks the complete release candidate for pull requests, for every push to main and
+# by hand. When a run of a main commit passes, release.yml (on workflow_run) publishes this run's
+# checked artifact through scripts/publish-verified-ipa.sh. It only publishes when every job here passed.
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "App/**"
+      - "AgentCore/**"
+      - "docs/**"
+      - "scripts/**"
+      - ".github/workflows/ios.yml"
+      - ".github/workflows/release.yml"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
@@ -24,7 +33,7 @@ permissions:
 jobs:
   checks:
     name: AgentCore tests (Linux)
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
