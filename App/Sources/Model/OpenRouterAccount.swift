@@ -86,6 +86,13 @@ final class OpenRouterAccount {
         return items
     }
 
+    /// Every connected provider's balance added up, in dollars, or nil when none reports one.
+    /// Real spend is this figure before a turn minus this figure after it.
+    var totalBalance: Double? {
+        let items = providerBalanceItems
+        return items.isEmpty ? nil : items.reduce(0) { $0 + $1.balance }
+    }
+
     var activeProviderSummary: String {
         var names: [String] = []
         if hasOpenRouterKey { names.append("OpenRouter") }

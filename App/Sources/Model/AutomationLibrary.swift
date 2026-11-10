@@ -161,6 +161,12 @@ final class AutomationLibrary {
             return false
         }
         guard let app else { return false }
+        // Workflows off means nothing can start a workflow from anywhere. A single agent run from
+        // the Agents screen is not a workflow, so it still runs.
+        guard app.settings.workflowsEnabled || workflow.id.hasPrefix("agent-run:") else {
+            lastError = "Workflows are off in Settings → Features. Turn them on to run one."
+            return false
+        }
         let job = await app.jobs.start(workflow: workflow, request: request, repo: repo)
         if job == nil {
             lastError = app.jobs.lastError ?? "Couldn't start this run."

@@ -26,7 +26,7 @@ struct SpecsScreen: View {
                     ContentUnavailableView(
                         "No specs yet",
                         systemImage: "list.clipboard",
-                        description: Text(canCreateSpec ? "Tap + to start a structured spec for your feature." : "Connect GitHub in Settings before starting a spec.")
+                        description: Text(canCreateSpec ? "Specs you write show up here. You don't need to start one here: in a chat, pick Spec to plan first, or tap + for a structured spec." : "Connect GitHub in Settings before starting a spec.")
                     )
                 }
                 ForEach(filtered) { spec in

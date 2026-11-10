@@ -420,7 +420,18 @@ final class AppModel {
     }
 
     func turnFinished(in session: ChatSession) {
-        Task { await openRouter.refreshKeyInfo(force: true) }
+        // Real spend: read the balance again after the turn, and once more a little later because
+        // providers can take a few seconds to charge. The turn's real cost is the difference.
+        let finishedTurnID = session.chat.messages.last?.id
+        let account = openRouter
+        Task { [weak session] in
+            await account.refreshKeyInfo(force: true)
+            if let id = finishedTurnID, let balance = account.totalBalance { session?.recordBalanceAfter(balance, messageID: id) }
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            guard let session, !session.isRunning, session.chat.messages.last?.id == finishedTurnID else { return }
+            await account.refreshKeyInfo(force: true)
+            if let id = finishedTurnID, let balance = account.totalBalance { session.recordBalanceAfter(balance, messageID: id) }
+        }
         sync.request(after: 2.5)
         if session.lastTurn?.status == .done || session.lastTurn?.status == .waitingForUser {
             Haptics.success()

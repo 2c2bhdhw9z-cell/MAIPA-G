@@ -199,14 +199,22 @@ public struct Usage: Codable, Sendable, Hashable {
     public var cacheWriteTokens: Int?
     /// US dollars.
     public var cost: Double?
+    /// True when `cost` was worked out from a price list because the provider reported none. It
+    /// is arithmetic, not what was billed, and is labelled "estimated" wherever it shows.
+    public var costIsEstimate: Bool?
+    /// True when the provider reported no cost and the model has no known price, so the cost is
+    /// unknown. Shown as "price unknown", never as $0.
+    public var priceUnknown: Bool?
 
-    public init(promptTokens: Int = 0, completionTokens: Int = 0, reasoningTokens: Int? = nil, cachedTokens: Int? = nil, cacheWriteTokens: Int? = nil, cost: Double? = nil) {
+    public init(promptTokens: Int = 0, completionTokens: Int = 0, reasoningTokens: Int? = nil, cachedTokens: Int? = nil, cacheWriteTokens: Int? = nil, cost: Double? = nil, costIsEstimate: Bool? = nil, priceUnknown: Bool? = nil) {
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
         self.reasoningTokens = reasoningTokens
         self.cachedTokens = cachedTokens
         self.cacheWriteTokens = cacheWriteTokens
         self.cost = cost
+        self.costIsEstimate = costIsEstimate
+        self.priceUnknown = priceUnknown
     }
 
     init(json: JSONValue) {
@@ -233,7 +241,9 @@ public struct Usage: Codable, Sendable, Hashable {
             reasoningTokens: sum(lhs.reasoningTokens, rhs.reasoningTokens),
             cachedTokens: sum(lhs.cachedTokens, rhs.cachedTokens),
             cacheWriteTokens: sum(lhs.cacheWriteTokens, rhs.cacheWriteTokens),
-            cost: sum(lhs.cost, rhs.cost)
+            cost: sum(lhs.cost, rhs.cost),
+            costIsEstimate: (lhs.costIsEstimate == true || rhs.costIsEstimate == true) ? true : nil,
+            priceUnknown: (lhs.priceUnknown == true || rhs.priceUnknown == true) ? true : nil
         )
     }
 }

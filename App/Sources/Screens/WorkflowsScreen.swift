@@ -33,7 +33,9 @@ struct WorkflowsScreen: View {
                         }
                     }
                 } header: {
-                    Text("Step-by-step plans that chain specialist agents together — tap any workflow to run it.")
+                    Text(app.settings.workflowsEnabled
+                        ? "Step-by-step plans that chain specialist agents together. The chat starts them when a request clearly needs one; this screen is history, and you can still run one by hand."
+                        : "Workflows are off in Settings → Features, so none can start. This screen is history: it shows what exists.")
                         .font(.footnote)
                         .foregroundStyle(Theme.secondaryText)
                         .textCase(nil)

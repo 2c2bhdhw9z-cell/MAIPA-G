@@ -447,9 +447,17 @@ struct AssistantTurnView: View {
                     Text("·")
                     Text(route)
                 }
-                if let cost = turn.usage.cost {
+                // Real cost from the balance once the turn has ended; until then the provider's
+                // figure, or a labelled estimate. An unknown price is said, never shown as $0.
+                if let real = turn.realCost {
                     Text("·")
-                    Text(cost.dollars)
+                    Text(real.dollars)
+                } else if let cost = turn.usage.cost {
+                    Text("·")
+                    Text(turn.usage.costIsEstimate == true ? "\(cost.dollars) estimated" : cost.dollars)
+                } else if turn.usage.priceUnknown == true {
+                    Text("·")
+                    Text("price unknown")
                 }
             }
             .lineLimit(1)

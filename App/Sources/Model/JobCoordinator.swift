@@ -55,26 +55,9 @@ final class JobCoordinator {
     /// setting still apply as they do everywhere else.
     func routedWorkflow(request: String, repo: ChatRepo?) -> WorkflowDefinition? {
         guard let app, app.settings.workflowsEnabled else { return nil }
-        let text = request.lowercased()
-        guard text.count >= 12 else { return nil }
-        // A question is an answer, not a job, whatever else it says.
-        let isQuestion = text.contains("?")
-            || text.hasPrefix("what ") || text.hasPrefix("why ") || text.hasPrefix("who ")
-            || text.hasPrefix("when ") || text.hasPrefix("how do ") || text.hasPrefix("where ")
-        guard !isQuestion else { return nil }
-        let multiStepCues = [
-            "workflow", "step by step", "step-by-step", "end to end", "end-to-end",
-            "full feature", "implement the whole", "build the whole", "do all of",
-        ]
-        let planCues = ["plan out", "plan this out", "write a plan", "make a plan", "break this down into steps"]
-        let asksForMultiStep = multiStepCues.contains { text.contains($0) }
-        let asksForPlan = planCues.contains { text.contains($0) }
-        guard asksForMultiStep || asksForPlan else { return nil }
-        // A plan request is a plan, not a feature build.
-        if asksForPlan && !asksForMultiStep {
-            return BuiltInWorkflows.named("look-into-something")
-        }
-        return BuiltInWorkflows.named("full-feature")
+        // The words are judged in AgentCore (`ChatRouting`), where the decision has unit tests.
+        guard let id = ChatRouting.decide(request).workflowID else { return nil }
+        return BuiltInWorkflows.named(id)
     }
 
     @discardableResult

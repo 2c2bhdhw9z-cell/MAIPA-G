@@ -1073,8 +1073,18 @@ public enum AIProviderGateway {
         }
     }
 
-    private static func fallbackCost(for usage: Usage, rawModelID: String, endpoint: AIProviderEndpoint, catalogueModel: ModelInfo?) -> Double? {
-        if let existing = usage.cost, existing > 0 { return existing }
+    /// The provider's own cost when it reported one. Otherwise a figure worked out from the price
+    /// list, marked `costIsEstimate` so it is labelled "estimated". When the model has no known
+    /// price, the cost is left empty and marked `priceUnknown`, so a paid model never shows as $0.
+    static func withFallbackCost(_ usage: Usage, rawModelID: String, endpoint: AIProviderEndpoint, catalogueModel: ModelInfo?) -> Usage {
+        var result = usage
+        if let existing = usage.cost, existing > 0 { return result }
+        func unknown() -> Usage {
+            result.cost = nil
+            result.costIsEstimate = nil
+            result.priceUnknown = true
+            return result
+        }
         let inPrice: Double?
         let outPrice: Double?
         let crPrice: Double?
@@ -1092,10 +1102,16 @@ public enum AIProviderGateway {
             crPrice = op.cacheReadPerM.map { $0 / 1_000_000.0 }
             cwPrice = op.cacheWritePerM.map { $0 / 1_000_000.0 }
         } else {
-            return usage.cost
+            return unknown()
         }
-        guard let inP = inPrice, let outP = outPrice else { return usage.cost }
-        if inP == 0 && outP == 0 { return 0 }
+        guard let inP = inPrice, let outP = outPrice else { return unknown() }
+        if inP == 0 && outP == 0 {
+            // Zero prices only mean free when the model says it is free. Otherwise the price list
+            // simply has no price for it, and showing $0 would make a paid model look free.
+            guard rawModelID.lowercased().contains("free") else { return unknown() }
+            result.cost = 0
+            return result
+        }
         let cachedRead = max(0, usage.cachedTokens ?? 0)
         let cacheWrite = max(0, usage.cacheWriteTokens ?? 0)
         let uncachedInput = max(0, usage.promptTokens - cachedRead - cacheWrite)
@@ -1105,7 +1121,10 @@ public enum AIProviderGateway {
             + Double(cachedRead) * readRate
             + Double(cacheWrite) * writeRate
             + Double(max(0, usage.completionTokens)) * outP
-        return total
+        result.cost = total
+        result.costIsEstimate = true
+        result.priceUnknown = nil
+        return result
     }
 
     // 1. Standard OpenAI `/v1/chat/completions`
@@ -1207,7 +1226,7 @@ public enum AIProviderGateway {
                     if chunk.provider == nil { chunk.provider = endpoint.name }
                     chunk.model = chunk.model.map { AIProviderModelID.encode(providerID: endpoint.id, rawModelID: $0) } ?? canonicalModelID
                     if var u = chunk.usage {
-                        u.cost = fallbackCost(for: u, rawModelID: rawModelID, endpoint: endpoint, catalogueModel: catalogueModel)
+                        u = withFallbackCost(u, rawModelID: rawModelID, endpoint: endpoint, catalogueModel: catalogueModel)
                         chunk.usage = u
                     }
                     continuation.yield(chunk)
@@ -1233,7 +1252,7 @@ public enum AIProviderGateway {
                             chunk.model = canonicalModelID
                         }
                         if var u = chunk.usage {
-                            u.cost = fallbackCost(for: u, rawModelID: rawModelID, endpoint: endpoint, catalogueModel: catalogueModel)
+                            u = withFallbackCost(u, rawModelID: rawModelID, endpoint: endpoint, catalogueModel: catalogueModel)
                             chunk.usage = u
                         }
                         continuation.yield(chunk)
@@ -1669,7 +1688,7 @@ public enum AIProviderGateway {
                                 cacheWriteTokens: cacheWriteTokens > 0 ? cacheWriteTokens : nil,
                                 cost: json["usage"]?["cost"]?.doubleValue
                             )
-                            usage.cost = fallbackCost(for: usage, rawModelID: rawModelID, endpoint: endpoint, catalogueModel: catalogueModel)
+                            usage = withFallbackCost(usage, rawModelID: rawModelID, endpoint: endpoint, catalogueModel: catalogueModel)
                             continuation.yield(StreamChunk(id: msgID, model: modelSeen, provider: providerName, finishReason: finish, usage: usage))
                         case "error":
                             if let errObj = json["error"] {
@@ -1854,7 +1873,7 @@ public enum AIProviderGateway {
                             let cached = u?["input_tokens_details"]?["cached_tokens"]?.intValue
                             let hasCalls = nextIdx > 0
                             var usage = Usage(promptTokens: inT, completionTokens: outT, cachedTokens: cached)
-                            usage.cost = fallbackCost(for: usage, rawModelID: rawModelID, endpoint: endpoint, catalogueModel: catalogueModel)
+                            usage = withFallbackCost(usage, rawModelID: rawModelID, endpoint: endpoint, catalogueModel: catalogueModel)
                             continuation.yield(StreamChunk(model: canonicalModelID, provider: providerName, finishReason: hasCalls ? "tool_calls" : "stop", usage: usage))
                         default:
                             break
@@ -2011,7 +2030,7 @@ public enum AIProviderGateway {
                             let outT = u?["candidatesTokenCount"]?.intValue ?? 0
                             let cached = u?["cachedContentTokenCount"]?.intValue
                             var usage = Usage(promptTokens: inT, completionTokens: outT, cachedTokens: cached)
-                            usage.cost = fallbackCost(for: usage, rawModelID: rawModelID, endpoint: endpoint, catalogueModel: catalogueModel)
+                            usage = withFallbackCost(usage, rawModelID: rawModelID, endpoint: endpoint, catalogueModel: catalogueModel)
                             let mappedFinish = callIndex > 0 ? "tool_calls" : finish.lowercased()
                             continuation.yield(StreamChunk(model: canonicalModelID, provider: providerName, finishReason: mappedFinish, usage: usage))
                         }

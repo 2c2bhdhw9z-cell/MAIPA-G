@@ -52,13 +52,12 @@ struct SettingsScreen: View {
                     }
                 }
                 look
-                workflowPolicy
+                features
                 chatComputer
                 previewHosts
                 memories
                 money
                 notifications
-                repoSaving
                 saving
                 about
                 technical
@@ -94,6 +93,8 @@ struct SettingsScreen: View {
                     settings.notificationsOn = edited.notificationsOn
                     settings.directSaveRepos = edited.directSaveRepos
                     settings.workflowPolicy = edited.workflowPolicy
+                    settings.workflowsEnabled = edited.workflowsEnabled
+                    settings.specsEnabled = edited.specsEnabled
                     settings.autonomousEnabled = edited.autonomousEnabled
                     settings.memoriesOn = edited.memoriesOn
                     settings.chatComputerServer = edited.chatComputerServer
@@ -140,8 +141,10 @@ struct SettingsScreen: View {
 
     // MARK: Accounts
 
+    /// GitHub in one place: connect, pick which repos MAIPA-G can use, and save-straight-to-branch
+    /// for each repo, all on this screen.
     private var accounts: some View {
-        Section("Accounts") {
+        Section {
             if app.github.isConnected {
                 VStack(alignment: .leading, spacing: 4) {
                     Label("GitHub: \(app.github.login ?? "connected")", systemImage: "link")
@@ -157,6 +160,21 @@ struct SettingsScreen: View {
                         Task { await app.github.reauthorize() }
                     }
                 }
+                if app.github.repos.isEmpty {
+                    Text("Your repos appear here after GitHub connects.")
+                        .foregroundStyle(Theme.secondaryText)
+                }
+                ForEach(app.github.repos) { repo in
+                    Toggle(isOn: Binding(
+                        get: { draft.directSaveRepos[repo.fullName] ?? false },
+                        set: { draft.directSaveRepos[repo.fullName] = $0 }
+                    )) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(repo.fullName).lineLimit(1)
+                            Text("Save straight to branch").font(.caption).foregroundStyle(Theme.secondaryText)
+                        }
+                    }
+                }
                 Button("Disconnect GitHub", role: .destructive) { confirmDisconnect = true }
             } else {
                 Button {
@@ -164,6 +182,12 @@ struct SettingsScreen: View {
                 } label: {
                     Label(app.github.phase == .needsInstall ? "Finish connecting GitHub" : "Connect GitHub", systemImage: "link")
                 }
+            }
+        } header: {
+            Text("GitHub")
+        } footer: {
+            if app.github.isConnected {
+                Text("A repo with Save straight to branch off uses a side branch and pull request. A repo's own rules always win.")
             }
         }
     }
@@ -345,13 +369,32 @@ struct SettingsScreen: View {
 
     // MARK: Autonomous
 
-    private var workflowPolicy: some View {
+    /// One switch each for Workflows, Specs and Autonomous jobs, all off to start with, so the app
+    /// behaves like a plain chat with a repo until one is turned on.
+    private var features: some View {
         Section {
-            Toggle("Autonomous enabled", isOn: $draft.autonomousEnabled)
+            Toggle(isOn: $draft.workflowsEnabled) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Workflows")
+                    Text("Off: nothing starts a workflow, and the chat answers plainly.").font(.caption).foregroundStyle(Theme.secondaryText)
+                }
+            }
+            Toggle(isOn: $draft.specsEnabled) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Specs")
+                    Text("Off: Spec is hidden from the chat's mode picker, and the chat plans inline.").font(.caption).foregroundStyle(Theme.secondaryText)
+                }
+            }
+            Toggle(isOn: $draft.autonomousEnabled) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Autonomous jobs")
+                    Text("Off: no repo jobs run, and Jobs shows only what already ran.").font(.caption).foregroundStyle(Theme.secondaryText)
+                }
+            }
         } header: {
-            Text("Autonomous")
+            Text("Features")
         } footer: {
-            Text("Turn Autonomous on from the + button in any chat so the AI plans, uses helper agents and finishes the whole job inside the chat using Auto or whichever AI you pick.")
+            Text("All three start off. Workflows cost more than sub-agents: each step is a full AI call that re-sends the chat.")
         }
     }
 
@@ -517,27 +560,6 @@ struct SettingsScreen: View {
             Toggle("Tell me when work finishes or needs me", isOn: $draft.notificationsOn)
         } header: { Text("Notifications") } footer: {
             Text("MAIPA-G only sends a notification when work finishes or needs an answer.")
-        }
-    }
-
-    private var repoSaving: some View {
-        let enabledCount = app.github.repos.filter { draft.directSaveRepos[$0.fullName] == true }.count
-        return Section {
-            NavigationLink {
-                DirectSaveReposScreen(directSaveRepos: $draft.directSaveRepos, repos: app.github.repos)
-            } label: {
-                HStack {
-                    Text("Save straight to branch")
-                    Spacer()
-                    Text(enabledCount == 0 ? "Off" : (enabledCount == 1 ? "1 repo" : "\(enabledCount) repos"))
-                        .font(.subheadline)
-                        .foregroundStyle(Theme.secondaryText)
-                }
-            }
-        } header: {
-            Text("Repository saving")
-        } footer: {
-            Text("Off uses a side branch and pull request. A repo's own rules always win.")
         }
     }
 
@@ -714,39 +736,3 @@ struct SettingsScreen: View {
     }
 }
 
-private struct DirectSaveReposScreen: View {
-    @Binding var directSaveRepos: [String: Bool]
-    let repos: [GitHubRepo]
-    @State private var query = ""
-
-    private var filteredRepos: [GitHubRepo] {
-        let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return repos }
-        return repos.filter { $0.fullName.localizedCaseInsensitiveContains(clean) }
-    }
-
-    var body: some View {
-        Form {
-            Section {
-                if repos.isEmpty {
-                    Text("Your repos appear here after GitHub connects.")
-                        .foregroundStyle(Theme.secondaryText)
-                } else if filteredRepos.isEmpty {
-                    Text("No repos match \"\(query)\".")
-                        .foregroundStyle(Theme.secondaryText)
-                }
-                ForEach(filteredRepos) { repo in
-                    Toggle(repo.fullName, isOn: Binding(
-                        get: { directSaveRepos[repo.fullName] ?? false },
-                        set: { directSaveRepos[repo.fullName] = $0 }
-                    ))
-                }
-            } footer: {
-                Text("Off uses a side branch and pull request. A repo's own branch protection rules always win.")
-            }
-        }
-        .searchable(text: $query, prompt: "Search repositories")
-        .navigationTitle("Save straight to branch")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}

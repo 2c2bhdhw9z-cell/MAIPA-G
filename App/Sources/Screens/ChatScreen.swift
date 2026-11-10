@@ -111,6 +111,15 @@ struct ChatScreen: View {
         }
     }
 
+    /// The chat's spend in a few characters: "$0.42", "$0.42 est.", "$0.42 + price unknown".
+    static func spendText(_ spend: SpendSummary) -> String {
+        guard let dollars = spend.dollars else { return "price unknown" }
+        var text = dollars.dollars
+        if spend.hasEstimate { text += " est." }
+        if spend.hasUnknownPrice { text += " + price unknown" }
+        return text
+    }
+
     // MARK: - Lowered Custom Top Bar (Crisp in Light & Dark Mode)
 
     private var topBar: some View {
@@ -145,12 +154,16 @@ struct ChatScreen: View {
             Spacer(minLength: 4)
 
             HStack(spacing: 4) {
-                if let cost = session.chat.totalUsage.cost {
-                    Text(cost.dollars)
+                // Real spend from balance readings where there are some; anything worked out from a
+                // price list says "est."; an unknown price is never shown as $0.
+                let spend = session.chat.spendSummary
+                if spend.dollars != nil || spend.hasUnknownPrice {
+                    Text(Self.spendText(spend))
                         .font(.caption.weight(.medium).monospacedDigit())
                         .foregroundStyle(Theme.secondaryText)
                         .padding(.leading, 8)
                         .padding(.trailing, 2)
+                        .accessibilityLabel(spend.hasEstimate ? "Estimated spend" : "Spend")
                 }
 
                 Button {
@@ -390,7 +403,10 @@ struct ChatScreen: View {
                     isCompacting: session.isCompacting,
                     canRestoreMemory: session.canUncompact,
                     onCompact: { session.compact() },
-                    onRestoreMemory: { session.restoreFullMemory() }
+                    onRestoreMemory: { session.restoreFullMemory() },
+                    chatMode: session.effectiveMode,
+                    chatModes: session.availableModes,
+                    onPickMode: { session.mode = $0 }
                 )
                 .padding(.horizontal, 12)
                 .padding(.bottom, 6)

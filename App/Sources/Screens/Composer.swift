@@ -56,6 +56,11 @@ struct Composer: View {
     var canRestoreMemory = false
     var onCompact: (() -> Void)? = nil
     var onRestoreMemory: (() -> Void)? = nil
+    /// This chat's mode (Vibe or Spec), shown next to the model and thinking pills. Nil hides it.
+    var chatMode: ChatMode? = nil
+    /// The modes on offer: Spec is left out while Specs is off in Settings.
+    var chatModes: [ChatMode] = []
+    var onPickMode: ((ChatMode) -> Void)? = nil
 
     private static let pasteAttachmentThreshold = 20_000
 
@@ -203,6 +208,7 @@ struct Composer: View {
                     plusMenu
                     modelButton
                     if !thinkingLevels.isEmpty { thinkingMenu }
+                    if let chatMode { modeMenu(chatMode) }
                     Spacer(minLength: 4)
                     if isRunning, let modeBinding = busySendMode {
                         busyModeToggle(modeBinding)
@@ -386,6 +392,43 @@ struct Composer: View {
         }
         .foregroundStyle(.primary)
         .accessibilityLabel("Thinking: \(thinking.label)")
+    }
+
+    /// Vibe or Spec for this chat. Two modes, no third; Spec only appears while Specs is on.
+    private func modeMenu(_ current: ChatMode) -> some View {
+        Menu {
+            Section("Mode") {
+                ForEach(chatModes) { mode in
+                    Button {
+                        focused = false
+                        onPickMode?(mode)
+                    } label: {
+                        if mode == current { Label("\(mode.label) — \(mode.explanation)", systemImage: "checkmark") }
+                        else { Text("\(mode.label) — \(mode.explanation)") }
+                    }
+                }
+            }
+            if !chatModes.contains(.spec) {
+                Text("Turn on Specs in Settings → Features to plan first with Spec.")
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: current.symbolName).foregroundStyle(theme.accent)
+                Text(current.label)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Theme.secondaryText)
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .font(.footnote.weight(.medium))
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
+            .background(Theme.raised.opacity(0.9), in: Capsule())
+            .overlay(Capsule().strokeBorder(Theme.stroke))
+        }
+        .foregroundStyle(.primary)
+        .accessibilityLabel("Mode: \(current.label)")
     }
 
     private var plusMenu: some View {

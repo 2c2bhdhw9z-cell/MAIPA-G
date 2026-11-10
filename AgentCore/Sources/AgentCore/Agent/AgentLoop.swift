@@ -211,8 +211,11 @@ public struct AgentTurnInput: Sendable {
     public var steering: SteeringInbox?
     /// False for background sub-agents and workflow steps that run autonomously without pausing for interactive questions.
     public var allowAskUser: Bool
+    /// Set when the person tapped Retry on a reply that stopped early. The turn carries on from
+    /// where it stopped, and the model is told plainly that it was cut off. Not saved in the chat.
+    public var resumeNote: String?
 
-    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 250, spendLimit: Double? = nil, attachmentData: [UUID: Data] = [:], serverTools: [ToolSpec] = [], fallbackModels: [String] = [], requiresInitialSpendApproval: Bool = false, agent: AgentDefinition? = nil, steering: SteeringInbox? = nil, allowAskUser: Bool = true) {
+    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 250, spendLimit: Double? = nil, attachmentData: [UUID: Data] = [:], serverTools: [ToolSpec] = [], fallbackModels: [String] = [], requiresInitialSpendApproval: Bool = false, agent: AgentDefinition? = nil, steering: SteeringInbox? = nil, allowAskUser: Bool = true, resumeNote: String? = nil) {
         self.chat = chat
         self.route = route
         self.systemPrompt = systemPrompt
@@ -227,6 +230,7 @@ public struct AgentTurnInput: Sendable {
         self.agent = agent
         self.steering = steering
         self.allowAskUser = allowAskUser
+        self.resumeNote = resumeNote
     }
 }
 
@@ -328,6 +332,46 @@ public enum AgentLoop {
 
     /// The plain words a failed turn shows for `error`.
     static func describe(_ error: Error) -> TurnFailure { Runner.describe(error) }
+
+    /// The notice on any reply that ended some way other than a normal finish.
+    public static let stoppedEarlyNotice = "This reply stopped early. Tap retry. Retry carries on from where it stopped; staged file changes are kept, but the AI's own thinking and file reads from this attempt are lost."
+
+    /// What the model is told when Retry carries on a reply that stopped early. Different from
+    /// "Keep going", which is the person's own message asking for more.
+    public static func resumeNote(partialText: String) -> String {
+        let tail = String(partialText.suffix(600)).trimmingCharacters(in: .whitespacesAndNewlines)
+        let whereItStopped = tail.isEmpty
+            ? "It stopped before writing any visible reply."
+            : "It stopped here: \"…\(tail)\""
+        return "[Retry after an early stop] Your previous attempt at this reply was cut off before it finished (the connection or stream ended early), not stopped by the person. \(whereItStopped) Carry on from exactly where it stopped. Do not start over and do not repeat what you already wrote. Your earlier thinking and any file reads from that attempt were lost, so re-read a file only if you need it."
+    }
+
+    /// One plain line saying where a slow reply's time went, from the measured step timings.
+    static func slowTurnSummary(elapsed: TimeInterval, steps: ArraySlice<AssistantStep>) -> String {
+        func time(_ seconds: Double) -> String {
+            let total = Int(seconds.rounded())
+            return total >= 60 ? "\(total / 60)m \(total % 60)s" : "\(total)s"
+        }
+        let timings = steps.compactMap(\.timing)
+        let calls = timings.filter { $0.modelCallSeconds > 0 }
+        let modelTime = calls.reduce(0) { $0 + $1.modelCallSeconds }
+        let firstBytes = calls.compactMap(\.firstByteSeconds)
+        let averageFirst = firstBytes.isEmpty ? 0 : firstBytes.reduce(0, +) / Double(firstBytes.count)
+        let slowestFirst = firstBytes.max() ?? 0
+        let longestStall = calls.map(\.longestStallSeconds).max() ?? 0
+        let toolTime = timings.compactMap(\.toolSeconds).reduce(0, +)
+        let waiting = timings.compactMap(\.waitingSeconds).reduce(0, +)
+        let retryWait = timings.reduce(0) { $0 + $1.retryWaitSeconds }
+        let attempts = timings.reduce(0) { $0 + $1.attempts }
+        let biggestPrompt = timings.map { $0.promptTokens ?? $0.sentTokensEstimate }.max() ?? 0
+        return "Slow reply (\(time(elapsed))), measured: \(calls.count) model call\(calls.count == 1 ? "" : "s") took \(time(modelTime)) (first words after \(time(averageFirst)) on average, slowest \(time(slowestFirst)); longest silence mid-reply \(time(longestStall))). Tools \(time(toolTime)). Waiting on sub-agents \(time(waiting)). Retry waits \(time(retryWait)) over \(attempts) request\(attempts == 1 ? "" : "s"). Largest prompt \(biggestPrompt) tokens."
+    }
+
+    /// True for the ways a reply normally ends. "length" has its own notice.
+    static func isNormalFinish(_ reason: String?) -> Bool {
+        guard let reason = reason?.lowercased() else { return false }
+        return ["stop", "tool_calls", "function_call", "end_turn", "length", "max_tokens", "stop_sequence", "tool_use"].contains(reason)
+    }
 }
 
 private struct Runner {
@@ -394,7 +438,26 @@ private struct Runner {
         allowAskUser = input.allowAskUser
         self.environment = environment
         self.continuation = continuation
+        if let note = input.resumeNote {
+            pendingBlankReplyNudge = note
+            turn.stoppedEarly = nil
+            turn.notices.removeAll { $0 == AgentLoop.stoppedEarlyNotice }
+        }
     }
+
+    mutating func markStoppedEarly() {
+        turn.stoppedEarly = true
+        if !turn.notices.contains(AgentLoop.stoppedEarlyNotice) { turn.notices.append(AgentLoop.stoppedEarlyNotice) }
+    }
+
+    /// Adds measured seconds to one of a step's timings (the last step when `index` is nil).
+    mutating func addTiming(_ key: WritableKeyPath<StepTiming, Double?>, since start: Date, step index: Int? = nil) {
+        guard let index = index ?? turn.steps.indices.last, turn.steps.indices.contains(index) else { return }
+        var timing = turn.steps[index].timing ?? StepTiming()
+        timing[keyPath: key] = (timing[keyPath: key] ?? 0) + Date().timeIntervalSince(start)
+        turn.steps[index].timing = timing
+    }
+
 
     mutating func emit(milestone: Bool) {
         chat.messages[chat.messages.count - 1].assistantTurn = turn
@@ -438,12 +501,17 @@ private struct Runner {
         if turn.routeLabel == nil { turn.routeLabel = route.label }
         emit(milestone: true)
         var newSteps = 0
+        let runStartedAt = Date()
+        let firstStepOfRun = turn.steps.count
         do {
             while true {
                 try Task.checkCancellation()
                 await applyBackgroundCardPatches()
                 if let last = turn.steps.indices.last, turn.steps[last].toolCalls.contains(where: { $0.result == nil }) {
-                    if try await runTools(inStep: last) {
+                    let toolsStartedAt = Date()
+                    let waitingForUser = try await runTools(inStep: last)
+                    addTiming(\.toolSeconds, since: toolsStartedAt, step: last)
+                    if waitingForUser {
                         turn.status = .waitingForUser
                         break
                     }
@@ -465,19 +533,23 @@ private struct Runner {
                 // A steer is kept and sent with their reports. It must not start a new
                 // reply, or another helper, while they are running.
                 if (await steering?.activeBackgroundTaskCount() ?? 0) > 0 {
+                    let waitStartedAt = Date()
                     await steering?.waitForActivity()
+                    addTiming(\.waitingSeconds, since: waitStartedAt)
                     continue
                 }
                 if injectedSteeringNotes.isEmpty, pendingBackgroundReports.isEmpty, newSteps > 0, await steering?.shouldYieldAfterStep() == true {
                     turn.status = .done
                     break
                 }
-                if let last = turn.steps.last, last.toolCalls.isEmpty, last.finishedAt != nil {
+                if pendingBlankReplyNudge == nil, let last = turn.steps.last, last.toolCalls.isEmpty, last.finishedAt != nil {
                     // If the user sent a live mid-run steering note or a backgrounded sub-agent completed, continue immediately!
                     if !injectedSteeringNotes.isEmpty || !pendingBackgroundReports.isEmpty {
                         // Fall through to next step with `injectedSteeringNotes` / `pendingBackgroundReports`.
                     } else if (await steering?.activeBackgroundTaskCount() ?? 0) > 0 {
+                        let waitStartedAt = Date()
                         await steering?.waitForActivity()
+                        addTiming(\.waitingSeconds, since: waitStartedAt)
                         await applyBackgroundCardPatches()
                         continue
                     } else {
@@ -531,9 +603,18 @@ private struct Runner {
             }
         }
         if Task.isCancelled, turn.status == .running { turn.status = .stopped }
+        // Measured, not guessed: a slow reply says where its time went, so the cause is evidence.
+        let elapsed = Date().timeIntervalSince(runStartedAt)
+        if elapsed >= Self.slowTurnSeconds, firstStepOfRun < turn.steps.count {
+            turn.notices.removeAll { $0.hasPrefix("Slow reply (") }
+            turn.notices.append(AgentLoop.slowTurnSummary(elapsed: elapsed, steps: turn.steps[firstStepOfRun...]))
+        }
         await steering?.clearYieldFlag()
         emit(milestone: true)
     }
+
+    /// A reply that runs at least this long gets a measured "where the time went" note.
+    static let slowTurnSeconds: TimeInterval = 120
 
     mutating func stopRunningTools(reason: String) {
         let isGracefulStop = (reason == "Stopped")
@@ -587,6 +668,7 @@ private struct Runner {
 
     mutating func requestStep() async throws {
         var attempt = 0
+        var retryWaitSeconds: Double = 0
         let activeBlankNudge = pendingBlankReplyNudge
         pendingBlankReplyNudge = nil
         let activeSteeringNotes = injectedSteeringNotes
@@ -663,9 +745,32 @@ private struct Runner {
 
             var accumulator = StreamAccumulator()
             var emittedInitialStep = false
+            let sentAt = Date()
+            var firstByteAt: Date?
+            var lastByteAt = sentAt
+            var longestStall: Double = 0
+            let sentTokensEstimate = Transcript.estimatedTokens(messages) + toolSchemaTokens
+            func timing() -> StepTiming {
+                StepTiming(
+                    firstByteSeconds: firstByteAt.map { $0.timeIntervalSince(sentAt) },
+                    modelCallSeconds: Date().timeIntervalSince(sentAt),
+                    longestStallSeconds: longestStall,
+                    retryWaitSeconds: retryWaitSeconds,
+                    attempts: attempt,
+                    promptTokens: accumulator.usage?.promptTokens,
+                    sentTokensEstimate: sentTokensEstimate
+                )
+            }
             do {
                 let stream = try await environment.openRouter.stream(request)
                 for try await chunk in stream {
+                    let arrivedAt = Date()
+                    if firstByteAt == nil {
+                        firstByteAt = arrivedAt
+                    } else {
+                        longestStall = max(longestStall, arrivedAt.timeIntervalSince(lastByteAt))
+                    }
+                    lastByteAt = arrivedAt
                     let prevToolCount = accumulator.toolCalls.count
                     accumulator.apply(chunk)
                     if let error = chunk.error { throw error }
@@ -691,9 +796,15 @@ private struct Runner {
                 guard accumulator.hasOutput || !accumulator.reasoning.isEmpty || accumulator.finishReason != nil else {
                     throw OpenRouterAPIError(httpStatus: 502, code: "empty_reply", message: "The AI sent back an empty reply.")
                 }
+                let measured = timing()
                 await finish(step: index, with: accumulator)
+                turn.steps[index].timing = measured
                 if accumulator.finishReason == "length", accumulator.toolCalls.isEmpty {
                     turn.notices.append("This reply hit its length limit and may be cut off.")
+                } else if accumulator.toolCalls.isEmpty, !AgentLoop.isNormalFinish(accumulator.finishReason) {
+                    // The stream ended without the model saying it was done: a dropped connection
+                    // or a server closing mid-reply. The text so far must not look finished.
+                    markStoppedEarly()
                 }
                 emit(milestone: true)
                 return
@@ -701,13 +812,19 @@ private struct Runner {
                 let producedOutput = accumulator.hasOutput
                 if producedOutput || error is CancellationError || Task.isCancelled {
                     // Keep what arrived; a half-written tool call is not safe to run, so drop those.
+                    let measured = timing()
                     await finish(step: index, with: accumulator, keepToolCalls: false)
+                    turn.steps[index].timing = measured
+                    if producedOutput, !(error is CancellationError), !Task.isCancelled {
+                        markStoppedEarly()
+                    }
                     emit(milestone: true)
                     throw error
                 }
                 turn.steps.remove(at: index)
                 switch await recovery(for: error, attempt: attempt) {
                 case .retry(let delay):
+                    retryWaitSeconds += delay
                     if delay >= 4 {
                         try await waitWithLiveCountdown(seconds: Int(delay.rounded(.up)))
                     } else if delay > 0 {

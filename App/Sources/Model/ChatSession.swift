@@ -41,6 +41,9 @@ final class ChatSession: Identifiable {
     var savedAnchorMessageID: UUID?
     @ObservationIgnored weak var app: AppModel?
     @ObservationIgnored private var run: AgentRun?
+    /// Set by Retry on a reply that stopped early: the next run carries that reply on instead of
+    /// starting it again, and the model is told it was cut off.
+    @ObservationIgnored private var pendingResumeNote: String?
     @ObservationIgnored private var workspace: RepoWorkspace?
     /// Observable without a receipt: true while the in-memory workspace has edits.
     private(set) var hasStagedChanges = false
@@ -495,6 +498,17 @@ final class ChatSession: Identifiable {
         guard !isRunning, !isCompacting,
               let index = chat.messages.firstIndex(where: { $0.id == messageID }),
               chat.messages[index].assistantTurn != nil else { return }
+        // A latest reply that stopped early carries on from where it stopped, rather than being
+        // thrown away and started over. The model is told it was cut off; "Keep going" is still
+        // the person's own message, so the two are different to it.
+        if index == chat.messages.count - 1,
+           let turn = chat.messages[index].assistantTurn, turn.stoppedEarly == true {
+            let partial = turn.steps.last(where: { !$0.text.isEmpty })?.text ?? ""
+            pendingResumeNote = AgentLoop.resumeNote(partialText: partial)
+            touch()
+            start()
+            return
+        }
         chat.messages.removeSubrange(index...)
         chat.messages.append(ChatMessage(body: .assistant(AssistantTurn())))
         pruneInvalidatedCompactionAfterRewind()
@@ -763,6 +777,24 @@ final class ChatSession: Identifiable {
         app?.settings.specsEnabled == true ? [.vibe, .spec] : [.vibe]
     }
 
+    /// The mode this chat actually runs in: a chat left on Spec runs as Vibe while Specs is off.
+    var effectiveMode: ChatMode {
+        availableModes.contains(mode) ? mode : .vibe
+    }
+
+    /// Added to the system prompt in Spec mode: plan first, inside the chat, then build on "go".
+    static let specModeInstructions = """
+
+
+    ## Spec mode (this chat)
+    The person chose Spec for this chat. For any request to build or change something, first write \
+    short requirements and a numbered plan (what changes, where, and how it will be checked), show \
+    them, and stop: make no file changes and run nothing that changes anything until the person \
+    says go (for example "go", "yes", "build it", "looks good"). Once they approve, build exactly \
+    that plan, and say if you have to depart from it. Plain questions are answered directly; they \
+    need no plan.
+    """
+
     func setRepo(_ repo: ChatRepo?) {
         chat.repo = repo
         workspace = nil
@@ -907,6 +939,8 @@ final class ChatSession: Identifiable {
     }
 
     private func runTurn() async {
+        let resumeNote = pendingResumeNote
+        pendingResumeNote = nil
         defer {
             flush()
             refreshStagedChanges()
@@ -924,6 +958,15 @@ final class ChatSession: Identifiable {
             return
         }
         await app.connectors.reconnectIfNeeded()
+        // Real spend: read the provider balance before the turn, so the turn's cost can be taken
+        // from the balance after it. A resumed turn keeps its first reading.
+        if lastTurn?.balanceBefore == nil {
+            await app.openRouter.refreshKeyInfo()
+            if let balance = app.openRouter.totalBalance, var turn = lastTurn {
+                turn.balanceBefore = balance
+                replaceLastTurn(turn)
+            }
+        }
         let aiClient = app.openRouter.client
         let hasOpenRouter = app.openRouter.hasOpenRouterKey
 
@@ -946,7 +989,7 @@ final class ChatSession: Identifiable {
         // extra spending confirmation here — a workflow is sub-agents running longer, so it starts
         // the way they do, and the ordinary spend limit and stop-and-ask setting still apply.
         // A failed start falls through to answering normally rather than leaving the chat empty.
-        if mode == .vibe,
+        if resumeNote == nil, effectiveMode == .vibe,
            let workflow = app.jobs.routedWorkflow(request: lastMessage, repo: chat.repo),
            chat.repo != nil {
             if await runRoutedWorkflow(workflow, request: lastMessage, app: app) { return }
@@ -1460,6 +1503,8 @@ final class ChatSession: Identifiable {
                     let saved = await app.automations.saveWorkflow(WorkflowRecord(definition: draft))
                     return await MainActor.run { saved?.definition ?? draft }
                 })
+                // Workflows off means nothing can start a workflow from anywhere, the chat included.
+                if app.settings.workflowsEnabled {
                 tools.append(RunWorkflowTool(
                     resolveWorkflow: { [weak app] id in
                         await MainActor.run {
@@ -1482,6 +1527,7 @@ final class ChatSession: Identifiable {
                         )
                     }
                 ))
+                }
                 tools.append(inspectWorkflowTool)
                 tools.append(UpdateWorkflowTool { [weak self] runID, replacementSteps in
                     guard let self else { throw ToolInputError("Chat is no longer open.") }
@@ -1515,7 +1561,7 @@ final class ChatSession: Identifiable {
                 connectedRepositories: app.github.repos.map(\.fullName),
                 isAutonomous: isAutonomousTurn,
                 skippedAttachments: skippedAttachments
-            ),
+            ) + (effectiveMode == .spec ? Self.specModeInstructions : ""),
             tools: tools,
             allowTools: app.openRouter.supportsTools(chat.model),
             spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil,
@@ -1523,7 +1569,8 @@ final class ChatSession: Identifiable {
             serverTools: [],
             fallbackModels: fallbackModels,
             requiresInitialSpendApproval: false,
-            steering: turnSteering
+            steering: turnSteering,
+            resumeNote: resumeNote
         )
         let account = app.openRouter
         let attachmentStore = app.attachmentStore
@@ -1636,6 +1683,16 @@ final class ChatSession: Identifiable {
             chat.updatedAt = Date()
             if scheduleSave { saveSoon() }
         }
+    }
+
+    /// Records the provider balance read after a turn, so the turn shows what it really cost.
+    func recordBalanceAfter(_ balance: Double, messageID: UUID) {
+        guard let index = chat.messages.firstIndex(where: { $0.id == messageID }),
+              var turn = chat.messages[index].assistantTurn,
+              turn.balanceBefore != nil, turn.status != .running else { return }
+        turn.balanceAfter = balance
+        chat.messages[index].assistantTurn = turn
+        saveSoon()
     }
 
     private func replaceLastTurn(_ turn: AssistantTurn) {
@@ -2412,7 +2469,8 @@ final class ChatSession: Identifiable {
     }
 
     func retryWorkflowRun(_ runID: String) {
-        guard let snap = activeWorkflowRuns.first(where: { $0.id == runID }), !snap.isRunning, let app else { return }
+        guard let snap = activeWorkflowRuns.first(where: { $0.id == runID }), !snap.isRunning, let app,
+              app.settings.workflowsEnabled else { return }
         let catalogue = app.openRouter.modelsByID
         let route = ModelRouter.route(
             choice: chat.model,

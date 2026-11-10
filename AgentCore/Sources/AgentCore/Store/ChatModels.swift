@@ -175,6 +175,27 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         return usage
     }
 
+    /// The chat's headline spend. Each turn counts its real cost (balance before minus balance
+    /// after) when both readings exist, and otherwise the cost the provider reported or, failing
+    /// that, an estimate from the price list, which marks the whole figure as estimated.
+    public var spendSummary: SpendSummary {
+        var summary = SpendSummary()
+        for turn in messages.compactMap(\.assistantTurn) {
+            if let real = turn.realCost {
+                summary.dollars = (summary.dollars ?? 0) + real
+                summary.realTurns += 1
+            } else {
+                let usage = turn.usage
+                if let cost = usage.cost {
+                    summary.dollars = (summary.dollars ?? 0) + cost
+                    if usage.costIsEstimate == true { summary.hasEstimate = true }
+                }
+                if usage.priceUnknown == true { summary.hasUnknownPrice = true }
+            }
+        }
+        return summary
+    }
+
     public var lastAssistantTurn: AssistantTurn? {
         messages.last?.assistantTurn
     }
@@ -315,6 +336,13 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
     public var spendCheck: Double?
     /// After the user said "keep going", the turn may spend up to this before asking again.
     public var approvedSpendUpTo: Double?
+    /// True when the reply ended some way other than a normal finish (a dropped connection, the
+    /// server closing the stream mid-reply). Retry then carries on from where it stopped.
+    public var stoppedEarly: Bool?
+    /// Total provider balance, in dollars, read just before the turn started.
+    public var balanceBefore: Double?
+    /// Total provider balance, in dollars, read after the turn ended.
+    public var balanceAfter: Double?
 
     public init(status: Status = .running, steps: [AssistantStep] = [], failure: TurnFailure? = nil, notices: [String] = [], routeLabel: String? = nil) {
         self.status = status
@@ -324,6 +352,13 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
         self.routeLabel = routeLabel
         self.spendCheck = nil
         self.approvedSpendUpTo = nil
+    }
+
+    /// What the turn really cost: the provider balance before it minus the balance after it. Nil
+    /// until both readings exist. This is what was billed, not a figure from a price list.
+    public var realCost: Double? {
+        guard let before = balanceBefore, let after = balanceAfter else { return nil }
+        return max(0, before - after)
     }
 
     /// The AIs that answered, in order, without repeats.
@@ -349,6 +384,25 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
             }
         }
         return nil
+    }
+}
+
+/// A chat's headline spend, with what kind of figure it is.
+public struct SpendSummary: Sendable, Equatable {
+    /// Dollars, or nil when nothing has a cost yet.
+    public var dollars: Double?
+    /// Some of it was worked out from a price list rather than billed, so label it "estimated".
+    public var hasEstimate: Bool
+    /// Some turn used a model with no known price, so the figure leaves that out.
+    public var hasUnknownPrice: Bool
+    /// Turns whose cost came from real balance readings.
+    public var realTurns: Int
+
+    public init(dollars: Double? = nil, hasEstimate: Bool = false, hasUnknownPrice: Bool = false, realTurns: Int = 0) {
+        self.dollars = dollars
+        self.hasEstimate = hasEstimate
+        self.hasUnknownPrice = hasUnknownPrice
+        self.realTurns = realTurns
     }
 }
 
@@ -435,6 +489,8 @@ public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
     public var generatedImages: [GeneratedImageResult]?
     /// Live mid-turn Kiro steering notes folded into this step without stopping the running turn.
     public var steeredMessages: [String]?
+    /// Where this step's time went, measured, so a slow turn shows its real cause.
+    public var timing: StepTiming?
 
     public init(id: UUID = UUID(), startedAt: Date = Date(), steeredMessages: [String]? = nil) {
         self.id = id
@@ -451,12 +507,48 @@ public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
         self.citations = nil
         self.generatedImages = nil
         self.steeredMessages = steeredMessages
+        self.timing = nil
     }
 
     /// How long the model thought, when it shared its thinking.
     public var thinkingSeconds: Int? {
         guard !reasoning.isEmpty, let end = reasoningFinishedAt ?? finishedAt else { return nil }
         return max(1, Int(end.timeIntervalSince(startedAt).rounded()))
+    }
+}
+
+/// Measured timings for one step of a turn, in seconds. Recorded so the next slow turn shows where
+/// its time actually went, instead of anyone guessing.
+public struct StepTiming: Codable, Sendable, Hashable {
+    /// From sending the request to the first piece of the reply arriving.
+    public var firstByteSeconds: Double?
+    /// From sending the request to the reply stream ending: the whole model call.
+    public var modelCallSeconds: Double
+    /// The longest gap with nothing arriving while the reply streamed.
+    public var longestStallSeconds: Double
+    /// Time slept waiting to retry (busy, rate limited, or a dropped connection) before this attempt.
+    public var retryWaitSeconds: Double
+    /// Requests made for this step, retries included.
+    public var attempts: Int
+    /// Prompt tokens the provider reported for this step.
+    public var promptTokens: Int?
+    /// Prompt tokens MAIPA-G estimated it sent (messages plus tool schemas).
+    public var sentTokensEstimate: Int
+    /// Time spent running this step's tools.
+    public var toolSeconds: Double?
+    /// Time spent after this step waiting on background sub-agents.
+    public var waitingSeconds: Double?
+
+    public init(firstByteSeconds: Double? = nil, modelCallSeconds: Double = 0, longestStallSeconds: Double = 0, retryWaitSeconds: Double = 0, attempts: Int = 1, promptTokens: Int? = nil, sentTokensEstimate: Int = 0, toolSeconds: Double? = nil, waitingSeconds: Double? = nil) {
+        self.firstByteSeconds = firstByteSeconds
+        self.modelCallSeconds = modelCallSeconds
+        self.longestStallSeconds = longestStallSeconds
+        self.retryWaitSeconds = retryWaitSeconds
+        self.attempts = attempts
+        self.promptTokens = promptTokens
+        self.sentTokensEstimate = sentTokensEstimate
+        self.toolSeconds = toolSeconds
+        self.waitingSeconds = waitingSeconds
     }
 }
 
