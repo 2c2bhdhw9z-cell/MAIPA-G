@@ -2067,6 +2067,30 @@ public enum AIProviderGateway {
         return (mime, b64)
     }
 
+    /// A multipart `/images/edits` request carrying the prompt and every input picture.
+    static func imageEditRequest(url: URL, model: String, prompt: String, count: Int, size: String, images: [ImageInput], headers: [String: String]) -> HTTPRequest {
+        let boundary = "maipag-\(UUID().uuidString)"
+        var body = Data()
+        func field(_ name: String, _ value: String) {
+            body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"\r\n\r\n\(value)\r\n".utf8))
+        }
+        field("model", model)
+        field("prompt", prompt)
+        field("n", String(count))
+        field("size", size)
+        for (index, image) in images.enumerated() {
+            let ext = image.mimeType.contains("png") ? "png" : (image.mimeType.contains("webp") ? "webp" : "jpg")
+            let safeName = "image-\(index + 1).\(ext)"
+            body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"image[]\"; filename=\"\(safeName)\"\r\nContent-Type: \(image.mimeType)\r\n\r\n".utf8))
+            body.append(image.data)
+            body.append(Data("\r\n".utf8))
+        }
+        body.append(Data("--\(boundary)--\r\n".utf8))
+        var allHeaders = headers
+        allHeaders["Content-Type"] = "multipart/form-data; boundary=\(boundary)"
+        return HTTPRequest(method: "POST", url: url, headers: allHeaders, body: body, idleTimeout: 300)
+    }
+
     // MARK: - OpenAI-Compatible Image Generation (`/v1/images/generations`)
 
     public static func generateImages(
@@ -2074,7 +2098,8 @@ public enum AIProviderGateway {
         rawModelID: String,
         options: ImageGenerationOptions,
         endpoint: AIProviderEndpoint,
-        transport: any HTTPTransport
+        transport: any HTTPTransport,
+        inputImages: [ImageInput] = []
     ) async throws -> [GeneratedImage] {
         guard let base = endpoint.normalizedURL else {
             throw OpenRouterAPIError(httpStatus: 400, code: "invalid_url", message: "Invalid base URL for \(endpoint.name).")
@@ -2097,10 +2122,27 @@ public enum AIProviderGateway {
             "size": .string(size),
             "response_format": "b64_json",
         ]
-        var response = try await transport.send(
-            try HTTPRequest.json("POST", base.appendingPathComponent("images/generations"), body: body, headers: headers, idleTimeout: 300)
-        )
-        if response.status == 404 {
+        var response: HTTPResponse
+        if !inputImages.isEmpty {
+            // OpenAI-compatible editing: `/images/edits`, multipart, one `image[]` part per picture.
+            let edit = imageEditRequest(
+                url: base.appendingPathComponent("images/edits"),
+                model: rawModelID, prompt: prompt, count: options.count, size: size,
+                images: inputImages, headers: headers
+            )
+            response = try await transport.send(edit)
+            if [400, 404, 405, 415, 501].contains(response.status), !response.isSuccess {
+                let detail = response.text.lowercased()
+                if response.status != 400 || detail.contains("not supported") || detail.contains("unsupported") || detail.contains("does not support") {
+                    throw ImageInputNotSupported(modelName: "\(rawModelID) on \(endpoint.name)")
+                }
+            }
+        } else {
+            response = try await transport.send(
+                try HTTPRequest.json("POST", base.appendingPathComponent("images/generations"), body: body, headers: headers, idleTimeout: 300)
+            )
+        }
+        if response.status == 404, inputImages.isEmpty {
             response = try await transport.send(
                 try HTTPRequest.json("POST", base.appendingPathComponent("images"), body: body, headers: headers, idleTimeout: 300)
             )

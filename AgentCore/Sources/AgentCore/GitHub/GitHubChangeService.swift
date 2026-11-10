@@ -172,6 +172,13 @@ public actor GitHubChangeService {
             targetBranch = selectedBranch
         }
 
+        if let gitLab = try github.gitLab(for: repo) {
+            return try await saveToGitLab(
+                gitLab, workspace: workspace, staged: staged, selectedHead: selectedHead, targetBranch: targetBranch,
+                usePR: usePR, continuing: continuing, defaultBranch: defaultBranch, title: title, body: body
+            )
+        }
+
         let baseTree = try await github.commitTree(repo, commit: selectedHead)
         var treeChanges: [GitHubClient.TreeChange] = []
         var states: [SaveReceipt.FileState] = []
@@ -233,6 +240,7 @@ public actor GitHubChangeService {
         guard let head = try await github.branchHead(receipt.repo, branch: receipt.branch) else {
             throw ChangeWorkspaceError.staleHead(expected: receipt.savedCommit, actual: nil)
         }
+        if let gitLab = try github.gitLab(for: receipt.repo) { return try await undoOnGitLab(gitLab, receipt: receipt, head: head) }
         let baseTree = try await github.commitTree(receipt.repo, commit: head)
         if head != receipt.savedCommit {
             let current = try await github.tree(receipt.repo, sha: baseTree, recursive: true)
@@ -248,6 +256,68 @@ public actor GitHubChangeService {
         let tree = try await github.createTree(receipt.repo, base: baseTree, changes: inverse)
         let commit = try await github.createCommit(receipt.repo, message: "Undo MAIPA-G save", tree: tree, parents: [head])
         try await github.updateBranch(receipt.repo, branch: receipt.branch, to: commit)
+        return SaveReceipt(repo: receipt.repo, branch: receipt.branch, baseCommit: head, savedCommit: commit, files: receipt.files.map { .init(path: $0.path, beforeBlob: $0.afterBlob, afterBlob: $0.beforeBlob) }, pullRequest: receipt.pullRequest)
+    }
+
+    /// GitLab saves with one commit call holding every file. Blob ids are worked out the way Git
+    /// does, so Undo can later check nobody changed the same files since.
+    private func saveToGitLab(
+        _ gitLab: GitLabClient, workspace: ChangeWorkspace, staged: [StagedChange], selectedHead: String, targetBranch initialBranch: String,
+        usePR: Bool, continuing: SaveReceipt?, defaultBranch: String, title: String, body: String
+    ) async throws -> SaveReceipt {
+        let repo = workspace.base.repo
+        var actions: [GitLabClient.FileAction] = []
+        var states: [SaveReceipt.FileState] = []
+        for change in staged {
+            let before = try await workspace.baseBlob(for: change.path)
+            switch change {
+            case .write(_, let data, _):
+                actions.append(.init(path: change.path, contents: data, existed: before != nil))
+                states.append(.init(path: change.path, beforeBlob: before, afterBlob: Hashing.gitBlobID(data)))
+            case .delete:
+                actions.append(.init(path: change.path, contents: nil, existed: true))
+                states.append(.init(path: change.path, beforeBlob: before, afterBlob: nil))
+            }
+        }
+        var targetBranch = initialBranch
+        var openMR = usePR
+        let commit: String
+        do {
+            commit = try await gitLab.commit(repo, branch: targetBranch, message: title, actions: actions)
+        } catch let error as GitHubAPIError where !usePR && (error.status == 403 || error.status == 400 && error.message.lowercased().contains("protected")) {
+            // A protected branch can't take a direct save: put the same change on a MAIPA-G side
+            // branch and open a merge request instead.
+            targetBranch = Self.branchName(title)
+            try await gitLab.createBranch(repo, branch: targetBranch, from: selectedHead)
+            commit = try await gitLab.commit(repo, branch: targetBranch, message: title, actions: actions)
+            openMR = true
+        }
+        var pullRequest: GitHubPullRequest?
+        if let continuing {
+            pullRequest = continuing.pullRequest
+        } else if openMR {
+            pullRequest = try await gitLab.openOrReuseMergeRequest(repo, title: title, body: body, head: targetBranch, base: defaultBranch)
+        }
+        await workspace.discardAll()
+        await workspace.advanceBase(toCommit: commit, branch: targetBranch)
+        return SaveReceipt(repo: repo, branch: targetBranch, baseCommit: selectedHead, savedCommit: commit, files: states, pullRequest: pullRequest)
+    }
+
+    private func undoOnGitLab(_ gitLab: GitLabClient, receipt: SaveReceipt, head: String) async throws -> SaveReceipt {
+        let current = try await gitLab.tree(receipt.repo, sha: head, recursive: true)
+        let blobs = Dictionary(current.entries.filter(\.isFile).map { ($0.path, $0.sha) }, uniquingKeysWith: { first, _ in first })
+        for file in receipt.files where blobs[file.path] != file.afterBlob {
+            throw ChangeWorkspaceError.staleHead(expected: receipt.savedCommit, actual: head)
+        }
+        var actions: [GitLabClient.FileAction] = []
+        for file in receipt.files {
+            if let before = file.beforeBlob {
+                actions.append(.init(path: file.path, contents: try await gitLab.blob(receipt.repo, sha: before), existed: file.afterBlob != nil))
+            } else {
+                actions.append(.init(path: file.path, contents: nil, existed: true))
+            }
+        }
+        let commit = try await gitLab.commit(receipt.repo, branch: receipt.branch, message: "Undo MAIPA-G save", actions: actions)
         return SaveReceipt(repo: receipt.repo, branch: receipt.branch, baseCommit: head, savedCommit: commit, files: receipt.files.map { .init(path: $0.path, beforeBlob: $0.afterBlob, afterBlob: $0.beforeBlob) }, pullRequest: receipt.pullRequest)
     }
 

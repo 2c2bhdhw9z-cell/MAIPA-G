@@ -34,6 +34,8 @@ struct Composer: View {
     var thinking: ThinkingLevel
     var thinkingLevels: [ThinkingLevel]
     var repo: ChatRepo?
+    /// How many more repos the chat edits besides `repo`.
+    var extraRepoCount = 0
     var groupName: String?
     var isGitHubConnected: Bool
     var isRunning: Bool
@@ -233,7 +235,7 @@ struct Composer: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     if let repo {
-                        Chip(title: repo.ref.name, systemImage: repo.isPrivate ? "lock" : "chevron.left.forwardslash.chevron.right", showsChevron: true, action: onPickRepo)
+                        Chip(title: repo.ref.name + (extraRepoCount > 0 ? " +\(extraRepoCount)" : ""), systemImage: repo.isPrivate ? "lock" : "chevron.left.forwardslash.chevron.right", showsChevron: true, action: onPickRepo)
                         Chip(title: repo.branch, systemImage: "arrow.triangle.branch", showsChevron: true, action: onPickBranch)
                         Button(action: onClearRepo) {
                             Image(systemName: "xmark")

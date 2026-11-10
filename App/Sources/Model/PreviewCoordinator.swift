@@ -19,7 +19,7 @@ final class PreviewCoordinator {
     init(root: URL) { self.root = root }
 
     func refresh(_ repo: ChatRepo) async {
-        guard let github = app?.github.client else { error = "Connect GitHub first."; return }
+        guard let github = app?.repoClient(for: repo.ref) else { error = "Connect \(repo.ref.hostName) first."; return }
         isLoading = true; error = nil; console = []
         defer { isLoading = false }
         do {

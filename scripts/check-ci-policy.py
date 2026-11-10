@@ -70,8 +70,19 @@ for required, why in (
 ):
     if required not in release_workflow:
         errors.append(f"release.yml: {why} ({required})")
-if "pulls --jq" in release_workflow or "merged_at" in release_workflow:
+# A pull request is never required: the exact commit's own green run comes first, and a merged
+# pull request head is only used when its tree is identical (a merge isn't built twice).
+if "no check run of $PR_HEAD built and checked the app" in release_workflow or "RUN_ID=$(green_run)" not in release_workflow:
     errors.append("release.yml: must not require a merged pull request; the gate is a green iOS run of the commit")
+for name, text in (("release.yml", release_workflow), ("ios.yml", ios)):
+    if "merged_at" in text and '--jq .tree.sha)" = "$' not in text:
+        errors.append(f"{name}: a merged pull request's run may only stand in for a commit with the identical tree")
+if 'PR_TREE" = "$MAIN_TREE"' not in release:
+    errors.append("publish-verified-ipa.sh: must prove the checked tree equals the published commit's tree")
+if "cancel-in-progress: true" in ios:
+    errors.append("ios.yml: runs of main commits must never be cancelled midway, so the newest always gets built")
+if "needs.reuse.outputs.run == ''" not in ios:
+    errors.append("ios.yml: the build jobs may only be skipped when an identical checked tree was found")
 manifest = json.loads((ROOT / "docs/regressions/2026-10-29.json").read_text())
 reports = manifest.get("reports", [])
 expected_ids = {f"OCT29-{number:02d}" for number in range(1, 19)}

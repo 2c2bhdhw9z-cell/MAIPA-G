@@ -185,8 +185,8 @@ struct FilesScreen: View {
         state = .loading
         workspace = nil
         entries = []
-        guard let github = app.github.client else {
-            state = .failed("Connect GitHub first.")
+        guard let github = app.repoClient(for: repo.ref) else {
+            state = .failed("Connect \(repo.ref.hostName) first.")
             return
         }
         do {
@@ -201,7 +201,7 @@ struct FilesScreen: View {
         } catch is CancellationError {
             return
         } catch {
-            state = .failed(app.github.describe(error))
+            state = .failed(app.describe(error, for: repo.ref))
         }
     }
 
@@ -211,7 +211,7 @@ struct FilesScreen: View {
             switch try await workspace.readFile(path) {
             case .text(let value, _): text = value
             case .binary where imagePath(path):
-                if let github = app.github.client,
+                if let github = app.repoClient(for: repo.ref),
                    let decoded = ImageDownsampler.image(from: try await github.fileContents(repo.ref, path: path, ref: workspace.commit), maxPixelSize: 2_048) {
                     image = decoded
                 } else {
@@ -224,7 +224,7 @@ struct FilesScreen: View {
             case .missing: text = "This file is no longer here."
             }
         } catch {
-            text = "Couldn’t open this file: \(app.github.describe(error))"
+            text = "Couldn’t open this file: \(app.describe(error, for: repo.ref))"
         }
     }
 

@@ -89,7 +89,7 @@ struct SpecsScreen: View {
         }
         loadingBranches = true
         defer { loadingBranches = false }
-        if let loaded = try? await app.github.branches(of: selected.ref, refresh: false) {
+        if let loaded = try? await app.branches(of: selected.ref, refresh: false) {
             availableBranches = loaded
         } else {
             availableBranches = []

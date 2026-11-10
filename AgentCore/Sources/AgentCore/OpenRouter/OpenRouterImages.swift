@@ -12,6 +12,45 @@ public struct ImageGenerationOptions: Codable, Sendable, Hashable {
     }
 }
 
+/// A picture sent to an image model as input (image-to-image or editing).
+public struct ImageInput: Sendable, Hashable {
+    public var name: String
+    public var mimeType: String
+    public var data: Data
+    public init(name: String, mimeType: String, data: Data) {
+        self.name = name; self.mimeType = mimeType; self.data = data
+    }
+    public var dataURL: String { "data:\(mimeType);base64,\(data.base64EncodedString())" }
+    var reference: JSONValue { ["type": "image_url", "image_url": ["url": .string(dataURL)]] }
+}
+
+/// Whether a message to a picture model is about a picture already in the chat ("make it blue",
+/// "edit the last picture"), so that picture goes in as input. A fresh description is not.
+public enum ImageEditIntent {
+    static let phrases = [
+        "edit", "change", "modify", "adjust", "tweak", "fix", "retouch", "recolor", "recolour",
+        "this picture", "this image", "this photo", "that picture", "that image", "that photo",
+        "the picture", "the image", "the photo", "last picture", "last image", "previous",
+        "make it", "same picture", "same image", "same but", "remove the", "replace the", "turn it",
+    ]
+
+    public static func refersToEarlierPicture(_ message: String) -> Bool {
+        let text = " " + message.lowercased().replacingOccurrences(of: "\n", with: " ") + " "
+        let words = text.map { $0.isLetter || $0.isNumber ? $0 : " " }
+        let padded = " " + String(words).split(separator: " ").joined(separator: " ") + " "
+        return phrases.contains { padded.contains(" \($0) ") }
+    }
+}
+
+/// A model that only makes pictures from words was given a picture to work from.
+public struct ImageInputNotSupported: Error, Sendable, CustomStringConvertible {
+    public let modelName: String
+    public init(modelName: String) { self.modelName = modelName }
+    public var description: String {
+        "\(modelName) can't take a picture as input: it only makes pictures from a written description. Pick a picture model that accepts images to edit or build on a picture."
+    }
+}
+
 public struct GeneratedImage: Codable, Sendable, Hashable, Identifiable {
     public var id: UUID
     public var prompt: String
@@ -41,22 +80,34 @@ public extension OpenRouterClient {
     /// Generates actual image bytes through OpenRouter's `/api/v1/images` endpoint (for pure image models like
     /// FLUX, Seedream, Qwen Image, Recraft, Riverflow, Krea) or `/api/v1/chat/completions` with
     /// `modalities: ["image", "text"]` (for multimodal chat-image models like Gemini Flash Image and GPT-5 Image).
+    /// Whether `model` takes pictures as input: true or false when the catalogue says, nil when unknown.
+    func acceptsImageInput(_ model: String) -> Bool? {
+        guard let entry = catalogueByID[model] else { return nil }
+        return entry.acceptsImages
+    }
+
     func generateImages(
         prompt: String,
         model: String,
         options: ImageGenerationOptions = .init(),
+        inputImages: [ImageInput] = [],
         progress: @escaping @Sendable (String) -> Void = { _ in }
     ) async throws -> [GeneratedImage] {
         let clean = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { throw ToolInputError("An image prompt is required.") }
-        progress("Generating picture…")
+        // Never drop a picture silently: a model known not to take pictures says so instead.
+        if !inputImages.isEmpty, acceptsImageInput(model) == false {
+            throw ImageInputNotSupported(modelName: catalogueByID[model]?.name ?? model)
+        }
+        progress(inputImages.isEmpty ? "Generating picture…" : "Working from your picture…")
         if let routed = providerEndpoint(for: model) {
             let images = try await AIProviderGateway.generateImages(
                 prompt: clean,
                 rawModelID: routed.rawModelID,
                 options: options,
                 endpoint: routed.endpoint,
-                transport: transport
+                transport: transport,
+                inputImages: inputImages
             )
             progress("Picture ready")
             return images
@@ -69,10 +120,10 @@ public extension OpenRouterClient {
             || lowerModel.contains("gpt-5-image")
 
         if prefersChatImagesEndpoint {
-            return try await generateImagesViaChatCompletions(prompt: clean, model: model, options: options, progress: progress)
+            return try await generateImagesViaChatCompletions(prompt: clean, model: model, options: options, inputImages: inputImages, progress: progress)
         }
 
-        let body: JSONValue = [
+        var fields: [String: JSONValue] = [
             "model": .string(model),
             "prompt": .string(clean),
             "n": .number(Double(options.count)),
@@ -80,12 +131,16 @@ public extension OpenRouterClient {
             "quality": .string(options.quality.rawValue),
             "response_format": "b64_json",
         ]
+        if !inputImages.isEmpty {
+            fields["input_references"] = .array(inputImages.prefix(16).map(\.reference))
+        }
+        let body = JSONValue.object(fields)
         let request = try HTTPRequest.json("POST", Self.apiBase.appendingPathComponent("images"), body: body, headers: headers(forModel: model), idleTimeout: 300)
         let response = try await transport.send(request)
         if !response.isSuccess,
            (response.status == 400 || response.status == 404 || response.status == 405),
            catalogEntry?.outputModalities.contains("text") == true {
-            return try await generateImagesViaChatCompletions(prompt: clean, model: model, options: options, progress: progress)
+            return try await generateImagesViaChatCompletions(prompt: clean, model: model, options: options, inputImages: inputImages, progress: progress)
         }
         guard response.isSuccess else { throw OpenRouterAPIError(status: response.status, body: response.body, headers: response.headers) }
         guard let root = JSONValue.parse(response.body), let values = root["data"]?.arrayValue else {
@@ -136,15 +191,19 @@ public extension OpenRouterClient {
         prompt: String,
         model: String,
         options: ImageGenerationOptions,
+        inputImages: [ImageInput] = [],
         progress: @escaping @Sendable (String) -> Void
     ) async throws -> [GeneratedImage] {
+        let content: JSONValue = inputImages.isEmpty
+            ? .string(prompt)
+            : .array([["type": "text", "text": .string(prompt)]] + inputImages.map(\.reference))
         let body: JSONValue = [
             "model": .string(model),
             "stream": .bool(false),
             "modalities": ["image", "text"],
             "image_config": ["aspect_ratio": .string(options.aspectRatio.rawValue)],
             "messages": [
-                ["role": "user", "content": .string(prompt)],
+                ["role": "user", "content": content],
             ],
         ]
         let req = try HTTPRequest.json("POST", Self.apiBase.appendingPathComponent("chat/completions"), body: body, headers: headers(forModel: model), idleTimeout: 300)
@@ -218,9 +277,39 @@ public struct GenerateImageTool: AgentTool {
     public let store: AttachmentStore
     public let model: String
     public let maySpend: Bool
+    /// Pictures in the chat (attached or generated) the model may name as input.
+    public let availableImages: [AttachmentReference]
     public let name = "generate_image"
-    public init(client: OpenRouterClient, store: AttachmentStore, model: String, maySpend: Bool) { self.client = client; self.store = store; self.model = model; self.maySpend = maySpend }
-    public var spec: ToolSpec { ToolSpec(name: name, description: "Generate and save a real picture.", parameters: ["type": "object", "properties": ["prompt": ["type": "string"], "aspect_ratio": ["type": "string", "enum": ["1:1", "3:4", "4:3", "16:9", "9:16"]], "quality": ["type": "string", "enum": ["standard", "high"]]], "required": ["prompt"]]) }
+    public init(client: OpenRouterClient, store: AttachmentStore, model: String, maySpend: Bool, availableImages: [AttachmentReference] = []) {
+        self.client = client; self.store = store; self.model = model; self.maySpend = maySpend
+        self.availableImages = availableImages.filter { $0.kind == .image }
+    }
+    public var spec: ToolSpec {
+        var properties: [String: JSONValue] = [
+            "prompt": ["type": "string"],
+            "aspect_ratio": ["type": "string", "enum": ["1:1", "3:4", "4:3", "16:9", "9:16"]],
+            "quality": ["type": "string", "enum": ["standard", "high"]],
+        ]
+        var description = "Generate and save a real picture."
+        if !availableImages.isEmpty, client.acceptsImageInput(model) != false {
+            let names = availableImages.map(\.name)
+            properties["reference_images"] = ["type": "array", "items": ["type": "string", "enum": .array(names.map { .string($0) })]]
+            description += " To edit or build on pictures from this chat, name them in reference_images."
+        }
+        return ToolSpec(name: name, description: description, parameters: ["type": "object", "properties": .object(properties), "required": ["prompt"]])
+    }
+
+    /// The named chat pictures, read from the store. An unknown name is an error the model can fix.
+    func inputImages(named names: [String]) async throws -> [ImageInput] {
+        var inputs: [ImageInput] = []
+        for name in names {
+            guard let reference = availableImages.first(where: { $0.name == name || $0.id.uuidString.lowercased() == name.lowercased() }) else {
+                throw ToolInputError("There is no picture called \(name) in this chat. Pictures here: \(availableImages.map(\.name).joined(separator: ", ")).")
+            }
+            inputs.append(ImageInput(name: reference.name, mimeType: reference.mimeType, data: try await store.data(for: reference)))
+        }
+        return inputs
+    }
     public func runningSummary(for arguments: JSONValue) -> String { "Generating a picture…" }
     public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
         guard maySpend else { return nil }
@@ -231,7 +320,9 @@ public struct GenerateImageTool: AgentTool {
         let prompt = try arguments.requiredString("prompt")
         let aspect = arguments.optionalString("aspect_ratio").flatMap(ImageAspectRatio.init(rawValue:)) ?? .square
         let quality = arguments.optionalString("quality").flatMap(ImageQuality.init(rawValue:)) ?? .standard
-        let generated = try await client.generateImages(prompt: prompt, model: model, options: ImageGenerationOptions(aspectRatio: aspect, quality: quality), progress: progress)
+        let referenceNames = arguments["reference_images"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        let inputs = try await inputImages(named: referenceNames)
+        let generated = try await client.generateImages(prompt: prompt, model: model, options: ImageGenerationOptions(aspectRatio: aspect, quality: quality), inputImages: inputs, progress: progress)
         var results: [GeneratedImageResult] = []
         for image in generated {
             let ext = image.mimeType.contains("jpeg") || image.mimeType.contains("jpg") ? "jpg" : (image.mimeType.contains("webp") ? "webp" : "png")
@@ -242,7 +333,7 @@ public struct GenerateImageTool: AgentTool {
         }
         let cost = results.compactMap(\.cost).reduce(0, +)
         return ToolOutput(
-            forModel: "Generated \(results.count) saved picture(s) using \(model).",
+            forModel: "Generated \(results.count) saved picture(s) using \(model)" + (inputs.isEmpty ? "." : " from " + inputs.map(\.name).joined(separator: ", ") + "."),
             summary: results.count == 1 ? "Generated a picture" : "Generated \(results.count) pictures",
             detail: cost > 0 ? "Cost: $\(String(format: "%.4f", cost))" : nil,
             generatedImages: results,

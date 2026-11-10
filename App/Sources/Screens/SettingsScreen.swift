@@ -7,6 +7,9 @@ struct SettingsScreen: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.theme) private var theme
     @State private var confirmDisconnect = false
+    @State private var confirmDisconnectGitLab = false
+    @State private var gitlabHost = ""
+    @State private var gitlabToken = ""
     @State private var copiesSize: Int64?
     @State private var freeSpace: Int64?
     /// The controls edit this copy; every change is saved straight away.
@@ -122,6 +125,12 @@ struct SettingsScreen: View {
             } message: {
                 Text("MAIPA-G stops using your repos and stops saving chats to GitHub. Your chats stay on this phone, and the ones already saved stay in MAIPA-G-data.")
             }
+            .alert("Disconnect GitLab?", isPresented: $confirmDisconnectGitLab) {
+                Button("Disconnect", role: .destructive) { app.disconnectGitLab() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("MAIPA-G forgets the GitLab token on this phone and stops using your GitLab projects. Nothing on GitLab changes; you can also revoke the token on GitLab.")
+            }
             .alert("Some data is not backed up", isPresented: $confirmUnsafeUpdate) {
                 Button("Save now first") { Task { await app.sync.syncNow() } }
                 Button("Download anyway", role: .destructive) { openURL(app.updates.downloadURL) }
@@ -166,8 +175,8 @@ struct SettingsScreen: View {
                 }
                 ForEach(app.github.repos) { repo in
                     Toggle(isOn: Binding(
-                        get: { draft.directSaveRepos[repo.fullName] ?? false },
-                        set: { draft.directSaveRepos[repo.fullName] = $0 }
+                        get: { draft.directSaveRepos[repo.ref.settingsKey] ?? false },
+                        set: { draft.directSaveRepos[repo.ref.settingsKey] = $0 }
                     )) {
                         VStack(alignment: .leading, spacing: 1) {
                             Text(repo.fullName).lineLimit(1)
@@ -183,11 +192,64 @@ struct SettingsScreen: View {
                     Label(app.github.phase == .needsInstall ? "Finish connecting GitHub" : "Connect GitHub", systemImage: "link")
                 }
             }
+            gitLabRows
         } header: {
-            Text("GitHub")
+            Text("GitHub & GitLab")
         } footer: {
-            if app.github.isConnected {
-                Text("A repo with Save straight to branch off uses a side branch and pull request. A repo's own rules always win.")
+            if app.github.isConnected || app.gitlab.isConnected {
+                Text("A repo with Save straight to branch off uses a side branch and a pull request (a merge request on GitLab). A repo's own rules always win.")
+            }
+        }
+    }
+
+    /// GitLab, in the same section: gitlab.com or your own server, with a personal access token
+    /// kept in the Keychain.
+    @ViewBuilder private var gitLabRows: some View {
+        if app.gitlab.isConnected {
+            Label("GitLab: \(app.gitlab.login ?? "connected") on \(app.gitlab.host)", systemImage: "link")
+            if let error = app.gitlab.reposError {
+                Text(error).font(.footnote).foregroundStyle(Theme.danger)
+            }
+            ForEach(app.gitlab.repos) { repo in
+                Toggle(isOn: Binding(
+                    get: { draft.directSaveRepos[repo.ref.settingsKey] ?? false },
+                    set: { draft.directSaveRepos[repo.ref.settingsKey] = $0 }
+                )) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(repo.fullName).lineLimit(1)
+                        Text("GitLab · Save straight to branch").font(.caption).foregroundStyle(Theme.secondaryText)
+                    }
+                }
+            }
+            Button("Disconnect GitLab", role: .destructive) { confirmDisconnectGitLab = true }
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Connect GitLab").font(.headline)
+                TextField("gitlab.com or https://your-server", text: $gitlabHost)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                SecureField("Personal access token (api scope)", text: $gitlabToken)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                HStack {
+                    Button(app.gitlab.isConnecting ? "Connecting…" : "Connect GitLab") {
+                        Task {
+                            if await app.gitlab.connect(host: gitlabHost, token: gitlabToken) { gitlabToken = "" }
+                        }
+                    }
+                    .disabled(app.gitlab.isConnecting || gitlabToken.trimmingCharacters(in: .whitespaces).isEmpty)
+                    Spacer()
+                    Button("Make a token") {
+                        let host = GitLabClient.normalizedHost(gitlabHost) ?? GitLabClient.defaultHost
+                        if let url = URL(string: "https://\(host)/-/user_settings/personal_access_tokens?name=MAIPA-G&scopes=api") { openURL(url) }
+                    }
+                    .font(.footnote)
+                }
+                .buttonStyle(.borderless)
+                if let error = app.gitlab.lastError {
+                    Text(error).font(.footnote).foregroundStyle(Theme.danger)
+                }
             }
         }
     }

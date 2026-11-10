@@ -94,6 +94,16 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
     /// How this chat behaves when you type: Vibe (just do it) or Spec (plan first). Remembered per
     /// chat. Stored as a plain string so AgentCore needs no app-level type.
     public var mode: String?
+    /// More repos this chat edits besides `repo`, each with its own branch, staged changes and
+    /// save rules. nil for a chat with one repo (or none), which behaves exactly as before.
+    public var additionalRepos: [ChatRepo]?
+
+    /// `repo` first, then the others, without duplicates.
+    public var allRepos: [ChatRepo] {
+        guard let repo else { return [] }
+        var seen: Set<RepoRef> = [repo.ref]
+        return [repo] + (additionalRepos ?? []).filter { seen.insert($0.ref).inserted }
+    }
 
     public init(
         id: UUID = UUID(),
@@ -129,6 +139,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         self.queuedFollowUps = nil
         self.activeWorkflowRuns = nil
         self.mode = nil
+        self.additionalRepos = nil
     }
 
     enum CodingKeys: String, CodingKey {
@@ -136,7 +147,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         case groupID, saveReceipts, activeJobID, workflowID, specID, memoryContext
         case compactedSummary, compactedThroughMessageID
         case previousCompactedSummary, previousCompactedThroughMessageID
-        case queuedFollowUps, activeWorkflowRuns, mode
+        case queuedFollowUps, activeWorkflowRuns, mode, additionalRepos
     }
 
     public init(from decoder: Decoder) throws {
@@ -164,6 +175,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         queuedFollowUps = try c.decodeIfPresent([QueuedFollowUp].self, forKey: .queuedFollowUps)
         activeWorkflowRuns = try c.decodeIfPresent([ActiveWorkflowRunSnapshot].self, forKey: .activeWorkflowRuns)
         mode = try c.decodeIfPresent(String.self, forKey: .mode)
+        additionalRepos = try c.decodeIfPresent([ChatRepo].self, forKey: .additionalRepos)
     }
 
     /// Everything the chat has cost so far, in dollars, as OpenRouter reported it.
@@ -357,6 +369,8 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
     /// switched provider partway through is costed on each provider it used.
     public var balancesBefore: [String: Double]?
     public var balancesAfter: [String: Double]?
+    /// Every provider any request of this turn went to, including attempts that were retried away.
+    public var providersTried: [String]?
 
     public init(status: Status = .running, steps: [AssistantStep] = [], failure: TurnFailure? = nil, notices: [String] = [], routeLabel: String? = nil) {
         self.status = status
@@ -383,7 +397,7 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
 
     /// The providers whose balance this turn spent: each step's provider, else the one it started on.
     public var providersUsed: Set<String> {
-        var used = Set(steps.compactMap(\.provider))
+        var used = Set(steps.compactMap(\.provider) + steps.flatMap { $0.providersTried ?? [] } + (providersTried ?? []))
         if used.isEmpty, let balanceProvider { used.insert(balanceProvider) }
         return used
     }
@@ -614,6 +628,8 @@ public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
     public var timing: StepTiming?
     /// Whose balance this step spent: "openrouter" or a connected gateway's id.
     public var provider: String?
+    /// Every provider an attempt at this step went to, including retries that switched provider.
+    public var providersTried: [String]?
 
     public init(id: UUID = UUID(), startedAt: Date = Date(), steeredMessages: [String]? = nil) {
         self.id = id

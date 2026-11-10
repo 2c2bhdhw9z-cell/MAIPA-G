@@ -42,13 +42,19 @@ gh api "repos/$REPO/actions/artifacts/$RUNNER_ARTIFACT_ID/zip" >"$TMP/runner-art
 mkdir -p "$TMP/runner"
 unzip -q "$TMP/runner-artifact.zip" -d "$TMP/runner"
 (cd "$TMP/runner" && sha256sum -c MAIPAGRunner-linux-x86_64.tar.gz.sha256)
-RUNNER_TAG="runner-$PR_HEAD"
 printf 'Checksummed MAIPAGRunner built and tested from reviewed commit `%s`.\n' "$PR_HEAD" >"$TMP/runner-notes.md"
-if gh release view "$RUNNER_TAG" --repo "$REPO" >/dev/null 2>&1; then
-  gh release upload "$RUNNER_TAG" "$TMP/runner/MAIPAGRunner-linux-x86_64.tar.gz" "$TMP/runner/MAIPAGRunner-linux-x86_64.tar.gz.sha256" --repo "$REPO" --clobber
-else
-  gh release create "$RUNNER_TAG" "$TMP/runner/MAIPAGRunner-linux-x86_64.tar.gz" "$TMP/runner/MAIPAGRunner-linux-x86_64.tar.gz.sha256" --repo "$REPO" --target "$MAIN_SHA" --title "MAIPAGRunner $PR_HEAD" --notes-file "$TMP/runner-notes.md"
-fi
+# Autonomous downloads runner-<revision> for the main commit it runs, so when the checked commit is
+# a pull request head with the same tree, the runner is published under both names.
+RUNNER_REVISIONS="$PR_HEAD"
+[ "$MAIN_SHA" = "$PR_HEAD" ] || RUNNER_REVISIONS="$PR_HEAD $MAIN_SHA"
+for revision in $RUNNER_REVISIONS; do
+  RUNNER_TAG="runner-$revision"
+  if gh release view "$RUNNER_TAG" --repo "$REPO" >/dev/null 2>&1; then
+    gh release upload "$RUNNER_TAG" "$TMP/runner/MAIPAGRunner-linux-x86_64.tar.gz" "$TMP/runner/MAIPAGRunner-linux-x86_64.tar.gz.sha256" --repo "$REPO" --clobber
+  else
+    gh release create "$RUNNER_TAG" "$TMP/runner/MAIPAGRunner-linux-x86_64.tar.gz" "$TMP/runner/MAIPAGRunner-linux-x86_64.tar.gz.sha256" --repo "$REPO" --target "$MAIN_SHA" --title "MAIPAGRunner $revision" --notes-file "$TMP/runner-notes.md" --latest=false
+  fi
+done
 
 TAG="build-$RUN_NUMBER-${MAIN_SHA:0:7}"
 NOTES="$TMP/notes.md"

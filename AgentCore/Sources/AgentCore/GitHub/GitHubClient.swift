@@ -53,6 +53,8 @@ public struct GitHubClient: Sendable {
 
     let transport: any HTTPTransport
     private let tokens: (any GitHubTokenProvider)?
+    /// Answers for GitLab projects (repos whose `RepoRef.host` is set), when GitLab is connected.
+    public var gitLab: GitLabClient?
 
     public init(transport: any HTTPTransport, tokens: (any GitHubTokenProvider)?) {
         self.transport = transport
@@ -60,6 +62,15 @@ public struct GitHubClient: Sendable {
     }
 
     // MARK: Plumbing
+
+    /// The GitLab client for a GitLab project, or nil for a GitHub repo.
+    func gitLab(for repo: RepoRef) throws -> GitLabClient? {
+        guard let host = repo.host else { return nil }
+        guard let gitLab, gitLab.host.caseInsensitiveCompare(host) == .orderedSame else {
+            throw GitHubAPIError(status: 401, message: "GitLab (\(host)) isn't connected. Connect it in Settings, under GitHub & GitLab.")
+        }
+        return gitLab
+    }
 
     func url(_ path: String, query: [String: String] = [:]) -> URL {
         var components = URLComponents(url: Self.api, resolvingAgainstBaseURL: false)!
@@ -192,21 +203,25 @@ public struct GitHubClient: Sendable {
     }
 
     public func repository(_ repo: RepoRef, auth: Auth = .installation) async throws -> GitHubRepo {
-        try await get(GitHubRepo.self, Self.path(repo), auth: auth)
+        if let lab = try gitLab(for: repo) { return try await lab.repository(repo) }
+        return try await get(GitHubRepo.self, Self.path(repo), auth: auth)
     }
 
     /// nil when the repo does not exist (or MAIPA-G cannot see it).
     public func repositoryIfExists(_ repo: RepoRef, auth: Auth = .installation) async throws -> GitHubRepo? {
+        if let lab = try gitLab(for: repo) { return try await lab.repositoryIfExists(repo) }
         let response = try await send("GET", Self.path(repo), auth: auth, allow: [404])
         return response.status == 404 ? nil : try response.decode(GitHubRepo.self)
     }
 
     public func branches(_ repo: RepoRef) async throws -> [GitHubBranch] {
-        try await paginate(GitHubBranch.self, Self.path(repo, "/branches"))
+        if let lab = try gitLab(for: repo) { return try await lab.branches(repo) }
+        return try await paginate(GitHubBranch.self, Self.path(repo, "/branches"))
     }
 
     /// The commit a branch (or any ref) points at, as a 40-character id.
     public func resolveCommit(_ repo: RepoRef, ref: String) async throws -> String {
+        if let lab = try gitLab(for: repo) { return try await lab.resolveCommit(repo, ref: ref) }
         let response = try await send("GET", Self.path(repo, "/commits/\(Self.escapePath(ref))"), accept: "application/vnd.github.sha")
         let sha = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard sha.count == 40 || sha.count == 64 else { throw GitHubAPIError(status: response.status, message: "Unexpected commit id \(sha.prefix(80))") }
@@ -214,18 +229,21 @@ public struct GitHubClient: Sendable {
     }
 
     public func tree(_ repo: RepoRef, sha: String, recursive: Bool = true) async throws -> GitTree {
-        try await get(GitTree.self, Self.path(repo, "/git/trees/\(sha)"), query: recursive ? ["recursive": "1"] : [:])
+        if let lab = try gitLab(for: repo) { return try await lab.tree(repo, sha: sha, recursive: recursive) }
+        return try await get(GitTree.self, Self.path(repo, "/git/trees/\(sha)"), query: recursive ? ["recursive": "1"] : [:])
     }
 
     /// A file's bytes by its blob id.
     public func blob(_ repo: RepoRef, sha: String) async throws -> Data {
-        try await send("GET", Self.path(repo, "/git/blobs/\(sha)"), accept: "application/vnd.github.raw+json").body
+        if let lab = try gitLab(for: repo) { return try await lab.blob(repo, sha: sha) }
+        return try await send("GET", Self.path(repo, "/git/blobs/\(sha)"), accept: "application/vnd.github.raw+json").body
     }
 
     /// The real content behind a Git LFS pointer, through GitHub's LFS batch API. The app's
     /// token goes only to github.com; the storage address gets only the headers GitHub returns.
     /// The bytes must match the pointer's SHA-256 and size exactly.
     public func lfsObject(_ repo: RepoRef, pointer: GitLFSPointer) async throws -> Data {
+        if let lab = try gitLab(for: repo) { return try await lab.lfsObject(repo, pointer: pointer) }
         guard let tokens else { throw GitLFSError.notSignedIn }
         let token = try await tokens.installationToken()
         let credential = Data("x-access-token:\(token)".utf8).base64EncodedString()
@@ -255,11 +273,13 @@ public struct GitHubClient: Sendable {
 
     /// A file's bytes at a commit or branch.
     public func fileContents(_ repo: RepoRef, path: String, ref: String) async throws -> Data {
-        try await send("GET", Self.path(repo, "/contents/\(Self.escapePath(path))"), query: ["ref": ref], accept: "application/vnd.github.raw+json").body
+        if let lab = try gitLab(for: repo) { return try await lab.fileContents(repo, path: path, ref: ref) }
+        return try await send("GET", Self.path(repo, "/contents/\(Self.escapePath(path))"), query: ["ref": ref], accept: "application/vnd.github.raw+json").body
     }
 
     /// Downloads the whole repo at `ref` as a gzip'd tarball, straight to a file.
     public func downloadTarball(_ repo: RepoRef, ref: String, to destination: URL, progress: (@Sendable (Int64) -> Void)? = nil) async throws {
+        if let lab = try gitLab(for: repo) { return try await lab.downloadTarball(repo, ref: ref, to: destination, progress: progress) }
         let headers = try await headers(.installation, accept: "application/vnd.github+json")
         let request = HTTPRequest(url: url(Self.path(repo, "/tarball/\(Self.escapePath(ref))")), headers: headers, idleTimeout: 120)
         let response = try await withRetries(.standard, retryAfter: defaultRetryDelay) {
@@ -273,6 +293,7 @@ public struct GitHubClient: Sendable {
     }
 
     public func compare(_ repo: RepoRef, base: String, head: String) async throws -> GitCompare {
+        if let lab = try gitLab(for: repo) { return try await lab.compare(repo, base: base, head: head) }
         let response = try await send("GET", Self.path(repo, "/compare/\(base)...\(head)"), query: ["per_page": "300"])
         guard let json = JSONValue.parse(response.body) else { throw GitHubAPIError(status: response.status, message: "Unreadable comparison") }
         let files = (json["files"]?.arrayValue ?? []).compactMap { file -> GitCompare.File? in
@@ -318,6 +339,7 @@ public struct GitHubClient: Sendable {
 
     /// The commit a branch points at, or nil when the branch (or the whole repo) is empty.
     public func branchHead(_ repo: RepoRef, branch: String) async throws -> String? {
+        if let lab = try gitLab(for: repo) { return try await lab.branchHead(repo, branch: branch) }
         let response = try await send("GET", Self.path(repo, "/git/ref/heads/\(Self.escapePath(branch))"), allow: [404, 409])
         guard response.isSuccess else { return nil }
         return JSONValue.parse(response.body)?["object"]?["sha"]?.stringValue
@@ -483,6 +505,7 @@ public struct GitHubClient: Sendable {
     }
 
     public func createBranch(_ repo: RepoRef, branch: String, from sha: String) async throws {
+        if let lab = try gitLab(for: repo) { return try await lab.createBranch(repo, branch: branch, from: sha) }
         _ = try await send("POST", Self.path(repo, "/git/refs"), body: ["ref": .string("refs/heads/\(branch)"), "sha": .string(sha)])
     }
 
@@ -496,6 +519,7 @@ public struct GitHubClient: Sendable {
 
     /// Deletes the branch only when MAIPA-G created it.
     public func deleteBranchIfMAIPAG(_ repo: RepoRef, branch: String) async throws {
+        if let lab = try gitLab(for: repo) { return try await lab.deleteBranchIfMAIPAG(repo, branch: branch) }
         guard Self.isMAIPAGBranch(branch) else { return }
         try await deleteBranch(repo, branch: branch)
     }
@@ -503,6 +527,7 @@ public struct GitHubClient: Sendable {
     /// The open pull request from `head` into `base`, opening one only when there is none yet.
     /// A branch the user picked may already have its own request; saves then join it.
     public func openOrReusePullRequest(_ repo: RepoRef, title: String, body text: String, head: String, base: String) async throws -> GitHubPullRequest {
+        if let lab = try gitLab(for: repo) { return try await lab.openOrReuseMergeRequest(repo, title: title, body: text, head: head, base: base) }
         let existing = try await get(
             [GitHubPullRequest].self, Self.path(repo, "/pulls"),
             query: ["state": "open", "head": "\(repo.owner):\(head)", "base": base, "per_page": "5"]
@@ -517,14 +542,17 @@ public struct GitHubClient: Sendable {
     }
 
     public func pullRequest(_ repo: RepoRef, number: Int) async throws -> GitHubPullRequest {
-        try await get(GitHubPullRequest.self, Self.path(repo, "/pulls/\(number)"))
+        if let lab = try gitLab(for: repo) { return try await lab.mergeRequest(repo, number: number) }
+        return try await get(GitHubPullRequest.self, Self.path(repo, "/pulls/\(number)"))
     }
 
     public func closePullRequest(_ repo: RepoRef, number: Int) async throws -> GitHubPullRequest {
-        try await send("PATCH", Self.path(repo, "/pulls/\(number)"), body: ["state": "closed"]).decode(GitHubPullRequest.self)
+        if let lab = try gitLab(for: repo) { return try await lab.closeMergeRequest(repo, number: number) }
+        return try await send("PATCH", Self.path(repo, "/pulls/\(number)"), body: ["state": "closed"]).decode(GitHubPullRequest.self)
     }
 
     public func mergePullRequest(_ repo: RepoRef, number: Int, title: String) async throws {
+        if let lab = try gitLab(for: repo) { return try await lab.merge(repo, number: number, title: title) }
         _ = try await send("PUT", Self.path(repo, "/pulls/\(number)/merge"), body: ["merge_method": "squash", "commit_title": .string(title)])
     }
 

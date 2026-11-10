@@ -749,61 +749,111 @@ struct RepoPicker: View {
                     }
                     .buttonStyle(.plain)
                 }
-                Section {
-                    ForEach(filtered) { repo in
-                        Button {
-                            app.choose(repo: repo, for: target)
-                            dismiss()
-                        } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: repo.isPrivate ? "lock" : "chevron.left.forwardslash.chevron.right")
-                                    .foregroundStyle(Theme.secondaryText)
-                                    .frame(width: 22)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(repo.ownerLogin == app.github.login ? repo.name : repo.fullName).font(.body)
-                                    HStack(spacing: 6) {
-                                        if let language = repo.language { Text(language) }
-                                        if let pushed = repo.pushedAt { Text("updated \(pushed.friendlyAgo)") }
-                                    }
-                                    .font(.caption)
-                                    .foregroundStyle(Theme.secondaryText)
-                                }
-                                Spacer()
-                                if current?.ref == repo.ref { Image(systemName: "checkmark").foregroundStyle(theme.accent) }
-                            }
-                            .contentShape(Rectangle())
+                if app.github.isConnected || app.github.isLoadingRepos || !app.github.repos.isEmpty {
+                    Section {
+                        ForEach(filtered) { repo in row(repo, current: current) }
+                        if app.github.isLoadingRepos, app.github.repos.isEmpty {
+                            HStack { ProgressView(); Text("Getting your repos…").foregroundStyle(Theme.secondaryText) }
                         }
-                        .buttonStyle(.plain)
+                        if let error = app.github.reposError {
+                            Text(error).font(.footnote).foregroundStyle(Theme.danger)
+                        }
+                    } header: {
+                        Text("GitHub")
+                    } footer: {
+                        if let url = app.github.installationSettingsURL {
+                            Button("Missing a repo? Let MAIPA-G into more of them") { openURL(url) }
+                                .font(.footnote)
+                        }
                     }
-                    if app.github.isLoadingRepos, app.github.repos.isEmpty {
-                        HStack { ProgressView(); Text("Getting your repos…").foregroundStyle(Theme.secondaryText) }
+                }
+                Section {
+                    if app.gitlab.isConnected {
+                        ForEach(filteredGitLab) { repo in row(repo, current: current) }
+                        if app.gitlab.isLoadingRepos, app.gitlab.repos.isEmpty {
+                            HStack { ProgressView(); Text("Getting your GitLab projects…").foregroundStyle(Theme.secondaryText) }
+                        }
+                        if let error = app.gitlab.reposError {
+                            Text(error).font(.footnote).foregroundStyle(Theme.danger)
+                        }
+                    } else {
+                        Button("Connect GitLab in Settings") { app.sheet = .settings }
                     }
-                    if let error = app.github.reposError {
-                        Text(error).font(.footnote).foregroundStyle(Theme.danger)
-                    }
+                } header: {
+                    Text(app.gitlab.isConnected ? "GitLab (\(app.gitlab.host))" : "GitLab")
                 } footer: {
-                    if let url = app.github.installationSettingsURL {
-                        Button("Missing a repo? Let MAIPA-G into more of them") { openURL(url) }
-                            .font(.footnote)
+                    if current != nil {
+                        Text("Tap a repo to make it this chat's repo. Tap the plus to edit it here too: each repo keeps its own changes and saves to itself.")
                     }
                 }
             }
             .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search repos")
-            .refreshable { await app.github.loadRepos() }
+            .refreshable {
+                await app.github.loadRepos()
+                await app.gitlab.loadRepos()
+            }
             .navigationTitle("Choose a repo")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }
-            .task { await app.github.loadRepos() }
+            .task {
+                await app.github.loadRepos()
+                await app.gitlab.loadRepos()
+            }
         }
         .presentationDragIndicator(.visible)
+    }
+
+    private func row(_ repo: GitHubRepo, current: ChatRepo?) -> some View {
+        let isExtra = app.additionalRepos(for: target).contains { $0.ref == repo.ref }
+        return HStack(spacing: 10) {
+            Button {
+                app.choose(repo: repo, for: target)
+                dismiss()
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: repo.isPrivate ? "lock" : "chevron.left.forwardslash.chevron.right")
+                        .foregroundStyle(Theme.secondaryText)
+                        .frame(width: 22)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(repo.host == nil && repo.ownerLogin == app.github.login ? repo.name : repo.fullName).font(.body)
+                        HStack(spacing: 6) {
+                            if let language = repo.language { Text(language) }
+                            if let pushed = repo.pushedAt { Text("updated \(pushed.friendlyAgo)") }
+                        }
+                        .font(.caption)
+                        .foregroundStyle(Theme.secondaryText)
+                    }
+                    Spacer()
+                    if current?.ref == repo.ref { Image(systemName: "checkmark").foregroundStyle(theme.accent) }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if let current, current.ref != repo.ref {
+                Button {
+                    app.toggleAdditional(repo: repo, for: target)
+                } label: {
+                    Image(systemName: isExtra ? "checkmark.circle.fill" : "plus.circle")
+                        .font(.title3)
+                        .foregroundStyle(isExtra ? theme.accent : Theme.secondaryText)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isExtra ? "Stop editing \(repo.name) in this chat" : "Also edit \(repo.name) in this chat")
+            }
+        }
     }
 
     private var filtered: [GitHubRepo] {
         let repos = app.github.repos.filter { $0.name != DataRepoSync.repoName }
         guard !query.isEmpty else { return repos }
         return repos.filter { $0.fullName.localizedCaseInsensitiveContains(query) || ($0.summary ?? "").localizedCaseInsensitiveContains(query) }
+    }
+
+    private var filteredGitLab: [GitHubRepo] {
+        guard !query.isEmpty else { return app.gitlab.repos }
+        return app.gitlab.repos.filter { $0.fullName.localizedCaseInsensitiveContains(query) || ($0.summary ?? "").localizedCaseInsensitiveContains(query) }
     }
 }
 
@@ -868,10 +918,10 @@ struct BranchPicker: View {
         loading = true
         defer { loading = false }
         do {
-            branches = try await app.github.branches(of: repo.ref, refresh: refresh)
+            branches = try await app.branches(of: repo.ref, refresh: refresh)
             error = nil
         } catch {
-            self.error = app.github.describe(error)
+            self.error = app.describe(error, for: repo.ref)
         }
     }
 

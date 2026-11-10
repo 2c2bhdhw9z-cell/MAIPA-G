@@ -67,6 +67,11 @@ final class JobCoordinator {
             lastError = "Autonomous is turned off in Settings. Turn it on to run repo jobs on GitHub, or switch 'Where it runs' to 'On this phone'."
             return nil
         }
+        guard !repo.ref.isGitLab else {
+            // Jobs, autonomous runs and preview builds run on GitHub Actions.
+            lastError = "\(repo.ref.fullName) is on GitLab. Jobs and preview builds run on GitHub Actions, so they need a GitHub repo; edit and save GitLab projects in the chat instead."
+            return nil
+        }
         guard let github = app.github.client else {
             lastError = "Connect GitHub in Settings before running a job on a repository."
             return nil

@@ -1478,7 +1478,7 @@ struct WorkstationScreen: View {
     }
 
     private func loadRepoTreeIfNeeded() async {
-        guard let repo = activeRepo, let github = app.github.client else {
+        guard let repo = activeRepo, let github = app.repoClient(for: repo.ref) else {
             repoEntries = []
             repoCommit = nil
             return
@@ -1994,7 +1994,7 @@ private struct WorkstationItemPreviewSheet: View {
             }
             return
         }
-        if case .repoFile(let path) = item.kind, let repo, let github = app.github.client {
+        if case .repoFile(let path) = item.kind, let repo, let github = app.repoClient(for: repo.ref) {
             do {
                 let commit = if let repoCommit { repoCommit } else { try await github.resolveCommit(repo.ref, ref: repo.branch) }
                 let ws = RepoWorkspace(repo: repo.ref, branch: repo.branch, commit: commit, github: github, store: app.snapshots)

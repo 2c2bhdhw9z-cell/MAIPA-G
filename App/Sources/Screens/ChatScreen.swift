@@ -373,8 +373,9 @@ struct ChatScreen: View {
                     thinking: session.chat.thinking,
                     thinkingLevels: app.openRouter.thinkingLevels(for: session.chat.model),
                     repo: session.chat.repo,
+                    extraRepoCount: session.chat.allRepos.count > 1 ? session.chat.allRepos.count - 1 : 0,
                     groupName: app.groups.name(for: session.chat.groupID),
-                    isGitHubConnected: app.github.isConnected,
+                    isGitHubConnected: app.github.isConnected || app.gitlab.isConnected,
                     isRunning: session.isRunning,
                     canStop: true,
                     onSend: {
@@ -390,7 +391,7 @@ struct ChatScreen: View {
                     onStop: { session.stop() },
                     onPickModel: { app.sheet = .models(.chat(session.id)) },
                     onPickThinking: { session.setThinking($0) },
-                    onPickRepo: { app.sheet = app.github.isConnected ? .repos(.chat(session.id)) : .connectGitHub },
+                    onPickRepo: { app.sheet = app.github.isConnected || app.gitlab.isConnected ? .repos(.chat(session.id)) : .connectGitHub },
                     onPickBranch: { app.sheet = .branches(.chat(session.id)) },
                     onClearRepo: { session.setRepo(nil) },
                     onPickGroup: { app.sheet = .groups(.chat(session.id)) },
@@ -498,7 +499,9 @@ struct ChatScreen: View {
             approveSpending: { session.approveMoreSpending() },
             switchToFree: { session.switchToFreeAIs() },
             signIn: {
-                if app.openRouter.isSignedIn, !app.github.isConnected {
+                if app.openRouter.isSignedIn, !app.gitlab.isConnected, session.chat.allRepos.contains(where: { $0.ref.isGitLab }) {
+                    app.sheet = .settings
+                } else if app.openRouter.isSignedIn, !app.github.isConnected {
                     app.sheet = .connectGitHub
                 } else {
                     app.sheet = .signInOpenRouter

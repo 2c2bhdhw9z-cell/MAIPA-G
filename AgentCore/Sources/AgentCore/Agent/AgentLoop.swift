@@ -789,10 +789,21 @@ private struct Runner {
         let activeBackgroundReports = pendingBackgroundReports
         pendingBackgroundReports.removeAll()
         let stepSteered = activeSteeringNotes.isEmpty ? nil : activeSteeringNotes
+        // Every provider an attempt at this step went to: a retry can switch provider (a
+        // fallback, or the free AIs), and an attempt that failed partway may still have cost.
+        var providersTried: [String] = []
         while true {
             attempt += 1
             turn.steps.append(AssistantStep(steeredMessages: stepSteered))
             let index = turn.steps.count - 1
+            let attemptProvider = AIProviderModelID.providerID(route.model)
+            if !providersTried.contains(attemptProvider) { providersTried.append(attemptProvider) }
+            turn.steps[index].providersTried = providersTried
+            // Kept on the turn too: an attempt that failed with nothing to show is removed as a
+            // step, but its provider may still have charged for it.
+            if !(turn.providersTried ?? []).contains(attemptProvider) {
+                turn.providersTried = (turn.providersTried ?? []) + [attemptProvider]
+            }
             chat.messages[chat.messages.count - 1].assistantTurn = turn
             var rawMessages = Transcript.messages(
                 for: chat,

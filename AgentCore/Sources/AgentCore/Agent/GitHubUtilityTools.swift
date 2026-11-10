@@ -36,7 +36,7 @@ public struct ReadOtherRepositoryFileTool: AgentTool {
     public let name = "read_other_repo_file"
     public init(github: GitHubClient, repositories: [GitHubRepo]) { self.github = github; self.repositories = repositories }
     public var spec: ToolSpec {
-        ToolSpec(name: name, description: "Read a text file from any connected GitHub repository by repository name and path.", parameters: [
+        ToolSpec(name: name, description: "Read a text file from any connected GitHub repository or GitLab project by repository name and path.", parameters: [
             "type": "object", "properties": ["repository": ["type": "string"], "path": ["type": "string"]],
             "required": ["repository", "path"], "additionalProperties": false,
         ])

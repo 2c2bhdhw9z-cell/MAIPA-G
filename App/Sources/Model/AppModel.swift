@@ -86,6 +86,8 @@ final class HomeDraft {
     var model: ModelChoice = .auto
     var thinking: ThinkingLevel = .default
     var repo: ChatRepo?
+    /// More repos for the next chat, edited alongside `repo` (see Chat.additionalRepos).
+    var additionalRepos: [ChatRepo] = []
     var attachments: [AttachmentReference] = [] { didSet { scheduleSave() } }
     var groupID: UUID?
     var webEnabled = true
@@ -129,6 +131,7 @@ final class AppModel {
     let paths: AppPaths
     let transport: AppTransport
     let github: GitHubAccount
+    let gitlab: GitLabAccount
     let openRouter: OpenRouterAccount
     let library: ChatLibrary
     let sync: SyncCoordinator
@@ -162,7 +165,11 @@ final class AppModel {
         // Big uploads keep going in the background; everything else is the normal session.
         let transport = AppTransport()
         self.transport = transport
-        github = GitHubAccount(transport: transport)
+        let githubAccount = GitHubAccount(transport: transport)
+        let gitlab = GitLabAccount(transport: transport)
+        githubAccount.gitLabClient = { [weak gitlab] in gitlab?.client }
+        github = githubAccount
+        self.gitlab = gitlab
         openRouter = OpenRouterAccount(transport: transport, paths: paths)
         library = ChatLibrary(store: ChatStore(dataDirectory: paths.data))
         sync = SyncCoordinator(paths: paths)
@@ -209,6 +216,7 @@ final class AppModel {
         let activeThinking = targetSession?.chat.thinking ?? home.thinking
         var lines = [
             "GitHub: " + (github.isConnected ? "connected as \(github.login ?? "unknown") (\(github.repos.count) accessible repos)" : "not connected"),
+            "GitLab: " + (gitlab.isConnected ? "connected to \(gitlab.host) as \(gitlab.login ?? "unknown") (\(gitlab.repos.count) projects)" : "not connected"),
             "AI providers: \(openRouter.activeProviderSummary)",
             "Chosen AI (active chat): \(openRouter.label(for: activeChoice))",
         ]
@@ -258,6 +266,7 @@ final class AppModel {
         metricKit.start()
         openRouter.restore()
         github.restore()
+        gitlab.restore()
         await library.load()
         await home.load()
         await jobs.load()
@@ -273,6 +282,7 @@ final class AppModel {
         async let models: Void = openRouter.loadModels()
         async let key: Void = openRouter.refreshKeyInfo()
         await github.refresh()
+        await gitlab.refresh()
         await startSaving()
         await jobs.updateAutonomousWorkflows()
         // Builds before the secret record existed: find the repos they set up, once.
@@ -302,7 +312,43 @@ final class AppModel {
         await sync.syncNow()
         await sync.reset()
         await github.disconnect()
-        home.repo = nil
+        // A GitLab project stays chosen: only GitHub went away.
+        if home.repo?.ref.isGitLab != true { home.repo = nil }
+        home.additionalRepos.removeAll { !$0.ref.isGitLab }
+    }
+
+    func disconnectGitLab() {
+        gitlab.disconnect()
+        if home.repo?.ref.isGitLab == true { home.repo = nil }
+        home.additionalRepos.removeAll { $0.ref.isGitLab }
+    }
+
+    /// The client that reads and saves `repo`: GitHub's, or GitLab's for a GitLab project. Nil
+    /// when that service isn't connected.
+    func repoClient(for repo: RepoRef) -> GitHubClient? {
+        if repo.isGitLab {
+            guard let lab = gitlab.client else { return nil }
+            var client = github.client ?? GitHubClient(transport: transport, tokens: nil)
+            client.gitLab = lab
+            return client
+        }
+        return github.client
+    }
+
+    /// GitHub's or GitLab's explanation of an error, whichever `repo` lives on.
+    func describe(_ error: Error, for repo: RepoRef?) -> String {
+        repo?.isGitLab == true ? gitlab.describe(error) : github.describe(error)
+    }
+
+    /// Branches of a GitHub repo or a GitLab project.
+    func branches(of repo: RepoRef, refresh: Bool = false) async throws -> [GitHubBranch] {
+        if repo.isGitLab { return try await gitlab.branches(of: repo, refresh: refresh) }
+        return try await github.branches(of: repo, refresh: refresh)
+    }
+
+    /// Details of a repo from either list.
+    func knownRepo(_ ref: RepoRef) -> GitHubRepo? {
+        ref.isGitLab ? gitlab.repo(ref) : github.repo(named: ref.fullName)
     }
 
     func scenePhaseChanged(_ phase: ScenePhase) {
@@ -404,7 +450,7 @@ final class AppModel {
             return
         }
         notifications.requestIfNeeded(enabled: settings.notificationsOn)
-        library.startChat(text: text, attachments: home.attachments, repo: home.repo, model: home.model, thinking: home.thinking, groupID: home.groupID, memories: memories.activeTexts, autonomous: home.autonomous)
+        library.startChat(text: text, attachments: home.attachments, repo: home.repo, additionalRepos: home.repo == nil ? [] : home.additionalRepos, model: home.model, thinking: home.thinking, groupID: home.groupID, memories: memories.activeTexts, autonomous: home.autonomous)
         home.text = ""
         home.attachments = []
         home.groupID = nil
@@ -508,10 +554,33 @@ final class AppModel {
         set(repo, for: target)
     }
 
+    /// The other repos a chat (or the next chat) edits besides its first one.
+    func additionalRepos(for target: ComposerTarget) -> [ChatRepo] {
+        switch target {
+        case .home: return home.repo == nil ? [] : home.additionalRepos
+        case .chat(let id): return library.session(id)?.chat.additionalRepos ?? []
+        }
+    }
+
+    /// Adds `repo` to the chat's other repos, or takes it off when it is already there.
+    func toggleAdditional(repo: GitHubRepo, for target: ComposerTarget) {
+        var list = additionalRepos(for: target)
+        if let index = list.firstIndex(where: { $0.ref == repo.ref }) {
+            list.remove(at: index)
+        } else {
+            list.append(ChatRepo(ref: repo.ref, branch: repo.defaultBranch, defaultBranch: repo.defaultBranch, isPrivate: repo.isPrivate))
+        }
+        switch target {
+        case .home: home.additionalRepos = list.filter { $0.ref != home.repo?.ref }
+        case .chat(let id): library.session(id)?.setAdditionalRepos(list)
+        }
+    }
+
     private func set(_ repo: ChatRepo?, for target: ComposerTarget) {
         switch target {
         case .home:
             home.repo = repo
+            if let repo { home.additionalRepos.removeAll { $0.ref == repo.ref } } else { home.additionalRepos = [] }
             updateSettings { $0.lastRepo = repo }
         case .chat(let id):
             library.session(id)?.setRepo(repo)

@@ -57,9 +57,16 @@ public actor ChangeSession {
     private var saved: [SaveReceipt]
     public init(receipts: [SaveReceipt] = []) { saved = receipts }
     public func record(_ receipt: SaveReceipt) { saved.append(receipt) }
+    /// Marks a save's request as finished elsewhere (closed or merged on the website), so it is
+    /// no longer continued.
+    public func markResolved(_ id: UUID, as resolution: String) {
+        if let index = saved.firstIndex(where: { $0.id == id }) { saved[index].resolution = resolution }
+    }
     public func receipts() -> [SaveReceipt] { saved }
-    public func activeReceipt() -> SaveReceipt? {
-        saved.last { $0.pullRequest != nil && $0.resolution == nil }
+    /// The newest save still waiting in an open pull/merge request; for `repo` only when given,
+    /// so a chat with several repos never continues another repo's request.
+    public func activeReceipt(for repo: RepoRef? = nil) -> SaveReceipt? {
+        saved.last { $0.pullRequest != nil && $0.resolution == nil && (repo == nil || $0.repo == repo) }
     }
 }
 
@@ -77,16 +84,16 @@ public struct SaveChangesTool: AgentTool {
     public var spec: ToolSpec { ToolSpec(name: name, description: "Save all staged file changes safely. Repository rules decide direct save versus a pull request.", parameters: ["type": "object", "properties": ["title": ["type": "string"], "summary": ["type": "string"]], "required": ["title"]]) }
     public func runningSummary(for arguments: JSONValue) -> String { "Saving changes…" }
     public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
-        guard rules.directSave, selectedBranch == defaultBranch, await session.activeReceipt() == nil else { return nil }
+        guard rules.directSave, selectedBranch == defaultBranch, await session.activeReceipt(for: workspace.base.repo) == nil else { return nil }
         return ToolApprovalRequest(question: "Allow MAIPA-G to save these staged changes directly to \(defaultBranch)?", allowLabel: "Save directly")
     }
     public func approvalAfterOutsideContent(for arguments: JSONValue) async -> ToolApprovalRequest? {
-        guard await session.activeReceipt() == nil else { return nil }
+        guard await session.activeReceipt(for: workspace.base.repo) == nil else { return nil }
         let title = String((arguments.optionalString("title") ?? "Changes").prefix(160))
-        return ToolApprovalRequest(question: "Allow MAIPA-G to push staged changes to GitHub (\(title))?", allowLabel: "Save changes")
+        return ToolApprovalRequest(question: "Allow MAIPA-G to push staged changes to \(workspace.base.repo.hostName) (\(title))?", allowLabel: "Save changes")
     }
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
-        if rules.directSave, selectedBranch == defaultBranch, await session.activeReceipt() == nil {
+        if rules.directSave, selectedBranch == defaultBranch, await session.activeReceipt(for: workspace.base.repo) == nil {
             throw ToolInputError("Saving directly to the default branch needs the person's approval.")
         }
         return try await save(arguments: arguments)
@@ -96,12 +103,12 @@ public struct SaveChangesTool: AgentTool {
     }
     private func save(arguments: JSONValue) async throws -> ToolOutput {
         let title = try arguments.requiredString("title")
-        let receipt = try await service.save(workspace, selectedBranch: selectedBranch, defaultBranch: defaultBranch, rules: rules, title: title, body: arguments.optionalString("summary") ?? "Changes made by MAIPA-G.", activeReceipt: await session.activeReceipt())
+        let receipt = try await service.save(workspace, selectedBranch: selectedBranch, defaultBranch: defaultBranch, rules: rules, title: title, body: arguments.optionalString("summary") ?? "Changes made by MAIPA-G.", activeReceipt: await session.activeReceipt(for: workspace.base.repo))
         await session.record(receipt)
         if let pull = receipt.pullRequest {
-            return ToolOutput(forModel: "Saved commit \(receipt.savedCommit) and opened pull request #\(pull.number): \(pull.htmlURL)", summary: "Opened pull request #\(pull.number)", detail: pull.htmlURL)
+            return ToolOutput(forModel: "Saved commit \(receipt.savedCommit) and opened \(receipt.repo.isGitLab ? "merge request !" : "pull request #")\(pull.number) in \(receipt.repo.fullName): \(pull.htmlURL)", summary: receipt.repo.isGitLab ? "Opened merge request !\(pull.number)" : "Opened pull request #\(pull.number)", detail: pull.htmlURL)
         }
-        return ToolOutput(forModel: "Saved commit \(receipt.savedCommit) directly to \(receipt.branch).", summary: "Saved to \(receipt.branch)")
+        return ToolOutput(forModel: "Saved commit \(receipt.savedCommit) directly to \(receipt.branch) in \(receipt.repo.fullName).", summary: "Saved to \(receipt.branch)")
     }
 }
 

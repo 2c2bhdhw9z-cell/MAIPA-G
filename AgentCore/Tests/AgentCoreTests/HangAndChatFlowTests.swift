@@ -321,6 +321,27 @@ struct HangAndChatFlowTests {
         #expect(turn.providersUsed == ["openrouter"])
     }
 
+    @Test("Every provider a step tried, even one it left mid-retry, counts toward the step's cost")
+    func providersTriedAreRecorded() async throws {
+        let transport = ScriptedTransport([.events([AgentLoopTests.text("Hi."), AgentLoopTests.done])])
+        let turn = try #require(await Self.run(transport, tools: []))
+        #expect(turn.providersTried == ["openrouter"])
+        #expect(turn.steps.first?.providersTried == ["openrouter"])
+
+        var step = AssistantStep()
+        step.provider = "oneprovider"
+        step.providersTried = ["openrouter", "oneprovider"]
+        var switched = AssistantTurn(status: .done, steps: [step])
+        switched.balanceProvider = "openrouter"
+        switched.balancesBefore = ["openrouter": 10, "oneprovider": 5]
+        switched.balancesAfter = ["openrouter": 9.9, "oneprovider": 4.8]
+        #expect(switched.providersUsed == ["openrouter", "oneprovider"])
+        #expect(abs((switched.realCost ?? 0) - 0.3) < 0.000_001)
+        // Without a reading for a provider it switched away from, the cost stays unknown.
+        switched.balancesAfter = ["oneprovider": 4.8]
+        #expect(switched.realCost == nil)
+    }
+
     @Test("A shared balance difference is an estimate, never a real cost")
     func sharedBalanceIsEstimated() {
         var turn = AssistantTurn(status: .done)

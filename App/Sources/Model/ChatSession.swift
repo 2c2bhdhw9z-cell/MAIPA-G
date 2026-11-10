@@ -52,16 +52,28 @@ final class ChatSession: Identifiable {
     @ObservationIgnored private var changeWorkspace: ChangeWorkspace? {
         didSet { refreshStagedChanges() }
     }
+    /// Staged changes for the chat's other repos (Chat.additionalRepos), one per repo.
+    @ObservationIgnored private var extraChangeWorkspaces: [RepoRef: ChangeWorkspace] = [:] {
+        didSet { refreshStagedChanges() }
+    }
+    /// Every repo's staged changes, the chat's first repo first.
+    private var allChangeWorkspaces: [ChangeWorkspace] {
+        let extras = (chat.additionalRepos ?? []).compactMap { extraChangeWorkspaces[$0.ref] }
+        return (changeWorkspace.map { [$0] } ?? []) + extras
+    }
     @ObservationIgnored private var workflowEngines: [String: WorkflowEngine] = [:]
     @ObservationIgnored private var workflowTasks: [String: Task<Void, Never>] = [:]
     var currentChangeWorkspace: ChangeWorkspace? { changeWorkspace }
     var hasActiveWorkflowRuns: Bool { activeWorkflowRuns.contains(where: \.isRunning) }
     var hasInMemoryWorkToPreserve: Bool {
-        changeWorkspace != nil || !workstationFiles.isEmpty || !activeWorkflowRuns.isEmpty
+        changeWorkspace != nil || !extraChangeWorkspaces.isEmpty || !workstationFiles.isEmpty || !activeWorkflowRuns.isEmpty
     }
 
     func hasUnsavedStagedWork() async -> Bool {
-        await changeWorkspace?.hasStagedChanges() ?? false
+        for changes in allChangeWorkspaces {
+            if await changes.hasStagedChanges() { return true }
+        }
+        return false
     }
 
     func adoptSyncedChatMetadataPreservingWorkspace(_ synced: Chat) {
@@ -399,7 +411,16 @@ final class ChatSession: Identifiable {
     }
 
     func stagedDiff() async -> String {
-        await changeWorkspace?.stagedDiff() ?? "No staged changes in this turn."
+        let all = allChangeWorkspaces
+        guard all.count > 1 else { return await changeWorkspace?.stagedDiff() ?? "No staged changes in this turn." }
+        // Several repos: each repo's changes under its own heading, as each is saved on its own.
+        var sections: [String] = []
+        for changes in all {
+            var diff = "No staged changes."
+            if await changes.hasStagedChanges() { diff = await changes.stagedDiff() }
+            sections.append("=== \(changes.base.repo.fullName) (\(changes.base.repo.hostName), \(changes.base.branch)) ===\n" + diff)
+        }
+        return sections.joined(separator: "\n\n")
     }
 
     /// Cheap actor query, never awaited by the token-delivery path. A replaced workspace
@@ -409,12 +430,17 @@ final class ChatSession: Identifiable {
         let generation = stagedChangesRefreshGeneration
         stagedChangesRefreshTask?.cancel()
         stagedChangesRefreshTask = nil
-        guard let changes = changeWorkspace else {
+        let all = allChangeWorkspaces
+        guard !all.isEmpty else {
             hasStagedChanges = false
             return
         }
+        let changes = changeWorkspace
         stagedChangesRefreshTask = Task { [weak self] in
-            let hasChanges = await changes.hasStagedChanges()
+            var hasChanges = false
+            for workspace in all {
+                if await workspace.hasStagedChanges() { hasChanges = true; break }
+            }
             guard !Task.isCancelled, let self,
                   self.stagedChangesRefreshGeneration == generation,
                   self.changeWorkspace === changes else { return }
@@ -429,16 +455,27 @@ final class ChatSession: Identifiable {
     }
 
     func branchDiff() async -> String {
-        guard let app, let github = app.github.client, let repo = chat.repo else { return "Connect GitHub to load the branch diff." }
-        let branch = (chat.saveReceipts ?? []).last { $0.pullRequest != nil && $0.resolution == nil }?.branch ?? repo.branch
+        let repos = chat.allRepos
+        guard !repos.isEmpty else { return "Connect GitHub to load the branch diff." }
+        guard repos.count > 1 else { return await branchDiff(for: repos[0]) }
+        var sections: [String] = []
+        for repo in repos {
+            sections.append("=== \(repo.ref.fullName) (\(repo.ref.hostName)) ===\n" + (await branchDiff(for: repo)))
+        }
+        return sections.joined(separator: "\n\n")
+    }
+
+    private func branchDiff(for repo: ChatRepo) async -> String {
+        guard let app, let github = app.repoClient(for: repo.ref) else { return "Connect \(repo.ref.hostName) to load the branch diff." }
+        let branch = (chat.saveReceipts ?? []).last { $0.repo == repo.ref && $0.pullRequest != nil && $0.resolution == nil }?.branch ?? repo.branch
         do {
             let comparison = try await github.compare(repo.ref, base: repo.defaultBranch, head: branch)
             if comparison.files.isEmpty { return "No branch changes." }
             return ChangeWorkspace.capped(
                 comparison.files.map { file in
-                    "--- \(file.status): \(file.path)\n" + (file.patch ?? "GitHub did not provide a text patch for this file.")
+                    "--- \(file.status): \(file.path)\n" + (file.patch ?? "\(repo.ref.hostName) did not provide a text patch for this file.")
                 }.joined(separator: "\n\n"),
-                hint: "\(comparison.files.count) files changed on this branch; open the file on GitHub to see the rest."
+                hint: "\(comparison.files.count) files changed on this branch; open the file on \(repo.ref.hostName) to see the rest."
             )
         } catch {
             return ErrorExplainer.explain(error).message
@@ -810,6 +847,28 @@ final class ChatSession: Identifiable {
         workspace = nil
         changeWorkspace = nil
         changeSession = nil
+        if repo == nil {
+            // More repos only ride along with a first one.
+            chat.additionalRepos = nil
+            extraChangeWorkspaces = [:]
+        } else if let repo, chat.additionalRepos?.contains(where: { $0.ref == repo.ref }) == true {
+            setAdditionalRepos((chat.additionalRepos ?? []).filter { $0.ref != repo.ref })
+            return
+        }
+        touch()
+    }
+
+    /// The chat's other repos. A repo taken off loses its staged (unsaved) changes; saved work stays.
+    func setAdditionalRepos(_ repos: [ChatRepo]) {
+        let kept = repos.filter { $0.ref != chat.repo?.ref }
+        chat.additionalRepos = kept.isEmpty ? nil : kept
+        let refs = Set(kept.map(\.ref))
+        var remaining: [RepoRef: ChangeWorkspace] = [:]
+        for (ref, changes) in extraChangeWorkspaces where refs.contains(ref) {
+            // A changed branch starts that repo's staged changes afresh.
+            if kept.first(where: { $0.ref == ref })?.branch == changes.base.branch { remaining[ref] = changes }
+        }
+        extraChangeWorkspaces = remaining
         touch()
     }
 
@@ -842,9 +901,32 @@ final class ChatSession: Identifiable {
     }
 
     func addLastSave(force: Bool = false) async {
-        guard let app, let github = app.github.client, var receipts = chat.saveReceipts,
-              let index = receipts.indices.last, let pull = receipts[index].pullRequest, receipts[index].resolution == nil else { return }
+        guard let app, var receipts = chat.saveReceipts,
+              let index = receipts.indices.last, let pull = receipts[index].pullRequest, receipts[index].resolution == nil,
+              let github = app.repoClient(for: receipts[index].repo) else { return }
+        let isGitLab = receipts[index].repo.isGitLab
+        let requestName = isGitLab ? "merge request !\(pull.number)" : "pull request #\(pull.number)"
         do {
+            if isGitLab, let lab = app.gitlab.client {
+                // GitLab runs pipelines instead of GitHub checks.
+                let status = try await lab.pipelineStatus(receipts[index].repo, commit: receipts[index].savedCommit)
+                switch status {
+                case nil: mergeCheckStatus = "No pipeline"
+                case "success", "skipped", "manual": mergeCheckStatus = "Pipeline passed"
+                default:
+                    mergeCheckStatus = status == "failed" || status == "canceled" ? "Pipeline \(status ?? "")" : "Pipeline is \(status ?? "pending")"
+                    if !force {
+                        mergeWarning = "\(mergeCheckStatus ?? "The pipeline did not pass"). Add \(requestName) anyway?"
+                        return
+                    }
+                }
+                try await GitHubChangeService(github: github).addIt(receipts[index])
+                receipts[index].resolution = "added"
+                chat.saveReceipts = receipts
+                mergeWarning = nil
+                appendNotice("Added the merge request and removed its side branch.")
+                return
+            }
             let result = try await GitHubRunWatcher(github: github, maximumPolls: 1, discoveryPolls: 1, sleeper: {}).wait(
                 repo: receipts[index].repo,
                 commit: receipts[index].savedCommit,
@@ -870,10 +952,10 @@ final class ChatSession: Identifiable {
             appendNotice("Added the pull request and removed its side branch.")
         } catch {
             let explanation = ErrorExplainer.explain(error)
-            if let api = error as? GitHubAPIError, api.status == 409 || api.status == 422 {
-                appendNotice("GitHub could not merge pull request #\(pull.number): \(explanation.cause) Open the pull request, resolve the named conflicting files, then tap Add it again. \(pull.htmlURL)")
+            if let api = error as? GitHubAPIError, api.status == 409 || api.status == 422 || (isGitLab && (api.status == 405 || api.status == 406)) {
+                appendNotice("\(receipts[index].repo.hostName) could not merge \(requestName): \(explanation.cause) Open it, resolve the named conflicting files, then tap Add it again. \(pull.htmlURL)")
             } else {
-                appendNotice("Couldn’t add pull request #\(pull.number): \(explanation.message)")
+                appendNotice("Couldn’t add \(requestName): \(explanation.message)")
             }
         }
     }
@@ -881,26 +963,35 @@ final class ChatSession: Identifiable {
     func cancelMergeWarning() { mergeWarning = nil }
 
     func throwAwayLastSave() async {
-        guard let app, let github = app.github.client, var receipts = chat.saveReceipts,
-              let index = receipts.indices.last, receipts[index].pullRequest != nil, receipts[index].resolution == nil else { return }
+        guard let app, var receipts = chat.saveReceipts,
+              let index = receipts.indices.last, receipts[index].pullRequest != nil, receipts[index].resolution == nil,
+              let github = app.repoClient(for: receipts[index].repo) else { return }
+        let repo = receipts[index].repo
         do {
             try await GitHubChangeService(github: github).throwAway(receipts[index])
             receipts[index].resolution = "discarded"
             chat.saveReceipts = receipts
-            workspace = nil
+            if repo == chat.repo?.ref { workspace = nil } else { extraChangeWorkspaces[repo] = nil }
             changeSession = nil
-            appendNotice("Closed the pull request and removed its side branch.")
-        } catch { appendNotice("Couldn't throw it away: \(app.github.describe(error))") }
+            appendNotice(repo.isGitLab ? "Closed the merge request and removed its side branch." : "Closed the pull request and removed its side branch.")
+        } catch { appendNotice("Couldn't throw it away: \(app.describe(error, for: repo))") }
     }
 
     func undoLastSave() async {
-        guard let app, let github = app.github.client, var receipts = chat.saveReceipts,
-              let index = receipts.lastIndex(where: { $0.undoneAt == nil }) else { return }
+        guard let app, var receipts = chat.saveReceipts,
+              let index = receipts.lastIndex(where: { $0.undoneAt == nil }),
+              let github = app.repoClient(for: receipts[index].repo) else { return }
+        let repo = receipts[index].repo
         do {
             let undoReceipt = try await GitHubChangeService(github: github).undo(receipts[index])
             receipts[index].undoneAt = Date()
             chat.saveReceipts = receipts
-            if let existingWorkspace = workspace {
+            if repo != chat.repo?.ref {
+                // Another of the chat's repos: its copy reloads at the new commit next turn.
+                if let existing = extraChangeWorkspaces[repo] {
+                    extraChangeWorkspaces[repo] = await existing.rebased(onto: existing.base.advancing(toCommit: undoReceipt.savedCommit))
+                }
+            } else if let existingWorkspace = workspace {
                 let advanced = existingWorkspace.advancing(toCommit: undoReceipt.savedCommit)
                 workspace = advanced
                 if let existingChanges = changeWorkspace {
@@ -911,7 +1002,7 @@ final class ChatSession: Identifiable {
             }
             changeSession = nil
             appendNotice("Undid MAIPA-G's last save.")
-        } catch { appendNotice("Undo stopped safely: \(app.github.describe(error))") }
+        } catch { appendNotice("Undo stopped safely: \(app.describe(error, for: repo))") }
     }
 
     private func appendNotice(_ text: String) {
@@ -1042,8 +1133,15 @@ final class ChatSession: Identifiable {
         })
         var readOnlyExtraTools: [any AgentTool] = []
         if let github = app.github.client {
-            let readOtherRepoTool = ReadOtherRepositoryFileTool(github: github, repositories: app.github.repos)
             tools.append(CreateRepositoryTool(github: github))
+        }
+        if let github = app.github.client ?? app.gitlab.client.map({ lab -> GitHubClient in
+            var client = GitHubClient(transport: app.transport, tokens: nil)
+            client.gitLab = lab
+            return client
+        }) {
+            // GitHub repos and GitLab projects alike; each is answered by its own service.
+            let readOtherRepoTool = ReadOtherRepositoryFileTool(github: github, repositories: app.github.repos + app.gitlab.repos)
             tools.append(readOtherRepoTool)
             readOnlyExtraTools.append(readOtherRepoTool)
         }
@@ -1089,8 +1187,8 @@ final class ChatSession: Identifiable {
         var hookProblems: [String] = []
         var repoLocalAgents: [AgentDefinition] = []
         if let repo = chat.repo {
-            guard let github = app.github.client else {
-                fail(.signInNeeded, "Connect GitHub so MAIPA-G can read \(repo.ref.fullName).")
+            guard let github = app.repoClient(for: repo.ref) else {
+                fail(.signInNeeded, "Connect \(repo.ref.hostName) so MAIPA-G can read \(repo.ref.fullName).")
                 return
             }
             do {
@@ -1149,17 +1247,40 @@ final class ChatSession: Identifiable {
                     DeleteFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
                     SaveChangesTool(workspace: changes, service: service, session: saves, selectedBranch: workingBranch, defaultBranch: repo.defaultBranch, rules: rules),
                 ]
-                tools.append(contentsOf: repoTools)
+                // The chat's other repos: the same tools for each, chosen with a repo argument.
+                var perRepo: [(repo: String, tools: [any AgentTool])] = [(repo.ref.fullName, repoTools)]
+                var perRepoHelpers: [(repo: String, tools: [any AgentTool])] = [(repo.ref.fullName, helperRepoTools)]
+                for extra in chat.allRepos.dropFirst() {
+                    do {
+                        let set = try await extraRepoTools(extra, app: app, saves: saves, authorization: changeAuthorization, lastMessage: lastMessage, setupDeadline: setupDeadline)
+                        perRepo.append((extra.ref.fullName, set.tools))
+                        perRepoHelpers.append((extra.ref.fullName, set.helpers))
+                    } catch let error as MissingConnection {
+                        fail(.signInNeeded, error.message)
+                        return
+                    } catch {
+                        fail(.other, "Couldn't open \(extra.ref.fullName) on \(extra.ref.hostName). \(app.describe(error, for: extra.ref))")
+                        return
+                    }
+                }
+                if perRepo.count > 1 {
+                    let names = Set(repoTools.map(\.name))
+                    readOnlyHelperTools.removeAll { names.contains($0.name) }
+                    readOnlyHelperTools.append(contentsOf: RepoRoutedTool.combine(perRepoHelpers))
+                    tools.append(contentsOf: RepoRoutedTool.combine(perRepo))
+                } else {
+                    tools.append(contentsOf: repoTools)
+                }
                 repoContext = SystemPrompt.RepoContext(
                     ref: repo.ref,
                     branch: workingBranch,
                     commit: commit,
                     isPrivate: repo.isPrivate,
-                    summary: app.github.repo(named: repo.ref.fullName)?.summary,
+                    summary: app.knownRepo(repo.ref)?.summary,
                     ruleDocuments: rules.documents
                 )
             } catch {
-                fail(.other, "Couldn't open \(repo.ref.fullName) on GitHub. \(app.github.describe(error))")
+                fail(.other, "Couldn't open \(repo.ref.fullName) on \(repo.ref.hostName). \(app.describe(error, for: repo.ref))")
                 return
             }
         }
@@ -1173,7 +1294,7 @@ final class ChatSession: Identifiable {
             tools.append(SyncStagedToComputerTool(
                 control: control, workspace: workspace,
                 homePath: "repos/\(repoContext.ref.owner)/\(repoContext.ref.name)",
-                cloneURL: repoContext.isPrivate ? nil : "https://github.com/\(repoContext.ref.owner)/\(repoContext.ref.name).git",
+                cloneURL: repoContext.isPrivate ? nil : repoContext.ref.webURL.absoluteString + ".git",
                 commit: repoContext.commit
             ))
             canSyncStaged = true
@@ -1183,7 +1304,7 @@ final class ChatSession: Identifiable {
         var hookRunner: HookedTool.CommandRunner?
         if let repoContext, let workspace = changeWorkspace, let control = app.connectors.computerControl(), control.commandTool != nil {
             let homePath = "repos/\(repoContext.ref.owner)/\(repoContext.ref.name)"
-            let cloneURL: String? = repoContext.isPrivate ? nil : "https://github.com/\(repoContext.ref.owner)/\(repoContext.ref.name).git"
+            let cloneURL: String? = repoContext.isPrivate ? nil : repoContext.ref.webURL.absoluteString + ".git"
             let commit = repoContext.commit
             hookRunner = { command in
                 _ = try await control.syncStagedChanges(homePath: homePath, cloneURL: cloneURL, commit: commit, changes: await workspace.stagedChanges())
@@ -1208,7 +1329,12 @@ final class ChatSession: Identifiable {
         for problem in hookProblems {
             _ = app.report(RepoHookProblem(message: problem), area: "hooks", operation: "read repo hooks")
         }
-        let stagedPatch = await changeWorkspace?.stagedDiffForPrompt()
+        var stagedPatch = await changeWorkspace?.stagedDiffForPrompt()
+        for extra in allChangeWorkspaces.dropFirst() {
+            guard await extra.hasStagedChanges() else { continue }
+            let patch = await extra.stagedDiffForPrompt()
+            stagedPatch = (stagedPatch.map { $0 + "\n\n" } ?? "") + "Staged in \(extra.base.repo.fullName):\n" + patch
+        }
         let contextRepo = repoContext
         var computer: SystemPrompt.ComputerContext? = await setupStep(setupDeadline, fallback: nil) {
             await self.computerContext(app: app, repo: contextRepo, stagedPatch: stagedPatch)
@@ -1253,7 +1379,8 @@ final class ChatSession: Identifiable {
             return imagePool.first(where: \.generatesImages)
         }()
         if let imageModel = preferredImageModel {
-            tools.append(GenerateImageTool(client: aiClient, store: app.attachmentStore, model: imageModel.id, maySpend: !imageModel.isFree))
+            // Pictures in the chat can be named as input when the picture model takes images.
+            tools.append(GenerateImageTool(client: aiClient, store: app.attachmentStore, model: imageModel.id, maySpend: !imageModel.isFree, availableImages: chatPictures()))
         }
         let isExternalRoute = AIProviderModelID.decode(route.model) != nil
         let isExplicitPick: Bool = {
@@ -1846,6 +1973,61 @@ final class ChatSession: Identifiable {
         replaceLastTurn(turn)
     }
 
+    private struct MissingConnection: Error { let message: String }
+
+    /// Reading, editing and saving tools for one of the chat's other repos, with its own staged
+    /// changes, working branch (an open request's branch when there is one) and save rules.
+    private func extraRepoTools(
+        _ extra: ChatRepo, app: AppModel, saves: ChangeSession, authorization changeAuthorization: ChangeAuthorization, lastMessage: String, setupDeadline: Date
+    ) async throws -> (tools: [any AgentTool], helpers: [any AgentTool]) {
+        guard let client = app.repoClient(for: extra.ref) else {
+            throw MissingConnection(message: "Connect \(extra.ref.hostName) so MAIPA-G can read \(extra.ref.fullName).")
+        }
+        let active = await saves.activeReceipt(for: extra.ref)
+        var branch = active?.branch ?? extra.branch
+        if let active, let pull = active.pullRequest, let current = try? await client.pullRequest(extra.ref, number: pull.number), current.state != "open" {
+            // Its request was closed or merged on the website: start again from the chosen branch.
+            branch = extra.branch
+            await saves.markResolved(active.id, as: "closed")
+            if var receipts = chat.saveReceipts, let index = receipts.firstIndex(where: { $0.id == active.id }) {
+                receipts[index].resolution = "closed"
+                chat.saveReceipts = receipts
+            }
+        }
+        let commit = try await client.resolveCommit(extra.ref, ref: branch)
+        let base: RepoWorkspace
+        let changes: ChangeWorkspace
+        if let existing = extraChangeWorkspaces[extra.ref], existing.base.branch == branch {
+            if existing.base.commit == commit {
+                changes = existing
+            } else {
+                changes = await existing.rebased(onto: RepoWorkspace(repo: extra.ref, branch: branch, commit: commit, github: client, store: app.snapshots))
+                extraChangeWorkspaces[extra.ref] = changes
+            }
+            base = changes.base
+        } else {
+            base = RepoWorkspace(repo: extra.ref, branch: branch, commit: commit, github: client, store: app.snapshots)
+            changes = ChangeWorkspace(base: base)
+            extraChangeWorkspaces[extra.ref] = changes
+        }
+        await setupStep(setupDeadline, fallback: ()) { await base.prefetch() }
+        let service = GitHubChangeService(github: client)
+        let rules = await service.resolveRules(in: base, directSaveSetting: app.settings.savesDirectly(to: extra.ref), requestText: lastMessage)
+        let helpers: [any AgentTool] = [
+            ListFilesTool(workspace: base, changes: changes),
+            SearchCodeTool(workspace: base, changes: changes),
+            ReadFileTool(workspace: base, changes: changes),
+            LoadRepoRulesTool(documents: rules.documents),
+        ]
+        return (helpers + [
+            CreateFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
+            EditFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
+            AppendFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
+            DeleteFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
+            SaveChangesTool(workspace: changes, service: service, session: saves, selectedBranch: branch, defaultBranch: extra.defaultBranch, rules: rules),
+        ], helpers)
+    }
+
     private func workspaceFor(repo: ChatRepo, commit: String, github: GitHubClient, store: SnapshotStore) -> RepoWorkspace {
         if let workspace, workspace.repo == repo.ref, workspace.commit == commit, workspace.branch == repo.branch {
             return workspace
@@ -1938,7 +2120,7 @@ final class ChatSession: Identifiable {
                     notes.append("This computer service has no checkpoint tool, so no checkpoint was taken.")
                 }
                 do {
-                    let status = try await control.syncStagedChanges(homePath: "repos/\(repo.ref.owner)/\(repo.ref.name)", cloneURL: repo.isPrivate ? nil : "https://github.com/\(repo.ref.owner)/\(repo.ref.name).git", commit: repo.commit, changes: changes)
+                    let status = try await control.syncStagedChanges(homePath: "repos/\(repo.ref.owner)/\(repo.ref.name)", cloneURL: repo.isPrivate ? nil : repo.ref.webURL.absoluteString + ".git", commit: repo.commit, changes: changes)
                     lastComputerSync = fingerprint
                     notes.append("MAIPA-G's own code already made ~/repos/\(repo.ref.owner)/\(repo.ref.name) match the phone-staged changes. git status:\n\(status.isEmpty ? "clean" : status)")
                 } catch {
@@ -1956,7 +2138,7 @@ final class ChatSession: Identifiable {
         guard let repo else { return SystemPrompt.ComputerContext(service: connector.displayName, machine: machine, approximateHourlyCost: app.settings.chatComputerHourlyCost) }
         let owner = repo.ref.owner
         let name = repo.ref.name
-        let cloneURL = "https://github.com/\(owner)/\(name).git"
+        let cloneURL = repo.ref.webURL.absoluteString + ".git"
         return SystemPrompt.ComputerContext(
             service: connector.displayName,
             machine: machine,
@@ -2067,24 +2249,46 @@ final class ChatSession: Identifiable {
         app: AppModel
     ) async {
         let cleanPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        // `generate_image` only takes a text prompt, so an attached picture cannot be sent here.
-        // Saying so beats letting the turn look like the picture was taken into account.
-        let ignoredNote = attachments.isEmpty
-            ? ""
-            : "Not sent to \(model.shortName): \(attachments.map(\.name).joined(separator: ", ")). \(model.shortName) only takes a written description here, so describe what you want instead."
+        // Pictures go to the model as input when it takes images: the ones attached to this
+        // message, or, when the message talks about an earlier picture, the chat's latest one.
+        var inputPictures = attachments.filter { $0.kind == .image }
+        if inputPictures.isEmpty, ImageEditIntent.refersToEarlierPicture(cleanPrompt), let latest = chatPictures().last {
+            inputPictures = [latest]
+        }
+        let takesPictures = model.acceptsImages
+        let sentPictures = takesPictures ? inputPictures : []
+        // Anything the model can't take is named plainly, never dropped silently.
+        let notSent = attachments.filter { !sentPictures.contains($0) } + (takesPictures ? [] : inputPictures.filter { !attachments.contains($0) })
+        let ignoredNote: String = {
+            guard !notSent.isEmpty else { return "" }
+            let names = notSent.map(\.name).joined(separator: ", ")
+            if !takesPictures, notSent.contains(where: { $0.kind == .image }) {
+                return "Not sent to \(model.shortName): \(names). \(model.shortName) can't take a picture as input; it only makes pictures from a written description, so this one was made from your words alone. Pick a picture model that accepts images to edit a picture."
+            }
+            return "Not sent to \(model.shortName): \(names). Picture models only take pictures and a written description, not other files."
+        }()
         guard !cleanPrompt.isEmpty else {
-            fail(.other, "Describe the picture you want \(model.shortName) to generate."
-                + (attachments.isEmpty ? "" : " " + ignoredNote))
+            fail(.other, "Describe the picture you want \(model.shortName) to generate"
+                + (sentPictures.isEmpty ? "." : " from your picture.")
+                + (ignoredNote.isEmpty ? "" : " " + ignoredNote))
             return
         }
         // A billed picture goes through `generate_image`'s own approval, the same pause every
         // other tool uses: a waiting tool call whose first option allows it.
-        let imageTool = GenerateImageTool(client: client, store: app.attachmentStore, model: model.id, maySpend: !model.isFree)
+        let imageTool = GenerateImageTool(client: client, store: app.attachmentStore, model: model.id, maySpend: !model.isFree, availableImages: sentPictures)
         var arguments: JSONValue = [
             "prompt": .string(cleanPrompt),
             "aspect_ratio": .string(ImageAspectRatio.square.rawValue),
             "quality": .string(ImageQuality.standard.rawValue),
         ]
+        if !sentPictures.isEmpty {
+            arguments = [
+                "prompt": .string(cleanPrompt),
+                "aspect_ratio": .string(ImageAspectRatio.square.rawValue),
+                "quality": .string(ImageQuality.standard.rawValue),
+                "reference_images": .array(sentPictures.map { .string($0.name) }),
+            ]
+        }
         var approved = false
         if let waiting = lastTurn?.steps.last?.toolCalls.last, waiting.name == imageTool.name, let questions = waiting.questions {
             guard let answer = questions.answers?.first else { return }
@@ -2135,7 +2339,9 @@ final class ChatSession: Identifiable {
             var turn = lastTurn ?? AssistantTurn()
             var finishedStep = AssistantStep()
             finishedStep.model = model.id
-            finishedStep.text = savedResults.isEmpty ? "No picture was returned by \(model.shortName)." : "Generated with **\(model.shortName)**."
+            finishedStep.text = savedResults.isEmpty
+                ? "No picture was returned by \(model.shortName)."
+                : (sentPictures.isEmpty ? "Generated with **\(model.shortName)**." : "Made with **\(model.shortName)** from \(sentPictures.map(\.name).joined(separator: ", ")).")
             if !ignoredNote.isEmpty {
                 finishedStep.text += "\n\n" + ignoredNote
             }
@@ -2152,6 +2358,21 @@ final class ChatSession: Identifiable {
         } catch {
             fail(.other, app.openRouter.describe(error))
         }
+    }
+
+    /// Every picture in the chat, oldest first: ones attached to messages and ones generated here.
+    func chatPictures() -> [AttachmentReference] {
+        var pictures: [AttachmentReference] = []
+        for message in chat.messages {
+            switch message.body {
+            case .user(let user):
+                pictures += user.attachments.filter { $0.kind == .image }
+            case .assistant(let turn):
+                pictures += turn.steps.flatMap { $0.generatedImages ?? [] }.map(\.attachment)
+            }
+        }
+        var seen = Set<UUID>()
+        return pictures.filter { seen.insert($0.id).inserted }
     }
 
     func collectWorkstationItems() async -> [WorkstationFileItem] {

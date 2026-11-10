@@ -12,6 +12,8 @@ enum Keychain {
         case githubApp = "github.app"
         case githubUserToken = "github.user-token"
         case githubInstallation = "github.installation"
+        case gitlabToken = "gitlab.token"
+        case gitlabHost = "gitlab.host"
     }
 
     static func data(_ item: Item) -> Data? {

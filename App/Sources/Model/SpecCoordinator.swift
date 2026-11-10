@@ -53,7 +53,7 @@ final class SpecCoordinator {
             ref: record.repo,
             branch: record.branch,
             defaultBranch: record.defaultBranch,
-            isPrivate: app.github.repo(named: record.repo.fullName)?.isPrivate ?? false
+            isPrivate: app.knownRepo(record.repo)?.isPrivate ?? false
         )
         guard let job = await app.jobs.start(workflow: workflow, request: record.request, repo: nil, readOnlyRepo: specRepo, openJobsSheet: false) else {
             lastError = "Couldn't start the \(record.stage.title.lowercased())."
@@ -88,7 +88,7 @@ final class SpecCoordinator {
         } else {
             workingBranch = record.branch
         }
-        let repo = ChatRepo(ref: record.repo, branch: workingBranch, defaultBranch: record.defaultBranch, isPrivate: app.github.repo(named: record.repo.fullName)?.isPrivate ?? false)
+        let repo = ChatRepo(ref: record.repo, branch: workingBranch, defaultBranch: record.defaultBranch, isPrivate: app.knownRepo(record.repo)?.isPrivate ?? false)
         guard let job = await app.jobs.start(workflow: workflow, request: task.title, repo: repo) else { return }
         do { _ = try await core.setActiveJob(job.id, for: record.id, taskID: task.id); specs = await core.all() }
         catch { lastError = ErrorExplainer.explain(error).message }
@@ -124,25 +124,25 @@ final class SpecCoordinator {
     }
 
     func addIt(_ record: SpecRecord) async {
-        guard let app, let github = app.github.client, var receipt = record.saveReceipt, receipt.pullRequest != nil, receipt.resolution == nil else { return }
+        guard let app, var receipt = record.saveReceipt, receipt.pullRequest != nil, receipt.resolution == nil, let github = app.repoClient(for: receipt.repo) else { return }
         do {
             try await GitHubChangeService(github: github).addIt(receipt)
             receipt.resolution = "added"
             _ = try await core.attachSave(receipt, to: record.id)
             specs = await core.all()
             app.sync.request()
-        } catch { lastError = app.github.describe(error) }
+        } catch { lastError = app.describe(error, for: record.repo) }
     }
 
     func throwAway(_ record: SpecRecord) async {
-        guard let app, let github = app.github.client, var receipt = record.saveReceipt, receipt.pullRequest != nil, receipt.resolution == nil else { return }
+        guard let app, var receipt = record.saveReceipt, receipt.pullRequest != nil, receipt.resolution == nil, let github = app.repoClient(for: receipt.repo) else { return }
         do {
             try await GitHubChangeService(github: github).throwAway(receipt)
             receipt.resolution = "discarded"
             _ = try await core.attachSave(receipt, to: record.id)
             specs = await core.all()
             app.sync.request()
-        } catch { lastError = app.github.describe(error) }
+        } catch { lastError = app.describe(error, for: record.repo) }
     }
 
     func delete(_ id: UUID) async {
@@ -151,7 +151,7 @@ final class SpecCoordinator {
     }
 
     private func saveApprovedArtifacts(_ record: SpecRecord) async {
-        guard let app, let github = app.github.client else { lastError = "Connect GitHub first."; return }
+        guard let app, let github = app.repoClient(for: record.repo) else { lastError = "Connect \(record.repo.hostName) first."; return }
         isLoading = true
         defer { isLoading = false }
         do {
@@ -165,11 +165,11 @@ final class SpecCoordinator {
             _ = try await core.attachSave(receipt, to: record.id)
             specs = await core.all()
             app.sync.request()
-        } catch { lastError = app.github.describe(error) }
+        } catch { lastError = app.describe(error, for: record.repo) }
     }
 
     private func discover(in repo: ChatRepo) async {
-        guard let app, let github = app.github.client else { return }
+        guard let app, let github = app.repoClient(for: repo.ref) else { return }
         isLoading = true
         defer { isLoading = false }
         do {
@@ -187,7 +187,7 @@ final class SpecCoordinator {
                 guard !requirements.isEmpty, !design.isEmpty, !tasks.isEmpty else { continue }
                 _ = try await core.importExisting(repo: repo.ref, branch: repo.branch, defaultBranch: repo.defaultBranch, slug: slug, requirements: requirements, design: design, tasksDocument: tasks)
             }
-        } catch { lastError = app.github.describe(error) }
+        } catch { lastError = app.describe(error, for: repo.ref) }
     }
 
     private func text(_ path: String, in workspace: RepoWorkspace) async -> String {

@@ -19,11 +19,26 @@ Things that cost time to find out. Keep them short and true.
   (`gh run download` gives 401).
 - The sandbox can't change repo settings that need admin rights (turning on GitHub Pages gave
   403). Neither can a workflow's own token. Only the owner can, in the repo's Settings.
-- Releases: the sandbox can create a release but can't upload files to it (uploads.github.com
-  gives 400). A workflow's token can upload files but gets 403 creating the release. So: make the
-  release as a draft from the sandbox (`gh api -X POST .../releases`, tag `build-<run>-<sha7>`),
-  dispatch release.yml with run_id, pr_head and main_sha (it attaches the checked .ipa), then
-  publish the draft (`PATCH .../releases/<id> -F draft=false -f make_latest=true`).
+- Releases are automatic; never make or publish one by hand. The flow:
+  - `ios.yml` runs on every push to `main` (no paths filter), on pull requests, and on
+    `workflow_dispatch`. Runs on `main` are never cancelled (only superseded PR runs are), so
+    two quick pushes both finish and the newest one is always released.
+  - A push whose tree is identical to a merged PR head that already has a green iOS run with
+    unexpired artifacts doesn't build again: its `reuse` job finds that run and the build jobs
+    are skipped. A merged PR therefore builds once, on the PR.
+  - `release.yml` follows every finished iOS run on `main` (`workflow_run`) and can be started
+    by hand with an optional `sha`. One Release run per commit (concurrency group per sha), so
+    a later commit's run never cancels an earlier one's publish. It publishes only from a green
+    run on that exact tree: the commit's own run, or an identical-tree PR head's run
+    (`scripts/publish-verified-ipa.sh` re-checks PR tree == main tree before uploading).
+  - Started by hand for the head of `main` with no green run, Release dispatches `ios.yml` on
+    `main` and waits. For an older commit it pushes a temporary tag `check-<sha12>-<run id>`,
+    dispatches `ios.yml` on that tag, waits up to 85 minutes, then deletes the tag; a refusal
+    or failure is reported with the run's link and result. An older build is published with
+    `--latest=false`, so it never replaces the newest release.
+  - A commit that is already published is skipped, so re-running Release never duplicates.
+  - Never put the skip-CI marker text anywhere in a commit message: GitHub skips the push run
+    when it appears anywhere, and that commit then gets no checked build.
 - The three shell-command tests hang on GitHub's Mac, so they run on Linux only.
 
 ## The sandbox itself

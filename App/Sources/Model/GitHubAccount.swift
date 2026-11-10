@@ -41,9 +41,17 @@ final class GitHubAccount {
     var isConnected: Bool { phase == .connected }
     var login: String? { user?.login ?? credentials?.ownerLogin }
 
+    /// GitLab's client while GitLab is connected, so GitLab projects named in a chat (for example
+    /// by the read-another-repo tool) are answered by GitLab.
+    @ObservationIgnored var gitLabClient: @MainActor () -> GitLabClient? = { nil }
+
     /// A client that acts as MAIPA-G's own app (the bot).
     var client: GitHubClient? {
-        session.map { GitHubClient(transport: transport, tokens: $0) }
+        session.map {
+            var client = GitHubClient(transport: transport, tokens: $0)
+            client.gitLab = gitLabClient()
+            return client
+        }
     }
 
     /// The public API, for things that need no sign-in.

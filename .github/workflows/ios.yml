@@ -3,17 +3,14 @@ name: iOS
 # Builds and checks the complete release candidate for pull requests, for every push to main and
 # by hand. When a run of a main commit passes, release.yml (on workflow_run) publishes this run's
 # checked artifact through scripts/publish-verified-ipa.sh. It only publishes when every job here passed.
+# A pull request merge is not built twice: when the main commit has exactly the tree of a merged
+# pull request head whose run already passed, the push run reuses that run (release.yml publishes
+# its artifact after proving the trees match) instead of building the same code again.
 on:
   workflow_dispatch:
+  # Every commit on main, so the newest one always has a checked build to release.
   push:
     branches: [main]
-    paths:
-      - "App/**"
-      - "AgentCore/**"
-      - "docs/**"
-      - "scripts/**"
-      - ".github/workflows/ios.yml"
-      - ".github/workflows/release.yml"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
@@ -23,17 +20,58 @@ on:
       - "scripts/**"
       - ".github/workflows/ios.yml"
 
+# A newer push to a pull request replaces its older run. On main nothing is cancelled midway: a
+# run in progress finishes and the newest waiting commit runs next, so the newest always gets built.
 concurrency:
   group: ios-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
+  # On a push to main: is this exact tree already checked by a merged pull request's green run?
+  reuse:
+    name: Find an identical checked tree
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      run: ${{ steps.find.outputs.run }}
+    steps:
+      - name: Look for a merged pull request head with the same tree and a green run
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TREE=$(gh api "repos/$REPO/git/commits/$SHA" --jq .tree.sha)
+          for head in $(gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[] | select(.merged_at != null) | .head.sha'); do
+            [ "$head" != "$SHA" ] || continue
+            [ "$(gh api "repos/$REPO/git/commits/$head" --jq .tree.sha)" = "$TREE" ] || continue
+            for id in $(gh api "repos/$REPO/actions/workflows/ios.yml/runs?head_sha=$head&per_page=20" --jq '.workflow_runs[] | select(.status=="completed" and .conclusion=="success") | .id'); do
+              ok=$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=20" --jq '[.jobs[] | select((.name=="AgentCore tests (Linux)" or .name=="iPhone release candidate") and .status=="completed" and .conclusion=="success")] | length')
+              artifacts=$(gh api "repos/$REPO/actions/runs/$id/artifacts" --jq '[.artifacts[] | select(.expired == false and ((.name|startswith("MAIPA-G-ipa-")) or (.name|startswith("MAIPAGRunner-linux-"))))] | length')
+              if [ "$ok" = "2" ] && [ "$artifacts" -ge 2 ]; then
+                echo "::notice::$SHA has the same tree as pull request head $head, already checked by run $id; not building it again."
+                echo "run=$id" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            done
+          done
+          echo "No identical checked tree; building $SHA."
+
   checks:
     name: AgentCore tests (Linux)
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: reuse
+    # Runs unless the push reused an identical checked tree (reuse is skipped for other events).
+    if: "!cancelled() && needs.reuse.outputs.run == '' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)"
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -84,6 +122,8 @@ jobs:
   # Runs alongside the Linux checks; release.yml publishes only when both passed.
   ipa:
     name: iPhone release candidate
+    needs: reuse
+    if: "!cancelled() && needs.reuse.outputs.run == ''"
     runs-on: macos-26
     timeout-minutes: 60
     steps:

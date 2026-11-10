@@ -159,7 +159,7 @@ struct AppSettings: Codable, Equatable, Sendable {
         previewAllowedHosts = (try? c.decodeIfPresent([String: Set<String>].self, forKey: .previewAllowedHosts)) ?? [:]
     }
 
-    func savesDirectly(to repo: RepoRef) -> Bool { directSaveRepos[repo.fullName] ?? false }
+    func savesDirectly(to repo: RepoRef) -> Bool { directSaveRepos[repo.settingsKey] ?? false }
 
     static let defaultChatComputerMachine = "mcp-maipa-g"
     private static let machineNameAllowed = Set("abcdefghijklmnopqrstuvwxyz0123456789-")

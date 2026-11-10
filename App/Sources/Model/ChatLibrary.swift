@@ -146,8 +146,9 @@ final class ChatLibrary {
     }
 
     /// Starts a chat from the home screen's box.
-    func startChat(text: String, attachments: [AttachmentReference] = [], repo: ChatRepo?, model: ModelChoice, thinking: ThinkingLevel, groupID: UUID? = nil, memories: [String] = [], autonomous: Bool = false) {
-        let chat = Chat(repo: repo, model: model, thinking: thinking, groupID: groupID, memoryContext: memories)
+    func startChat(text: String, attachments: [AttachmentReference] = [], repo: ChatRepo?, additionalRepos: [ChatRepo] = [], model: ModelChoice, thinking: ThinkingLevel, groupID: UUID? = nil, memories: [String] = [], autonomous: Bool = false) {
+        var chat = Chat(repo: repo, model: model, thinking: thinking, groupID: groupID, memoryContext: memories)
+        if !additionalRepos.isEmpty { chat.additionalRepos = additionalRepos }
         let session = ChatSession(chat: chat, app: app)
         session.autonomous = autonomous
         sessions[chat.id] = session

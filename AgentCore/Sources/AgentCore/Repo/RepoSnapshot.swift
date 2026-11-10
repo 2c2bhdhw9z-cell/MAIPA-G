@@ -99,12 +99,17 @@ public actor SnapshotStore {
     }
 
     private func repoDirectory(_ repo: RepoRef) -> URL {
-        root.appendingPathComponent(Self.safeName(repo.owner), isDirectory: true)
+        root.appendingPathComponent(Self.safeName(Self.ownerFolder(repo)), isDirectory: true)
             .appendingPathComponent(Self.safeName(repo.name), isDirectory: true)
     }
 
     private func snapshotDirectory(_ repo: RepoRef, commit: String) -> URL {
         repoDirectory(repo).appendingPathComponent(commit, isDirectory: true)
+    }
+
+    /// GitLab projects live apart from GitHub repos with the same name.
+    static func ownerFolder(_ repo: RepoRef) -> String {
+        repo.host.map { "gitlab~\($0)~\(repo.owner)" } ?? repo.owner
     }
 
     static func safeName(_ name: String) -> String {
@@ -167,7 +172,7 @@ public actor SnapshotStore {
         progress: @escaping @Sendable (SnapshotProgress) -> Void
     ) async throws -> RepoSnapshot {
         let manager = FileManager.default
-        let repoDirectory = root.appendingPathComponent(safeName(repo.owner), isDirectory: true)
+        let repoDirectory = root.appendingPathComponent(safeName(ownerFolder(repo)), isDirectory: true)
             .appendingPathComponent(safeName(repo.name), isDirectory: true)
         try manager.createDirectory(at: repoDirectory, withIntermediateDirectories: true)
         let partial = repoDirectory.appendingPathComponent(".partial-\(UUID().uuidString)", isDirectory: true)

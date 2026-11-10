@@ -1,7 +1,9 @@
 name: Release
 
 # Publishes the .ipa for a commit on main once that exact commit has a green iOS run, however the
-# commit got there: a pull request merge, a direct push, or a manual run. Nothing is rebuilt:
+# commit got there: a pull request merge, a direct push, or a manual run. A merge commit whose tree
+# is identical to its pull request head is published from that head's green run (ios.yml doesn't
+# build the same code twice), after the trees are proven identical. Nothing is rebuilt:
 # scripts/publish-verified-ipa.sh re-checks the run (both gating jobs green, the IPA embeds this
 # commit) and attaches that run's checked artifact. A commit whose iOS tests or build didn't pass
 # is never published, and a commit that already has a published build is not published twice.
@@ -26,8 +28,10 @@ permissions:
   actions: write
   pull-requests: read
 
+# One queue per commit: two Release runs of the same commit never publish it twice, and a Release
+# run that only skips (a pull request head, say) can never displace another commit's publish.
 concurrency:
-  group: release
+  group: release-${{ github.event.workflow_run.head_sha || inputs.sha || 'main-head' }}
   cancel-in-progress: false
 
 jobs:
@@ -67,10 +71,11 @@ jobs:
           EXISTING=$(gh api "repos/$REPO/releases?per_page=100" --jq "[.[] | select(.draft == false and (.tag_name | test(\"^build-[0-9]+-${SHA:0:7}\$\")) and any(.assets[]; .name == \"MAIPA-G.ipa\")) | .tag_name][0] // empty")
           if [ -n "$EXISTING" ]; then skip "$SHA is already published as $EXISTING"; fi
 
-          # The newest completed iOS run of this exact commit, from any event, whose complete
-          # build matrix passed.
+          # The newest completed iOS run of a commit (default: this one), from any event, whose
+          # complete build matrix passed.
           green_run() {
-            for id in $(gh api "repos/$REPO/actions/workflows/ios.yml/runs?head_sha=$SHA&per_page=20" --jq '.workflow_runs[] | select(.status=="completed" and .conclusion=="success") | .id'); do
+            local commit="${1:-$SHA}"
+            for id in $(gh api "repos/$REPO/actions/workflows/ios.yml/runs?head_sha=$commit&per_page=20" --jq '.workflow_runs[] | select(.status=="completed" and .conclusion=="success") | .id'); do
               ok=$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=20" --jq '[.jobs[] | select((.name=="AgentCore tests (Linux)" or .name=="iPhone release candidate") and .status=="completed" and .conclusion=="success")] | length')
               if [ "$ok" = "2" ]; then echo "$id"; return; fi
             done
@@ -78,28 +83,69 @@ jobs:
           unfinished_runs() {
             gh api "repos/$REPO/actions/workflows/ios.yml/runs?head_sha=$SHA&per_page=20" --jq '[.workflow_runs[] | select(.status!="completed")] | length'
           }
-          RUN_ID=$(green_run)
+          # A merged pull request head with exactly this commit's tree whose own run passed: the
+          # push run reused it instead of building the same code twice. publish-verified-ipa.sh
+          # proves the two trees are identical again before publishing.
+          identical_tree_run() {
+            local tree head id
+            tree=$(gh api "repos/$REPO/git/commits/$SHA" --jq .tree.sha)
+            for head in $(gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[] | select(.merged_at != null) | .head.sha'); do
+              [ "$head" != "$SHA" ] || continue
+              [ "$(gh api "repos/$REPO/git/commits/$head" --jq .tree.sha)" = "$tree" ] || continue
+              id=$(green_run "$head")
+              if [ -n "$id" ]; then echo "$head $id"; return; fi
+            done
+          }
+          find_checked() {
+            HEAD="$SHA"; RUN_ID=$(green_run)
+            if [ -z "$RUN_ID" ]; then
+              read -r HEAD RUN_ID <<<"$(identical_tree_run)" || true
+              [ -n "${RUN_ID:-}" ] || { HEAD="$SHA"; RUN_ID=""; }
+            fi
+          }
+          TEMP_TAG=""
+          cleanup() { if [ -n "$TEMP_TAG" ]; then gh api -X DELETE "repos/$REPO/git/refs/tags/$TEMP_TAG" >/dev/null 2>&1 || true; fi; }
+          trap cleanup EXIT
+          find_checked
           if [ -z "$RUN_ID" ] && [ "$EVENT" = "workflow_dispatch" ]; then
-            # No green run yet: wait for one that is running, or start one. ios.yml can only be
-            # started on a branch, so only main's newest commit can be checked this way.
+            # No green run yet: wait for one that is running, or start one. ios.yml runs on a
+            # branch or tag, so main's newest commit is checked on main and an older main commit
+            # on a temporary tag pointing at it (removed afterwards).
             if [ "$(unfinished_runs)" = "0" ]; then
-              [ "$SHA" = "$MAIN_HEAD" ] || { echo "::error::$SHA has no green iOS run, and only main's newest commit ($MAIN_HEAD) can be checked now"; exit 1; }
-              echo "No iOS run of $SHA yet; starting one on main."
-              gh api -X POST "repos/$REPO/actions/workflows/ios.yml/dispatches" -f ref=main
+              if [ "$SHA" = "$MAIN_HEAD" ]; then
+                echo "No iOS run of $SHA yet; starting one on main."
+                gh api -X POST "repos/$REPO/actions/workflows/ios.yml/dispatches" -f ref=main
+              else
+                TEMP_TAG="check-${SHA:0:12}-${{ github.run_id }}"
+                echo "No iOS run of older main commit $SHA yet; starting one on temporary tag $TEMP_TAG."
+                if ! gh api -X POST "repos/$REPO/git/refs" -f ref="refs/tags/$TEMP_TAG" -f sha="$SHA" >/dev/null; then
+                  TEMP_TAG=""
+                  echo "::error::$SHA has no green iOS run, and a check of it couldn't be started (creating a tag for it was refused). Start the iOS workflow on a branch or tag at $SHA, then run Release again."
+                  exit 1
+                fi
+                gh api -X POST "repos/$REPO/actions/workflows/ios.yml/dispatches" -f ref="$TEMP_TAG"
+              fi
               sleep 20
+            else
+              echo "An iOS run of $SHA is already in progress; waiting for it."
             fi
             for attempt in $(seq 1 85); do
-              RUN_ID=$(green_run)
+              find_checked
               [ -n "$RUN_ID" ] && break
               # A run that was just started can take a moment to be listed.
               if [ "$attempt" -gt 3 ] && [ "$(unfinished_runs)" = "0" ]; then break; fi
               sleep 60
             done
+            if [ -z "$RUN_ID" ]; then
+              LAST=$(gh api "repos/$REPO/actions/workflows/ios.yml/runs?head_sha=$SHA&per_page=1" --jq '.workflow_runs[0] | "\(.html_url) (\(.conclusion))"' || true)
+              echo "::error::The iOS check of $SHA did not pass, so it is not published. Its run: ${LAST:-none found}"
+              exit 1
+            fi
           fi
-          if [ -z "$RUN_ID" ]; then echo "::error::no iOS run of $SHA passed both its tests and its build, so it is not published"; exit 1; fi
-          echo "Publishing $SHA from iOS run $RUN_ID."
+          if [ -z "$RUN_ID" ]; then echo "::error::no iOS run of $SHA (or of a merged pull request head with the same tree) passed both its tests and its build, so it is not published"; exit 1; fi
+          echo "Publishing $SHA from iOS run $RUN_ID (checked commit $HEAD)."
           echo "main=$SHA" >> "$GITHUB_OUTPUT"
-          echo "head=$SHA" >> "$GITHUB_OUTPUT"
+          echo "head=$HEAD" >> "$GITHUB_OUTPUT"
           echo "run=$RUN_ID" >> "$GITHUB_OUTPUT"
           if [ "$SHA" = "$(gh api "repos/$REPO/commits/main" --jq .sha)" ]; then echo "latest=true" >> "$GITHUB_OUTPUT"; else echo "latest=false" >> "$GITHUB_OUTPUT"; fi
       - name: Publish

@@ -21,11 +21,14 @@ PRs ... It's just fucking shit up." This replaces the 27 October exception entir
   recognised and leave the default side-branch-and-PR behaviour in place. Do not reword it.
 - Do not rely on the app's "Save straight to branch" switch. It is off by default, off means
   pull request, and the owner has never turned it on.
-- The build still has to be checked before it reaches him. `ios.yml` runs on `workflow_dispatch`
-  as well as on pull requests, and it embeds `github.sha` when there is no pull request, so a
-  checked build of `main` is still possible without a PR.
-- Keep `.github/workflows/publish-verified-ipa.sh`'s "PR and main trees must match" proof intact:
-  when there is no pull request, the tree of the published commit equals itself, so it still holds.
+- The build still has to be checked before it reaches him, and nothing is published by hand.
+  `ios.yml` runs on every push to `main` (and on pull requests and `workflow_dispatch`);
+  `release.yml` follows each finished `main` run and publishes only from a green run on that
+  exact tree. A push identical to an already-checked PR head reuses that PR run instead of
+  building twice. Release can also be started by hand with an older commit's `sha`: it checks
+  that commit first (on a temporary tag) or explains clearly why it can't.
+- Keep `scripts/publish-verified-ipa.sh`'s "PR and main trees must match" proof intact: when
+  there is no pull request, the tree of the published commit equals itself, so it still holds.
 
 ## "However you do it" means Kiro's factory defaults
 Owner, 27 October 2026, correcting answer 11: "the way you normally are programmed, like the way

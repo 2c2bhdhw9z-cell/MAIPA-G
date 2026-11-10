@@ -4,10 +4,14 @@ import Foundation
 public struct RepoRef: Codable, Sendable, Hashable, CustomStringConvertible {
     public var owner: String
     public var name: String
+    /// The GitLab server ("gitlab.com" or a self-hosted name) for a GitLab project; nil for GitHub.
+    /// A GitLab owner is the full group path, which may contain slashes.
+    public var host: String?
 
-    public init(owner: String, name: String) {
+    public init(owner: String, name: String, host: String? = nil) {
         self.owner = owner
         self.name = name
+        self.host = host
     }
 
     public init?(fullName: String) {
@@ -18,7 +22,16 @@ public struct RepoRef: Codable, Sendable, Hashable, CustomStringConvertible {
 
     public var fullName: String { "\(owner)/\(name)" }
     public var description: String { fullName }
-    public var webURL: URL { URL(string: "https://github.com/\(owner)/\(name)")! }
+    public var webURL: URL {
+        if let host { return URL(string: "https://\(host)/\(owner)/\(name)") ?? URL(string: "https://gitlab.com")! }
+        return URL(string: "https://github.com/\(owner)/\(name)")!
+    }
+    public var isGitLab: Bool { host != nil }
+    /// A key that tells a GitLab project apart from a GitHub repo with the same name, for
+    /// per-repo settings. GitHub repos keep their plain "owner/name".
+    public var settingsKey: String { host.map { "\($0)/\(fullName)" } ?? fullName }
+    /// "GitHub" or "GitLab", for messages.
+    public var hostName: String { host == nil ? "GitHub" : "GitLab" }
 }
 
 public struct GitHubUser: Codable, Sendable, Hashable {
@@ -54,8 +67,10 @@ public struct GitHubRepo: Codable, Sendable, Hashable, Identifiable {
     public var isFork: Bool
     public var isArchived: Bool
     public var htmlURL: String
+    /// Set for GitLab projects; see `RepoRef.host`.
+    public var host: String?
 
-    public var ref: RepoRef { RepoRef(owner: ownerLogin, name: name) }
+    public var ref: RepoRef { RepoRef(owner: ownerLogin, name: name, host: host) }
 
     enum CodingKeys: String, CodingKey {
         case id, name, language, owner, size, fork, archived
@@ -65,6 +80,7 @@ public struct GitHubRepo: Codable, Sendable, Hashable, Identifiable {
         case defaultBranch = "default_branch"
         case pushedAt = "pushed_at"
         case htmlURL = "html_url"
+        case host = "maipa_host"
     }
 
     struct Owner: Codable { let login: String }
@@ -72,8 +88,9 @@ public struct GitHubRepo: Codable, Sendable, Hashable, Identifiable {
     public init(
         id: Int, name: String, fullName: String, ownerLogin: String, isPrivate: Bool, summary: String? = nil,
         defaultBranch: String, pushedAt: Date? = nil, language: String? = nil, sizeKB: Int? = nil,
-        isFork: Bool = false, isArchived: Bool = false, htmlURL: String
+        isFork: Bool = false, isArchived: Bool = false, htmlURL: String, host: String? = nil
     ) {
+        self.host = host
         self.id = id
         self.name = name
         self.fullName = fullName
@@ -104,6 +121,7 @@ public struct GitHubRepo: Codable, Sendable, Hashable, Identifiable {
         isFork = try c.decodeIfPresent(Bool.self, forKey: .fork) ?? false
         isArchived = try c.decodeIfPresent(Bool.self, forKey: .archived) ?? false
         htmlURL = try c.decode(String.self, forKey: .htmlURL)
+        host = try c.decodeIfPresent(String.self, forKey: .host)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -121,6 +139,7 @@ public struct GitHubRepo: Codable, Sendable, Hashable, Identifiable {
         try c.encode(isFork, forKey: .fork)
         try c.encode(isArchived, forKey: .archived)
         try c.encode(htmlURL, forKey: .htmlURL)
+        try c.encodeIfPresent(host, forKey: .host)
     }
 }
 
