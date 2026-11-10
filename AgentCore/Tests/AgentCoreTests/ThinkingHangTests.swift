@@ -238,10 +238,12 @@ struct ThinkingHangTests {
         // Build 148, 10 November 2026: a Claude reply sat on "Thinking…" for minutes. A request
         // times out (180 s) before the watchdog (300 s), and each retry used to get a fresh
         // watchdog, so three silent attempts ran back to back with nothing said.
-        let transport = TimingOutTransport(delay: 0.3)
+        // Each attempt times out after 2 s and the limit is 3 s: the first attempt fits with a
+        // second to spare even on a busy test machine, and the second can't.
+        let transport = TimingOutTransport(delay: 2.0)
         let turn = await Self.lastTurn(
             AgentTurnInput(chat: AgentLoopTests.newChat("Hi"), route: AgentLoopTests.route(), systemPrompt: "system", tools: []),
-            Self.environment(transport, modelSilence: 0.5)
+            Self.environment(transport, modelSilence: 3.0)
         )
         let finished = try #require(turn)
         #expect(finished.status == .failed)
