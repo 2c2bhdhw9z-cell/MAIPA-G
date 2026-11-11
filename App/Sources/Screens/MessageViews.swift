@@ -637,7 +637,7 @@ struct ActivityTimelineCard: View {
                                             .font(.caption2.weight(.semibold))
                                             .foregroundStyle(theme.accent)
                                     }
-                                    Text(step.reasoning)
+                                    Text(ReasoningText.readable(step.reasoning))
                                         .font(.footnote)
                                         .foregroundStyle(Theme.secondaryText)
                                         .textSelection(.enabled)
@@ -816,7 +816,7 @@ private struct ActivityTimelineRow: View {
                     Text(isLive ? "Thinking…" : (step.thinkingSeconds.map { "Thought for \($0)s" } ?? "Thoughts"))
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(isLive ? theme.accent : Theme.secondaryText)
-                    Text(step.reasoning)
+                    Text(ReasoningText.readable(step.reasoning))
                         .font(.footnote)
                         .foregroundStyle(Theme.secondaryText)
                         .textSelection(.enabled)
@@ -986,16 +986,24 @@ struct GeneratedImageCard: View {
             Image(uiImage: image)
                 .resizable()
                 .scaledToFit()
-                .frame(maxHeight: 320)
-                .clipShape(RoundedRectangle(cornerRadius: 16))
-            HStack {
-                Label("Generated picture", systemImage: "photo")
-                Spacer()
-                if let cost = result.cost { Text(cost.dollars) }
+                .frame(maxWidth: 340, maxHeight: 360, alignment: .leading)
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Theme.stroke))
+                .shadow(color: .black.opacity(0.08), radius: 10, y: 4)
+            HStack(spacing: 4) {
+                Text(modelName)
+                if let cost = result.cost, cost > 0 { Text("· \(cost.dollars)") }
             }
-            .font(.caption)
+            .font(.caption2)
             .foregroundStyle(Theme.secondaryText)
+            .padding(.leading, 4)
         }
+    }
+
+    private var modelName: String {
+        if let model = app.openRouter.modelsByID[result.model] { return model.shortName }
+        if result.model.hasPrefix("mcp-") || result.model == app.settings.chatComputerMachineName { return "Made on your computer" }
+        return AIProviderModelID.rawModelID(result.model).split(separator: "/").last.map(String.init) ?? "Picture"
     }
 }
 
@@ -1025,7 +1033,7 @@ struct ThoughtsView: View {
             }
             .buttonStyle(.plain)
             if open {
-                Text(step.reasoning)
+                Text(ReasoningText.readable(step.reasoning))
                     .font(.footnote)
                     .foregroundStyle(Theme.secondaryText)
                     .textSelection(.enabled)
@@ -2118,5 +2126,18 @@ private struct SubagentItemCard: View {
         case .completed:
             return "Completed without extra text."
         }
+    }
+}
+
+
+/// Thinking as the model sent it, readable: its section titles ("**Checking the image**") came
+/// glued together ("**One****Two**") and showed their asterisks.
+enum ReasoningText {
+    static func readable(_ raw: String) -> AttributedString {
+        let separated = raw.replacingOccurrences(of: "****", with: "**\n**")
+        if let parsed = try? AttributedString(markdown: separated, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+            return parsed
+        }
+        return AttributedString(separated.replacingOccurrences(of: "**", with: ""))
     }
 }

@@ -88,15 +88,16 @@ struct Composer: View {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
     }
 
+    /// Like Kiro: a message sent while a reply runs simply steers it (there is no mode to pick).
+    /// One with attachments runs straight after, as steering carries words only.
     private var effectiveBusyMode: ChatSession.BusySendMode {
-        if !attachments.isEmpty { return .queue }
-        return busySendMode?.wrappedValue ?? .steer
+        attachments.isEmpty ? .steer : .queue
     }
 
     private var busyPlaceholderText: String {
         effectiveBusyMode == .steer
-            ? "Steer running reply without stopping…"
-            : "Queue follow-up for after this turn…"
+            ? "Add something while it works…"
+            : "Sends when this reply finishes…"
     }
 
     private var canSend: Bool {
@@ -220,9 +221,6 @@ struct Composer: View {
                     if !thinkingLevels.isEmpty { thinkingMenu }
                     if let chatMode { modeMenu(chatMode) }
                     Spacer(minLength: 4)
-                    if isRunning, let modeBinding = busySendMode {
-                        busyModeToggle(modeBinding)
-                    }
                     ContextMeter(
                         used: contextUsedTokens,
                         limit: contextLimitTokens,
@@ -649,44 +647,6 @@ struct Composer: View {
             },
             onFailure: { importError = $0 }
         )
-    }
-
-    @ViewBuilder
-    private func busyModeToggle(_ modeBinding: Binding<ChatSession.BusySendMode>) -> some View {
-        let activeMode = effectiveBusyMode
-        Menu {
-            Button {
-                modeBinding.wrappedValue = .steer
-                Haptics.selection()
-            } label: {
-                Label("Steer — guide active reply without stopping", systemImage: activeMode == .steer ? "checkmark.circle.fill" : "arrow.turn.down.right")
-            }
-            .disabled(!attachments.isEmpty)
-            Button {
-                modeBinding.wrappedValue = .queue
-                Haptics.selection()
-            } label: {
-                Label("Queue — run after current reply finishes", systemImage: activeMode == .queue ? "checkmark.circle.fill" : "text.append")
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: activeMode == .steer ? "arrow.turn.down.right" : "text.append")
-                    .font(.system(size: 10, weight: .bold))
-                Text(activeMode == .steer ? "Steer" : "Queue")
-                    .font(.caption.weight(.semibold))
-            }
-            .foregroundStyle(activeMode == .steer ? theme.accent : .primary)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 6)
-            .background(
-                activeMode == .steer ? theme.accent.opacity(0.14) : Theme.raised,
-                in: Capsule()
-            )
-            .overlay(Capsule().strokeBorder(activeMode == .steer ? theme.accent.opacity(0.35) : Theme.stroke))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Mid-turn message mode")
-        .accessibilityValue(activeMode == .steer ? "Steer running reply" : "Queue follow-up")
     }
 
     @ViewBuilder

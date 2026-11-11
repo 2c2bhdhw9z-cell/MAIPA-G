@@ -9,9 +9,65 @@ struct GeneratedMediaCard: View {
     var body: some View {
         if result.isVideo {
             GeneratedVideoCard(result: result)
+        } else if result.isFile {
+            GeneratedFileCard(result: result)
         } else {
             GeneratedImageCard(result: result)
         }
+    }
+}
+
+/// A file the AI handed over (a built .ipa, a .deb, a zip): tap Share to open it in a sideloading
+/// app or save it to Files.
+struct GeneratedFileCard: View {
+    @Environment(AppModel.self) private var app
+    let result: GeneratedImageResult
+
+    private var ext: String { (result.attachment.name as NSString).pathExtension.uppercased() }
+    private var icon: String {
+        switch ext {
+        case "IPA": "app.badge"
+        case "ZIP": "doc.zipper"
+        case "DEB", "DYLIB": "shippingbox"
+        case "PDF": "doc.richtext"
+        default: "doc"
+        }
+    }
+
+    var body: some View {
+        let url = try? app.attachmentStore.fileURL(for: result.attachment)
+        let exists = url.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundStyle(.tint)
+                .frame(width: 44, height: 44)
+                .background(Theme.sunken, in: RoundedRectangle(cornerRadius: 12))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(result.attachment.name)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(exists ? "\(ext.isEmpty ? "File" : ext) · \(ByteCountFormatter.string(fromByteCount: Int64(result.attachment.bytes), countStyle: .file))" : "Still coming from your computer…")
+                    .font(.caption)
+                    .foregroundStyle(Theme.secondaryText)
+            }
+            Spacer(minLength: 8)
+            if let url, exists {
+                ShareLink(item: url) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.body.weight(.semibold))
+                        .frame(width: 40, height: 40)
+                        .background(Theme.raised, in: Circle())
+                        .overlay(Circle().strokeBorder(Theme.stroke))
+                }
+                .accessibilityLabel("Open or save \(result.attachment.name)")
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .card()
+        .accessibilityElement(children: .combine)
     }
 }
 

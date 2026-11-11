@@ -215,6 +215,24 @@ Found from the owner's error log and chats of 11 November, then fixed:
    cost was counted twice; now once. Picture requests stay on the phone, where the picture tools are.
 Not done (owner: "No appetize shit for now"): a real iPhone simulator preview (VibeCode-style).
 
+## Follow-up of 11 November 2026 (owner, after testing build 168)
+- "It shouldn't take 4 minutes": the red recolour went through the computer (9 steps at Extra high,
+  3m 23s) because the prompt said picture models were the wrong tool for colour swaps. Now a picture
+  request is one `generate_image` call in the first step, thinking is capped at Low for picture and
+  video replies, and the computer is only for exact pixel work.
+- Steer: "It's not a thing you select, it just steers." The Steer/Queue switch is gone: a message
+  sent while a reply runs steers it; one with attachments runs right after.
+- Files in the chat (his screenshot of another app handing over an .ipa): `send_file` gives a
+  GitHub artifact, release asset, download or computer file as a card with Share (open in the
+  sideloading app or Files). Files made on the computer come to the phone with each state.
+- Picture screen and chat picture made cleaner: full-screen zoomable picture, round Redo, Video,
+  Save, Share buttons, the prompt behind a tap, the model's name instead of its id, and the change
+  box pinned at the bottom.
+- Thought titles showed glued with asterisks ("**A****B**"); they show as bold lines now.
+- Owner's answer on the computer and GitHub ("however you work"): the app's GitHub key stays on the
+  phone, as Kiro would. When an hour-long token runs out on the computer, the reply waits up to 10
+  minutes for the phone's next one instead of failing.
+
 ## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
 He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,
 ask_user, generate_image) and Kiro's (read_file, list_directory, file_search, grep_search, code,

@@ -36,46 +36,56 @@ struct PictureViewer: View {
         }
     }
 
+    @State private var showsPrompt = false
+
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    if let image {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFit()
-                            .clipShape(RoundedRectangle(cornerRadius: 18))
-                        controls(for: image)
-                    } else if isLoadingStoredImage {
-                        VStack(spacing: 14) {
-                            ProgressView()
-                            Text("Opening picture…")
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(40)
-                        .card()
-                    } else if result != nil {
-                        ContentUnavailableView {
-                            Label("Picture unavailable", systemImage: "photo.badge.exclamationmark")
-                        } description: {
-                            Text(error ?? "This picture is missing or can’t be read.")
-                        } actions: {
-                            Button("Try again") { Task { await loadImage() } }
-                                .buttonStyle(.borderedProminent)
-                        }
-                    } else {
-                        ContentUnavailableView {
-                            Label("Ask in the chat", systemImage: "sparkles")
-                        } description: {
-                            Text("Describe the picture or video you want in any chat, attach a photo to change it, and MAIPA-G picks the right model.")
+            VStack(spacing: 0) {
+                if let image {
+                    // The picture fills the screen and pinches to zoom, like Photos and Grok.
+                    ZoomableImageCanvas(image: image)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        .padding(.horizontal, 12)
+                        .padding(.top, 4)
+                    if let generated { actions(for: generated) }
+                } else if isLoadingStoredImage {
+                    Spacer()
+                    ProgressView("Opening picture…")
+                    Spacer()
+                } else if result != nil {
+                    ContentUnavailableView {
+                        Label("Picture unavailable", systemImage: "photo.badge.exclamationmark")
+                    } description: {
+                        Text(error ?? "This picture is missing or can’t be read.")
+                    } actions: {
+                        Button("Try again") { Task { await loadImage() } }
+                            .buttonStyle(.borderedProminent)
+                    }
+                } else {
+                    ContentUnavailableView {
+                        Label("Ask in the chat", systemImage: "sparkles")
+                    } description: {
+                        Text("Describe the picture or video you want in any chat, attach a photo to change it, and MAIPA-G picks the right model.")
+                    }
+                }
+            }
+            .background(Theme.background.ignoresSafeArea())
+            .safeAreaInset(edge: .bottom) {
+                if image != nil, let generated, session != nil { changeBar(for: generated) }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .principal) {
+                    if let generated {
+                        VStack(spacing: 0) {
+                            Text(modelName(generated)).font(.subheadline.weight(.semibold)).lineLimit(1)
+                            if let cost = generated.cost, cost > 0 { Text(cost.dollars).font(.caption2).foregroundStyle(Theme.secondaryText) }
                         }
                     }
                 }
-                .padding()
             }
-            .navigationTitle("Picture")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
             .task {
                 generated = result
                 if PreviewScenes.isActive, result != nil {
@@ -98,86 +108,124 @@ struct PictureViewer: View {
         dismiss()
     }
 
+    /// The model's own name ("Gemini 3 Pro Image"), not its id; "Your computer" for one made there.
+    private func modelName(_ picture: GeneratedImageResult) -> String {
+        if let model = app.openRouter.modelsByID[picture.model] { return model.shortName }
+        if picture.model.hasPrefix("mcp-") || picture.model == app.settings.chatComputerMachineName { return "Made on your computer" }
+        let raw = AIProviderModelID.rawModelID(picture.model)
+        return raw.split(separator: "/").last.map { $0.replacingOccurrences(of: "-", with: " ").capitalized } ?? "Picture"
+    }
+
+    /// Four round buttons under the picture, then the prompt behind a tap.
     @ViewBuilder
-    private func controls(for _: UIImage) -> some View {
-        if let generated {
-            if session != nil {
-                HStack(spacing: 8) {
-                    TextField("Describe a change…", text: $change, axis: .vertical)
-                        .lineLimit(1...4)
-                        .focused($changeFocused)
-                        .submitLabel(.send)
-                        .onSubmit { sendChange(generated) }
-                    Button {
-                        sendChange(generated)
-                    } label: {
-                        Image(systemName: "arrow.up.circle.fill").font(.title2)
+    private func actions(for picture: GeneratedImageResult) -> some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 0) {
+                if session != nil {
+                    roundButton("Redo", systemImage: "arrow.triangle.2.circlepath") {
+                        ask("Make another version of this picture: the same idea, a fresh take.", about: picture)
                     }
-                    .disabled(change.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .accessibilityLabel("Edit the picture")
-                }
-                .padding(12)
-                .glassPanel()
-
-                HStack {
-                    Button {
-                        ask("Make another version of this picture: the same idea, a fresh take.", about: generated)
-                    } label: {
-                        Label("Redo", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    Button {
-                        ask("Turn this picture into a short video.", about: generated)
-                    } label: {
-                        Label("Video", systemImage: "play.rectangle")
+                    roundButton("Video", systemImage: "play.fill") {
+                        ask("Turn this picture into a short video.", about: picture)
                     }
                 }
-                .buttonStyle(.bordered)
-            }
-            HStack {
-                Button {
-                    Task { await saveToPhotos(generated) }
-                } label: {
-                    Label(saveState == .saving ? "Saving…" : "Save", systemImage: "square.and.arrow.down")
+                roundButton(saveLabel, systemImage: saveState == .saved ? "checkmark" : "arrow.down.to.line") {
+                    Task { await saveToPhotos(picture) }
                 }
-                .disabled(saveState == .saving)
-                ShareLink(item: app.paths.data.appendingPathComponent(generated.attachment.path)) {
-                    Label("Share", systemImage: "square.and.arrow.up")
+                .disabled(saveState == .saving || saveState == .saved)
+                ShareLink(item: app.paths.data.appendingPathComponent(picture.attachment.path)) {
+                    roundLabel("Share", systemImage: "square.and.arrow.up")
                 }
+                .frame(maxWidth: .infinity)
                 if let target {
-                    Button {
-                        app.attach(generated.attachment, to: target)
+                    roundButton("Attach", systemImage: "paperclip") {
+                        app.attach(picture.attachment, to: target)
                         dismiss()
-                    } label: {
-                        Label("Attach again", systemImage: "paperclip")
                     }
                 }
             }
-            .buttonStyle(.bordered)
-
-            switch saveState {
-            case .idle, .saving:
-                EmptyView()
-            case .saved:
-                Label("Saved to Photos", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            case .failed(let message, let canOpenSettings):
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(message).foregroundStyle(Theme.danger)
+            if case .failed(let message, let canOpenSettings) = saveState {
+                HStack(spacing: 8) {
+                    Text(message).font(.footnote).foregroundStyle(Theme.danger)
                     if canOpenSettings, let settings = URL(string: UIApplication.openSettingsURLString) {
-                        Button("Open Settings") { openURL(settings) }
-                            .buttonStyle(.bordered)
+                        Button("Settings") { openURL(settings) }.font(.footnote.weight(.semibold))
                     }
                 }
+                .padding(.horizontal)
             }
-
-            Text(generated.prompt).font(.footnote).foregroundStyle(.secondary)
-            HStack {
-                Text(generated.model)
-                if let cost = generated.cost { Text("· \(cost.dollars)") }
+            if !picture.prompt.isEmpty {
+                Button {
+                    withAnimation(.snappy) { showsPrompt.toggle() }
+                } label: {
+                    Text(picture.prompt)
+                        .font(.footnote)
+                        .foregroundStyle(Theme.secondaryText)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(showsPrompt ? nil : 1)
+                        .padding(.horizontal, 24)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(showsPrompt ? "Prompt, tap to fold" : "Show the prompt")
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
         }
+        .padding(.top, 14)
+        .padding(.bottom, 6)
+    }
+
+    private var saveLabel: String {
+        switch saveState {
+        case .saving: "Saving…"
+        case .saved: "Saved"
+        default: "Save"
+        }
+    }
+
+    private func roundButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) { roundLabel(title, systemImage: systemImage) }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity)
+    }
+
+    private func roundLabel(_ title: String, systemImage: String) -> some View {
+        VStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 50, height: 50)
+                .background(Theme.raised, in: Circle())
+                .overlay(Circle().strokeBorder(Theme.stroke))
+            Text(title).font(.caption).foregroundStyle(Theme.secondaryText)
+        }
+        .contentShape(Rectangle())
+    }
+
+    /// "Describe a change…", pinned to the bottom like the chat's own box.
+    private func changeBar(for picture: GeneratedImageResult) -> some View {
+        HStack(spacing: 8) {
+            TextField("Describe a change…", text: $change, axis: .vertical)
+                .lineLimit(1...4)
+                .focused($changeFocused)
+                .submitLabel(.send)
+                .onSubmit { sendChange(picture) }
+                .padding(.leading, 6)
+            Button {
+                sendChange(picture)
+            } label: {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(Circle().fill(.tint))
+                    .opacity(change.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.35 : 1)
+            }
+            .disabled(change.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .accessibilityLabel("Edit the picture")
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .glassPanel(cornerRadius: 24)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 6)
     }
 
     private func sendChange(_ picture: GeneratedImageResult) {

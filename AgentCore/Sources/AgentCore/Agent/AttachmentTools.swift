@@ -47,6 +47,22 @@ public actor AttachmentStore {
         try write(data, name: name, mimeType: mimeType, kind: kind, folder: "media")
     }
 
+    /// A file the AI handed over (send_file), copied from disk into media/ without loading it
+    /// into memory.
+    public func importGeneratedFile(at source: URL, name: String, mimeType: String) throws -> AttachmentReference {
+        let cleanName = name.replacingOccurrences(of: "/", with: "-")
+        let reference = try importFile(at: source, name: cleanName.isEmpty ? "file" : cleanName, mimeType: mimeType, kind: .file, moveIfPossible: true)
+        // importFile puts it in attachments/; files the AI made live in media/ with pictures.
+        let from = try fileURL(for: reference)
+        var moved = reference
+        moved.path = reference.path.replacingOccurrences(of: "attachments/", with: "media/", options: .anchored)
+        let to = dataDirectory.appendingPathComponent(moved.path)
+        try FileManager.default.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: from, to: to)
+        try? FileManager.default.removeItem(at: from.deletingLastPathComponent())
+        return moved
+    }
+
     public func importWorkstationFile(_ data: Data, name: String, mimeType: String, kind: AttachmentKind) throws -> AttachmentReference {
         try write(data, name: name, mimeType: mimeType, kind: kind, folder: "attachments")
     }

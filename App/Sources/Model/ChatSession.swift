@@ -271,7 +271,7 @@ final class ChatSession: Identifiable {
             // - `Steer` (default for text): folds guidance into the active turn at the next safe boundary
             //   WITHOUT calling `finishAfterCurrentStep()` or cancelling any running stream/sub-agent/tool!
             // - `Queue` (or attachments): holds follow-up on disk to run sequentially after the active turn finishes naturally.
-            if busySendMode == .steer, attachments.isEmpty {
+            if attachments.isEmpty {
                 pendingSteers.append(PendingSteer(text: message))
                 if let activeRun = run {
                     Task { await activeRun.steer(message) }
@@ -1416,6 +1416,8 @@ final class ChatSession: Identifiable {
                 return app.liveStatusText(for: self)
             }
         })
+        // Files the AI hands over (a built .ipa or .deb, a zip) as cards, not links that need a GitHub sign-in.
+        tools.append(SendFileTool(github: app.github.client, transport: app.transport, computer: app.connectors.computerControl(), store: app.attachmentStore))
         var readOnlyExtraTools: [any AgentTool] = []
         if let github = app.github.client {
             tools.append(CreateRepositoryTool(github: github))
@@ -1779,7 +1781,10 @@ final class ChatSession: Identifiable {
             fail(.other, "This AI can't read pictures. Pick Auto or a vision AI that accepts pictures.")
             return
         }
-        let thinking = chat.thinking
+        // A picture or video request is one quick tool call: long thinking only made it slow
+        // (11 November 2026: a colour change took over 3 minutes at Extra high).
+        let isMediaTurn = MediaRequest.wanted(lastMessage, hasImageAttachments: lastUserAttachments.contains { $0.kind == .image }, chatHasPictures: !chatPictures().isEmpty)
+        let thinking = isMediaTurn ? min(chat.thinking, .low) : chat.thinking
         let judgedDifficulty = difficulty
         let hasImageInput = allAttachments.contains { $0.kind == .image }
         let route = ModelRouter.route(
@@ -2399,6 +2404,11 @@ final class ChatSession: Identifiable {
     /// Each state the computer writes: its staged files and saves come to this phone, so Review,
     /// Save and the next reply see exactly what it did.
     private func applyComputerState(_ state: VMTurnState, vm: VMControl, app: AppModel?) async {
+        // Files and pictures the reply made on the computer come to this phone before the step shows.
+        if let app {
+            let missing = VMMedia.missing(in: state.turn, dataDirectory: app.paths.data)
+            if !missing.isEmpty { await VMMedia.fetch(missing, runID: state.id, from: vm.computer, into: app.paths.data) }
+        }
         if let staged = state.staged {
             let changes = staged.map(\.change)
             if let workspace = changeWorkspace { await workspace.restoreStaged(changes) } else { pendingStagedRestore = changes }
@@ -3044,7 +3054,7 @@ final class ChatSession: Identifiable {
             case .user(let user):
                 pictures += user.attachments.filter { $0.kind == .image }
             case .assistant(let turn):
-                pictures += turn.steps.flatMap { $0.generatedImages ?? [] }.filter { !$0.isVideo }.map(\.attachment)
+                pictures += turn.steps.flatMap { $0.generatedImages ?? [] }.filter { $0.attachment.kind == .image }.map(\.attachment)
             }
         }
         var seen = Set<UUID>()

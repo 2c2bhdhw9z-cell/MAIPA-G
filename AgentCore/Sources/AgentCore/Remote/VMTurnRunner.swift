@@ -5,14 +5,40 @@ import Foundation
 public actor HandedOverTokens: GitHubTokenProvider {
     private var token: String
     private let refreshFile: URL?
+    private let waitForFresh: TimeInterval
+    private var refused = false
 
-    public init(token: String, refreshFile: URL?) {
+    /// `waitForFresh`: after GitHub refuses the token (it lasts about an hour), how long to wait
+    /// for the phone to hand over the next one. The phone does that as soon as the app is opened,
+    /// so a long reply pauses its GitHub work instead of failing. The app's own GitHub key stays
+    /// on the phone; the computer only ever holds these hour-long tokens.
+    public init(token: String, refreshFile: URL?, waitForFresh: TimeInterval = 600) {
         self.token = token
         self.refreshFile = refreshFile
+        self.waitForFresh = waitForFresh
     }
 
-    public func installationToken() async throws -> String { current() }
+    public func installationToken() async throws -> String {
+        if refused, refreshFile != nil {
+            let started = Date()
+            while Date().timeIntervalSince(started) < waitForFresh, !takeRefresh() {
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+            refused = false
+        }
+        return current()
+    }
+
     public func userToken() async throws -> String { current() }
+
+    public func forgetInstallationToken() async { refused = true }
+
+    /// Takes a handed-over token when one has arrived.
+    private func takeRefresh() -> Bool {
+        guard let refreshFile, FileManager.default.fileExists(atPath: refreshFile.path) else { return false }
+        _ = current()
+        return true
+    }
 
     private func current() -> String {
         if let refreshFile, let data = try? Data(contentsOf: refreshFile) {
@@ -188,7 +214,7 @@ public struct VMTurnRunner: Sendable {
 
 
         ## Where this reply runs
-        This reply runs on the person's own Linux computer (`\(machine)`), not on the phone. It keeps going when the app is closed. `run_command` and `computer_task` run right here in a real shell. The phone's own features (memories, the Workstation, pictures, helpers and workflows\(hasConnectors ? "" : ", connectors")) aren't available in this reply; if the task needs one, say so.
+        This reply runs on the person's own Linux computer (`\(machine)`), not on the phone. It keeps going when the app is closed. `run_command` and `computer_task` run right here in a real shell. The phone's own features (memories, the Workstation, making pictures with picture models, helpers and workflows\(hasConnectors ? "" : ", connectors")) aren't available in this reply; if the task needs one, say so.
         """
     }
 
@@ -283,6 +309,12 @@ public struct VMTurnRunner: Sendable {
         }
         tools.append(RunCommandTool(control: control, homePath: homePath))
         tools.append(ComputerTaskTool(control: control, homePath: homePath))
+        // Files and pictures made here are kept in the run's folder; the phone copies them into
+        // the chat as each state arrives (VMMedia), so they show the same as on the phone.
+        let media = AttachmentStore(dataDirectory: folder.appendingPathComponent(VMMedia.folder, isDirectory: true))
+        let fileGitHub = secrets.githubToken.flatMap { $0.isEmpty ? nil : GitHubClient(transport: transport, tokens: HandedOverTokens(token: $0, refreshFile: folder.appendingPathComponent("token-refresh.json.gz"))) }
+        tools.append(SendFileTool(github: fileGitHub, transport: transport, computer: control, store: media))
+        tools.append(ShowComputerPictureTool(control: control, store: media))
         if request.webEnabled {
             tools.append(WebSearchTool(transport: transport))
             tools.append(ReadWebPageTool(transport: transport))

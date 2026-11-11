@@ -218,3 +218,29 @@ public struct VMJobRequest: Codable, Sendable, Hashable {
         self.dataRepository = dataRepository; self.dataBranch = dataBranch
     }
 }
+
+
+/// Files a reply on the computer made (send_file, show_computer_picture) live in the run's folder
+/// under `data/`, at the same `media/…` path the chat refers to. The phone copies each one into
+/// its own data folder before it shows the step, and before the run's folder is removed.
+public enum VMMedia {
+    public static let folder = "data"
+
+    /// The made files in a turn that the phone doesn't have yet.
+    public static func missing(in turn: AssistantTurn, dataDirectory: URL) -> [AttachmentReference] {
+        turn.steps.flatMap { $0.generatedImages ?? [] }.map(\.attachment).filter { reference in
+            SnapshotStore.isSafeRelativePath(reference.path) && reference.path.hasPrefix("media/")
+                && !FileManager.default.fileExists(atPath: dataDirectory.appendingPathComponent(reference.path).path)
+        }
+    }
+
+    /// Copies them from the computer.
+    public static func fetch(_ references: [AttachmentReference], runID: String, from computer: ComputerControl, into dataDirectory: URL) async {
+        for reference in references {
+            guard let data = try? await computer.readFile(homePath: "\(VMRun.folder(runID))/\(folder)/\(reference.path)", maxBytes: 260 * 1024 * 1024) else { continue }
+            let target = dataDirectory.appendingPathComponent(reference.path)
+            try? FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? data.write(to: target, options: .atomic)
+        }
+    }
+}
