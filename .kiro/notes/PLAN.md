@@ -244,6 +244,19 @@ Not done (owner: "No appetize shit for now"): a real iPhone simulator preview (V
 - Picture screen Edit, Redo and Video go straight to the picture or video model with no chat model
   in between; other picture replies end once the picture is made. Models show by name.
 
+## Third follow-up of 11 November 2026 (owner, after testing build 171)
+- A short chat sent a 254k-token prompt: every old tool result (GitHub pages, file reads,
+  attachments, about 700k characters in the vellum chat) was re-sent in full on every step. Now the
+  current turn keeps tool output whole, the last few messages keep 6,000 characters of each, and
+  older ones keep 1,500 (`Transcript.condensed`). The AI can read again if it needs more.
+- "It's supposed to be auto compacting" / "the model's context is a million, and so is yours": the
+  chat compacts by itself only when it passes 80% of the chosen model's real context window, not at
+  a fixed smaller number.
+- "Settings cleaner and prettier": the main page is now iPhone-Settings style, a header card and
+  coloured icon rows with their current value, each opening its own page.
+- His "recent photos" never arrived: pictures sent while a reply is running don't come through, only
+  the text. He needs to attach them to a normal message.
+
 ## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
 He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,
 ask_user, generate_image) and Kiro's (read_file, list_directory, file_search, grep_search, code,

@@ -676,8 +676,18 @@ final class ChatSession: Identifiable {
         touch()
     }
 
-    private func performStructuredCompaction() async {
-        guard !isCompacting, !isRunning,
+    /// Kiro compacts by itself when a chat nears the AI's context: past 80% of the model's real
+    /// window (800,000 tokens on a 1M model), the older part is summarized. It never cuts in early;
+    /// old tool output is kept short instead (Transcript), so replies stay quick without losing
+    /// what was said. "Restore full memory" still brings everything back.
+    private func shouldAutoCompact(app: AppModel) -> Bool {
+        guard compactableRangeEndIndex != nil, !isCompacting else { return false }
+        let limit = app.openRouter.contextLimit(for: chat.model, lastModelID: contextModelID) ?? 200_000
+        return contextUsedTokens > Int(Double(limit) * 0.8)
+    }
+
+    private func performStructuredCompaction(automatic: Bool = false) async {
+        guard !isCompacting, automatic || !isRunning,
               let throughIndex = compactableRangeEndIndex,
               chat.messages.indices.contains(throughIndex) else { return }
         let targetThroughMessageID = chat.messages[throughIndex].id
@@ -787,7 +797,7 @@ final class ChatSession: Identifiable {
         }
 
         // Re-verify target message ID after async suspension so concurrent rewinds/deletions can never crash on a stale index.
-        guard !isRunning,
+        guard automatic || !isRunning,
               let verifiedIndex = chat.messages.firstIndex(where: { $0.id == targetThroughMessageID }) else {
             return
         }
@@ -806,7 +816,9 @@ final class ChatSession: Identifiable {
         chat.compactedSummary = finalSummary
         chat.compactedThroughMessageID = targetThroughMessageID
         let keptTailCount = max(0, chat.messages.count - 1 - verifiedIndex)
-        appendNotice("Compacted \(slice.count) older messages into structured session memory (keeping the latest \(keptTailCount) messages verbatim). Tap the Context ring anytime to restore full memory.")
+        appendNotice(automatic
+            ? "This chat was getting long, so the older \(slice.count) messages were summarized to keep replies fast. Tap the Context ring to restore full memory."
+            : "Compacted \(slice.count) older messages into structured session memory (keeping the latest \(keptTailCount) messages verbatim). Tap the Context ring anytime to restore full memory.")
         touch()
     }
 
@@ -1340,6 +1352,9 @@ final class ChatSession: Identifiable {
         }
         // Kiro checkpoint: the chat as it was before this message ran.
         await captureCheckpoint()
+        if resumeNote == nil, shouldAutoCompact(app: app) {
+            await performStructuredCompaction(automatic: true)
+        }
         guard app.openRouter.isSignedIn else {
             fail(.signInNeeded, "Connect an AI provider (OpenRouter, OneProvider, SayGM, TeamoRouter, or OmniRoute) in Settings first.")
             return

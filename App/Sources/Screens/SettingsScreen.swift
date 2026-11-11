@@ -25,6 +25,7 @@ struct SettingsScreen: View {
     var body: some View {
         NavigationStack {
             Form {
+                header
                 if let newer = app.updates.newerBuildNumber {
                     Section {
                         Button {
@@ -32,9 +33,9 @@ struct SettingsScreen: View {
                             else { confirmUnsafeUpdate = true }
                         } label: {
                             HStack(spacing: 12) {
-                                Spark(size: 36)
+                                SettingsIcon(systemImage: "arrow.down.app.fill", tint: theme.accent)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("Build \(newer) is out").font(.body.weight(.semibold))
+                                    Text("Build \(newer) is out").font(.body.weight(.semibold)).foregroundStyle(.primary)
                                     Text(app.sync.isEverythingBackedUp
                                          ? "Everything is backed up. Install it over the top."
                                          : "Don’t delete MAIPA-G yet. Some data is not backed up.")
@@ -47,32 +48,40 @@ struct SettingsScreen: View {
                     }
                 }
 
-                accounts
-                aiProvidersSection
                 Section {
+                    page("GitHub & GitLab", icon: "chevron.left.forwardslash.chevron.right", tint: Color(white: 0.2), value: app.github.login ?? (app.gitlab.isConnected ? "GitLab" : "Not connected")) { accounts }
+                    page("AI providers", icon: "sparkles", tint: .purple, value: aiSummary) { aiProvidersSection }
+                    page("Computer for chats", icon: "desktopcomputer", tint: .blue, value: draft.chatComputerOff ? "Off" : draft.chatComputerMachineName) { chatComputer }
+                }
+
+                Section {
+                    page("Memories", icon: "brain.head.profile", tint: .pink, value: draft.memoriesOn ? "On" : "Off") { memories }
+                    page("Spending limit", icon: "dollarsign", tint: .green, value: draft.spendLimitOn ? draft.spendLimit.dollars : "Off") { money }
+                    page("Notifications", icon: "bell.badge.fill", tint: .red, value: draft.notificationsOn ? "On" : "Off") { notifications }
+                    page("Look", icon: "paintbrush.fill", tint: .orange, value: draft.appearance.label) { look }
+                }
+
+                Section {
+                    page("Features", icon: "square.stack.3d.up.fill", tint: .indigo, value: featuresSummary) { features }
+                    page("Website previews", icon: "safari.fill", tint: .teal, value: previewHostCount == 0 ? "No outside sites" : "\(previewHostCount) allowed") { previewHosts }
+                    page("Saving & backup", icon: "icloud.fill", tint: .cyan, value: saveStatus, valueTint: app.sync.isEverythingBackedUp ? nil : .orange) { saving }
                     NavigationLink { HealthCheckScreen(embedded: true) } label: {
-                        Label("Check everything", systemImage: "checkmark.shield")
+                        SettingsRowLabel(title: "Check everything", icon: "checkmark.shield.fill", tint: .mint)
                     }
                 }
-                look
-                features
-                chatComputer
-                previewHosts
-                memories
-                money
-                notifications
-                saving
-                about
-                technical
+
+                Section {
+                    page("About MAIPA-G", icon: "info.circle.fill", tint: .gray, value: "Build \(app.updates.currentBuild)") {
+                        about
+                        technical
+                    }
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .scrollDismissesKeyboard(.interactively)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
-            }
-            .sheet(item: $providerConnectSheet) { sheet in
-                sheet
             }
             .onAppear {
                 if !loaded {
@@ -118,27 +127,30 @@ struct SettingsScreen: View {
                 copiesSize = await app.snapshots.diskUsage()
                 freeSpace = try? app.paths.support.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage
             }
-            .alert("Disconnect GitHub?", isPresented: $confirmDisconnect) {
-                Button("Disconnect", role: .destructive) {
-                    Task { await app.disconnectGitHub() }
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("MAIPA-G stops using your repos and stops saving chats to GitHub. Your chats stay on this phone, and the ones already saved stay in MAIPA-G-data.")
+        }
+        .sheet(item: $providerConnectSheet) { sheet in
+            sheet
+        }
+        .alert("Disconnect GitHub?", isPresented: $confirmDisconnect) {
+            Button("Disconnect", role: .destructive) {
+                Task { await app.disconnectGitHub() }
             }
-            .alert("Disconnect GitLab?", isPresented: $confirmDisconnectGitLab) {
-                Button("Disconnect", role: .destructive) { app.disconnectGitLab() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("MAIPA-G forgets the GitLab token on this phone and stops using your GitLab projects. Nothing on GitLab changes; you can also revoke the token on GitLab.")
-            }
-            .alert("Some data is not backed up", isPresented: $confirmUnsafeUpdate) {
-                Button("Save now first") { Task { await app.sync.syncNow() } }
-                Button("Download anyway", role: .destructive) { openURL(app.updates.downloadURL) }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Install the new build over this one. Deleting the app first can lose the files that are still only on this phone.")
-            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("MAIPA-G stops using your repos and stops saving chats to GitHub. Your chats stay on this phone, and the ones already saved stay in MAIPA-G-data.")
+        }
+        .alert("Disconnect GitLab?", isPresented: $confirmDisconnectGitLab) {
+            Button("Disconnect", role: .destructive) { app.disconnectGitLab() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("MAIPA-G forgets the GitLab token on this phone and stops using your GitLab projects. Nothing on GitLab changes; you can also revoke the token on GitLab.")
+        }
+        .alert("Some data is not backed up", isPresented: $confirmUnsafeUpdate) {
+            Button("Save now first") { Task { await app.sync.syncNow() } }
+            Button("Download anyway", role: .destructive) { openURL(app.updates.downloadURL) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Install the new build over this one. Deleting the app first can lose the files that are still only on this phone.")
         }
         .fileMover(isPresented: $movingExport, file: exportURL) { result in
             switch result {
@@ -148,6 +160,51 @@ struct SettingsScreen: View {
             exportURL = nil
         }
     }
+
+    // MARK: The main page
+
+    /// The app, its build and whether everything is saved, at the top like an account card.
+    private var header: some View {
+        Section {
+            HStack(spacing: 14) {
+                Spark(size: 46)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("MAIPA-G").font(.title3.weight(.semibold))
+                    Text(app.github.login.map { "\($0) · \(saveStatus)" } ?? saveStatus)
+                        .font(.footnote)
+                        .foregroundStyle(Theme.secondaryText)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.vertical, 6)
+        }
+    }
+
+    /// One row on the main page that opens its own page of settings.
+    private func page<Content: View>(_ title: String, icon: String, tint: Color, value: String? = nil, valueTint: Color? = nil, @ViewBuilder content: @escaping () -> Content) -> some View {
+        NavigationLink {
+            Form { content() }
+                .navigationTitle(title)
+                .navigationBarTitleDisplayMode(.inline)
+                .scrollDismissesKeyboard(.interactively)
+        } label: {
+            SettingsRowLabel(title: title, icon: icon, tint: tint, value: value, valueTint: valueTint)
+        }
+    }
+
+    private var aiSummary: String {
+        guard app.openRouter.isSignedIn else { return "Not connected" }
+        if let balance = app.openRouter.balance { return balance.dollars }
+        let connected = app.openRouter.externalProviders.filter(\.isEnabled).count + (app.openRouter.hasOpenRouterKey ? 1 : 0)
+        return connected == 1 ? "1 connected" : "\(connected) connected"
+    }
+
+    private var featuresSummary: String {
+        let on = [draft.workflowsEnabled ? "Workflows" : nil, draft.autonomousEnabled ? "Autonomous" : nil].compactMap { $0 }
+        return on.isEmpty ? "Off" : on.joined(separator: ", ")
+    }
+
+    private var previewHostCount: Int { draft.previewAllowedHosts.values.reduce(0) { $0 + $1.count } }
 
     // MARK: Accounts
 
@@ -205,8 +262,6 @@ struct SettingsScreen: View {
                 }
             }
             gitLabRows
-        } header: {
-            Text("GitHub & GitLab")
         } footer: {
             if app.github.isConnected || app.gitlab.isConnected {
                 Text("A repo with Save straight to branch off uses a side branch and a pull request (a merge request on GitLab). A repo's own rules always win.")
@@ -378,8 +433,6 @@ struct SettingsScreen: View {
                 }
                 .disabled(app.openRouter.isLoadingModels)
             }
-        } header: {
-            Text("AI Providers")
         } footer: {
             Text("Connect OpenRouter, OneProvider, SayGM, TeamoRouter, OmniRoute, or any compatible /v1 gateway. All connected models appear together in the AI selector.")
         }
@@ -432,8 +485,6 @@ struct SettingsScreen: View {
             Toggle("Glow behind the home screen", isOn: $draft.effects.backgroundGlow)
             Toggle("Shimmer while thinking", isOn: $draft.effects.thinkingShimmer)
             Toggle("Messages slide in", isOn: $draft.effects.messagesSlideIn)
-        } header: {
-            Text("Look")
         } footer: {
             if theme.reduceMotion {
                 Text("Reduce Motion is on in your iPhone's settings, so nothing moves.")
@@ -459,8 +510,6 @@ struct SettingsScreen: View {
                     Text("Off: no repo jobs run, and Jobs shows only what already ran.").font(.caption).foregroundStyle(Theme.secondaryText)
                 }
             }
-        } header: {
-            Text("Features")
         } footer: {
             Text("Both start off. Spec is always in the chat's mode picker, like Kiro. Workflows cost more than sub-agents: each step is a full AI call that re-sends the chat.")
         }
@@ -500,7 +549,7 @@ struct SettingsScreen: View {
                 }
             }
         } header: {
-            Text("Preview network access")
+            Text("Outside sites previews may reach")
         } footer: {
             Text("Add a host from a repo's preview with the network button. Swipe a host to remove it; the preview loses access the next time it opens.")
         }
@@ -553,8 +602,6 @@ struct SettingsScreen: View {
                         .foregroundStyle(Theme.secondaryText)
                 }
             }
-        } header: {
-            Text("Computer for chats")
         } footer: {
             Text("The AI uses this computer by itself whenever a job needs commands. Connect Sprites or another computer service in Connectors first.")
         }
@@ -601,7 +648,7 @@ struct SettingsScreen: View {
         Section {
             Toggle("Use memories in new chats", isOn: $draft.memoriesOn)
             NavigationLink("Edit memories") { MemoriesScreen(embedded: true) }
-        } header: { Text("Memories") } footer: {
+        } footer: {
             Text("Each memory also has its own switch. Memories start empty.")
         }
     }
@@ -616,8 +663,6 @@ struct SettingsScreen: View {
                     Text(draft.spendLimit.dollars).font(.body.monospacedDigit())
                 }
             }
-        } header: {
-            Text("Money")
         } footer: {
             Text("When a reply costs this much, MAIPA-G pauses and asks before spending more.")
         }
@@ -626,7 +671,7 @@ struct SettingsScreen: View {
     private var notifications: some View {
         Section {
             Toggle("Tell me when work finishes or needs me", isOn: $draft.notificationsOn)
-        } header: { Text("Notifications") } footer: {
+        } footer: {
             Text("MAIPA-G only sends a notification when work finishes or needs an answer.")
         }
     }
@@ -688,8 +733,6 @@ struct SettingsScreen: View {
             }
             .disabled(exporting)
             if let exportMessage { Text(exportMessage).font(.footnote).foregroundStyle(Theme.secondaryText) }
-        } header: {
-            Text("Saving")
         } footer: {
             Text(app.sync.isEverythingBackedUp
                  ? "Everything is in your private MAIPA-G-data repo. Install updates over this app."
@@ -804,3 +847,41 @@ struct SettingsScreen: View {
     }
 }
 
+
+
+/// A rounded, colored icon tile like the iPhone's own Settings.
+struct SettingsIcon: View {
+    let systemImage: String
+    let tint: Color
+
+    var body: some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: 30, height: 30)
+            .background(tint.gradient, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+/// A main-page row: icon, name, and the current value in grey.
+struct SettingsRowLabel: View {
+    let title: String
+    let icon: String
+    let tint: Color
+    var value: String?
+    var valueTint: Color?
+
+    var body: some View {
+        HStack(spacing: 12) {
+            SettingsIcon(systemImage: icon, tint: tint)
+            Text(title)
+            Spacer(minLength: 8)
+            if let value {
+                Text(value)
+                    .foregroundStyle(valueTint ?? Theme.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+    }
+}

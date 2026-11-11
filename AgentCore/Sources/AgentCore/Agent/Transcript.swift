@@ -147,7 +147,11 @@ public enum Transcript {
                 }
             case .assistant(let turn):
                 let isCurrent = index == lastAssistantIndex && index == chat.messages.count - 1
-                let isOlderTurn = !isCurrent && index < max(0, chat.messages.count - 4)
+                // Earlier replies' tool output is kept short, the way Kiro clears old tool results:
+                // the AI wrote its findings into its answers, and can run a tool again. Sending every
+                // file and API reply again made a 20-message chat 254,000 tokens per step.
+                let age: ToolResultAge = isCurrent ? .current : (index >= max(0, chat.messages.count - 4) ? .recent : .older)
+                let isOlderTurn = age == .older
                 for step in turn.steps {
                     if let steered = step.steeredMessages, !steered.isEmpty {
                         let notes = steered.joined(separator: "\n\n")
@@ -164,7 +168,7 @@ public enum Transcript {
                     ))
                     var stepVisionImages: [ToolInlineImage] = []
                     for call in calls {
-                        result.append(.tool(id: call.id, toolResultText(for: call, turnIsCurrent: isCurrent, isOlderTurn: isOlderTurn)))
+                        result.append(.tool(id: call.id, toolResultText(for: call, turnIsCurrent: isCurrent, isOlderTurn: isOlderTurn, age: age)))
                         if isCurrent, readsImages, let imgs = toolInlineImages[call.id], !imgs.isEmpty {
                             stepVisionImages.append(contentsOf: imgs)
                         }
@@ -190,7 +194,20 @@ public enum Transcript {
         return result
     }
 
-    static func toolResultText(for call: ToolCallRecord, turnIsCurrent: Bool, isOlderTurn: Bool = false) -> String {
+    enum ToolResultAge { case current, recent, older }
+    /// Most characters of one tool result sent again in a later reply: the reply before this one,
+    /// and anything older.
+    static let recentToolResultCharacters = 6_000
+    static let olderToolResultCharacters = 1_500
+
+    static func condensed(_ result: String, limit: Int, tool: String) -> String {
+        guard result.count > limit else { return result }
+        let head = result.prefix(limit * 2 / 3)
+        let tail = result.suffix(limit / 4)
+        return "\(head)\n\n[… \(result.count - head.count - tail.count) characters of this earlier \(tool) output left out to keep replies fast; run it again if you need them …]\n\n\(tail)"
+    }
+
+    static func toolResultText(for call: ToolCallRecord, turnIsCurrent: Bool, isOlderTurn: Bool = false, age: ToolResultAge? = nil) -> String {
         if call.name == "launch_helpers",
            (call.result == nil || call.result == "Interrupted when the app closed.") {
             let actionsDone = (call.subagents ?? []).reduce(0) { $0 + $1.toolCallCount }
@@ -199,13 +216,10 @@ public enum Transcript {
         }
         if let result = call.result {
             let effectiveResult: String
-            if isOlderTurn && result.count > 24_000 {
-                let head = result.prefix(10_000)
-                let tail = result.suffix(6_000)
-                let omitted = result.count - 16_000
-                effectiveResult = "\(head)\n\n[... \(omitted) characters of older raw tool output condensed; re-run \(call.name) if exact middle lines are needed ...]\n\n\(tail)"
-            } else {
-                effectiveResult = result
+            switch age ?? (turnIsCurrent ? .current : (isOlderTurn ? .older : .recent)) {
+            case .current: effectiveResult = result
+            case .recent: effectiveResult = condensed(result, limit: recentToolResultCharacters, tool: call.name)
+            case .older: effectiveResult = condensed(result, limit: olderToolResultCharacters, tool: call.name)
             }
             return wrappedToolResult(effectiveResult, tool: call.name)
         }

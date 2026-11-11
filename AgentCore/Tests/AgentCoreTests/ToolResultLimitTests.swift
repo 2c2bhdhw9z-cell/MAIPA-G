@@ -132,3 +132,24 @@ private struct LargeResultTool: AgentTool {
         return ToolOutput(forModel: text, summary: "Read output", detail: text)
     }
 }
+
+@Suite("Earlier tool output is kept short")
+struct OlderToolOutputTests {
+    /// 11 November 2026: a 20-message chat resent 254,000 tokens on every step, almost all of it
+    /// earlier replies' file reads and GitHub answers.
+    @Test("The current reply sees everything; the last one a few thousand characters; older ones a summary line's worth")
+    func shrinksWithAge() throws {
+        var call = ToolCallRecord(id: "big", name: "mcp_github_api_request", arguments: "{}", summary: "GitHub")
+        call.result = String(repeating: "a", count: 18_000)
+        let current = Transcript.toolResultText(for: call, turnIsCurrent: true, age: .current)
+        let recent = Transcript.toolResultText(for: call, turnIsCurrent: false, age: .recent)
+        let older = Transcript.toolResultText(for: call, turnIsCurrent: false, age: .older)
+        #expect(current.count > 18_000)
+        #expect(recent.count < 7_000)
+        #expect(older.count < 2_200)
+        #expect(older.contains("run it again if you need them"))
+        var small = call
+        small.result = "HTTP 200 ok"
+        #expect(Transcript.toolResultText(for: small, turnIsCurrent: false, age: .older).contains("HTTP 200 ok"))
+    }
+}
