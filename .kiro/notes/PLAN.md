@@ -1,6 +1,6 @@
 # MAIPA-G plan
 
-**Status (3 November 2026): Owner authorized this batch end-to-end: replace the inline save bar with a floating Review Changes entry; bundle LobeHub model-brand logos; coalesce live text updates and parse Markdown off-main; run CI tests and iPhone validation, squash-merge the batch PR, then publish its verified IPA. Implementation and regression coverage are staged; CI/build validation is pending. Build 126 previously shipped the payload-cap and audit fixes.**
+**Status (11 November 2026): Owner OK'd the batch below ("Only things to change from that are get rid of the make a picture tab… and make it pick the best [model]"; no Appetize for now). Built and tested on Linux; the iPhone build is checked on a temporary tag before it goes to main as one build.**
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
 saving works (Settings and the side menu showed "Saved just now", and the 173 MB Continuum .ipa is
@@ -181,6 +181,39 @@ item 6's leak test (deleted on the owner's order). Waiting on the phone: Stabili
 and 35 (chat-computer features) and 14 (the owner has to add the GitHub app's Plan permission).
 Cancelled by the owner: Stability 40 and necessary item 8 (the screenshot job was deleted at 2:40
 PM). The 37 items finished before noon were spot-checked, not re-audited sentence by sentence.**
+
+## Batch of 11 November 2026 (owner OK'd; one build)
+Found from the owner's error log and chats of 11 November, then fixed:
+1. **Try again threw away work.** A dropped connection got two quick retries (3 s) and the turn was
+   wiped by Try again. Now: about a minute of retries (two when offline), any failed reply that did
+   work is marked stopped-early, and Try again carries on with its tool results kept.
+2. **The computer.** Sprites' `exec` puts the command in the web address, so long scripts got
+   "Sprite returned 414" (staged-file sync, the reply hand-over, the runner install). Long scripts
+   and files now go through Sprites' `file_write` tool (short commands when there's none). Private
+   repos are copied with a read-only one-repo token from a file deleted before git starts (they
+   were never copied: "cd: …: No such file or directory"). The `.bashrc` bind warnings and Sprites'
+   control bytes are taken out of output. The follower keeps trying after lost contact.
+3. **Backups.** Each file's content is uploaded once (one IPA was attached 18 times), slow uploads
+   keep the save alive by their size, and a file that would pass the pass's byte budget waits.
+   Existing copies are left: GitHub already stores identical files once.
+4. **"Sign in to GitHub again" was false.** A refused installation token is dropped and the request
+   sent once more; tokens renew 15 minutes early; the computer gets tokens with 50+ minutes left.
+5. **Main or PR follows what the person says** (`set_saving_style`, remembered for every chat, plus an
+   "Every repo" switch in Settings). A direct save the person asked for doesn't ask again; one that
+   comes only from a repo's rules file still does. Owner's 5 November instruction ("only ever push
+   main") becomes the starting rule.
+6. **Live app preview** (`app_preview`): the chat computer runs the repo's Expo (or Vite, Next, plain
+   site) dev server behind a Cloudflare quick tunnel (cloudflared 2026.10.7, sha256-checked). The chat
+   gets an Open preview card (in MAIPA-G) and Open in Expo Go. Public address only while it runs;
+   stops after 2 hours. Tested for real on a blank SDK 58 Expo app: web page, Expo Go manifest and
+   the iOS bundle all load through the tunnel. `EXPO_PACKAGER_PROXY_URL` uses port 8443 (expo/expo#51990).
+7. **Pictures and video.** No Make a picture screen: pictures are made and changed in the chat, and a
+   picture opened from the chat has Describe a change, Redo, Video, Save and Share. The model is picked
+   for the job (editing model for edits, best general one for new pictures) unless the person names
+   one (`list_media_models`). `generate_video` (OpenRouter's video API). Pictures go to and from the
+   computer (`copy_picture_to_computer`, `show_computer_picture`) for exact edits there. A picture's
+   cost was counted twice; now once. Picture requests stay on the phone, where the picture tools are.
+Not done (owner: "No appetize shit for now"): a real iPhone simulator preview (VibeCode-style).
 
 ## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
 He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,

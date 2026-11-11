@@ -338,12 +338,9 @@ public struct GenerateImageTool: AgentTool {
         return inputs
     }
     public func runningSummary(for arguments: JSONValue) -> String { "Generating a picture…" }
-    public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
-        guard let resolved = try? resolvedModel(arguments), resolved.maySpend else { return nil }
-        let service = client.providerEndpoint(for: resolved.id)?.endpoint.name ?? "OpenRouter"
-        let modelName = candidates.first { $0.id == resolved.id }?.name ?? resolved.id
-        return ToolApprovalRequest(question: "Generate this billed picture with \(modelName) on \(service)?", allowLabel: "Generate")
-    }
+    // No extra "spend money?" question (owner, 6 November 2026: "They don't stop to say it cost
+    // money… it just runs"). The stop-and-ask amount in Settings still applies, as it does to
+    // everything: the picture's cost counts toward the reply before the next request.
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let prompt = try arguments.requiredString("prompt")
         let model = try resolvedModel(arguments).id

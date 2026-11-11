@@ -1156,7 +1156,7 @@ struct WorkstationScreen: View {
             guard let turn = msg.assistantTurn else { continue }
             for step in turn.steps {
                 for img in step.generatedImages ?? [] {
-                    list.append(WorkstationItem.fromAttachment(img.attachment, source: "Generated picture", removableDraft: false))
+                    list.append(WorkstationItem.fromAttachment(img.attachment, source: img.isVideo ? "Made video" : "Generated picture", removableDraft: false))
                 }
             }
         }

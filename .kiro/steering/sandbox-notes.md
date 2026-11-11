@@ -40,6 +40,12 @@ Things that cost time to find out. Keep them short and true.
   - Never put the skip-CI marker text anywhere in a commit message: GitHub skips the push run
     when it appears anywhere, and that commit then gets no checked build.
 - The three shell-command tests hang on GitHub's Mac, so they run on Linux only.
+- To check the iPhone build before anything reaches `main` (no branches, no PRs): push a tag
+  `check-<sha12>-kiro` for the commit and dispatch `ios.yml` on it
+  (`gh api -X POST …/actions/workflows/ios.yml/dispatches -f ref=<tag>`). Release only publishes
+  commits on `main`, so a tag run is a check only. Delete the tag afterwards.
+- Scripts run by AgentCore tests also run on GitHub's Mac: no `stat -c` or `base64 -w0` there
+  (use `wc -c < f` and `base64 | tr -d '\n'`).
 
 ## The sandbox itself
 - `/tmp` doesn't last from one command to the next. Keep scratch files in `/projects/sandbox/`

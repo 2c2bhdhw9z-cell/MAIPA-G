@@ -296,7 +296,7 @@ struct Composer: View {
             Task {
                 do {
                     let attached = try await AttachmentImporter.importFile(data, name: fileName, store: app.attachmentStore)
-                    attachments.append(attached)
+                    await keep(attached)
                 } catch {
                     importError = error.localizedDescription
                 }
@@ -312,7 +312,10 @@ struct Composer: View {
         .fullScreenCover(isPresented: $takingPhoto) {
             CameraPicker(isPresented: $takingPhoto) { data in
                 Task {
-                    do { attachments.append(try await AttachmentImporter.importCameraPhoto(data, store: app.attachmentStore)) }
+                    do {
+                        let photo = try await AttachmentImporter.importCameraPhoto(data, store: app.attachmentStore)
+                        await keep(photo)
+                    }
                     catch { importError = "Couldn't add that photo." }
                 }
             }
@@ -329,8 +332,8 @@ struct Composer: View {
                 for item in items {
                     let baseName = shouldNumber ? "Photo \(nextNumber)" : nil
                     do {
-                        attachments.append(try await AttachmentImporter.importPhoto(item, baseName: baseName, store: app.attachmentStore))
-                        nextNumber += 1
+                        let photo = try await AttachmentImporter.importPhoto(item, baseName: baseName, store: app.attachmentStore)
+                        if await keep(photo) { nextNumber += 1 }
                     } catch {
                         failed += 1
                     }
@@ -611,6 +614,18 @@ struct Composer: View {
         .disabled(disabled)
     }
 
+    /// Adds an imported attachment unless the same file is already attached (the same bytes,
+    /// whatever its name). One message once carried 701 attachments that were 82 files.
+    @discardableResult
+    private func keep(_ attached: AttachmentReference) async -> Bool {
+        if await app.attachmentStore.duplicate(of: attached, among: attachments) != nil {
+            await app.attachmentStore.discard(attached)
+            return false
+        }
+        attachments.append(attached)
+        return true
+    }
+
     private func pickFile() {
         focused = false
         AttachmentFilePicker.shared.present(
@@ -619,7 +634,8 @@ struct Composer: View {
                     var failures: [String] = []
                     for picked in files {
                         do {
-                            attachments.append(try await AttachmentImporter.importFileURL(picked.url, name: picked.name, store: app.attachmentStore))
+                            let file = try await AttachmentImporter.importFileURL(picked.url, name: picked.name, store: app.attachmentStore)
+                            await keep(file)
                         } catch let error as AttachmentImporter.Failure {
                             failures.append("\(picked.name): \(error.localizedDescription)")
                         } catch {

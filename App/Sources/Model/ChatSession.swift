@@ -2283,7 +2283,10 @@ final class ChatSession: Identifiable {
         return runID == ComputerRuns.runID(forReply: last.id)
     }
 
-    @ObservationIgnored private var lastTokenHandover = Date()
+    /// When the computer last got a GitHub token from this phone. A reply picked up again after
+    /// the app was closed gets a fresh one straight away (its old one may have run out while the
+    /// phone was away); it used to wait 40 minutes from the moment the app opened.
+    @ObservationIgnored private var lastTokenHandover = Date.distantPast
 
     /// Hands this reply to the runner on the chat computer and follows it from here. Nil means
     /// it runs on the phone; when a computer is set up, the chat says why it couldn't take it.
@@ -2707,7 +2710,10 @@ final class ChatSession: Identifiable {
     /// What MAIPA-G's own code uses to copy a private repo onto the computer: a token that can
     /// only read that one repo, made when it's needed and never shown to the AI or saved.
     private func checkoutToken(app: AppModel, repo: SystemPrompt.RepoContext) -> CheckoutToken? {
-        guard repo.isPrivate, !repo.ref.isGitLab else { return nil }
+        guard repo.isPrivate else { return nil }
+        if repo.ref.isGitLab {
+            return { @MainActor in app.gitlab.cloneToken }
+        }
         let name = repo.ref.name
         return { @MainActor in
             guard let session = app.github.session else { return nil }

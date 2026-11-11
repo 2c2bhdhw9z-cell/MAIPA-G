@@ -76,6 +76,23 @@ public actor AttachmentStore {
         return AttachmentReference(id: id, name: safeFileName, mimeType: mimeType, kind: kind, path: path, bytes: data.count)
     }
 
+    /// The attachment already in `existing` with exactly the same bytes as `candidate`, if any.
+    /// One message had 701 attachments that were only 82 different files (11 November 2026).
+    public func duplicate(of candidate: AttachmentReference, among existing: [AttachmentReference]) -> AttachmentReference? {
+        let sameSize = existing.filter { $0.id != candidate.id && $0.bytes == candidate.bytes }
+        guard !sameSize.isEmpty, let url = try? fileURL(for: candidate), let mine = try? Hashing.gitBlobID(fileAt: url) else { return nil }
+        return sameSize.first { other in
+            guard let otherURL = try? fileURL(for: other) else { return false }
+            return (try? Hashing.gitBlobID(fileAt: otherURL)) == mine
+        }
+    }
+
+    /// Removes an attachment that was imported but not kept (a duplicate).
+    public func discard(_ attachment: AttachmentReference) {
+        guard let url = try? fileURL(for: attachment) else { return }
+        try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+    }
+
     public nonisolated func fileURL(for attachment: AttachmentReference) throws -> URL {
         guard SnapshotStore.isSafeRelativePath(attachment.path) else { throw ToolInputError("That attachment path is not safe.") }
         return dataDirectory.appendingPathComponent(attachment.path)

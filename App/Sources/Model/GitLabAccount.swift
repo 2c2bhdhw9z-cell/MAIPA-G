@@ -25,6 +25,8 @@ final class GitLabAccount {
     }
 
     var isConnected: Bool { token != nil }
+    /// For MAIPA-G's own code copying a private GitLab project onto the chat computer.
+    var cloneToken: String? { token }
     var login: String? { user?.username }
 
     var client: GitLabClient? {

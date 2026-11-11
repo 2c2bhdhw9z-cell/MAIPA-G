@@ -144,20 +144,24 @@ extension ComputerControl {
         if state.contains("maipa-g-checkout-present"), validCommit == nil || state.contains("maipa-g-commit-present") { return }
 
         var headerPath: String?
-        if cloneURL.hasPrefix("https://github.com/"), let token, let value = await token(), !value.isEmpty {
-            let header = "AUTHORIZATION: basic " + Data("x-access-token:\(value)".utf8).base64EncodedString()
+        let host = URL(string: cloneURL)?.host ?? ""
+        if !host.isEmpty, let token, let value = await token(), !value.isEmpty {
+            // GitHub takes its app token as x-access-token; GitLab takes a personal access token as oauth2.
+            let user = host == "github.com" ? "x-access-token" : "oauth2"
+            let header = "AUTHORIZATION: basic " + Data("\(user):\(value)".utf8).base64EncodedString()
             let name = ".maipa-g/secrets/git-\(UUID().uuidString.prefix(12).lowercased())"
             try await writeFile(Data(header.utf8), toHomePath: name)
             headerPath = name
         }
-        let output = try await run(Self.checkoutScript(homePath: homePath, cloneURL: cloneURL, commit: validCommit, headerPath: headerPath))
+        let output = try await run(Self.checkoutScript(homePath: homePath, cloneURL: cloneURL, commit: validCommit, headerPath: headerPath, host: host))
         if output.contains("maipa-g-checkout-ok") { return }
         let detail = Self.plainOutput(output).replacingOccurrences(of: "maipa-g-clone-failed", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
         let repoName = cloneURL.replacingOccurrences(of: "https://github.com/", with: "").replacingOccurrences(of: ".git", with: "")
-        throw Failure.commandFailed("Couldn't copy \(repoName) onto the computer\(headerPath == nil && cloneURL.hasPrefix("https://github.com/") ? " (no GitHub token was available for it)" : ""): \(String(detail.suffix(400)))")
+        throw Failure.commandFailed("Couldn't copy \(repoName) onto the computer\(headerPath == nil && token != nil ? " (no token was available for it)" : ""): \(String(detail.suffix(400)))")
     }
 
-    static func checkoutScript(homePath: String, cloneURL: String, commit: String?, headerPath: String?) -> String {
+    static func checkoutScript(homePath: String, cloneURL: String, commit: String?, headerPath: String?, host: String = "github.com") -> String {
+        let safeHost = host.allSatisfy { $0.isLetter || $0.isNumber || ".-:".contains($0) } && !host.isEmpty ? host : "github.com"
         var script = """
         set -u
         umask 077
@@ -169,7 +173,7 @@ extension ComputerControl {
             script += """
             h="$HOME/\(headerPath)"
             hv=$(cat "$h" 2>/dev/null || true); rm -f "$h"
-            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0='http.https://github.com/.extraheader' GIT_CONFIG_VALUE_0="$hv"
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0='http.https://\(safeHost)/.extraheader' GIT_CONFIG_VALUE_0="$hv"
             unset hv
 
             """

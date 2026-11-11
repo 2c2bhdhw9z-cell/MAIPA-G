@@ -245,7 +245,7 @@ public struct GenerateVideoTool: AgentTool {
         if !availableImages.isEmpty {
             properties["first_frame"] = ["type": "string", "enum": .array(availableImages.map { .string($0.name) }), "description": "A picture from this chat to start the video from."]
         }
-        return ToolSpec(name: name, description: "Make a real video (it takes a minute or more) and save it with the chat. Videos are billed by the second; it asks before spending.", parameters: [
+        return ToolSpec(name: name, description: "Make a real video (it takes a minute or more) and save it with the chat. Videos are billed by the second, so keep them short unless asked.", parameters: [
             "type": "object", "properties": .object(properties), "required": ["prompt"], "additionalProperties": false,
         ])
     }
@@ -276,16 +276,15 @@ public struct GenerateVideoTool: AgentTool {
         return model.durations.min { abs($0 - target) < abs($1 - target) }
     }
 
-    public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
-        guard let model = try? await resolve(arguments) else { return nil }
+    /// What a video will cost, for the tool's own result (no question is asked before spending;
+    /// the stop-and-ask amount in Settings applies as it does everywhere).
+    static func estimate(_ arguments: JSONValue, model: VideoModelInfo) -> String {
         let seconds = Self.seconds(arguments, model: model) ?? 5
-        let price = model.pricePerSecond.map { " (about $\(String(format: "%.2f", $0 * Double(seconds))))" } ?? ""
-        return ToolApprovalRequest(question: "Make a \(seconds)-second video with \(model.name)\(price)?", allowLabel: "Make video")
+        return model.pricePerSecond.map { "about $\(String(format: "%.2f", $0 * Double(seconds))) for \(seconds) seconds" } ?? "\(seconds) seconds"
     }
 
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
-        if let approval = await approvalRequest(for: arguments) { throw ToolApprovalRequired(approval) }
-        return try await runApproved(arguments: arguments, progress: progress)
+        try await runApproved(arguments: arguments, progress: progress)
     }
 
     public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
@@ -303,6 +302,7 @@ public struct GenerateVideoTool: AgentTool {
             resolution: arguments.optionalString("resolution"), aspectRatio: arguments.optionalString("aspect_ratio"),
             firstFrame: firstFrame, progress: progress
         )
+        progress("Saved (\(Self.estimate(arguments, model: model)))")
         let ext = video.mimeType.contains("webm") ? "webm" : (video.mimeType.contains("quicktime") ? "mov" : "mp4")
         let id = UUID()
         let reference = try await store.importGeneratedMedia(video.data, name: "video-\(id.uuidString.lowercased()).\(ext)", mimeType: video.mimeType, kind: .file)
