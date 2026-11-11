@@ -876,21 +876,27 @@ through and become places you can look at what happened, if you ever want to.
    Karpathy in February 2025 and made Collins Word of the Year, and "spec" is short for
    specification. Neither belongs to Kiro, so the picker uses those two words:
    - **Vibe** — just does it. The default.
-   - **Spec** — writes requirements and a plan first, shows it, then builds once the owner says go.
+   - **Spec** — ~~writes requirements and a plan first, shows it, then builds once the owner says go.~~
+     **Replaced 11 November 2026 by "Kiro parity" below:** Spec writes Kiro's three spec files in the
+     repo, one approved phase at a time.
 
    There is deliberately **no third mode**. An earlier draft had "Run a workflow" as a third choice;
    the owner said "theirs not 3", and it is unnecessary anyway: Workflows now has its own off-by-
    default switch in Settings, so it never needs a slot in the picker.
 
-   The mode is a *hint*, not a cage: the chat can still decide a plain request needs a plan. It
-   lives in the chat box next to the model and thinking pills, and is remembered per chat.
+   ~~The mode is a *hint*, not a cage: the chat can still decide a plain request needs a plan.~~
+   **Replaced 11 November 2026:** in Spec mode the approval gates are enforced by the app, not
+   hinted (see "Kiro parity"). It lives in the chat box next to the model and thinking pills, is
+   remembered per chat, and can be switched at any point in the chat.
 
 3. **One settings section for all of it.** "GitHub" becomes one plain section: connect, pick the
    repo, and a direct-save switch on the same screen (today it is buried in "Repository saving" →
    a second screen with a switch per repo). Below it, one **Features** group with a switch each for
-   **Workflows**, **Specs** and **Autonomous jobs**, every one of them **off by default**:
+   **Workflows** and **Autonomous jobs**, each **off by default**:
    - Workflows off → nothing can start a workflow from anywhere, and the chat answers plainly.
-   - Specs off → **Spec** is hidden from the picker and the chat plans inline instead of creating a spec.
+   - ~~Specs off → **Spec** is hidden from the picker and the chat plans inline instead of creating a spec.~~
+     **Removed 11 November 2026 (Kiro parity):** there is no Specs switch. Kiro has none; Spec is
+     always in the mode picker.
    - Autonomous off → no repo jobs; the Jobs screen is reachable but empty and says so.
 
    Owner, 6 November 2026: "the ability to turn workflows off and or on in settings off by default".
@@ -906,6 +912,39 @@ through and become places you can look at what happened, if you ever want to.
    the chats list with "Search chats"; its footer Jobs button is gone too. No Features switch,
    setting or condition puts any tab back. The screens, their data and their tests are kept: Specs
    opens from the chat's mode picker, Workflows from the Workstation, and Jobs from the chat box.
+
+### Kiro parity (owner instruction, 11 November 2026)
+Owner, 11 November 2026: "Look up shit. So it's Actually like how Kiro does Everything. (The way
+its workflows are, specs, everything. The way tools are used, Everything.)" Where this section and
+the text above disagree, this section wins. Sources are Kiro's own docs, read on 11 November 2026.
+
+- **A spec is three files in the repo**, not a record in the app: `.kiro/specs/<feature>/`
+  `requirements.md` (user stories, EARS acceptance criteria: WHEN … THE SYSTEM SHALL …),
+  `design.md`, `tasks.md` (checkboxes). On iPhone they are staged in the chat's repo and saved
+  through the normal GitHub save path. (kiro.dev/docs/specs/, /docs/specs/feature-specs/)
+- **Approval gates.** Requirements, then design, then tasks; each is approved before the next is
+  written. The app enforces it: until the tasks are approved, the file tools can only write the
+  spec's own documents. An approval is a plain reply such as "looks good"; asking for a change
+  keeps the phase. (kiro.dev/docs/specs/quick-spec/: Quick Spec is the variant *without* gates.)
+- **Building.** After the tasks are approved, the AI runs the task asked for (or the next
+  unchecked one), checks it off `- [x]` in `tasks.md`, saves, and stops. (kiro.dev/docs/specs/
+  "Task Execution")
+- **The spec goes with later messages.** A chat in Spec mode keeps its spec and reads the current
+  files (`load_spec`) every turn; `#spec:<name>` brings any spec in, and in Spec mode resumes it.
+  (kiro.dev/docs/specs/best-practices/ "How do I reference a spec in chat?")
+- **Vibe and Spec are a toggle**, switchable mid-chat, conversation kept. No setting hides Spec.
+  (kiro.dev/docs/ide/chat/ "Switching agents mid-session")
+- **Steering inclusion modes** from front matter: `always` (default), `fileMatch` +
+  `fileMatchPattern`, `manual` (`#name`), `auto` (`name` + `description`). AGENTS.md is always.
+  (kiro.dev/docs/steering/)
+- **`#` references**: `#spec:`, `#steering:`/`#name`, `#file`/`#path.ext`, `#folder`/`#dir/`,
+  `#git diff` (the chat's staged changes), `#codebase`, `#repository`, `#url:`. `#terminal`,
+  `#problems` and `#current` need a desktop editor and are reported as unavailable on iPhone.
+  (kiro.dev/docs/ide/chat/ "Context providers")
+- **Kept from MAIPA-G's safety boundary:** repo text (spec files, steering) reaches the AI through
+  read tools as outside content, never pasted into the system prompt. Kiro pastes always-steering
+  into every interaction; whether MAIPA-G should do the same is an open question for the owner.
+- The side menu tab strip stays removed (10 November 2026). Nothing here brings it back.
 
 ### Deliberately not in this batch
 - Multi-repo editing (Kiro can select several repos and edit across them; MAIPA-G chats hold one

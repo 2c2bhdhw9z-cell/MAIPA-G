@@ -441,12 +441,6 @@ struct SettingsScreen: View {
                     Text("Off: nothing starts a workflow, and the chat answers plainly.").font(.caption).foregroundStyle(Theme.secondaryText)
                 }
             }
-            Toggle(isOn: $draft.specsEnabled) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Specs")
-                    Text("Off: Spec is hidden from the chat's mode picker, and the chat plans inline.").font(.caption).foregroundStyle(Theme.secondaryText)
-                }
-            }
             Toggle(isOn: $draft.autonomousEnabled) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Autonomous jobs")
@@ -456,7 +450,7 @@ struct SettingsScreen: View {
         } header: {
             Text("Features")
         } footer: {
-            Text("All three start off. Workflows cost more than sub-agents: each step is a full AI call that re-sends the chat.")
+            Text("Both start off. Spec is always in the chat's mode picker, like Kiro. Workflows cost more than sub-agents: each step is a full AI call that re-sends the chat.")
         }
     }
 

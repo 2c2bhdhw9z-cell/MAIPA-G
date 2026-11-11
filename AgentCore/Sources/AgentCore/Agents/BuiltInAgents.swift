@@ -3,7 +3,7 @@ import Foundation
 public enum BuiltInAgents {
     public static let inspectToolNames = [
         "list_files", "search_code", "read_file", "read_repo_file", "read_other_repo_file",
-        "load_repo_rules", "inspect_workspace", "read_attachment",
+        "load_repo_rules", "load_spec", "inspect_workspace", "read_attachment",
         "list_workstation_files", "read_workstation_file",
         "web_search", "read_web_page", "introspect", "inspect_workflow", "ask_user",
     ]

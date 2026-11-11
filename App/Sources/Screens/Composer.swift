@@ -396,7 +396,7 @@ struct Composer: View {
         .accessibilityLabel("Thinking: \(thinking.label)")
     }
 
-    /// Vibe or Spec for this chat. Two modes, no third; Spec only appears while Specs is on.
+    /// Vibe or Spec for this chat. Two modes, no third, switchable at any point in the chat.
     private func modeMenu(_ current: ChatMode) -> some View {
         Menu {
             Section("Mode") {
@@ -409,9 +409,6 @@ struct Composer: View {
                         else { Text("\(mode.label) — \(mode.explanation)") }
                     }
                 }
-            }
-            if !chatModes.contains(.spec) {
-                Text("Turn on Specs in Settings → Features to plan first with Spec.")
             }
         } label: {
             HStack(spacing: 4) {

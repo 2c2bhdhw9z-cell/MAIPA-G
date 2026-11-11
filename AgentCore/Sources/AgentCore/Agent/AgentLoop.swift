@@ -1371,7 +1371,7 @@ private struct Runner {
     // Prefer `AgentTool.bringsOutsideContent` when the tool object is available.
     static let outsideContentToolNames: Set<String> = [
         "web_search", "read_web_page", "read_file", "search_code", "read_repo_file",
-        "read_other_repo_file", "load_repo_rules", "read_attachment",
+        "read_other_repo_file", "load_repo_rules", "read_attachment", "load_spec",
     ]
 
     mutating func apply(_ result: (Int, Result<ToolOutput, Error>), stepIndex: Int) {

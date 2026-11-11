@@ -818,18 +818,17 @@ final class ChatSession: Identifiable {
         }
     }
 
-    /// The modes the picker offers. Spec is hidden when Specs is off, so the switch really turns the
-    /// feature off instead of leaving a mode that cannot do what it says.
-    var availableModes: [ChatMode] {
-        app?.settings.specsEnabled == true ? [.vibe, .spec] : [.vibe]
-    }
+    /// The modes the picker offers: always both. Owner, 11 November 2026 (Kiro parity): Kiro has no
+    /// switch that hides Spec; Vibe and Spec can be flipped at any point in a chat
+    /// (https://kiro.dev/docs/ide/chat/ "Switching agents mid-session"), and the next message uses
+    /// the new mode with the whole conversation kept.
+    var availableModes: [ChatMode] { [.vibe, .spec] }
 
-    /// The mode this chat actually runs in: a chat left on Spec runs as Vibe while Specs is off.
-    var effectiveMode: ChatMode {
-        availableModes.contains(mode) ? mode : .vibe
-    }
+    /// The mode this chat runs in: whatever was picked, Vibe by default.
+    var effectiveMode: ChatMode { mode }
 
-    /// Added to the system prompt in Spec mode: plan first, inside the chat, then build on "go".
+    /// Added to the system prompt in Spec mode when the chat has no repo to hold spec files:
+    /// plan first, inside the chat, then build on "go".
     static let specModeInstructions = """
 
 
@@ -841,6 +840,34 @@ final class ChatSession: Identifiable {
     that plan, and say if you have to depart from it. Plain questions are answered directly; they \
     need no plan.
     """
+
+    /// The Spec-mode part of the system prompt: Kiro's three-file spec flow when the chat has a repo,
+    /// otherwise a plan written in the chat.
+    private func specModeSection(hasRepo: Bool, existingSpecs: [String]) -> String {
+        guard effectiveMode == .spec else { return "" }
+        guard hasRepo else {
+            return Self.specModeInstructions + " Spec files (`.kiro/specs/<feature>/requirements.md`, `design.md`, `tasks.md`) need a repo; this chat has none, so plan in the chat."
+        }
+        return KiroSpecs.instructions(state: chat.kiroSpec, existingSpecs: existingSpecs)
+    }
+
+    /// One line under a Spec-mode reply saying which document waits for approval and how to give it.
+    static func specPhaseNotice(_ state: KiroSpecState, workspace: ChangeWorkspace) async -> String? {
+        guard let path = state.path(state.phase) else {
+            guard case .text(let text, _) = try? await workspace.read(state.path(.tasks) ?? "") else { return nil }
+            let tasks = KiroSpecs.tasks(in: text)
+            guard !tasks.isEmpty else { return nil }
+            return "Spec \(state.slug): \(tasks.filter(\.isDone).count) of \(tasks.count) tasks done in \(state.path(.tasks) ?? "")."
+        }
+        guard case .text = try? await workspace.read(path) else { return nil }
+        let next: String
+        switch state.phase {
+        case .requirements: next = "move on to the design"
+        case .design: next = "move on to the tasks"
+        default: next = "start building"
+        }
+        return "Spec \(state.slug): \(path) is ready for review. Reply \u{201C}looks good\u{201D} to \(next), or say what to change."
+    }
 
     func setRepo(_ repo: ChatRepo?) {
         chat.repo = repo
@@ -1348,6 +1375,42 @@ final class ChatSession: Identifiable {
             }
         }
         tools = HookedTool.wrap(tools, hooks: repoHooks, runCommand: hookRunner)
+        // Kiro specs: three files under .kiro/specs/<feature>/ in the chat's repo, read with
+        // load_spec (Kiro's #spec), with Spec mode's approval gates enforced on the file tools.
+        var existingSpecs: [String] = []
+        if repoContext != nil, let specChanges = changeWorkspace {
+            let readSpecFile: LoadSpecTool.Reader = { path in
+                guard case .text(let text, _) = try? await specChanges.read(path) else { return nil }
+                return text
+            }
+            let listRepoFiles: LoadSpecTool.Lister = {
+                ((try? await specChanges.mergedTree())?.entries ?? []).filter(\.isFile).map(\.path)
+            }
+            tools.append(LoadSpecTool(read: readSpecFile, list: listRepoFiles))
+            let references = KiroContextReferences.parse(lastMessage)
+            if effectiveMode == .spec {
+                existingSpecs = await setupStep(setupDeadline, fallback: [], label: "listing specs") { KiroSpecs.slugs(in: await listRepoFiles()) }
+                if let state = chat.kiroSpec {
+                    // An approval reply moves the spec on one phase, once that phase's document exists.
+                    let documentExists: Bool
+                    if let path = state.path(state.phase) { documentExists = await readSpecFile(path) != nil } else { documentExists = true }
+                    let next = KiroSpecs.afterMessage(lastMessage, state: state, currentDocumentExists: documentExists)
+                    if next != state { chat.kiroSpec = next; touch() }
+                } else if let named = references.specs.first(where: KiroSpecs.isValidSlug) {
+                    // `#spec:<name>` in Spec mode picks up a spec already in the repo where it left off.
+                    let base = KiroSpecs.folder + named + "/"
+                    let hasRequirements = await readSpecFile(base + "requirements.md") != nil
+                    let hasDesign = await readSpecFile(base + "design.md") != nil
+                    let hasTasks = await readSpecFile(base + "tasks.md") != nil
+                    if hasRequirements || hasDesign || hasTasks {
+                        chat.kiroSpec = KiroSpecs.resume(slug: named, hasRequirements: hasRequirements, hasDesign: hasDesign, hasTasks: hasTasks)
+                        touch()
+                    }
+                }
+                let gateState = chat.kiroSpec
+                tools = KiroSpecGatedTool.wrap(tools, state: { gateState })
+            }
+        }
         for problem in hookProblems {
             _ = app.report(RepoHookProblem(message: problem), area: "hooks", operation: "read repo hooks")
         }
@@ -1756,7 +1819,8 @@ final class ChatSession: Identifiable {
                 connectedRepositories: app.github.repos.map(\.fullName),
                 isAutonomous: isAutonomousTurn,
                 skippedAttachments: skippedAttachments
-            ) + (effectiveMode == .spec ? Self.specModeInstructions : ""),
+            ) + specModeSection(hasRepo: repoContext != nil, existingSpecs: existingSpecs)
+              + KiroContextReferences.parse(lastMessage).promptSection,
             tools: tools,
             allowTools: app.openRouter.supportsTools(chat.model),
             spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil,
@@ -1835,13 +1899,16 @@ final class ChatSession: Identifiable {
             turn.status = .stopped
             replaceLastTurn(turn)
         }
-        // A plan written in Spec mode is also a Specs entry for this chat, kept up to date.
-        if effectiveMode == .spec, app.settings.specsEnabled, let repo = chat.repo,
-           let turn = lastTurn, let plan = SpecModePlan.extract(from: turn) {
-            let title = chat.title.isEmpty ? Self.provisionalTitle(lastMessage) : chat.title
-            if let saved = await app.specs.recordChatPlan(chatID: chat.id, title: title, request: lastMessage, plan: plan, repo: repo),
-               var current = lastTurn {
-                let notice = "Saved this plan to Specs as \u{201C}\(saved.title)\u{201D}."
+        // Spec mode writes the spec as files in the repo (Kiro parity, 11 November 2026), not as a
+        // record inside the app: pick up the spec the AI started, and say what is waiting for approval.
+        if effectiveMode == .spec, chat.repo != nil, let specChanges = changeWorkspace {
+            let staged = await specChanges.stagedChanges().map(\.path)
+            if let found = KiroSpecs.discovered(stagedPaths: staged, current: chat.kiroSpec), found != chat.kiroSpec {
+                chat.kiroSpec = found
+                touch()
+            }
+            if let state = chat.kiroSpec, var current = lastTurn, current.status == .done,
+               let notice = await Self.specPhaseNotice(state, workspace: specChanges) {
                 if !current.notices.contains(notice) { current.notices.append(notice) }
                 replaceLastTurn(current)
             }

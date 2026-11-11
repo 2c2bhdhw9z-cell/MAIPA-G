@@ -97,6 +97,9 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
     /// More repos this chat edits besides `repo`, each with its own branch, staged changes and
     /// save rules. nil for a chat with one repo (or none), which behaves exactly as before.
     public var additionalRepos: [ChatRepo]?
+    /// The Kiro-style spec this chat is writing or building (`.kiro/specs/<slug>/` in its repo) and
+    /// its phase. nil until Spec mode writes requirements or a `#spec:` reference picks one up.
+    public var kiroSpec: KiroSpecState?
 
     /// `repo` first, then the others, without duplicates.
     public var allRepos: [ChatRepo] {
@@ -140,6 +143,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         self.activeWorkflowRuns = nil
         self.mode = nil
         self.additionalRepos = nil
+        self.kiroSpec = nil
     }
 
     enum CodingKeys: String, CodingKey {
@@ -147,7 +151,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         case groupID, saveReceipts, activeJobID, workflowID, specID, memoryContext
         case compactedSummary, compactedThroughMessageID
         case previousCompactedSummary, previousCompactedThroughMessageID
-        case queuedFollowUps, activeWorkflowRuns, mode, additionalRepos
+        case queuedFollowUps, activeWorkflowRuns, mode, additionalRepos, kiroSpec
     }
 
     public init(from decoder: Decoder) throws {
@@ -176,6 +180,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         activeWorkflowRuns = try c.decodeIfPresent([ActiveWorkflowRunSnapshot].self, forKey: .activeWorkflowRuns)
         mode = try c.decodeIfPresent(String.self, forKey: .mode)
         additionalRepos = try c.decodeIfPresent([ChatRepo].self, forKey: .additionalRepos)
+        kiroSpec = try c.decodeIfPresent(KiroSpecState.self, forKey: .kiroSpec)
     }
 
     /// Everything the chat has cost so far, in dollars, as OpenRouter reported it.
