@@ -2256,7 +2256,7 @@ final class ChatSession: Identifiable {
             }
             return nil
         }
-        if !chat.additionalRepos.isEmpty { return fallBack("this chat works on several repos, which only the phone can do so far") }
+        if !(chat.additionalRepos ?? []).isEmpty { return fallBack("this chat works on several repos, which only the phone can do so far") }
         if let repoContext, repoContext.ref.isGitLab { return fallBack("GitLab projects only run on the phone so far") }
         if chat.repo != nil, repoContext == nil { return nil }
         if attachmentData.values.reduce(0, { $0 + $1.count }) > 3_000_000 { return fallBack("the attached files are too big to send there") }
