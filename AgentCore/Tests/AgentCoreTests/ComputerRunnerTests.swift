@@ -9,6 +9,19 @@ import Testing
 struct ComputerRunnerTests {
     // MARK: Helpers
 
+    /// The VM scripts use GNU tools and /proc, as the chat computer (Linux) has them.
+    #if os(Linux)
+    static let onLinux = true
+    #else
+    static let onLinux = false
+    #endif
+
+    /// The newest state the runner wrote, read straight from its files.
+    static func latestState(in folder: URL) throws -> VMTurnState {
+        let seq = try String(contentsOf: folder.appendingPathComponent("seq"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        return try VMCoding.unpack(VMTurnState.self, from: Data(contentsOf: folder.appendingPathComponent("state/\(seq).json.gz")))
+    }
+
     static func temporaryHome() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("maipa-g-vm-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
@@ -219,7 +232,7 @@ struct ComputerRunnerTests {
 
     // MARK: Handing over and following, through the real scripts
 
-    @Test("Big uploads arrive whole, in pieces, readable only by the computer's user")
+    @Test("Big uploads arrive whole, in pieces, readable only by the computer's user", .enabled(if: ComputerRunnerTests.onLinux))
     func chunkedUpload() async throws {
         let home = try Self.temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
@@ -235,7 +248,7 @@ struct ComputerRunnerTests {
         await #expect(throws: (any Error).self) { try await vm.upload(bytes, to: "../escape") }
     }
 
-    @Test("A poll picks up from the last state seen, reading big states in pieces")
+    @Test("A poll picks up from the last state seen, reading big states in pieces", .enabled(if: ComputerRunnerTests.onLinux))
     func pollResumesAfterSeq() async throws {
         let home = try Self.temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
@@ -286,7 +299,7 @@ struct ComputerRunnerTests {
         """, in: home)
     }
 
-    @Test("Hand over, steer and stop a run through the real scripts")
+    @Test("Hand over, steer and stop a run through the real scripts", .enabled(if: ComputerRunnerTests.onLinux))
     func launchSteerStop() async throws {
         let home = try Self.temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
@@ -317,7 +330,7 @@ struct ComputerRunnerTests {
         #expect(try await vm.poll(id: id, after: 0).runnerAlive == false)
     }
 
-    @Test("A run that won't stop is ended")
+    @Test("A run that won't stop is ended", .enabled(if: ComputerRunnerTests.onLinux))
     func stopKillsAStuckRunner() async throws {
         let home = try Self.temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
@@ -337,7 +350,7 @@ struct ComputerRunnerTests {
         #expect(try await vm.poll(id: id, after: 0).runnerAlive == false)
     }
 
-    @Test("The phone follows a reply on the computer, steers it, and gets unused steering back")
+    @Test("The phone follows a reply on the computer, steers it, and gets unused steering back", .enabled(if: ComputerRunnerTests.onLinux))
     func followerFollowsSteersAndFinishes() async throws {
         let home = try Self.temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
@@ -381,7 +394,7 @@ struct ComputerRunnerTests {
         #expect(await seen.staged == staged)
     }
 
-    @Test("A runner that ends without finishing says so")
+    @Test("A runner that ends without finishing says so", .enabled(if: ComputerRunnerTests.onLinux))
     func followerNoticesADeadRunner() async throws {
         let home = try Self.temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
@@ -400,7 +413,7 @@ struct ComputerRunnerTests {
         #expect(last?.notices.contains(VMNotices.runnerEnded) == true)
     }
 
-    @Test("Cancelling only stops following; the run's files stay for later")
+    @Test("Cancelling only stops following; the run's files stay for later", .enabled(if: ComputerRunnerTests.onLinux))
     func cancelDetaches() async throws {
         let home = try Self.temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
@@ -454,9 +467,7 @@ struct VMTurnRunnerTests {
         let transport = ScriptedTransport([.events([AgentLoopTests.text("Hi "), AgentLoopTests.text("there."), AgentLoopTests.done])])
         try await VMTurnRunner(folder: folder, home: home, machine: "test", transport: transport).run()
         #expect(!FileManager.default.fileExists(atPath: folder.appendingPathComponent("secrets.json.gz").path))
-        let vm = VMControl(computer: ComputerControl.local(machine: "test", home: home))
-        let poll = try await vm.poll(id: id, after: 0)
-        let state = try #require(poll.state)
+        let state = try ComputerRunnerTests.latestState(in: folder)
         #expect(state.isFinished)
         #expect(state.turn.status == .done)
         #expect(state.turn.steps.last?.text.contains("Hi there.") == true)
@@ -484,7 +495,7 @@ struct VMTurnRunnerTests {
         try Data().write(to: folder.appendingPathComponent("stop"))
         let transport = SlowTransport()
         try await VMTurnRunner(folder: folder, home: home, machine: "test", transport: transport).run()
-        let state = try #require(try await VMControl(computer: ComputerControl.local(machine: "test", home: home)).poll(id: id, after: 0).state)
+        let state = try ComputerRunnerTests.latestState(in: folder)
         #expect(state.isFinished)
         #expect(state.turn.status != .running && state.turn.status != .done)
     }
@@ -507,7 +518,7 @@ struct VMTurnRunnerTests {
         // No GitHub token for a repo chat.
         try VMCoding.pack(VMSecrets(openRouterKey: "sk-test", githubToken: nil)).write(to: folder.appendingPathComponent("secrets.json.gz"))
         try await VMTurnRunner(folder: folder, home: home, machine: "test", transport: ScriptedTransport([])).run()
-        let state = try #require(try await VMControl(computer: ComputerControl.local(machine: "test", home: home)).poll(id: id, after: 0).state)
+        let state = try ComputerRunnerTests.latestState(in: folder)
         #expect(state.isFinished)
         #expect(state.turn.status == .failed)
         #expect(state.error?.contains("couldn't start on your computer") == true)
