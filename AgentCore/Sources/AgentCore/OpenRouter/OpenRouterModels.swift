@@ -55,6 +55,15 @@ public struct ModelInfo: Codable, Sendable, Hashable, Identifiable {
     public var supportedParameters: Set<String>
     public var reasoning: ReasoningCapability?
     public var created: Date?
+    /// The official list price (US dollars per token) when the gateway resells below it (TeamoRouter `list_cost`).
+    public var listPromptPrice: Double?
+    public var listCompletionPrice: Double?
+    public var listCacheReadPrice: Double?
+    public var listCacheWritePrice: Double?
+    /// Higher prices for very long inputs (TeamoRouter `context_tier_pricing`).
+    public var contextTier: ContextTierPricing?
+    /// The account's claimed limited offer; while set, the prices above are the offer prices.
+    public var priceOffer: PriceOffer?
 
     public init(
         id: String,
@@ -71,7 +80,13 @@ public struct ModelInfo: Codable, Sendable, Hashable, Identifiable {
         outputModalities: [String] = ["text"],
         supportedParameters: Set<String> = [],
         reasoning: ReasoningCapability? = nil,
-        created: Date? = nil
+        created: Date? = nil,
+        listPromptPrice: Double? = nil,
+        listCompletionPrice: Double? = nil,
+        listCacheReadPrice: Double? = nil,
+        listCacheWritePrice: Double? = nil,
+        contextTier: ContextTierPricing? = nil,
+        priceOffer: PriceOffer? = nil
     ) {
         self.id = id
         self.name = name
@@ -88,6 +103,12 @@ public struct ModelInfo: Codable, Sendable, Hashable, Identifiable {
         self.supportedParameters = supportedParameters
         self.reasoning = reasoning
         self.created = created
+        self.listPromptPrice = listPromptPrice
+        self.listCompletionPrice = listCompletionPrice
+        self.listCacheReadPrice = listCacheReadPrice
+        self.listCacheWritePrice = listCacheWritePrice
+        self.contextTier = contextTier
+        self.priceOffer = priceOffer
     }
 
     /// Formats token limits using binary KiB/MiB math (`131,072` -> `"128K"`, `1,048,576` -> `"1M"`) when evenly

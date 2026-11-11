@@ -522,6 +522,12 @@ public enum AIProviderGateway {
             }
         }
 
+        // TeamoRouter: the account's claimed offer ("Surprise price") only shows on the signed-in
+        // `/v1/user/pricing-campaigns`, never on the public price list, so read it and apply it.
+        if isTeamoRouter(endpoint), let campaigns = await fetchPricingCampaigns(for: endpoint, transport: transport) {
+            parsed.models = applyPricingCampaigns(parsed.models, campaigns: campaigns)
+        }
+
         return parsed
     }
 
@@ -655,6 +661,7 @@ public enum AIProviderGateway {
         let maxOut: Int = normalizedOut.cap ?? inferredMaxOutputTokens(for: lower)
 
         let extractedPrices = extractPerTokenPrices(entry: entry, overlay: overlay, opMeta: opMeta, rawID: lower)
+        let listPrices = extractListPrices(entry: entry, overlay: overlay, current: extractedPrices)
 
         // Wire shape detection
         let shapes = (entry["api_shapes"]?.arrayValue ?? []).compactMap(\.stringValue)
@@ -785,7 +792,12 @@ public enum AIProviderGateway {
             outputModalities: outputMods,
             supportedParameters: params,
             reasoning: reasoning,
-            created: createdDate
+            created: createdDate,
+            listPromptPrice: listPrices.prompt,
+            listCompletionPrice: listPrices.completion,
+            listCacheReadPrice: listPrices.cacheRead,
+            listCacheWritePrice: listPrices.cacheWrite,
+            contextTier: ContextTierPricing.parse(entry["context_tier_pricing"] ?? overlay?["context_tier_pricing"])
         )
         return (model, wireHint)
     }
@@ -851,6 +863,26 @@ public enum AIProviderGateway {
             )
         }
         return ExtractedPrices()
+    }
+
+    /// The official list price a gateway reports next to its own (TeamoRouter `list_cost`, USD per 1M tokens).
+    /// Only kept when it is above the price charged, so it can be shown struck through.
+    private static func extractListPrices(entry: JSONValue, overlay: JSONValue?, current: ExtractedPrices) -> ExtractedPrices {
+        guard let list = entry["list_cost"] ?? overlay?["list_cost"],
+              let inM = numberFromJSON(list["input"]),
+              let outM = numberFromJSON(list["output"]),
+              inM >= 0, outM >= 0 else { return ExtractedPrices() }
+        let prompt = inM / 1_000_000.0
+        let completion = outM / 1_000_000.0
+        if let p = current.prompt, let c = current.completion, prompt + completion <= p + c { return ExtractedPrices() }
+        let read = numberFromJSON(list["cache_read"]) ?? numberFromJSON(list["cached_input"])
+        let write = numberFromJSON(list["cache_creation"]) ?? numberFromJSON(list["cache_write_5m"])
+        return ExtractedPrices(
+            prompt: prompt,
+            completion: completion,
+            cacheRead: read.map { $0 / 1_000_000.0 },
+            cacheWrite: write.map { $0 / 1_000_000.0 }
+        )
     }
 
     private static func numberFromJSON(_ value: JSONValue?) -> Double? {
@@ -1089,6 +1121,8 @@ public enum AIProviderGateway {
         let outPrice: Double?
         let crPrice: Double?
         let cwPrice: Double?
+        // An offer that has ended or run out of quota goes back to the regular price.
+        let catalogueModel = catalogueModel?.pricedNow()
         if let m = catalogueModel, m.promptPrice != nil || m.completionPrice != nil {
             inPrice = m.promptPrice
             outPrice = m.completionPrice
@@ -1104,7 +1138,16 @@ public enum AIProviderGateway {
         } else {
             return unknown()
         }
-        guard let inP = inPrice, let outP = outPrice else { return unknown() }
+        guard var inP = inPrice, var outP = outPrice else { return unknown() }
+        var crPriceTiered = crPrice
+        var cwPriceTiered = cwPrice
+        // Long inputs past the gateway's threshold cost more (TeamoRouter: over 272K, input 2x, output 1.5x).
+        if let tier = catalogueModel?.contextTier, usage.promptTokens > tier.thresholdTokens {
+            inP *= tier.inputMultiplier
+            outP *= tier.outputMultiplier
+            crPriceTiered = crPrice.map { $0 * tier.inputMultiplier }
+            cwPriceTiered = cwPrice.map { $0 * tier.inputMultiplier }
+        }
         if inP == 0 && outP == 0 {
             // Zero prices only mean free when the model says it is free. Otherwise the price list
             // simply has no price for it, and showing $0 would make a paid model look free.
@@ -1115,8 +1158,8 @@ public enum AIProviderGateway {
         let cachedRead = max(0, usage.cachedTokens ?? 0)
         let cacheWrite = max(0, usage.cacheWriteTokens ?? 0)
         let uncachedInput = max(0, usage.promptTokens - cachedRead - cacheWrite)
-        let readRate = crPrice ?? (inP * 0.1)
-        let writeRate = cwPrice ?? (inP * 1.25)
+        let readRate = crPriceTiered ?? (inP * 0.1)
+        let writeRate = cwPriceTiered ?? (inP * 1.25)
         let total = Double(uncachedInput) * inP
             + Double(cachedRead) * readRate
             + Double(cacheWrite) * writeRate

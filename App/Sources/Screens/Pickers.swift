@@ -542,8 +542,9 @@ struct ModelPicker: View {
                 if ld != rd { return ld > rd }
                 return lhs.model.shortName < rhs.model.shortName
             case .cheapest:
-                let lp = (lhs.model.promptPrice ?? 999) + (lhs.model.completionPrice ?? 999)
-                let rp = (rhs.model.promptPrice ?? 999) + (rhs.model.completionPrice ?? 999)
+                let lm = lhs.model.pricedNow(), rm = rhs.model.pricedNow()
+                let lp = (lm.promptPrice ?? 999) + (lm.completionPrice ?? 999)
+                let rp = (rm.promptPrice ?? 999) + (rm.completionPrice ?? 999)
                 if lp != rp { return lp < rp }
                 return lhs.model.shortName < rhs.model.shortName
             case .context:
@@ -612,9 +613,30 @@ struct ModelPicker: View {
                         .lineLimit(1)
 
                     FlowLayout(spacing: 5, lineSpacing: 5) {
-                        badge(text: price(model), highlight: model.isFree)
-                        if !model.isFree, let cached = model.cacheReadPrice, cached > 0 {
+                        // The price actually charged right now: an offer that ended or ran out is already dropped.
+                        let priced = model.pricedNow()
+                        badge(text: price(priced), highlight: priced.isFree || priced.priceOffer != nil)
+                        if let offer = priced.priceOffer {
+                            if let regularIn = offer.regularPromptPrice, let regularOut = offer.regularCompletionPrice {
+                                struckBadge(text: pairText(regularIn, regularOut), label: "Regular price")
+                            }
+                            badge(text: "\(offer.name) · \(offer.percentOffList)% off list", icon: "tag.fill", highlight: true)
+                            if let left = offer.remainingUSD {
+                                let quota = offer.quotaUSD.map { " of \(usdText($0))" } ?? ""
+                                badge(text: "\(usdText(left))\(quota) offer left", icon: "gift.fill", highlight: true)
+                            }
+                            if let ends = offer.endsAt {
+                                badge(text: "Ends \(ends.formatted(.dateTime.month(.abbreviated).day()))", icon: "clock")
+                            }
+                        } else if let pct = priced.percentOffList, let listIn = priced.listPromptPrice, let listOut = priced.listCompletionPrice {
+                            struckBadge(text: pairText(listIn, listOut), label: "List price")
+                            badge(text: "\(pct)% off list", icon: "tag")
+                        }
+                        if !priced.isFree, let cached = priced.cacheReadPrice, cached > 0 {
                             badge(text: "Cache \(perMillionText(cached))", icon: "bolt.fill", highlight: true)
+                        }
+                        if let tier = priced.contextTier {
+                            badge(text: "Over \(Self.tokens(tier.thresholdTokens)) in: \(multiplierText(tier.inputMultiplier))/\(multiplierText(tier.outputMultiplier))", icon: "arrow.up.right")
                         }
                         if let context = model.contextLength {
                             badge(text: "\(Self.tokens(context)) ctx")
@@ -693,6 +715,29 @@ struct ModelPicker: View {
         .background(highlight ? Color.green.opacity(0.12) : Theme.raised, in: Capsule())
     }
 
+    /// A price the user is not paying (regular or list price), struck through.
+    private func struckBadge(text: String, label: String) -> some View {
+        Text(text)
+            .font(.caption2.weight(.medium))
+            .strikethrough()
+            .foregroundStyle(Theme.secondaryText)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(Theme.raised, in: Capsule())
+            .accessibilityLabel("\(label) \(text)")
+    }
+
+    private func usdText(_ value: Double) -> String {
+        let text = String(format: "%.2f", value)
+        return "$" + (text.hasSuffix(".00") ? String(text.dropLast(3)) : text)
+    }
+
+    private func multiplierText(_ value: Double) -> String {
+        let text = String(format: "%.2f", value)
+            .replacingOccurrences(of: #"\.?0+$"#, with: "", options: .regularExpression)
+        return "\(text)x"
+    }
+
     /// "128K", "1M", "1.5M": uses binary KiB/MiB math (`131,072` -> `128K`, `1,048,576` -> `1M`) when evenly divisible by 1,024.
     static func tokens(_ count: Int) -> String {
         ModelInfo.formattedTokenCount(count)
@@ -709,6 +754,11 @@ struct ModelPicker: View {
     private func price(_ model: ModelInfo) -> String {
         if model.isFree { return "Free" }
         guard let input = model.promptPrice, let output = model.completionPrice else { return "Variable" }
+        return pairText(input, output)
+    }
+
+    /// "$2.14/$10.70": dollars per million tokens for reading / writing.
+    private func pairText(_ input: Double, _ output: Double) -> String {
         func dollars(_ perToken: Double) -> String {
             let perMillion = perToken * 1_000_000
             if perMillion == 0 { return "$0" }

@@ -385,6 +385,22 @@ final class OpenRouterAccount {
         if changedBalances {
             UserDefaults.standard.set(externalBalances, forKey: "externalProviderBalances")
         }
+        // TeamoRouter offers ("Surprise price") use up quota and end: re-read them with the balance so the
+        // prices shown and used for cost go back to regular as soon as the offer is over.
+        var changedOffers = false
+        for endpoint in readyExternalProviders {
+            guard let cached = externalCatalogCache[endpoint.id], !cached.isEmpty,
+                  let campaigns = await AIProviderGateway.fetchPricingCampaigns(for: endpoint, transport: transport) else { continue }
+            let repriced = AIProviderGateway.applyPricingCampaigns(cached, campaigns: campaigns)
+            if repriced != cached {
+                externalCatalogCache[endpoint.id] = repriced
+                changedOffers = true
+            }
+        }
+        if changedOffers {
+            rebuildMergedModels()
+            persistMergedCatalog()
+        }
     }
 
     /// Models OpenRouter refused in the current session as app-restricted (kept session-local so a
