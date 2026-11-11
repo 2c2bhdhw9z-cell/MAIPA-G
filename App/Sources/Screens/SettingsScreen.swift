@@ -95,6 +95,7 @@ struct SettingsScreen: View {
                     settings.spendLimit = edited.spendLimit
                     settings.notificationsOn = edited.notificationsOn
                     settings.directSaveRepos = edited.directSaveRepos
+                    settings.saveStraightToBranchEverywhere = edited.saveStraightToBranchEverywhere
                     settings.workflowPolicy = edited.workflowPolicy
                     settings.workflowsEnabled = edited.workflowsEnabled
                     settings.specsEnabled = edited.specsEnabled
@@ -173,9 +174,20 @@ struct SettingsScreen: View {
                     Text("Your repos appear here after GitHub connects.")
                         .foregroundStyle(Theme.secondaryText)
                 }
+                if !app.github.repos.isEmpty {
+                    Toggle(isOn: Binding(
+                        get: { draft.saveStraightToBranchEverywhere ?? false },
+                        set: { draft.saveStraightToBranchEverywhere = $0; draft.directSaveRepos = [:] }
+                    )) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Every repo")
+                            Text("Save straight to branch, no pull requests. Telling the AI in a chat sets this too.").font(.caption).foregroundStyle(Theme.secondaryText)
+                        }
+                    }
+                }
                 ForEach(app.github.repos) { repo in
                     Toggle(isOn: Binding(
-                        get: { draft.directSaveRepos[repo.ref.settingsKey] ?? false },
+                        get: { draft.directSaveRepos[repo.ref.settingsKey] ?? draft.saveStraightToBranchEverywhere ?? false },
                         set: { draft.directSaveRepos[repo.ref.settingsKey] = $0 }
                     )) {
                         VStack(alignment: .leading, spacing: 1) {

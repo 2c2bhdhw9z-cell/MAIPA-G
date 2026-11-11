@@ -237,9 +237,9 @@ struct ComputerRunnerTests {
         let home = try Self.temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
         let vm = VMControl(computer: ComputerControl.local(machine: "test", home: home))
-        var bytes = Data(count: VMControl.chunkBytes * 2 + 123)
+        var bytes = Data(count: 90_000 * 2 + 123)
         for index in bytes.indices { bytes[index] = UInt8(truncatingIfNeeded: index &* 31) }
-        #expect(VMControl.uploadScripts(bytes, to: "x/file").count == 3)
+        #expect(ComputerControl.pieceScripts(bytes, path: "x/file", pieceBytes: 90_000).count == 3)
         try await vm.upload(bytes, to: ".maipa-g/runs/turn-a/secrets.json.gz")
         let file = home.appendingPathComponent(".maipa-g/runs/turn-a/secrets.json.gz")
         #expect(try Data(contentsOf: file) == bytes)
@@ -260,7 +260,7 @@ struct ComputerRunnerTests {
         #expect(empty.seq == 0 && empty.state == nil && !empty.missing && !empty.runnerAlive)
         let writer = VMStateWriter(folder: folder)
         // Random bytes don't compress, so this state takes several reads.
-        var noise = Data(count: VMControl.chunkBytes * 2)
+        var noise = Data(count: 90_000)
         for index in noise.indices { noise[index] = UInt8.random(in: 0...255) }
         let staged = [CheckpointFile(.write(path: "big.bin", data: noise, existed: false))]
         try await writer.write { VMTurnState(id: id, seq: $0, phase: .running, turn: AssistantTurn(), staged: staged) }

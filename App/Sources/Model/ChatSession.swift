@@ -812,10 +812,17 @@ final class ChatSession: Identifiable {
 
     /// Runs the last message again, after a failure.
     func retry() {
-        guard !isRunning, let last = chat.messages.last, last.assistantTurn != nil else { return }
+        guard !isRunning, let last = chat.messages.last, var failedTurn = last.assistantTurn else { return }
+        // A failed or stopped reply that already did work is never thrown away by "Try again": it
+        // carries on from where it stopped, with its tool results kept. (Replies saved by older
+        // builds didn't always say they stopped early.)
+        if failedTurn.stoppedEarly != true, failedTurn.status == .failed || failedTurn.status == .stopped, AgentLoop.didWork(failedTurn.steps) {
+            failedTurn.stoppedEarly = true
+            replaceLastTurn(failedTurn)
+        }
         // "Try again" on a reply that stopped early carries it on, the same as "Retry this answer",
         // instead of throwing away what it already did.
-        if last.assistantTurn?.stoppedEarly == true {
+        if lastTurn?.stoppedEarly == true {
             retryAnswer(last.id)
             return
         }
@@ -1531,6 +1538,7 @@ final class ChatSession: Identifiable {
                 repoLocalAgents = await setupStep(repoDeadline, fallback: [], label: "reading repo agents") { await RepoAgentLoader.loadAgents(from: workspace) }
                 let saves = changeSession ?? ChangeSession(receipts: chat.saveReceipts ?? [])
                 changeSession = saves
+                let savingChoice = SavingStyleChoice()
                 let listTool = ListFilesTool(workspace: workspace, changes: changes)
                 let searchTool = SearchCodeTool(workspace: workspace, changes: changes)
                 let readTool = ReadFileTool(workspace: workspace, changes: changes)
@@ -1544,7 +1552,8 @@ final class ChatSession: Identifiable {
                     EditFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
                     AppendFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
                     DeleteFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
-                    SaveChangesTool(workspace: changes, service: service, session: saves, selectedBranch: workingBranch, defaultBranch: repo.defaultBranch, rules: rules),
+                    SaveChangesTool(workspace: changes, service: service, session: saves, selectedBranch: workingBranch, defaultBranch: repo.defaultBranch, rules: rules, choice: savingChoice),
+                    SetSavingStyleTool(choice: savingChoice, repoName: repo.ref.fullName),
                 ]
                 // The chat's other repos: the same tools for each, chosen with a repo argument.
                 var perRepo: [(repo: String, tools: [any AgentTool])] = [(repo.ref.fullName, repoTools)]
@@ -1593,8 +1602,9 @@ final class ChatSession: Identifiable {
             tools.append(SyncStagedToComputerTool(
                 control: control, workspace: workspace,
                 homePath: "repos/\(repoContext.ref.owner)/\(repoContext.ref.name)",
-                cloneURL: repoContext.isPrivate ? nil : repoContext.ref.webURL.absoluteString + ".git",
-                commit: repoContext.commit
+                cloneURL: repoContext.ref.webURL.absoluteString + ".git",
+                commit: repoContext.commit,
+                token: checkoutToken(app: app, repo: repoContext)
             ))
             canSyncStaged = true
         }
@@ -1603,10 +1613,11 @@ final class ChatSession: Identifiable {
         var hookRunner: HookedTool.CommandRunner?
         if let repoContext, let workspace = changeWorkspace, let control = app.connectors.computerControl(), control.commandTool != nil {
             let homePath = "repos/\(repoContext.ref.owner)/\(repoContext.ref.name)"
-            let cloneURL: String? = repoContext.isPrivate ? nil : repoContext.ref.webURL.absoluteString + ".git"
+            let cloneURL = repoContext.ref.webURL.absoluteString + ".git"
             let commit = repoContext.commit
+            let token = checkoutToken(app: app, repo: repoContext)
             hookRunner = { command in
-                _ = try await control.syncStagedChanges(homePath: homePath, cloneURL: cloneURL, commit: commit, changes: await workspace.stagedChanges())
+                _ = try await control.syncStagedChanges(homePath: homePath, cloneURL: cloneURL, commit: commit, changes: await workspace.stagedChanges(), token: token)
                 return try await control.run("cd \"$HOME/\(homePath)\" && \(command)")
             }
         }
@@ -1616,8 +1627,14 @@ final class ChatSession: Identifiable {
         if app.openRouter.supportsTools(chat.model), app.connectors.hasConfiguredComputer {
             if let control = await setupStep(setupDeadline, fallback: nil, label: "connecting the computer", { await connectors.ensureComputerSession() }), control.commandTool != nil {
                 let repoHome = repoContext.map { "repos/\($0.ref.owner)/\($0.ref.name)" }
-                tools.append(RunCommandTool(control: control, homePath: repoHome))
-                tools.append(ComputerTaskTool(control: control, homePath: repoHome))
+                // The repo's copy goes onto the computer before the first command, private repos
+                // included (they were never copied before 11 November 2026, so every command in a
+                // private repo failed with "No such file or directory").
+                let checkout = repoContext.map {
+                    CheckoutPreparer(control: control, homePath: "repos/\($0.ref.owner)/\($0.ref.name)", cloneURL: $0.ref.webURL.absoluteString + ".git", commit: $0.commit, token: checkoutToken(app: app, repo: $0))
+                }
+                tools.append(RunCommandTool(control: control, homePath: repoHome, checkout: checkout))
+                tools.append(ComputerTaskTool(control: control, homePath: repoHome, checkout: checkout))
             } else if var turn = lastTurn {
                 // Say it out loud. A missing computer must never look like work that simply failed.
                 turn.notices.append("The chat computer is configured but couldn't be reached, so commands can't run in this reply. The machine itself may still be on.")
@@ -2461,7 +2478,10 @@ final class ChatSession: Identifiable {
             }
         }
         replaceLastTurn(turn)
-        if milestone || turn.status != .running { refreshStagedChanges() }
+        if milestone || turn.status != .running {
+            refreshStagedChanges()
+            rememberSavingStyle(from: turn)
+        }
         if milestone || turn.status != .running || Date().timeIntervalSince(lastSaved) >= 4.0 {
             chat.updatedAt = Date()
             if scheduleSave { saveSoon() }
@@ -2478,6 +2498,29 @@ final class ChatSession: Identifiable {
         if shared { turn.balanceShared = true }
         chat.messages[index].assistantTurn = turn
         saveSoon()
+    }
+
+    @ObservationIgnored private var appliedSavingStyleCalls = Set<String>()
+
+    /// When the person told the AI how to save ("only push to main", "use PRs"), the app keeps it
+    /// for every later chat, until they say otherwise. It works the same whether the reply ran on
+    /// the phone or on the computer, as both record the set_saving_style call in the reply.
+    private func rememberSavingStyle(from turn: AssistantTurn) {
+        guard let app else { return }
+        for call in turn.steps.flatMap(\.toolCalls) where call.name == "set_saving_style" && call.status == .done {
+            guard appliedSavingStyleCalls.insert(call.id).inserted,
+                  let arguments = JSONValue.parse(Data(call.arguments.utf8)),
+                  let parsed = SetSavingStyleTool.parse(arguments) else { continue }
+            let repoKey = chat.repo?.ref.settingsKey
+            app.updateSettings { settings in
+                if parsed.allRepos || repoKey == nil {
+                    settings.saveStraightToBranchEverywhere = parsed.straightToBranch
+                    settings.directSaveRepos = [:]
+                } else if let repoKey {
+                    settings.directSaveRepos[repoKey] = parsed.straightToBranch
+                }
+            }
+        }
     }
 
     private func replaceLastTurn(_ turn: AssistantTurn) {
@@ -2633,6 +2676,17 @@ final class ChatSession: Identifiable {
         return false
     }
 
+    /// What MAIPA-G's own code uses to copy a private repo onto the computer: a token that can
+    /// only read that one repo, made when it's needed and never shown to the AI or saved.
+    private func checkoutToken(app: AppModel, repo: SystemPrompt.RepoContext) -> CheckoutToken? {
+        guard repo.isPrivate, !repo.ref.isGitLab else { return nil }
+        let name = repo.ref.name
+        return { @MainActor in
+            guard let session = app.github.session else { return nil }
+            return try? await session.readOnlyToken(forRepository: name).token
+        }
+    }
+
     private func prepareComputer(app: AppModel, repo: SystemPrompt.RepoContext?, lastUserMessage: String, isAutonomous: Bool) async -> String? {
         guard app.openRouter.supportsTools(chat.model), let control = app.connectors.computerControl(), control.commandTool != nil else { return nil }
         let stagedChanges = await changeWorkspace?.stagedChanges() ?? []
@@ -2697,7 +2751,7 @@ final class ChatSession: Identifiable {
                     notes.append("This computer service has no checkpoint tool, so no checkpoint was taken.")
                 }
                 do {
-                    let status = try await control.syncStagedChanges(homePath: "repos/\(repo.ref.owner)/\(repo.ref.name)", cloneURL: repo.isPrivate ? nil : repo.ref.webURL.absoluteString + ".git", commit: repo.commit, changes: changes)
+                    let status = try await control.syncStagedChanges(homePath: "repos/\(repo.ref.owner)/\(repo.ref.name)", cloneURL: repo.ref.webURL.absoluteString + ".git", commit: repo.commit, changes: changes, token: checkoutToken(app: app, repo: repo))
                     lastComputerSync = fingerprint
                     notes.append("MAIPA-G's own code already made ~/repos/\(repo.ref.owner)/\(repo.ref.name) match the phone-staged changes. git status:\n\(status.isEmpty ? "clean" : status)")
                 } catch {

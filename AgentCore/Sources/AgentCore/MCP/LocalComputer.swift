@@ -13,7 +13,7 @@ extension ComputerControl {
             inputSchema: ["type": "object", "properties": ["cmd": ["type": "array", "items": ["type": "string"]]], "required": ["cmd"]]
         )
         let childEnvironment = localEnvironment(home: home, from: environment)
-        return ComputerControl(tools: [tool], machine: machine) { _, arguments in
+        return ComputerControl(tools: [tool], machine: machine, commandSizeLimit: nil) { _, arguments in
             let argv = arguments["cmd"]?.arrayValue?.compactMap(\.stringValue) ?? []
             guard argv.count == 3, argv[0] == "bash", argv[1] == "-lc" else {
                 return ("MAIPA-G only runs `bash -lc <script>` here.", true)

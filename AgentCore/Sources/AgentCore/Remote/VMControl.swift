@@ -5,11 +5,9 @@ import Foundation
 /// computer connector's command tool; the model never chooses any of it.
 public struct VMControl: Sendable {
     public let computer: ComputerControl
-    /// Bytes per piece when a file crosses the command tool (base64 makes them a third bigger). A
-    /// single command can't be much longer than 128 KB on Linux.
-    public static let chunkBytes = 45_000
-    /// Bytes per piece when reading a state back: smaller, as a connector may cap what one
-    /// command's output can be.
+    /// Bytes per piece when reading a state back, as a connector may cap what one command's output
+    /// can be. (Files going the other way use `ComputerControl.writeFile`, which keeps every
+    /// command under the service's address-length limit.)
     public static let readBytes = 30_000
 
     public init(computer: ComputerControl) { self.computer = computer }
@@ -163,32 +161,10 @@ public struct VMControl: Sendable {
         guard output.contains("maipa-g-run-started") else { throw Failure.unexpected(output) }
     }
 
-    /// Writes a file in pieces small enough for one command each.
+    /// Writes a file onto the computer, readable only by its user.
     public func upload(_ data: Data, to homeRelativePath: String) async throws {
         guard ComputerControl.isSafeRelativePath(homeRelativePath) else { throw Failure.badID }
-        for script in Self.uploadScripts(data, to: homeRelativePath) {
-            let output = ComputerControl.plainOutput(try await computer.run(script))
-            guard output.contains("maipa-g-upload-ok") else { throw Failure.unexpected(output) }
-        }
-    }
-
-    static func uploadScripts(_ data: Data, to path: String) -> [String] {
-        let file = "\"$HOME/\(path)\""
-        var pieces: [Data] = []
-        var offset = 0
-        repeat {
-            let end = min(offset + chunkBytes, data.count)
-            pieces.append(data.subdata(in: offset..<end))
-            offset = end
-        } while offset < data.count
-        return pieces.enumerated().map { index, piece in
-            var script = "set -eu\numask 077\n"
-            if index == 0 { script += "mkdir -p \"$(dirname \(file))\"\n: > \(file).part\n" }
-            script += "base64 -d >> \(file).part <<'MAIPA_G_DATA'\n\(piece.base64EncodedString(options: [.lineLength76Characters, .endLineWithLineFeed]))\nMAIPA_G_DATA\n"
-            if index == pieces.count - 1 { script += "mv -f \(file).part \(file)\n" }
-            script += "echo maipa-g-upload-ok\n"
-            return script
-        }
+        try await computer.writeFile(data, toHomePath: homeRelativePath)
     }
 
     static func launchScript(id: String, mode: Mode, revision: String) -> String {
@@ -353,15 +329,10 @@ public struct VMControl: Sendable {
     public func steer(id: String, text: String) async throws {
         guard VMRun.isRunID(id) else { throw Failure.badID }
         let name = String(format: "%013.0f", Date().timeIntervalSince1970 * 1000) + "-" + UUID().uuidString.prefix(8).lowercased()
+        // Written under another name first, so the runner never reads half a message.
+        try await computer.writeFile(Data(text.utf8), toHomePath: "\(VMRun.folder(id))/steer/\(name).part")
         let output = ComputerControl.plainOutput(try await computer.run("""
-        set -eu
-        d="$HOME/\(VMRun.folder(id))/steer"
-        mkdir -p "$d"
-        base64 -d > "$d/\(name).part" <<'MAIPA_G_DATA'
-        \(Data(text.utf8).base64EncodedString(options: [.lineLength76Characters, .endLineWithLineFeed]))
-        MAIPA_G_DATA
-        mv -f "$d/\(name).part" "$d/\(name).txt"
-        echo maipa-g-steer-ok
+        d="$HOME/\(VMRun.folder(id))/steer"; mv -f "$d/\(name).part" "$d/\(name).txt" && echo maipa-g-steer-ok
         """))
         guard output.contains("maipa-g-steer-ok") else { throw Failure.unexpected(output) }
     }

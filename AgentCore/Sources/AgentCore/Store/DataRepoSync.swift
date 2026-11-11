@@ -103,7 +103,8 @@ public actor DataRepoSync {
     /// A big file's upload or download sends no progress of its own, so it keeps `activity` alive
     /// for as long as that many bytes may fairly take (100 KB/s at the slowest, at least 3 minutes);
     /// past that it counts as stuck like anything else.
-    private func withHeartbeat(bytes: Int, _ work: @Sendable () async throws -> Void) async throws {
+    @discardableResult
+    private func withHeartbeat<T: Sendable>(bytes: Int, _ work: @Sendable () async throws -> T) async throws -> T {
         let clock = activity
         let allowance = max(180, Double(bytes) / 100_000)
         let beat = Task {
@@ -114,8 +115,9 @@ public actor DataRepoSync {
             }
         }
         defer { beat.cancel() }
-        try await work()
+        let value = try await work()
         clock.touch()
+        return value
     }
 
     /// For tests: smaller passes.
@@ -257,7 +259,10 @@ public actor DataRepoSync {
         if head == state.lastCommit {
             remote = state.files
         } else if let head {
-            let tree = try await github.tree(repo, sha: try await github.commitTree(repo, commit: head), recursive: true)
+            // Listing every file can take a while on a slow connection; it isn't a stuck save.
+            let tree = try await withHeartbeat(bytes: 0) { [github] in
+                try await github.tree(repo, sha: try await github.commitTree(repo, commit: head), recursive: true)
+            }
             remote = [:]
             for entry in tree.entries where entry.isFile && Self.isManaged(entry.path) { remote[entry.path] = entry.sha }
         } else {
@@ -431,21 +436,33 @@ public actor DataRepoSync {
         let passStarted = ProcessInfo.processInfo.systemUptime
         var startedUploads = 0
         var startedBytes = 0
+        // Every file GitHub already has, by content. Attaching the same file again (or many
+        // copies of it at once) used to upload every copy; GitHub keeps one, so the others were
+        // bytes sent for nothing, and on a phone connection they made the save time out.
+        var storedBlobs = Set(remote.values).union(base.values)
         for path in Self.uploadOrder(uploads) {
             try Task.checkCancellation()
             let url = dataDirectory.appendingPathComponent(path)
+            if !path.hasPrefix("chats/"), scan.largeFiles[path] == nil, let blob = local[path], storedBlobs.contains(blob) {
+                changes.append(GitHubClient.TreeChange(path: path, blobSHA: blob))
+                successfulUploads.append(path)
+                continue
+            }
+            let size = scan.largeFiles[path]?.size
+                ?? ((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
             // Past this pass's budget: leave the rest for the next pass, which starts as soon as
             // this one is committed. At least one file always goes, so every pass makes progress.
+            // A file that would take the pass past its byte budget waits for the next one.
+            let largeOnes = scan.largeFiles[path] != nil
             if startedUploads > 0,
-               startedUploads >= uploadFileLimit || startedBytes >= uploadByteLimit
+               startedUploads >= uploadFileLimit || (!largeOnes && startedBytes + size > uploadByteLimit)
                 || ProcessInfo.processInfo.systemUptime - passStarted >= uploadTimeLimit {
                 agreed[path] = base[path]
                 report.deferred.append(path)
                 continue
             }
             startedUploads += 1
-            startedBytes += scan.largeFiles[path]?.size
-                ?? ((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            startedBytes += size
             do {
                 let data: Data
                 if let large = scan.largeFiles[path] {
@@ -472,8 +489,17 @@ public actor DataRepoSync {
                         data = raw
                     }
                 }
-                let blob = try await github.createBlob(repo, contents: data)
-                activity.touch()
+                // Sent as base64, a third bigger. A 17 MB file on a slow phone connection can take
+                // longer than the save's three quiet minutes, so the upload keeps the save alive
+                // for as long as its size fairly needs.
+                let blob: String
+                let known = Hashing.gitBlobID(data)
+                if storedBlobs.contains(known) {
+                    blob = known
+                } else {
+                    blob = try await withHeartbeat(bytes: data.count * 4 / 3) { [github] in try await github.createBlob(repo, contents: data) }
+                }
+                storedBlobs.insert(blob)
                 changes.append(GitHubClient.TreeChange(path: path, blobSHA: blob))
                 successfulUploads.append(path)
             } catch let error as GitHubAPIError where error.isRateLimited {
@@ -602,7 +628,10 @@ public actor DataRepoSync {
             options: [.skipsHiddenFiles]
         ) else { return scan }
         let rootPath = dataDirectory.standardizedFileURL.path
+        var looked = 0
         for case let url as URL in enumerator {
+            looked += 1
+            if looked % 250 == 0 { activity.touch() }
             var path = url.standardizedFileURL.path
             guard path.hasPrefix(rootPath) else { continue }
             path.removeFirst(rootPath.count)
@@ -710,6 +739,7 @@ public actor DataRepoSync {
             for _ in 0..<6 { addNext() }
             while let (path, outcome) = await group.next() {
                 results[path] = outcome
+                activity.touch()
                 addNext()
             }
             return results

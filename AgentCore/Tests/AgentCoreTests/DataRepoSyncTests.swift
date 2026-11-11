@@ -309,6 +309,32 @@ struct DataRepoSyncTests {
         #expect(await setup.store.load(two.id) == nil)
     }
 
+    /// 11 November 2026: the same IPAs were attached again and again (one 18 times), and every
+    /// copy was uploaded in full; on a phone connection that kept timing the save out.
+    @Test func theSameFileIsUploadedOnlyOnce() async throws {
+        let setup = try await Setup()
+        defer { try? FileManager.default.removeItem(at: setup.directory) }
+        var bytes = Data(count: 300_000)
+        for index in bytes.indices { bytes[index] = UInt8(truncatingIfNeeded: index &* 7) }
+        for copy in 0..<5 {
+            let url = setup.directory.appendingPathComponent("data/attachments/\(UUID().uuidString.lowercased())/Signer \(copy).ipa")
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try bytes.write(to: url)
+        }
+        let before = setup.github.blobRequests
+        let report = try await setup.sync.sync()
+        #expect(report.uploaded.count == 5)
+        #expect(setup.github.blobRequests - before == 1)
+        // A copy attached later, once GitHub has it, isn't sent at all.
+        let later = setup.directory.appendingPathComponent("data/attachments/\(UUID().uuidString.lowercased())/Signer again.ipa")
+        try FileManager.default.createDirectory(at: later.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try bytes.write(to: later)
+        let again = try await setup.sync.sync()
+        #expect(again.uploaded.count == 1)
+        #expect(setup.github.blobRequests - before == 1)
+        #expect(setup.github.remoteFile(again.uploaded[0]) == bytes)
+    }
+
     @Test func bothSidesEditedKeepsTheNewest() async throws {
         let setup = try await Setup()
         defer { try? FileManager.default.removeItem(at: setup.directory) }

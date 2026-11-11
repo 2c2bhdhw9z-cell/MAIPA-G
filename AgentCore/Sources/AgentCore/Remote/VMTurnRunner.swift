@@ -239,6 +239,8 @@ public struct VMTurnRunner: Sendable {
             saves = session
             initialReceiptIDs = Set(repo.receipts.map(\.id))
             let authorization = ChangeAuthorization(request: request.lastUserMessage)
+            let savingChoice = SavingStyleChoice()
+            tools.append(SetSavingStyleTool(choice: savingChoice, repoName: repo.repo.ref.fullName))
             tools += [
                 ListFilesTool(workspace: workspace, changes: staged),
                 SearchCodeTool(workspace: workspace, changes: staged),
@@ -249,7 +251,7 @@ public struct VMTurnRunner: Sendable {
                 EditFileTool(workspace: staged, authorization: authorization, rules: rules),
                 AppendFileTool(workspace: staged, authorization: authorization, rules: rules),
                 DeleteFileTool(workspace: staged, authorization: authorization, rules: rules),
-                SaveChangesTool(workspace: staged, service: service, session: session, selectedBranch: repo.workingBranch, defaultBranch: repo.repo.defaultBranch, rules: rules),
+                SaveChangesTool(workspace: staged, service: service, session: session, selectedBranch: repo.workingBranch, defaultBranch: repo.repo.defaultBranch, rules: rules, choice: savingChoice),
             ]
             tools.append(LoadSpecTool(
                 read: { path in

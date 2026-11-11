@@ -17,6 +17,10 @@ public struct RepoRuleDocument: Sendable, Hashable {
 
 public struct RepoWriteRules: Sendable, Hashable {
     public var directSave: Bool
+    /// Direct saving comes from the person (their setting, their message, or what they told the
+    /// AI), not only from a rules file in the repo. Then it just saves, as Kiro does when it's
+    /// told to push to main; a repo's file alone still asks first.
+    public var directSaveFromPerson: Bool = false
     public var reason: String?
     public var documents: [RepoRuleDocument]
     public var deletionDeniedScopes: Set<String>
@@ -73,6 +77,7 @@ public struct RepoWriteRules: Sendable, Hashable {
     public static func resolve(documents values: [(path: String, text: String)], directSaveSetting: Bool, requestText: String? = nil) -> RepoWriteRules {
         let documents = values.map(RepoRuleDocument.init)
         var result = RepoWriteRules(directSave: directSaveSetting, reason: directSaveSetting ? "Direct save is on for this repo." : nil, documents: documents)
+        result.directSaveFromPerson = directSaveSetting
         for document in documents {
             let lines = document.text.lowercased().components(separatedBy: .newlines)
             let statements = lines.flatMap { line in
@@ -96,6 +101,7 @@ public struct RepoWriteRules: Sendable, Hashable {
         // The person's own request is checked last so it wins over every default.
         if let requestText, requestsDirectSave(requestText) {
             result.directSave = true
+            result.directSaveFromPerson = true
             result.reason = "You asked for main-only saves in this message."
         }
         return result

@@ -39,6 +39,14 @@ public protocol GitHubTokenProvider: Sendable {
     func installationToken() async throws -> String
     /// Acts as the user, for the few things an app cannot do alone, like creating a repo.
     func userToken() async throws -> String
+    /// GitHub refused the installation token it was given: drop it, so the next request gets a
+    /// fresh one. (Before 11 November 2026 nothing ever did, so one refused token became a false
+    /// "Sign in to GitHub again" until the hour was up.)
+    func forgetInstallationToken() async
+}
+
+extension GitHubTokenProvider {
+    public func forgetInstallationToken() async {}
 }
 
 /// GitHub's REST API, as MAIPA-G uses it.
@@ -100,6 +108,17 @@ public struct GitHubClient: Sendable {
         return headers
     }
 
+    /// Sends with the auth's headers. When GitHub refuses MAIPA-G's installation token (a 401),
+    /// the token is dropped and the request is sent once more with a fresh one: a token that ran
+    /// out a little early (a phone clock that is behind) or one GitHub hadn't caught up on yet is
+    /// not a sign-out.
+    func sendAuthorized(_ auth: Auth, accept: String, _ make: ([String: String]) async throws -> HTTPResponse) async throws -> HTTPResponse {
+        let response = try await make(try await headers(auth, accept: accept))
+        guard response.status == 401, case .installation = auth, let tokens else { return response }
+        await tokens.forgetInstallationToken()
+        return try await make(try await headers(auth, accept: accept))
+    }
+
     /// Sends a request. Reads are retried on temporary failures; writes are sent once.
     public func send(
         _ method: String,
@@ -115,9 +134,11 @@ public struct GitHubClient: Sendable {
         let isRead = method == "GET" || method == "HEAD"
         let encodedBody = try body.map { try JSONCoding.encoder().encode($0) }
         let response = try await withRetries(isRead ? .standard : .none, retryAfter: defaultRetryDelay) {
-            var headers = try await headers(auth, accept: accept)
-            if encodedBody != nil { headers["Content-Type"] = "application/json" }
-            let response = try await transport.send(HTTPRequest(method: method, url: url, headers: headers, body: encodedBody, idleTimeout: 60, followsRedirects: followsRedirects))
+            let response = try await sendAuthorized(auth, accept: accept) { base in
+                var headers = base
+                if encodedBody != nil { headers["Content-Type"] = "application/json" }
+                return try await transport.send(HTTPRequest(method: method, url: url, headers: headers, body: encodedBody, idleTimeout: 60, followsRedirects: followsRedirects))
+            }
             if isRead, [502, 503, 504].contains(response.status) {
                 throw HTTPError.status(code: response.status, body: response.text, headers: response.headers)
             }
@@ -142,8 +163,9 @@ public struct GitHubClient: Sendable {
         while let page = next, results.count < limit, pagesFetched < 200 {
             pagesFetched += 1
             let response = try await withRetries(.standard, retryAfter: defaultRetryDelay) {
-                let headers = try await headers(auth, accept: "application/vnd.github+json")
-                return try await transport.send(HTTPRequest(url: page, headers: headers))
+                try await sendAuthorized(auth, accept: "application/vnd.github+json") { headers in
+                    try await transport.send(HTTPRequest(url: page, headers: headers))
+                }
             }
             guard response.isSuccess else { throw GitHubAPIError(response: response) }
             let previousCount = results.count
@@ -439,9 +461,11 @@ public struct GitHubClient: Sendable {
         components.queryItems = [URLQueryItem(name: "name", value: name)]
         guard let url = components.url else { throw GitHubAPIError(status: 0, message: "Bad upload address") }
         return try await withRetries(Self.idempotentWrite, retryAfter: Self.writeRetryDelay) { [self] in
-            var headers = try await headers(.installation, accept: "application/vnd.github+json")
-            headers["Content-Type"] = "application/octet-stream"
-            let response = try await transport.upload(HTTPRequest(method: "POST", url: url, headers: headers, idleTimeout: 300, followsRedirects: false), fromFile: file)
+            let response = try await sendAuthorized(.installation, accept: "application/vnd.github+json") { base in
+                var headers = base
+                headers["Content-Type"] = "application/octet-stream"
+                return try await transport.upload(HTTPRequest(method: "POST", url: url, headers: headers, idleTimeout: 300, followsRedirects: false), fromFile: file)
+            }
             if response.status == 422, let existing = try await releaseAssets(repo, releaseID: releaseID).first(where: { $0.name == name }) {
                 // Only a finished earlier upload counts. A cut-off one is removed so the next
                 // attempt can put the whole file there.

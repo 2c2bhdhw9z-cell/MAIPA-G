@@ -57,6 +57,10 @@ extension AgentRun {
                 }
                 do {
                     let poll = try await handle.control.poll(id: handle.id, after: seq)
+                    if failures >= 8 {
+                        turn.notices.removeAll { $0 == VMNotices.lostContact }
+                        continuation.yield(.updated(turn, milestone: false))
+                    }
                     failures = 0
                     if poll.missing {
                         finish("The reply's files on your computer are gone (the computer may have been replaced), so it can't be picked up again. Tap retry to run it again.", stoppedEarly: true)
@@ -102,15 +106,16 @@ extension AgentRun {
                     break
                 } catch {
                     failures += 1
-                    if failures >= 8 {
-                        // Leaves the turn running: the reply may well still be going on the
-                        // computer, and is picked up again when the app comes back.
-                        turn.notices.append(VMNotices.lostContact)
+                    if failures == 8 {
+                        // The reply may well still be going on the computer. The app keeps
+                        // trying, more slowly, and picks it up the moment the computer answers
+                        // (it used to stop trying until the app was closed and opened again).
+                        if !turn.notices.contains(VMNotices.lostContact) { turn.notices.append(VMNotices.lostContact) }
                         continuation.yield(.updated(turn, milestone: true))
-                        break
                     }
                 }
-                try? await Task.sleep(nanoseconds: pollInterval)
+                let wait = failures >= 8 ? min(UInt64(failures - 6) * 5_000_000_000, 30_000_000_000) : pollInterval
+                try? await Task.sleep(nanoseconds: wait)
             }
             continuation.finish()
         }
@@ -123,7 +128,7 @@ public enum VMNotices {
     public static let runningOnComputer = "Running on your computer: this reply keeps going if you close the app."
     public static let cantStayAwake = "Your computer couldn't hold itself awake, so this reply only moves on while the app is open."
     public static let runnerEnded = "The reply ended on your computer without finishing (the runner stopped). Tap retry to carry on from where it stopped."
-    public static let lostContact = "Lost contact with your computer. The reply keeps going there, and MAIPA-G picks it up again when you come back to the app."
+    public static let lostContact = "Lost contact with your computer. The reply keeps going there, and MAIPA-G keeps trying to reach it."
 
     public static func fellBack(_ reason: String) -> String {
         "Your computer couldn't take this reply (\(reason)), so it runs on the phone and stops if you leave the app."

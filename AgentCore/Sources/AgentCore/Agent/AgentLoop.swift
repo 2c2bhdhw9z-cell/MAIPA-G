@@ -378,6 +378,11 @@ public enum AgentLoop {
 
     /// What the model is told when Retry carries on a reply that stopped early. Different from
     /// "Keep going", which is the person's own message asking for more.
+    /// Whether a reply did anything worth keeping: wrote something or ran a tool.
+    public static func didWork(_ steps: [AssistantStep]) -> Bool {
+        steps.contains { !$0.toolCalls.isEmpty || !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !($0.generatedImages ?? []).isEmpty }
+    }
+
     public static func resumeNote(partialText: String) -> String {
         let tail = String(partialText.suffix(600)).trimmingCharacters(in: .whitespacesAndNewlines)
         let whereItStopped = tail.isEmpty
@@ -709,8 +714,11 @@ private struct Runner {
             stopRunningTools(reason: "Didn't finish")
             turn.status = .failed
             turn.failure = Self.describe(error)
-            // An empty reply is an early stop too: say so, and let Retry carry on.
-            if (error as? OpenRouterAPIError)?.code == "empty_reply" { markStoppedEarly() }
+            // An empty reply is an early stop too: say so, and let Retry carry on. So is any
+            // failure after the reply already did work: Try again carries on from there instead
+            // of starting over (11 November 2026: two hours of work were thrown away by one
+            // dropped connection and a tap on Try again).
+            if (error as? OpenRouterAPIError)?.code == "empty_reply" || AgentLoop.didWork(turn.steps) { markStoppedEarly() }
             if let api = error as? OpenRouterAPIError, api.kind == .appRestricted {
                 await environment.onModelRestricted(route.model)
             }
@@ -1108,11 +1116,19 @@ private struct Runner {
                 return .giveUp
             }
         }
-        if let http = error as? HTTPError, case .transport(_, let isOffline) = http, !isOffline, attempt <= 2 {
-            return .retry(Double(attempt))
+        // A dropped connection is retried for about a minute (1, 2, 4, 8, 16 and 20 seconds), and
+        // no signal at all for about two: a phone moving between Wi-Fi and cellular, or through a
+        // dead spot, loses its connection for longer than a few seconds. Before 11 November 2026
+        // it got two quick retries over three seconds, and the reply failed.
+        if let http = error as? HTTPError, case .transport(_, let isOffline) = http {
+            if !isOffline, attempt <= 6 { return .retry(Self.reconnectDelay(attempt: attempt)) }
+            if isOffline, attempt <= 5 { return .retry(Self.offlineDelay(attempt: attempt)) }
         }
         return .giveUp
     }
+
+    static func reconnectDelay(attempt: Int) -> TimeInterval { min(pow(2, Double(max(attempt, 1) - 1)), 20) }
+    static func offlineDelay(attempt: Int) -> TimeInterval { [5, 10, 20, 30, 45][min(max(attempt, 1), 5) - 1] }
 
     static let trimmedNotice = "This chat is long, so some older tool results were left out of what the AI sees."
 

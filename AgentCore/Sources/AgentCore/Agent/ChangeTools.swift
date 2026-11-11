@@ -77,14 +77,34 @@ public struct SaveChangesTool: AgentTool {
     public let selectedBranch: String
     public let defaultBranch: String
     public let rules: RepoWriteRules
+    /// What the person told the AI in this reply about how to save (set_saving_style).
+    public let choice: SavingStyleChoice?
     public let name = "save_changes"
-    public init(workspace: ChangeWorkspace, service: GitHubChangeService, session: ChangeSession, selectedBranch: String, defaultBranch: String, rules: RepoWriteRules) {
-        self.workspace = workspace; self.service = service; self.session = session; self.selectedBranch = selectedBranch; self.defaultBranch = defaultBranch; self.rules = rules
+    public init(workspace: ChangeWorkspace, service: GitHubChangeService, session: ChangeSession, selectedBranch: String, defaultBranch: String, rules: RepoWriteRules, choice: SavingStyleChoice? = nil) {
+        self.workspace = workspace; self.service = service; self.session = session; self.selectedBranch = selectedBranch; self.defaultBranch = defaultBranch; self.rules = rules; self.choice = choice
+    }
+
+    /// The rules with what the person said in this reply on top: their word wins.
+    func effectiveRules() async -> RepoWriteRules {
+        var effective = rules
+        if let told = await choice?.straightToBranch {
+            effective.directSave = told
+            effective.directSaveFromPerson = true
+            effective.reason = told ? "You asked for saves straight to the branch." : "You asked for pull requests."
+        }
+        return effective
+    }
+
+    /// Only a repo's rules file alone asks first; when the person chose direct saves, it saves.
+    func needsDirectSaveApproval() async -> Bool {
+        let effective = await effectiveRules()
+        guard effective.directSave, !effective.directSaveFromPerson, selectedBranch == defaultBranch else { return false }
+        return await session.activeReceipt(for: workspace.base.repo) == nil
     }
     public var spec: ToolSpec { ToolSpec(name: name, description: "Save all staged file changes safely. Repository rules decide direct save versus a pull request.", parameters: ["type": "object", "properties": ["title": ["type": "string"], "summary": ["type": "string"]], "required": ["title"]]) }
     public func runningSummary(for arguments: JSONValue) -> String { "Saving changes…" }
     public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
-        guard rules.directSave, selectedBranch == defaultBranch, await session.activeReceipt(for: workspace.base.repo) == nil else { return nil }
+        guard await needsDirectSaveApproval() else { return nil }
         return ToolApprovalRequest(question: "Allow MAIPA-G to save these staged changes directly to \(defaultBranch)?", allowLabel: "Save directly")
     }
     public func approvalAfterOutsideContent(for arguments: JSONValue) async -> ToolApprovalRequest? {
@@ -93,7 +113,7 @@ public struct SaveChangesTool: AgentTool {
         return ToolApprovalRequest(question: "Allow MAIPA-G to push staged changes to \(workspace.base.repo.hostName) (\(title))?", allowLabel: "Save changes")
     }
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
-        if rules.directSave, selectedBranch == defaultBranch, await session.activeReceipt(for: workspace.base.repo) == nil {
+        if await needsDirectSaveApproval() {
             throw ToolInputError("Saving directly to the default branch needs the person's approval.")
         }
         return try await save(arguments: arguments)
@@ -103,7 +123,7 @@ public struct SaveChangesTool: AgentTool {
     }
     private func save(arguments: JSONValue) async throws -> ToolOutput {
         let title = try arguments.requiredString("title")
-        let receipt = try await service.save(workspace, selectedBranch: selectedBranch, defaultBranch: defaultBranch, rules: rules, title: title, body: arguments.optionalString("summary") ?? "Changes made by MAIPA-G.", activeReceipt: await session.activeReceipt(for: workspace.base.repo))
+        let receipt = try await service.save(workspace, selectedBranch: selectedBranch, defaultBranch: defaultBranch, rules: await effectiveRules(), title: title, body: arguments.optionalString("summary") ?? "Changes made by MAIPA-G.", activeReceipt: await session.activeReceipt(for: workspace.base.repo))
         await session.record(receipt)
         if let pull = receipt.pullRequest {
             return ToolOutput(forModel: "Saved commit \(receipt.savedCommit) and opened \(receipt.repo.isGitLab ? "merge request !" : "pull request #")\(pull.number) in \(receipt.repo.fullName): \(pull.htmlURL)", summary: receipt.repo.isGitLab ? "Opened merge request !\(pull.number)" : "Opened pull request #\(pull.number)", detail: pull.htmlURL)
@@ -263,5 +283,57 @@ public struct DeleteFileTool: AgentTool {
         guard rules.permitsDeletion(at: path) else { throw ToolInputError("Repository rules do not allow deleting \(path).") }
         try await workspace.delete(path: path, approved: true)
         return ToolOutput(forModel: "Staged deletion of \(path).", summary: "Deleted \(path)")
+    }
+}
+
+
+// MARK: How the person wants changes saved
+
+/// What the person said, in this reply, about saving straight to the branch or as a pull request.
+public actor SavingStyleChoice {
+    public private(set) var straightToBranch: Bool?
+    public init(straightToBranch: Bool? = nil) { self.straightToBranch = straightToBranch }
+    public func set(_ value: Bool) { straightToBranch = value }
+}
+
+/// Kiro does what it's told about branches: "only push to main" means it pushes to main, and
+/// "use pull requests" means pull requests. This is how the AI records that. It applies from the
+/// next save in this reply, and the app remembers it for later chats until the person says
+/// otherwise (the app reads this tool's call when the reply ends).
+public struct SetSavingStyleTool: AgentTool {
+    public let name = "set_saving_style"
+    let choice: SavingStyleChoice
+    let repoName: String?
+
+    public init(choice: SavingStyleChoice, repoName: String?) {
+        self.choice = choice
+        self.repoName = repoName
+    }
+
+    public var spec: ToolSpec {
+        ToolSpec(name: name, description: "Call this whenever the person says how changes should be saved, in any wording: straight to the branch (e.g. \"only push to main\", \"no branches or PRs\", \"commit to master\") or as pull requests (e.g. \"use PRs\", \"make a branch\"). It takes effect for the next save_changes and is remembered for later chats. Never tell the person to change a setting for this, and never say you can't: call this tool.", parameters: [
+            "type": "object",
+            "properties": [
+                "style": ["type": "string", "enum": ["straight_to_branch", "pull_request"]],
+                "scope": ["type": "string", "enum": ["all_repos", "this_repo"], "description": "all_repos unless they named only this repo."],
+            ],
+            "required": ["style"],
+            "additionalProperties": false,
+        ])
+    }
+
+    public func runningSummary(for arguments: JSONValue) -> String { "Remembering how to save…" }
+
+    public static func parse(_ arguments: JSONValue) -> (straightToBranch: Bool, allRepos: Bool)? {
+        guard let style = arguments["style"]?.stringValue, ["straight_to_branch", "pull_request"].contains(style) else { return nil }
+        return (style == "straight_to_branch", arguments["scope"]?.stringValue != "this_repo")
+    }
+
+    public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        guard let parsed = Self.parse(arguments) else { throw ToolInputError("style must be straight_to_branch or pull_request.") }
+        await choice.set(parsed.straightToBranch)
+        let where_ = parsed.allRepos ? "every repo" : (repoName ?? "this repo")
+        let how = parsed.straightToBranch ? "straight to the branch (no side branch or pull request)" : "on a side branch with a pull request"
+        return ToolOutput(forModel: "From now on, changes in \(where_) save \(how). The app remembers this for later chats until the person says otherwise.", summary: "Saving \(parsed.straightToBranch ? "straight to the branch" : "as pull requests") · \(where_)")
     }
 }

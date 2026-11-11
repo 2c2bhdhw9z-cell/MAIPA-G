@@ -108,8 +108,12 @@ struct AppSettings: Codable, Equatable, Sendable {
     var lastRepo: ChatRepo?
     /// Local finish/needs-answer notifications start on.
     var notificationsOn = true
-    /// Repos whose changes save straight to the selected branch.
+    /// Repos whose changes save straight to the selected branch (or, when false, as a pull
+    /// request), overriding `saveStraightToBranchEverywhere` for that repo.
     var directSaveRepos: [String: Bool] = [:]
+    /// What the person said about every repo: true for straight to the branch, false for pull
+    /// requests, nil when they haven't said (pull requests, Kiro's factory default).
+    var saveStraightToBranchEverywhere: Bool?
     /// When work moves to an Autonomous GitHub runner. Big jobs too is the factory default.
     var workflowPolicy: WorkflowPolicy = .bigJobs
     /// Workflows off means nothing can start a workflow from anywhere and the chat answers plainly.
@@ -147,6 +151,7 @@ struct AppSettings: Codable, Equatable, Sendable {
         lastRepo = try? c.decodeIfPresent(ChatRepo.self, forKey: .lastRepo)
         notificationsOn = try c.decodeIfPresent(Bool.self, forKey: .notificationsOn) ?? true
         directSaveRepos = try c.decodeIfPresent([String: Bool].self, forKey: .directSaveRepos) ?? [:]
+        saveStraightToBranchEverywhere = try? c.decodeIfPresent(Bool.self, forKey: .saveStraightToBranchEverywhere)
         workflowPolicy = (try? c.decodeIfPresent(WorkflowPolicy.self, forKey: .workflowPolicy)) ?? .bigJobs
         workflowsEnabled = try c.decodeIfPresent(Bool.self, forKey: .workflowsEnabled) ?? false
         specsEnabled = try c.decodeIfPresent(Bool.self, forKey: .specsEnabled) ?? false
@@ -159,7 +164,7 @@ struct AppSettings: Codable, Equatable, Sendable {
         previewAllowedHosts = (try? c.decodeIfPresent([String: Set<String>].self, forKey: .previewAllowedHosts)) ?? [:]
     }
 
-    func savesDirectly(to repo: RepoRef) -> Bool { directSaveRepos[repo.settingsKey] ?? false }
+    func savesDirectly(to repo: RepoRef) -> Bool { directSaveRepos[repo.settingsKey] ?? saveStraightToBranchEverywhere ?? false }
 
     static let defaultChatComputerMachine = "mcp-maipa-g"
     private static let machineNameAllowed = Set("abcdefghijklmnopqrstuvwxyz0123456789-")

@@ -175,11 +175,21 @@ public actor GitHubAppSession: GitHubTokenProvider {
         self.onUserTokenChange = onUserTokenChange
     }
 
+    /// Renewed 15 minutes before GitHub says it runs out, so a phone clock that is a few minutes
+    /// behind never sends a token GitHub has already dropped.
     public func installationToken() async throws -> String {
-        if let cached = cachedInstallationToken, cached.expiresAt.timeIntervalSinceNow > 5 * 60 {
+        try await installationToken(validFor: 15 * 60)
+    }
+
+    /// A token that still has at least `seconds` left, for handing to the chat computer, which
+    /// may keep using it for a while before the phone hands over the next one.
+    public func installationToken(validFor seconds: TimeInterval) async throws -> String {
+        if let cached = cachedInstallationToken, cached.expiresAt.timeIntervalSinceNow > seconds {
             return cached.token
         }
-        if let running = installationRefresh { return try await running.value.token }
+        if let running = installationRefresh, let fresh = try? await running.value, fresh.expiresAt.timeIntervalSinceNow > seconds {
+            return fresh.token
+        }
         let credentials = credentials, installationID = installationID, signer = signer, transport = transport
         let task = Task<(token: String, expiresAt: Date), Error> {
             let jwt = try GitHubAppJWT.make(clientID: credentials.clientID, signer: signer)

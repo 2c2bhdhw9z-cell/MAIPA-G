@@ -61,10 +61,12 @@ enum ComputerRuns {
         )
     }
 
-    /// A fresh GitHub token for the computer (they last about an hour).
+    /// A GitHub token for the computer with at least 50 minutes left (they last about an hour).
+    /// The phone hands a new one over every 40 minutes while it follows a run, so the computer is
+    /// never left holding one that has run out.
     static func githubToken(app: AppModel) async -> String? {
         guard let session = app.github.session else { return nil }
-        return try? await session.installationToken()
+        return try? await session.installationToken(validFor: 50 * 60)
     }
 
     /// The run id for a reply: tied to the reply's message, so a run is only ever picked up again

@@ -9,11 +9,19 @@ public struct ComputerControl: Sendable {
 
     public let tools: [ConnectorToolDefinition]
     public let machine: String
-    private let call: Call
+    /// The longest script sent inside one command call. Sprites' `exec` carries the command in
+    /// the request's web address, which the service refuses past a few kilobytes ("Sprite
+    /// returned 414", 11 November 2026). Longer scripts are uploaded as a file and run from there.
+    /// Nil means no limit (commands that run right here, on the computer itself).
+    public let commandSizeLimit: Int?
+    let call: Call
 
-    public init(tools: [ConnectorToolDefinition], machine: String, call: @escaping Call) {
+    public static let connectorCommandSizeLimit = 2_000
+
+    public init(tools: [ConnectorToolDefinition], machine: String, commandSizeLimit: Int? = ComputerControl.connectorCommandSizeLimit, call: @escaping Call) {
         self.tools = tools
         self.machine = machine
+        self.commandSizeLimit = commandSizeLimit
         self.call = call
     }
 
@@ -120,12 +128,25 @@ public struct ComputerControl: Sendable {
 
     // MARK: Operations
 
-    /// Runs one command chosen by the app's own code, never by the model.
+    /// Runs one command chosen by the app's own code, never by the model. A script too long for
+    /// one command call is uploaded as a file first and run from there, so nothing is lost to the
+    /// service's address-length limit.
     public func run(_ command: String) async throws -> String {
+        if let limit = commandSizeLimit, command.utf8.count > limit {
+            let name = ".maipa-g/scripts/run-\(UUID().uuidString.prefix(12).lowercased()).sh"
+            try await writeFile(Data(command.utf8), toHomePath: name)
+            return try await runInline("f=\"$HOME/\(name)\"; bash -l \"$f\"; code=$?; rm -f \"$f\"; exit $code")
+        }
+        return try await runInline(command)
+    }
+
+    /// One command call, exactly as given.
+    func runInline(_ command: String) async throws -> String {
         guard let tool = commandTool else { throw Failure.noCommandTool }
         let result = try await call(tool.originalName, commandArguments(command, tool: tool))
-        if result.isError { throw Failure.commandFailed(result.text) }
-        return result.text
+        let text = Self.withoutShellNoise(result.text)
+        if result.isError { throw Failure.commandFailed(text) }
+        return text
     }
 
     /// A shell test that is true while MAIPA-G's tool setup runs on the machine. The process is
@@ -317,8 +338,14 @@ public struct ComputerControl: Sendable {
     /// folder first, and the copy is only touched once all of them are ready. Edits made on the
     /// computer itself since the last sync are kept in `git stash` (named "maipa-g: …") instead of
     /// being thrown away by the reset.
-    public func syncStagedChanges(homePath: String, cloneURL: String?, commit: String?, changes: [StagedChange]) async throws -> String {
-        let output = try await run(try Self.syncScript(homePath: homePath, cloneURL: cloneURL, commit: commit, changes: changes))
+    /// `token` gives a private repo's copy: when the copy is missing, MAIPA-G clones it with this
+    /// GitHub token, passed to git from a file only the computer's user can read and deleted
+    /// straight after. The token never appears in a command or in the chat.
+    public func syncStagedChanges(homePath: String, cloneURL: String?, commit: String?, changes: [StagedChange], token: CheckoutToken? = nil) async throws -> String {
+        if let cloneURL {
+            try await ensureCheckout(homePath: homePath, cloneURL: cloneURL, commit: commit, token: token)
+        }
+        let output = try await run(try Self.syncScript(homePath: homePath, cloneURL: nil, commit: commit, changes: changes))
         guard output.contains("maipa-g-staged-ok") else { throw Failure.commandFailed(output) }
         return output.replacingOccurrences(of: "maipa-g-staged-ok", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -331,6 +358,7 @@ public struct ComputerControl: Sendable {
             script += "if [ ! -d \(path)/.git ]; then mkdir -p \"$(dirname \(path))\" && git clone --quiet '\(cloneURL)' \(path); fi\n"
             script += "git -C \(path) fetch --quiet origin\n"
         }
+        script += "[ -d \(path)/.git ] || { echo \"maipa-g-no-checkout: ~/\(homePath) isn't on the computer\"; exit 3; }\n"
         script += "cd \(path)\n"
         // 1. Every staged file is decoded before anything in the copy changes.
         script += "scratch=$(mktemp -d \"${TMPDIR:-/tmp}/maipa-g-staged.XXXXXX\")\ntrap 'rm -rf \"$scratch\"' EXIT\n"
@@ -428,12 +456,15 @@ public struct SyncStagedToComputerTool: AgentTool {
     let cloneURL: String?
     let commit: String?
 
-    public init(control: ComputerControl, workspace: ChangeWorkspace, homePath: String, cloneURL: String?, commit: String?) {
+    let token: CheckoutToken?
+
+    public init(control: ComputerControl, workspace: ChangeWorkspace, homePath: String, cloneURL: String?, commit: String?, token: CheckoutToken? = nil) {
         self.control = control
         self.workspace = workspace
         self.homePath = homePath
         self.cloneURL = cloneURL
         self.commit = commit
+        self.token = token
     }
 
     public var spec: ToolSpec {
@@ -446,7 +477,7 @@ public struct SyncStagedToComputerTool: AgentTool {
 
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let changes = await workspace.stagedChanges()
-        let status = try await control.syncStagedChanges(homePath: homePath, cloneURL: cloneURL, commit: commit, changes: changes)
+        let status = try await control.syncStagedChanges(homePath: homePath, cloneURL: cloneURL, commit: commit, changes: changes, token: token)
         let shown = status.isEmpty ? "No changed files." : status
         return ToolOutput(forModel: "The computer copy at ~/\(homePath) now matches the staged changes. git status:\n\(shown)", summary: "Synced staged changes to the computer", detail: shown)
     }
@@ -548,10 +579,12 @@ public struct ComputerTaskTool: AgentTool {
     public let name = "computer_task"
     let control: ComputerControl
     let homePath: String?
+    let checkout: CheckoutPreparer?
 
-    public init(control: ComputerControl, homePath: String?) {
+    public init(control: ComputerControl, homePath: String?, checkout: CheckoutPreparer? = nil) {
         self.control = control
         self.homePath = homePath
+        self.checkout = checkout
     }
 
     public var spec: ToolSpec {
@@ -606,6 +639,7 @@ public struct ComputerTaskTool: AgentTool {
             return ToolOutput(forModel: text, summary: "Stopped background task \(id)", detail: text)
         case "start":
             let command = try arguments.requiredString("command")
+            try await checkout?.ensure()
             let id = try await control.startBackground(command, homePath: homePath)
             return ToolOutput(forModel: "Started background task \(id) on \(control.machine). Check it with computer_task status and task_id \(id).", summary: "Started background task \(id)", detail: command)
         default:
@@ -621,10 +655,12 @@ public struct RunCommandTool: AgentTool {
     public let name = "run_command"
     let control: ComputerControl
     let homePath: String?
+    let checkout: CheckoutPreparer?
 
-    public init(control: ComputerControl, homePath: String?) {
+    public init(control: ComputerControl, homePath: String?, checkout: CheckoutPreparer? = nil) {
         self.control = control
         self.homePath = homePath
+        self.checkout = checkout
     }
 
     public var spec: ToolSpec {
@@ -689,15 +725,23 @@ public struct RunCommandTool: AgentTool {
         } else {
             effectiveRelPath = homePath
         }
+        // The repo's copy goes onto the computer before the first command that needs it, private
+        // repos included. If that fails, the command still runs and the reason is shown.
+        var checkoutNote = ""
+        if effectiveRelPath == homePath, let checkout {
+            do { try await checkout.ensure() } catch {
+                checkoutNote = "MAIPA-G couldn't copy the repo onto the computer: \(ErrorExplainer.explain(error).message)\n"
+            }
+        }
         let dirSetup: String
         if let rel = effectiveRelPath, ComputerControl.isSafeRelativePath(rel) {
-            dirSetup = "if [ -d \"$HOME/\(rel)\" ]; then cd \"$HOME/\(rel)\"; fi; "
+            dirSetup = "if [ -d \"$HOME/\(rel)\" ]; then cd \"$HOME/\(rel)\"; else echo \"(MAIPA-G: ~/\(rel) isn't on this computer, so this ran in $HOME)\"; fi; "
         } else {
             dirSetup = ""
         }
         let wrapped = ". \"$HOME/.maipa-g/env.sh\" 2>/dev/null || true; \(dirSetup)\(command)"
         let raw = try await control.run(wrapped)
-        let plain = ComputerControl.plainOutput(raw)
+        let plain = checkoutNote + ComputerControl.plainOutput(raw)
         let redacted = SensitiveDataRedactor().redact(plain)
         let capped = ConnectorOutputLimit.cap(redacted)
         let shown = capped.isEmpty ? "(command exited with no output)" : capped
