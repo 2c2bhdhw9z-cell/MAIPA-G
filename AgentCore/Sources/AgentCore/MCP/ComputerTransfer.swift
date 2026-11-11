@@ -75,7 +75,7 @@ extension ComputerControl {
         mkdir -p "$(dirname "$f")"
         i=0; while [ $i -lt \(count) ]; do cat "$in/\(tag).$i.b64"; i=$((i + 1)); done | base64 -d > "$f.part"
         rm -f "$in/\(tag)."*.b64
-        [ "$(stat -c %s "$f.part")" = "\(bytes)" ] || { rm -f "$f.part"; echo "maipa-g-write-short"; exit 1; }
+        [ "$(wc -c < "$f.part" | tr -d ' ')" = "\(bytes)" ] || { rm -f "$f.part"; echo "maipa-g-write-short"; exit 1; }
         mv -f "$f.part" "$f"
         echo maipa-g-write-ok
         """
@@ -116,7 +116,7 @@ extension ComputerControl {
             if index == 0 { script += "mkdir -p \"$(dirname \(file))\"\n: > \(file).part\n" }
             script += "printf %s '\(piece.base64EncodedString())' | base64 -d >> \(file).part\n"
             if index == pieces.count - 1 {
-                script += "[ \"$(stat -c %s \(file).part)\" = \"\(data.count)\" ] || { echo maipa-g-write-short; exit 1; }\n"
+                script += "[ \"$(wc -c < \(file).part | tr -d ' ')\" = \"\(data.count)\" ] || { echo maipa-g-write-short; exit 1; }\n"
                 script += "mv -f \(file).part \(file)\n"
             }
             script += "echo maipa-g-write-ok\n"

@@ -472,7 +472,10 @@ struct ChatScreen: View {
                     onPickGroup: { app.sheet = .groups(.chat(session.id)) },
                     onSpec: { app.sheet = .specs(session.chat.repo) },
                     onPicture: { app.sheet = .pictureGenerator(.chat(session.id)) },
-                    onPreview: { if let repo = session.chat.repo { app.sheet = .webPreview(repo) } },
+                    onPreview: {
+                        if let link = session.latestLivePreview { app.sheet = .livePreview(link) }
+                        else if let repo = session.chat.repo { app.sheet = .webPreview(repo) }
+                    },
                     onFiles: { if let repo = session.chat.repo { app.sheet = .files(repo, .chat(session.id)) } },
                     onWorkstation: { app.sheet = .workstation(.chat(session.id)) },
                     canCompact: session.canCompact,

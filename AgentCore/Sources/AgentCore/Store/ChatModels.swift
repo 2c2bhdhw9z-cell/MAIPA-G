@@ -209,7 +209,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
     public var totalUsage: Usage {
         var usage = messages.compactMap(\.assistantTurn).flatMap(\.steps).compactMap(\.usage).reduce(Usage(), +)
         let steps = messages.compactMap(\.assistantTurn).flatMap(\.steps)
-        let extraCosts = steps.flatMap { $0.generatedImages ?? [] }.compactMap(\.cost) + steps.flatMap(\.toolCalls).compactMap(\.billedCost)
+        let extraCosts = AssistantStep.extraCosts(steps)
         if !extraCosts.isEmpty { usage.cost = (usage.cost ?? 0) + extraCosts.reduce(0, +) }
         return usage
     }
@@ -456,7 +456,7 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
 
     public var usage: Usage {
         var usage = steps.compactMap(\.usage).reduce(Usage(), +)
-        let extraCosts = steps.flatMap { $0.generatedImages ?? [] }.compactMap(\.cost) + steps.flatMap(\.toolCalls).compactMap(\.billedCost)
+        let extraCosts = AssistantStep.extraCosts(steps)
         if !extraCosts.isEmpty { usage.cost = (usage.cost ?? 0) + extraCosts.reduce(0, +) }
         return usage
     }
@@ -631,6 +631,15 @@ public struct GeneratedImageResult: Codable, Sendable, Hashable, Identifiable {
 
 /// One request to the model and what came back.
 public struct AssistantStep: Codable, Sendable, Hashable, Identifiable {
+    /// Money spent outside the AI requests: pictures and videos, and tools that bill (computer
+    /// time). A picture's cost is on the picture and also on the tool call that made it; it used
+    /// to be added twice.
+    public static let mediaTools: Set<String> = ["generate_image", "generate_video"]
+    public static func extraCosts(_ steps: [AssistantStep]) -> [Double] {
+        steps.flatMap { $0.generatedImages ?? [] }.compactMap(\.cost)
+            + steps.flatMap(\.toolCalls).filter { !mediaTools.contains($0.name) }.compactMap(\.billedCost)
+    }
+
     public var id: UUID
     public var startedAt: Date
     public var finishedAt: Date?
@@ -883,6 +892,8 @@ public struct ToolCallRecord: Codable, Sendable, Hashable, Identifiable {
     public var billedCost: Double?
     /// Structured per-sub-agent live and completed states when `name == "launch_helpers"`.
     public var subagents: [SubagentRunItem]?
+    /// A live preview of the app this call started on the chat computer (`app_preview`).
+    public var livePreview: LivePreviewLink?
 
     public init(
         id: String,
@@ -907,6 +918,22 @@ public struct ToolCallRecord: Codable, Sendable, Hashable, Identifiable {
     }
 
     public var parsedArguments: JSONValue { JSONValue.parse(arguments) ?? .object([:]) }
+}
+
+/// Where to see an app running live on the chat computer: in MAIPA-G (`webURL`) and, for an
+/// Expo app, in Expo Go (`expoGoURL`).
+public struct LivePreviewLink: Codable, Sendable, Hashable {
+    public var webURL: String
+    public var expoGoURL: String?
+    /// expo, vite, next, npm or static.
+    public var kind: String
+    /// The app's folder in the repo, "." for the top.
+    public var folder: String
+    public var startedAt: Date
+
+    public init(webURL: String, expoGoURL: String? = nil, kind: String, folder: String, startedAt: Date = Date()) {
+        self.webURL = webURL; self.expoGoURL = expoGoURL; self.kind = kind; self.folder = folder; self.startedAt = startedAt
+    }
 }
 
 /// Numbered questions the AI asked, each with a few choices.

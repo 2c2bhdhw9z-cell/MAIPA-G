@@ -507,11 +507,6 @@ struct Composer: View {
                     showingPlusMenu = false
                     pickFile()
                 }
-                plusPopoverRow("Make picture", icon: "paintbrush") {
-                    showingPlusMenu = false
-                    onPicture()
-                }
-
                 Divider().padding(.vertical, 4)
 
                 plusPopoverRow("Web search", icon: webEnabled ? "globe" : "globe.badge.chevron.backward", trailing: webEnabled ? "On" : "Off", highlightTrailing: webEnabled) {

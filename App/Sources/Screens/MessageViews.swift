@@ -547,7 +547,10 @@ struct StepContentView: View {
                 MarkdownView(text: step.text, isStreaming: isStreaming)
             }
             ForEach(step.generatedImages ?? []) { image in
-                GeneratedImageCard(result: image)
+                GeneratedMediaCard(result: image)
+            }
+            ForEach(step.toolCalls.compactMap(\.livePreview), id: \.webURL) { link in
+                LivePreviewCard(link: link)
             }
         }
     }
@@ -909,7 +912,10 @@ struct StepView: View {
                 MarkdownView(text: step.text)
             }
             ForEach(step.generatedImages ?? []) { image in
-                GeneratedImageCard(result: image)
+                GeneratedMediaCard(result: image)
+            }
+            ForEach(step.toolCalls.compactMap(\.livePreview), id: \.webURL) { link in
+                LivePreviewCard(link: link)
             }
             if !step.toolCalls.isEmpty {
                 ToolCallsFold(calls: step.toolCalls)

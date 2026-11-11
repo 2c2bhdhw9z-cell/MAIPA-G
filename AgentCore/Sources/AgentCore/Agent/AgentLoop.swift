@@ -1404,6 +1404,7 @@ private struct Runner {
             record.result = Self.capped(output.forModel)
             record.finishedAt = Date()
             if output.billedCost > 0 { record.billedCost = output.billedCost }
+            if let preview = output.livePreview { record.livePreview = preview }
             turn.steps[stepIndex].toolCalls[callIndex] = record
             if !output.generatedImages.isEmpty {
                 turn.steps[stepIndex].generatedImages = (turn.steps[stepIndex].generatedImages ?? []) + output.generatedImages

@@ -39,6 +39,8 @@ enum AppSheet: Identifiable, Hashable {
     case pictureGenerator(ComposerTarget)
     case picture(UUID)
     case webPreview(ChatRepo)
+    /// The app running live on the chat computer (app_preview).
+    case livePreview(LivePreviewLink)
     case workstation(ComposerTarget, WorkstationScreen.Tab = .canvas)
 
     var id: String {
@@ -72,6 +74,7 @@ enum AppSheet: Identifiable, Hashable {
         case .pictureGenerator(let target): return "picture-generator-\(target)"
         case .picture(let id): return "picture-\(id.uuidString)"
         case .webPreview(let repo): return "preview-\(repo.ref.fullName)-\(repo.branch)"
+        case .livePreview(let link): return "live-preview-\(link.webURL)"
         case .workstation(let target, let tab): return "workstation-\(target)-\(tab.rawValue)"
         }
     }

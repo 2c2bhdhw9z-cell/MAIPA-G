@@ -279,19 +279,46 @@ public struct GenerateImageTool: AgentTool {
     public let maySpend: Bool
     /// Pictures in the chat (attached or generated) the model may name as input.
     public let availableImages: [AttachmentReference]
+    /// Every picture model the person can use. When `chooseAutomatically` is on (they haven't
+    /// picked a picture model for the chat), the model is chosen for the job: one that edits
+    /// well for an edit, the best general one for a new picture, or the one the AI names.
+    public let candidates: [ModelInfo]
+    public let chooseAutomatically: Bool
     public let name = "generate_image"
-    public init(client: OpenRouterClient, store: AttachmentStore, model: String, maySpend: Bool, availableImages: [AttachmentReference] = []) {
+    public init(client: OpenRouterClient, store: AttachmentStore, model: String, maySpend: Bool, availableImages: [AttachmentReference] = [], candidates: [ModelInfo] = [], chooseAutomatically: Bool = false) {
         self.client = client; self.store = store; self.model = model; self.maySpend = maySpend
-        self.availableImages = availableImages.filter { $0.kind == .image }
+        self.availableImages = availableImages.filter { $0.kind == .image && !$0.mimeType.hasPrefix("video/") }
+        self.candidates = candidates.filter(\.generatesImages)
+        self.chooseAutomatically = chooseAutomatically
     }
+
+    /// The model for this call: the one named, else the chat's picked picture model, else the
+    /// best for the job.
+    func resolvedModel(_ arguments: JSONValue) throws -> (id: String, maySpend: Bool) {
+        let isEdit = !(arguments["reference_images"]?.arrayValue ?? []).isEmpty
+        if let wanted = arguments.optionalString("model"), !wanted.isEmpty, wanted.lowercased() != "auto" {
+            if let match = ImageModelChooser.named(wanted, among: candidates) { return (match.id, !match.isFree) }
+            if wanted == model { return (model, maySpend) }
+            throw ToolInputError("There's no picture model called \(wanted). Call list_media_models to see them.")
+        }
+        if chooseAutomatically, let best = ImageModelChooser.best(for: isEdit ? .edit : .new, among: candidates) {
+            return (best.id, !best.isFree)
+        }
+        return (model, maySpend)
+    }
+
     public var spec: ToolSpec {
         var properties: [String: JSONValue] = [
-            "prompt": ["type": "string"],
+            "prompt": ["type": "string", "description": "A detailed prompt written for the model: subject, style, composition, light, any exact text. For an edit, say what changes and that everything else stays the same."],
             "aspect_ratio": ["type": "string", "enum": ["1:1", "3:4", "4:3", "16:9", "9:16"]],
             "quality": ["type": "string", "enum": ["standard", "high"]],
         ]
-        var description = "Generate and save a real picture."
-        if !availableImages.isEmpty, client.acceptsImageInput(model) != false {
+        if !candidates.isEmpty {
+            properties["model"] = ["type": "string", "description": "Optional picture model id (see list_media_models), when the person names one. Leave it out and MAIPA-G picks the best for the job: an editing model for edits, the best general model for new pictures."]
+        }
+        var description = "Generate and save a real picture, or change one from this chat."
+        let anyTakesPictures = client.acceptsImageInput(model) != false || candidates.contains(where: \.acceptsImages)
+        if !availableImages.isEmpty, anyTakesPictures {
             let names = availableImages.map(\.name)
             properties["reference_images"] = ["type": "array", "items": ["type": "string", "enum": .array(names.map { .string($0) })]]
             description += " To edit or build on pictures from this chat, name them in reference_images."
@@ -312,12 +339,14 @@ public struct GenerateImageTool: AgentTool {
     }
     public func runningSummary(for arguments: JSONValue) -> String { "Generating a picture…" }
     public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
-        guard maySpend else { return nil }
-        let service = client.providerEndpoint(for: model)?.endpoint.name ?? "OpenRouter"
-        return ToolApprovalRequest(question: "Generate this billed picture with \(service)?", allowLabel: "Generate")
+        guard let resolved = try? resolvedModel(arguments), resolved.maySpend else { return nil }
+        let service = client.providerEndpoint(for: resolved.id)?.endpoint.name ?? "OpenRouter"
+        let modelName = candidates.first { $0.id == resolved.id }?.name ?? resolved.id
+        return ToolApprovalRequest(question: "Generate this billed picture with \(modelName) on \(service)?", allowLabel: "Generate")
     }
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let prompt = try arguments.requiredString("prompt")
+        let model = try resolvedModel(arguments).id
         let aspect = arguments.optionalString("aspect_ratio").flatMap(ImageAspectRatio.init(rawValue:)) ?? .square
         let quality = arguments.optionalString("quality").flatMap(ImageQuality.init(rawValue:)) ?? .standard
         let referenceNames = arguments["reference_images"]?.arrayValue?.compactMap(\.stringValue) ?? []

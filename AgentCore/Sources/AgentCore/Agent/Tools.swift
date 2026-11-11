@@ -45,6 +45,8 @@ public struct ToolOutput: Sendable, Hashable {
     public var billedCost: Double
     /// Structured per-sub-agent records for `launch_helpers`.
     public var subagents: [SubagentRunItem]?
+    /// A live preview the tool started (`app_preview`).
+    public var livePreview: LivePreviewLink?
 
     public init(
         forModel: String,
@@ -54,8 +56,10 @@ public struct ToolOutput: Sendable, Hashable {
         generatedImages: [GeneratedImageResult] = [],
         inlineImages: [ToolInlineImage] = [],
         billedCost: Double = 0,
-        subagents: [SubagentRunItem]? = nil
+        subagents: [SubagentRunItem]? = nil,
+        livePreview: LivePreviewLink? = nil
     ) {
+        self.livePreview = livePreview
         self.forModel = forModel
         self.summary = summary
         self.detail = detail

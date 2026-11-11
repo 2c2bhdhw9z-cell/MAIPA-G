@@ -175,6 +175,7 @@ struct SheetContent: View {
         case .pictureGenerator(let target): PictureViewer(target: target, result: nil)
         case .picture(let id): PictureViewer(target: nil, result: app.library.generatedImage(id))
         case .webPreview(let repo): WebPreviewScreen(repo: repo)
+        case .livePreview(let link): LivePreviewScreen(link: link)
         case .workstation(let target, let tab): WorkstationScreen(target: target, initialTab: tab)
         }
     }

@@ -226,7 +226,7 @@ public enum SystemPrompt {
         - `web_search` and `read_web_page`: look up current facts, prices, docs, or anything that may have changed rather than guessing from memory. Cite `[Title](URL)` sources used.
         - Attachments: read text or large binary/archive slices (up to 250 MB) with `read_attachment`; image and PDF attachments are sent directly to compatible AIs (or extracted automatically when needed).
         - Connectors (`mcp_*`): use connected external services directly when relevant and report what they returned. Note: any `mcp_hugging_face_*` `hf_sandbox*` tool belongs to Hugging Face's remote Space sandbox — never confuse it with this chat's Linux computer (`run_command` / `computer_task`).
-        - `generate_image`: generates and saves real pictures (honoring the selected image model when chosen, and pausing for approval before a billed request).
+        - Pictures and video: `generate_image` makes or changes real pictures (name chat pictures in `reference_images` to edit them; write a detailed prompt for the model, and for an edit say what changes and that everything else stays the same). Leave out `model` and MAIPA-G picks the best model for the job; pass `model` when the person names one, and use `list_media_models` when they ask which models there are. `generate_video` makes a short video from words or from a chat picture as its first frame. For exact pixel work (one colour swapped, crop, resize, remove a background, upscale) a picture model is the wrong tool when a chat computer is connected: use `run_command` there with ImageMagick or Python (`pip install rembg` for backgrounds, OpenCV's `dnn_superres` for upscaling), after the person's picture is on the computer, then show the result.
         - Memories: when no memories block appeared above, you may still use `add_memory` or `edit_memory` for durable user preferences or facts, stating plainly what changed.
         """)
         return parts.joined(separator: "\n\n")
@@ -236,12 +236,12 @@ public enum SystemPrompt {
         var steps = [
             "- The machine is named `\(computer.machine)` (`mcp-maipa-g`). MAIPA-G's own code checks it with a real command before each message and creates it again when it is missing. If commands fail, say so plainly and suggest Settings → Check everything.",
             "- Use `run_command` as your primary tool to execute foreground shell commands on `\(computer.machine)` (batching related steps with `cmd1 && cmd2`). Never use `mcp_hugging_face_*` (`hf_sandbox*`) when asked to run commands on the chat's Linux computer. Put temporary scratch files in `/tmp` or `/var/tmp`, delete them when done, and never reuse old ad-hoc scratch scripts unless asked.",
-            "- Use the tools already present in the provider's reviewed machine image. Do not download or run setup scripts, moving `latest` installers, or `curl | bash`. If a required tool is missing, explain which exact tool is unavailable instead of installing unverified code.",
+            "- Use the tools already present in the provider's reviewed machine image. Do not download or run setup scripts, moving `latest` installers, or `curl | bash`. Installing a project's or task's packages with its package manager (npm, pnpm, pip, cargo and so on) is fine.",
         ]
         if let fullName = computer.repoFullName, let cloneURL = computer.cloneURL, let path = computer.repoPath {
             let branch = computer.branch.map { " on the branch \($0)" } ?? ""
             let commit = computer.commit.map { " at commit \($0.prefix(7))" } ?? ""
-            steps.append("- Keep a copy of \(fullName) at `\(path)`\(branch)\(commit). If it is public and missing, clone it with `git clone \(cloneURL) \(path)`. For a private repo, use MAIPA-G's trusted computer setup; never ask for or construct a credential URL.")
+            steps.append("- Keep a copy of \(fullName) at `\(path)`\(branch)\(commit). MAIPA-G's own code copies it there (private repos too) before the first `run_command`, `computer_task` or `app_preview`; never clone it yourself with a credential, and never ask for or construct a credential URL. (Public clone address: \(cloneURL).)")
             steps.append("- Never place a token, password, secret, or credential-file location in a command, tool argument, answer, or saved chat.")
             if computer.canSyncStaged {
                 steps.append("- The copy on the computer is for running and checking, never stray scratch files. To change the repo, use `create_file`, `edit_file`, `append_file`, `delete_file`, and `save_changes`, then call `sync_staged_to_computer` before any build or test so the computer copy matches your staged files without retyping.")
@@ -251,6 +251,9 @@ public enum SystemPrompt {
                     steps.append("- Before any build or test, make the computer checkout match these phone-staged changes exactly. Do not test the old checkout:\n```diff\n\(String(SensitiveDataRedactor().redact(patch).prefix(80_000)))\n```")
                 }
             }
+        }
+        if computer.repoFullName != nil {
+            steps.append("- Show your work live: when the repo is an app or website the person can look at (Expo/React Native, Vite, Next, plain HTML) and you've made something visible, start `app_preview` without being asked, like Rork and VibeCode do. They get an Open preview card (and Open in Expo Go for Expo apps). After later edits, `sync_staged_to_computer` and the preview reloads by itself. Use `app_preview status` to read the dev server's errors. A native Swift or Kotlin app can't be previewed this way; say so and use the repo's own build instead.")
         }
         steps.append("- For builds, tests, or installs that may run longer than a couple of minutes, use `computer_task` (`start`, then `status` or `stop` by `task_id`) so work continues in the background without timing out. Before risky changes on the computer, take a provider checkpoint when supported.")
         steps.append("- When the person's message directly asks to wake the computer, check it, or keep the computer awake, act immediately with `run_command` using a read-only/status command (e.g. `uptime`, `uname`, `ls`) rather than asking again. Any command that `ShellRisk` marks risky still pauses for the app's approval — do not try to talk around it.")

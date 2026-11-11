@@ -438,7 +438,8 @@ struct GitHubAuthTests {
             branch: "main", commit: "0123456789abcdef", repoPath: "$HOME/repos/octo/app"
         ))
         #expect(open.contains("Keep a copy of octo/app at `$HOME/repos/octo/app` on the branch main at commit 0123456."))
-        #expect(open.contains("`git clone https://github.com/octo/app.git $HOME/repos/octo/app`"))
+        // MAIPA-G's own code copies the repo there (11 November 2026), so the AI never clones it.
+        #expect(open.contains("MAIPA-G's own code copies it there") && open.contains("https://github.com/octo/app.git"))
         #expect(!open.contains("remote set-url"))
 
         let secret = SystemPrompt.make(userLogin: nil, repo: nil, computer: SystemPrompt.ComputerContext(

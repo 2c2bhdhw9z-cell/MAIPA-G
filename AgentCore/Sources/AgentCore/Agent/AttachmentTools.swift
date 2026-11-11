@@ -42,6 +42,11 @@ public actor AttachmentStore {
         try write(data, name: name, mimeType: mimeType, kind: .image, folder: "media")
     }
 
+    /// A made video (or other media) kept with the chat's pictures in media/.
+    public func importGeneratedMedia(_ data: Data, name: String, mimeType: String, kind: AttachmentKind) throws -> AttachmentReference {
+        try write(data, name: name, mimeType: mimeType, kind: kind, folder: "media")
+    }
+
     public func importWorkstationFile(_ data: Data, name: String, mimeType: String, kind: AttachmentKind) throws -> AttachmentReference {
         try write(data, name: name, mimeType: mimeType, kind: kind, folder: "attachments")
     }

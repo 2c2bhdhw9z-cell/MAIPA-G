@@ -3,25 +3,23 @@ import Photos
 import SwiftUI
 import UIKit
 
+/// One picture from the chat, full size. Pictures are made and changed in the chat itself (owner,
+/// 11 November 2026: "get rid of the make a picture tab and everything and do it when you click the
+/// image in chat"), so this screen sends what you ask for back to the chat with the picture attached:
+/// a change, another version, or a video. The AI picks the right model for each.
 struct PictureViewer: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     let target: ComposerTarget?
     let result: GeneratedImageResult?
-    @State private var prompt = ""
-    @State private var aspect: ImageAspectRatio = .square
-    @State private var quality: ImageQuality = .standard
-    @State private var model = ""
     @State private var generated: GeneratedImageResult?
     @State private var image: UIImage?
-    @State private var isGenerating = false
     @State private var isLoadingStoredImage = false
-    @State private var progress = ""
     @State private var error: String?
-    @State private var confirmSpend = false
-    @State private var spendApproved = false
     @State private var saveState: PhotoSaveState = .idle
+    @State private var change = ""
+    @FocusState private var changeFocused: Bool
 
     private enum PhotoSaveState: Equatable {
         case idle, saving, saved
@@ -29,12 +27,10 @@ struct PictureViewer: View {
     }
 
     private enum PictureError: LocalizedError {
-        case noReadableImage
         case storedImageUnreadable
 
         var errorDescription: String? {
             switch self {
-            case .noReadableImage: return "No readable picture came back. Try again."
             case .storedImageUnreadable: return "This picture is missing or can’t be read."
             }
         }
@@ -50,10 +46,10 @@ struct PictureViewer: View {
                             .scaledToFit()
                             .clipShape(RoundedRectangle(cornerRadius: 18))
                         controls(for: image)
-                    } else if isGenerating || isLoadingStoredImage {
+                    } else if isLoadingStoredImage {
                         VStack(spacing: 14) {
                             ProgressView()
-                            Text(isLoadingStoredImage ? "Opening picture…" : (progress.isEmpty ? "Generating picture…" : progress))
+                            Text("Opening picture…")
                         }
                         .frame(maxWidth: .infinity)
                         .padding(40)
@@ -68,74 +64,75 @@ struct PictureViewer: View {
                                 .buttonStyle(.borderedProminent)
                         }
                     } else {
-                        generator
+                        ContentUnavailableView {
+                            Label("Ask in the chat", systemImage: "sparkles")
+                        } description: {
+                            Text("Describe the picture or video you want in any chat, attach a photo to change it, and MAIPA-G picks the right model.")
+                        }
                     }
                 }
                 .padding()
             }
-            .navigationTitle(result != nil || generated != nil ? "Picture" : "Make a picture")
+            .navigationTitle("Picture")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
             .task {
                 generated = result
-                if imageModels.isEmpty {
-                    await app.openRouter.loadModels()
-                }
-                if model.isEmpty { model = imageModels.first?.id ?? "" }
-                if PreviewScenes.scene == "picture-generating" {
-                    isGenerating = true
-                    progress = "Drawing your picture…"
-                } else if PreviewScenes.isActive, result != nil {
+                if PreviewScenes.isActive, result != nil {
                     image = PreviewScenes.pictureImage()
                 } else {
                     await loadImage()
                 }
             }
-            .alert("Approve spending?", isPresented: $confirmSpend) {
-                Button("Generate") { spendApproved = true; generate() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text(spendMessage)
-            }
         }
     }
 
-    private var generator: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            TextField("Describe the picture…", text: $prompt, axis: .vertical)
-                .lineLimit(3...8)
-                .padding()
-                .glassPanel()
-            Picker("Shape", selection: $aspect) {
-                ForEach(ImageAspectRatio.allCases, id: \.self) { Text(label($0)).tag($0) }
-            }
-            Picker("Quality", selection: $quality) {
-                Text("Standard").tag(ImageQuality.standard)
-                Text("High").tag(ImageQuality.high)
-            }
-            .pickerStyle(.segmented)
-            Picker("Image AI", selection: $model) {
-                ForEach(imageModels) { Text($0.shortName).tag($0.id) }
-            }
-            if let error { Text(error).foregroundStyle(Theme.danger) }
-            Button(error == nil ? "Generate picture" : "Retry") {
-                let paid = imageModels.first(where: { $0.id == model })?.isFree == false
-                confirmSpend = paid
-                if !paid { generate() }
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isEmpty)
-        }
-    }
+    /// The chat this picture belongs to: the open one, since pictures are opened from it.
+    private var session: ChatSession? { app.library.openSession }
 
-    private var imageModels: [ModelInfo] {
-        let pool = app.openRouter.allSelectableModels.isEmpty ? app.openRouter.models : app.openRouter.allSelectableModels
-        return pool.filter(\.generatesImages).sorted { $0.shortName < $1.shortName }
+    /// Sends a request about this picture to its chat, with the picture attached, and closes.
+    private func ask(_ text: String, about picture: GeneratedImageResult) {
+        guard let session else { return }
+        session.send(text, attachments: [picture.attachment])
+        Haptics.tap()
+        dismiss()
     }
 
     @ViewBuilder
     private func controls(for _: UIImage) -> some View {
         if let generated {
+            if session != nil {
+                HStack(spacing: 8) {
+                    TextField("Describe a change…", text: $change, axis: .vertical)
+                        .lineLimit(1...4)
+                        .focused($changeFocused)
+                        .submitLabel(.send)
+                        .onSubmit { sendChange(generated) }
+                    Button {
+                        sendChange(generated)
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill").font(.title2)
+                    }
+                    .disabled(change.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityLabel("Edit the picture")
+                }
+                .padding(12)
+                .glassPanel()
+
+                HStack {
+                    Button {
+                        ask("Make another version of this picture: the same idea, a fresh take.", about: generated)
+                    } label: {
+                        Label("Redo", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    Button {
+                        ask("Turn this picture into a short video.", about: generated)
+                    } label: {
+                        Label("Video", systemImage: "play.rectangle")
+                    }
+                }
+                .buttonStyle(.bordered)
+            }
             HStack {
                 Button {
                     Task { await saveToPhotos(generated) }
@@ -183,62 +180,12 @@ struct PictureViewer: View {
         }
     }
 
-    private var spendMessage: String {
-        let providerLabel = app.openRouter.providerName(forModelID: model)
-        if app.settings.spendLimitOn {
-            return "This billed picture is a separate paid operation. Your stop-and-ask amount is \(app.settings.spendLimit.dollars); approve it before \(providerLabel) starts."
-        }
-        return "This picture can use \(providerLabel) credit."
-    }
-
-    private func generate() {
-        let paid = imageModels.first(where: { $0.id == model })?.isFree == false
-        guard !paid || spendApproved else { confirmSpend = true; return }
-        spendApproved = false
-        guard !isGenerating else { return }
-        isGenerating = true
-        error = nil
-        progress = ""
-        saveState = .idle
-        Task {
-            defer { isGenerating = false }
-            do {
-                let values = try await app.openRouter.client.generateImages(
-                    prompt: prompt,
-                    model: model,
-                    options: ImageGenerationOptions(aspectRatio: aspect, quality: quality)
-                ) { value in
-                    Task { @MainActor in progress = value }
-                }
-                guard let value = values.first(where: { ImageDownsampler.image(from: $0.data) != nil }),
-                      let decoded = ImageDownsampler.image(from: value.data)
-                else { throw PictureError.noReadableImage }
-
-                // Validate bytes before saving either the attachment or its metadata.
-                let ext = value.mimeType.contains("jpeg") || value.mimeType.contains("jpg") ? "jpg" : (value.mimeType.contains("webp") ? "webp" : "png")
-                let attachment = try await app.attachmentStore.importGeneratedImage(
-                    value.data,
-                    name: "picture-\(value.id.uuidString.lowercased()).\(ext)",
-                    mimeType: value.mimeType
-                )
-                let saved = GeneratedImageResult(
-                    attachment: attachment,
-                    prompt: value.prompt,
-                    model: value.model,
-                    aspectRatio: aspect.rawValue,
-                    quality: quality.rawValue,
-                    cost: value.cost
-                )
-                try await app.attachmentStore.saveGeneratedMetadata(saved)
-                generated = saved
-                image = decoded
-                app.openRouter.recordRecent(.model(model))
-                app.sync.request()
-                await app.openRouter.refreshKeyInfo(force: true)
-            } catch {
-                self.error = userMessage(for: error)
-            }
-        }
+    private func sendChange(_ picture: GeneratedImageResult) {
+        let text = change.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        change = ""
+        changeFocused = false
+        ask("Edit this picture: \(text)", about: picture)
     }
 
     private func loadImage() async {
@@ -305,15 +252,5 @@ struct PictureViewer: View {
 
     private func userMessage(for error: Error) -> String {
         (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-    }
-
-    private func label(_ value: ImageAspectRatio) -> String {
-        switch value {
-        case .square: "Square"
-        case .portrait: "Portrait"
-        case .landscape: "Landscape"
-        case .wide: "Wide"
-        case .tall: "Tall"
-        }
     }
 }

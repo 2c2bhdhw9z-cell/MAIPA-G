@@ -275,6 +275,11 @@ public struct VMTurnRunner: Sendable {
                 return try await control.run("cd \"$HOME/\(path)\" && \(command)")
             }
             hooks = await RepoHooks.load(from: workspace).hooks
+            tools.append(AppPreviewTool(control: control, repoHome: path, prepare: {
+                if await staged.hasStagedChanges() {
+                    _ = try await control.syncStagedChanges(homePath: path, cloneURL: nil, commit: commit, changes: await staged.stagedChanges())
+                }
+            }))
         }
         tools.append(RunCommandTool(control: control, homePath: homePath))
         tools.append(ComputerTaskTool(control: control, homePath: homePath))

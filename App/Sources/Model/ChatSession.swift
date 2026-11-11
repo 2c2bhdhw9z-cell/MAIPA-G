@@ -1635,6 +1635,24 @@ final class ChatSession: Identifiable {
                 }
                 tools.append(RunCommandTool(control: control, homePath: repoHome, checkout: checkout))
                 tools.append(ComputerTaskTool(control: control, homePath: repoHome, checkout: checkout))
+                // The app being built, running live on the computer, shown in the chat.
+                if let repoContext, let checkout {
+                    let previewHome = "repos/\(repoContext.ref.owner)/\(repoContext.ref.name)"
+                    let previewClone = repoContext.ref.webURL.absoluteString + ".git"
+                    let previewCommit = repoContext.commit
+                    let previewToken = checkoutToken(app: app, repo: repoContext)
+                    let previewChanges = changeWorkspace
+                    tools.append(AppPreviewTool(control: control, repoHome: previewHome, prepare: {
+                        try await checkout.ensure()
+                        if let previewChanges, await previewChanges.hasStagedChanges() {
+                            _ = try await control.syncStagedChanges(homePath: previewHome, cloneURL: previewClone, commit: previewCommit, changes: await previewChanges.stagedChanges(), token: previewToken)
+                        }
+                    }))
+                }
+                // Exact picture work happens on the computer: pictures go there and come back.
+                let pictures = chatPictures()
+                if !pictures.isEmpty { tools.append(CopyPictureToComputerTool(control: control, store: app.attachmentStore, pictures: pictures)) }
+                tools.append(ShowComputerPictureTool(control: control, store: app.attachmentStore))
             } else if var turn = lastTurn {
                 // Say it out loud. A missing computer must never look like work that simply failed.
                 turn.notices.append("The chat computer is configured but couldn't be reached, so commands can't run in this reply. The machine itself may still be on.")
@@ -1779,8 +1797,15 @@ final class ChatSession: Identifiable {
             return imagePool.first(where: \.generatesImages)
         }()
         if let imageModel = preferredImageModel {
-            // Pictures in the chat can be named as input when the picture model takes images.
-            tools.append(GenerateImageTool(client: aiClient, store: app.attachmentStore, model: imageModel.id, maySpend: !imageModel.isFree, availableImages: chatPictures()))
+            // Pictures in the chat can be named as input when the picture model takes images. The
+            // AI picks the model for the job (an editing model for edits, the best general one for
+            // new pictures, or the one the person names) unless a picture model is picked for the chat.
+            let pictureModels = imagePool.filter(\.generatesImages)
+            let pickedPictureModel = catalogue[route.model]?.generatesImages == true
+            tools.append(GenerateImageTool(client: aiClient, store: app.attachmentStore, model: imageModel.id, maySpend: !imageModel.isFree, availableImages: chatPictures(), candidates: pictureModels, chooseAutomatically: !pickedPictureModel))
+            let videoClient = aiClient
+            tools.append(ListMediaModelsTool(imageModels: pictureModels, videoModels: { await VideoCatalogue.shared.models(using: videoClient) }))
+            tools.append(GenerateVideoTool(client: aiClient, store: app.attachmentStore, availableImages: chatPictures(), models: { await VideoCatalogue.shared.models(using: videoClient) }))
         }
         let isExternalRoute = AIProviderModelID.decode(route.model) != nil
         let isExplicitPick: Bool = {
@@ -2277,6 +2302,9 @@ final class ChatSession: Identifiable {
         if let repoContext, repoContext.ref.isGitLab { return fallBack("GitLab projects only run on the phone so far") }
         if chat.repo != nil, repoContext == nil { return nil }
         if attachmentData.values.reduce(0, { $0 + $1.count }) > 3_000_000 { return fallBack("the attached files are too big to send there") }
+        // Pictures and videos are made on the phone, where the picture tools are.
+        let lastAttachments = chat.messages.last(where: { $0.userText != nil })?.userAttachments ?? []
+        if MediaRequest.wanted(lastMessage, hasImageAttachments: lastAttachments.contains { $0.kind == .image }, chatHasPictures: !chatPictures().isEmpty) { return nil }
         let vm: VMControl
         switch await ComputerRuns.prepare(app: app) {
         case .ready(let ready): vm = ready
@@ -2992,6 +3020,17 @@ final class ChatSession: Identifiable {
     }
 
     /// Every picture in the chat, oldest first: ones attached to messages and ones generated here.
+    /// The newest live preview this chat started that may still be running.
+    var latestLivePreview: LivePreviewLink? {
+        for message in chat.messages.reversed() {
+            guard let turn = message.assistantTurn else { continue }
+            if let link = turn.steps.flatMap(\.toolCalls).compactMap(\.livePreview).last {
+                return Date().timeIntervalSince(link.startedAt) < Double(AppPreview.lifetimeSeconds) ? link : nil
+            }
+        }
+        return nil
+    }
+
     func chatPictures() -> [AttachmentReference] {
         var pictures: [AttachmentReference] = []
         for message in chat.messages {
@@ -2999,7 +3038,7 @@ final class ChatSession: Identifiable {
             case .user(let user):
                 pictures += user.attachments.filter { $0.kind == .image }
             case .assistant(let turn):
-                pictures += turn.steps.flatMap { $0.generatedImages ?? [] }.map(\.attachment)
+                pictures += turn.steps.flatMap { $0.generatedImages ?? [] }.filter { !$0.isVideo }.map(\.attachment)
             }
         }
         var seen = Set<UUID>()
