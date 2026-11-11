@@ -1,6 +1,6 @@
 # MAIPA-G plan
 
-**Status (11 November 2026): Owner OK'd the batch below ("Only things to change from that are get rid of the make a picture tab… and make it pick the best [model]"; no Appetize for now). Built and tested on Linux; the iPhone build is checked on a temporary tag before it goes to main as one build.**
+**Status (11 November 2026): Owner OK'd the batch below ("Only things to change from that are get rid of the make a picture tab… and make it pick the best [model]"; no Appetize for now). Built and tested (Linux and the iPhone build, checked on a temporary tag first), then pushed to main as one build.**
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
 saving works (Settings and the side menu showed "Saved just now", and the 173 MB Continuum .ipa is
