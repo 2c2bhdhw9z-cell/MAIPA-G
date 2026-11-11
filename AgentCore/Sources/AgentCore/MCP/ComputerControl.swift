@@ -309,7 +309,21 @@ public struct ComputerControl: Sendable {
     /// resets the copy to the chat's commit, then writes every staged file's exact bytes and
     /// removes every staged deletion; the model never retypes anything. `homePath` is relative to
     /// the machine's home folder.
+    ///
+    /// Nothing is lost if a step fails. It used to reset and clean the copy first and write the
+    /// files after, so any failure on the way (a file that wouldn't decode, a full disk, a path
+    /// that is a folder) left the copy wiped with none of the staged edits on it: a tool failure
+    /// cleared the staged edits before they were saved. Now every file is decoded into a scratch
+    /// folder first, and the copy is only touched once all of them are ready. Edits made on the
+    /// computer itself since the last sync are kept in `git stash` (named "maipa-g: …") instead of
+    /// being thrown away by the reset.
     public func syncStagedChanges(homePath: String, cloneURL: String?, commit: String?, changes: [StagedChange]) async throws -> String {
+        let output = try await run(try Self.syncScript(homePath: homePath, cloneURL: cloneURL, commit: commit, changes: changes))
+        guard output.contains("maipa-g-staged-ok") else { throw Failure.commandFailed(output) }
+        return output.replacingOccurrences(of: "maipa-g-staged-ok", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func syncScript(homePath: String, cloneURL: String?, commit: String?, changes: [StagedChange]) throws -> String {
         guard Self.isSafeRelativePath(homePath) else { throw Failure.commandFailed("Unsafe checkout path \(homePath)") }
         let path = "\"$HOME/\(homePath)\""
         var script = "set -euo pipefail\n"
@@ -318,25 +332,50 @@ public struct ComputerControl: Sendable {
             script += "git -C \(path) fetch --quiet origin\n"
         }
         script += "cd \(path)\n"
-        if let commit, !commit.isEmpty, commit.allSatisfy(\.isHexDigit) {
-            script += "git checkout --quiet --detach \(commit)\n"
-        }
-        script += "git reset --quiet --hard\ngit clean -fdq\n"
-        for change in changes {
+        // 1. Every staged file is decoded before anything in the copy changes.
+        script += "scratch=$(mktemp -d \"${TMPDIR:-/tmp}/maipa-g-staged.XXXXXX\")\ntrap 'rm -rf \"$scratch\"' EXIT\n"
+        var placing = ""
+        for (index, change) in changes.enumerated() {
             switch change {
             case .write(let file, let data, _):
                 guard Self.isSafeRelativeRepoPath(file) else { throw Failure.commandFailed("Unsafe staged path \(file)") }
                 let quoted = Self.shellQuote(file)
-                script += "mkdir -p \"$(dirname \(quoted))\"\nbase64 -d > \(quoted) <<'MAIPA_G_FILE'\n\(data.base64EncodedString(options: [.lineLength76Characters, .endLineWithLineFeed]))\nMAIPA_G_FILE\n"
+                script += "base64 -d > \"$scratch/\(index)\" <<'MAIPA_G_FILE'\n\(data.base64EncodedString(options: [.lineLength76Characters, .endLineWithLineFeed]))\nMAIPA_G_FILE\n"
+                // Writing into an existing file keeps its mode (an executable script stays executable).
+                placing += "mkdir -p \"$(dirname \(quoted))\"\nif [ -f \(quoted) ] && [ ! -L \(quoted) ]; then cat \"$scratch/\(index)\" > \(quoted); else rm -rf -- \(quoted); mv -f -- \"$scratch/\(index)\" \(quoted); fi\n"
             case .delete(let file, _):
                 guard Self.isSafeRelativeRepoPath(file) else { throw Failure.commandFailed("Unsafe staged path \(file)") }
-                script += "rm -f -- \(Self.shellQuote(file))\n"
+                placing += "rm -f -- \(Self.shellQuote(file))\n"
             }
         }
-        script += "git status --short | head -n 200\necho maipa-g-staged-ok\n"
-        let output = try await run(script)
-        guard output.contains("maipa-g-staged-ok") else { throw Failure.commandFailed(output) }
-        return output.replacingOccurrences(of: "maipa-g-staged-ok", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        // 2. Work done on the computer since MAIPA-G's last sync is stashed, not thrown away. The
+        //    tree MAIPA-G itself left is remembered, so its own files aren't stashed every time.
+        script += """
+        if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+          index_copy="$scratch/index"; cp "$(git rev-parse --git-path index)" "$index_copy" 2>/dev/null || true
+          now=$(GIT_INDEX_FILE="$index_copy" git add -A >/dev/null 2>&1 && GIT_INDEX_FILE="$index_copy" git write-tree 2>/dev/null || echo unknown)
+          last=$(cat "$(git rev-parse --git-path maipa-g-synced-tree)" 2>/dev/null || true)
+          if [ "$now" != "$last" ]; then
+            git -c user.name=MAIPA-G -c user.email=maipa-g@localhost stash push --include-untracked --quiet -m "maipa-g: computer edits kept before syncing staged changes $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "maipa-g-stashed: edits made on the computer are kept in git stash"
+          fi
+        fi
+
+        """
+        if let commit, !commit.isEmpty, commit.allSatisfy(\.isHexDigit) {
+            script += "git checkout --quiet --force --detach \(commit)\n"
+        }
+        script += "git reset --quiet --hard\ngit clean -fdq\n"
+        // 3. Only now do the staged files go in.
+        script += placing
+        script += """
+        index_copy="$scratch/index-after"; cp "$(git rev-parse --git-path index)" "$index_copy" 2>/dev/null || true
+        (GIT_INDEX_FILE="$index_copy" git add -A >/dev/null 2>&1 && GIT_INDEX_FILE="$index_copy" git write-tree > "$(git rev-parse --git-path maipa-g-synced-tree)") 2>/dev/null || true
+        git status --short | head -n 200
+        echo maipa-g-staged-ok
+
+        """
+        return script
     }
 
     static func shellQuote(_ value: String) -> String {

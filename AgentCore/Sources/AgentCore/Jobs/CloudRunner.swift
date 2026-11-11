@@ -16,8 +16,10 @@ public struct CloudRunnerConfiguration: Sendable {
     public var openRouterKey: String
     public var runID: Int?
     public var handoverAfter: TimeInterval
+    /// On the chat computer: where the phone leaves a fresh GitHub token for a long job.
+    public var tokenRefreshFile: URL?
 
-    public init(jobID: UUID, targetRepository: RepoRef, workspace: URL, trustedRunnerDirectory: URL? = nil, ipaChecker: Data? = nil, targetToken: String, dataToken: String, dataRepository: RepoRef, dataBranch: String = "main", connectorSecrets: [String: String] = [:], openRouterKey: String, runID: Int? = nil, handoverAfter: TimeInterval = 5.5 * 60 * 60) {
+    public init(jobID: UUID, targetRepository: RepoRef, workspace: URL, trustedRunnerDirectory: URL? = nil, ipaChecker: Data? = nil, targetToken: String, dataToken: String, dataRepository: RepoRef, dataBranch: String = "main", connectorSecrets: [String: String] = [:], openRouterKey: String, runID: Int? = nil, handoverAfter: TimeInterval = 5.5 * 60 * 60, tokenRefreshFile: URL? = nil) {
         self.jobID = jobID; self.targetRepository = targetRepository; self.workspace = workspace
         let runnerDirectory = trustedRunnerDirectory ?? workspace.deletingLastPathComponent().appendingPathComponent("maipag-trusted-runner", isDirectory: true)
         self.trustedRunnerDirectory = runnerDirectory
@@ -25,6 +27,7 @@ public struct CloudRunnerConfiguration: Sendable {
         self.targetToken = targetToken; self.dataToken = dataToken; self.dataRepository = dataRepository; self.dataBranch = dataBranch
         self.connectorSecrets = connectorSecrets; self.openRouterKey = openRouterKey; self.runID = runID
         self.handoverAfter = handoverAfter
+        self.tokenRefreshFile = tokenRefreshFile
     }
 }
 
@@ -220,8 +223,11 @@ public struct CloudRunner: Sendable {
     }
 
     public func run() async throws {
-        let targetGitHub = GitHubClient(transport: transport, tokens: StaticTokenProvider(token: configuration.targetToken))
-        let dataGitHub = GitHubClient(transport: transport, tokens: StaticTokenProvider(token: configuration.dataToken))
+        let targetTokens: any GitHubTokenProvider = configuration.tokenRefreshFile.map { HandedOverTokens(token: configuration.targetToken, refreshFile: $0) }
+            ?? StaticTokenProvider(token: configuration.targetToken)
+        let dataTokens: any GitHubTokenProvider = configuration.dataToken == configuration.targetToken ? targetTokens : StaticTokenProvider(token: configuration.dataToken)
+        let targetGitHub = GitHubClient(transport: transport, tokens: targetTokens)
+        let dataGitHub = GitHubClient(transport: transport, tokens: dataTokens)
         let github = targetGitHub
         let store = RemoteJobStore(github: dataGitHub, repo: configuration.dataRepository, branch: configuration.dataBranch)
         var job = try await store.load(configuration.jobID)

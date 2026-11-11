@@ -547,6 +547,19 @@ final class ConnectorLibrary {
         return String(decoding: data, as: UTF8.self)
     }
 
+    /// The remote connectors a reply on the chat computer may use: each one's address, the tools
+    /// found here, and its current access token. Never a refresh token (renewing one there would
+    /// leave this phone holding a used-up one), and never the computer's own connector.
+    func computerRunConnectors() -> [VMConnector] {
+        let computerID = computerConnector()?.id
+        return connected.compactMap { configuration in
+            guard configuration.kind == .remote, configuration.id != computerID, states[configuration.id] == .connected,
+                  let tools = toolDefinitions[configuration.id], !tools.isEmpty else { return nil }
+            let credential = Keychain.value(ConnectorCredential.self, account: credentialKey(configuration.id))
+            return VMConnector(configuration: configuration, tools: tools, accessToken: credential?.accessToken)
+        }
+    }
+
     func setTool(_ name: String, enabled: Bool, for configuration: ConnectorConfiguration) async {
         var copy = configuration
         if enabled { copy.disabledTools.remove(name) }

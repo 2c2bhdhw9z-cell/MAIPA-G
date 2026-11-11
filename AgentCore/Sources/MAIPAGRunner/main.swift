@@ -17,8 +17,22 @@ enum MAIPAGRunnerMain {
             Runs one private, restartable MAIPA-G Autonomous job. GitHub Actions supplies the
             opaque job id and credentials through its masked environment.
 
+            On the chat computer it also runs one chat reply or one Autonomous job from a run
+            folder the app wrote (request and keys; the keys file is deleted once read).
+
             Usage: MAIPAGRunner [--help]
+                   MAIPAGRunner --probe
+                   MAIPAGRunner turn <run folder>
+                   MAIPAGRunner job <run folder>
             """)
+            return
+        }
+        if arguments.first == "--probe" {
+            print("maipag-runner-ok")
+            return
+        }
+        if arguments.count == 2, arguments[0] == "turn" || arguments[0] == "job" {
+            await runOnComputer(mode: arguments[0], folder: URL(fileURLWithPath: arguments[1], isDirectory: true).standardizedFileURL)
             return
         }
         let environment = ProcessInfo.processInfo.environment
@@ -74,6 +88,26 @@ enum MAIPAGRunnerMain {
             // Error details can contain provider bodies or tool output. The private checkpoint has
             // the useful state; Actions receives only this safe failure line.
             FileHandle.standardError.write(Data("MAIPAGRunner: the job stopped safely; open MAIPA-G for details.\n".utf8))
+            exit(1)
+        }
+    }
+
+    /// A chat reply or job on the chat computer. Everything useful goes to the run folder's state
+    /// files; this prints only safe progress lines.
+    static func runOnComputer(mode: String, folder: URL) async {
+        let environment = ProcessInfo.processInfo.environment
+        let home = URL(fileURLWithPath: environment["HOME"] ?? NSHomeDirectory(), isDirectory: true)
+        let runnerDirectory = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        do {
+            if mode == "turn" {
+                try await VMTurnRunner(folder: folder, home: home, machine: ProcessInfo.processInfo.hostName).run()
+            } else {
+                try await VMJobRunner(folder: folder, runnerDirectory: runnerDirectory).run()
+            }
+            print("MAIPAGRunner: finished.")
+        } catch {
+            FileHandle.standardError.write(Data("MAIPAGRunner: the run stopped safely; open MAIPA-G for details.\n".utf8))
             exit(1)
         }
     }

@@ -108,6 +108,9 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
     public var acceptedChanges: [String]?
     /// Kiro-style checkpoints, one before each of the person's messages.
     public var checkpoints: [ChatCheckpoint]?
+    /// The reply running on the chat computer right now (its run folder there), so a phone that
+    /// was closed picks the same run up again instead of starting the reply over.
+    public var computerRunID: String?
 
     /// `repo` first, then the others, without duplicates.
     public var allRepos: [ChatRepo] {
@@ -156,6 +159,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         self.permissionMode = nil
         self.acceptedChanges = nil
         self.checkpoints = nil
+        self.computerRunID = nil
     }
 
     enum CodingKeys: String, CodingKey {
@@ -164,7 +168,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         case compactedSummary, compactedThroughMessageID
         case previousCompactedSummary, previousCompactedThroughMessageID
         case queuedFollowUps, activeWorkflowRuns, mode, additionalRepos, kiroSpec
-        case kiroSpecKind, permissionMode, acceptedChanges, checkpoints
+        case kiroSpecKind, permissionMode, acceptedChanges, checkpoints, computerRunID
     }
 
     public init(from decoder: Decoder) throws {
@@ -198,6 +202,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         permissionMode = try? c.decodeIfPresent(PermissionMode.self, forKey: .permissionMode)
         acceptedChanges = try c.decodeIfPresent([String].self, forKey: .acceptedChanges)
         checkpoints = (try? c.decodeIfPresent([ChatCheckpoint].self, forKey: .checkpoints)) ?? nil
+        computerRunID = try? c.decodeIfPresent(String.self, forKey: .computerRunID)
     }
 
     /// Everything the chat has cost so far, in dollars, as OpenRouter reported it.

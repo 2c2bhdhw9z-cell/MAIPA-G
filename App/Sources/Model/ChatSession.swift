@@ -49,6 +49,8 @@ final class ChatSession: Identifiable {
     var savedAnchorMessageID: UUID?
     @ObservationIgnored weak var app: AppModel?
     @ObservationIgnored private var run: AgentRun?
+    /// Set while this reply runs on the chat computer: Stop goes to the computer through it.
+    @ObservationIgnored private var computerHandle: VMRunHandle?
     /// Set by Retry on a reply that stopped early: the next run carries that reply on instead of
     /// starting it again, and the model is told it was cut off.
     @ObservationIgnored private var pendingResumeNote: String?
@@ -333,7 +335,9 @@ final class ChatSession: Identifiable {
     }
 
     func resumeInterruptedTurn() {
-        guard !isRunning, pausedInBackground, var turn = lastTurn else { return }
+        // A reply on the chat computer is picked up again whenever the app comes back, even if
+        // the phone lost contact with the computer while it was open.
+        guard !isRunning, pausedInBackground || hasComputerRun, var turn = lastTurn else { return }
         pausedInBackground = false
         guard turn.status == .stopped || turn.status == .running else { return }
         turn.status = .running
@@ -343,6 +347,14 @@ final class ChatSession: Identifiable {
 
     /// The reply was still going when the app was closed. Continue it, unless that just crashed.
     func resumeFromRelaunchIfSafe() {
+        // A reply on the chat computer kept going while the app was closed: follow it again. That
+        // only reads its state, so it can't be what crashed the app.
+        if !isRunning, hasComputerRun {
+            pausedInBackground = false
+            if var turn = lastTurn, turn.status != .running { turn.status = .running; replaceLastTurn(turn) }
+            start()
+            return
+        }
         guard !isRunning, lastTurn?.status == .running else { return }
         let key = Self.autoResumeKey(chat.id)
         let now = Date().timeIntervalSince1970
@@ -516,12 +528,26 @@ final class ChatSession: Identifiable {
         pendingSteers.removeAll()
         flush()
         guard isRunning else {
+            // Lost contact with a reply on the chat computer: Stop still reaches it.
+            if hasComputerRun, let runID = chat.computerRunID {
+                chat.computerRunID = nil
+                if let control = app?.connectors.computerControl() {
+                    Task { try? await VMControl(computer: control).stop(id: runID) }
+                }
+                if var turn = lastTurn, turn.status == .running { turn.status = .stopped; replaceLastTurn(turn) }
+                saveSoon(immediately: true)
+            }
             settleWaitingTurn()
             return
         }
         // A workflow the chat started runs in the chat with no agent run to cancel; Stop stops it.
         if run == nil, let routeLabel = lastTurn?.routeLabel, routeLabel.hasPrefix("Workflow · ") {
             for workflowRun in activeWorkflowRuns where workflowRun.isRunning { stopWorkflowRun(workflowRun.id) }
+        }
+        // On the chat computer: ask it to stop, and keep following until it says it has.
+        if let handle = computerHandle {
+            Task { await handle.requestStop() }
+            return
         }
         run?.cancel()
     }
@@ -1277,13 +1303,15 @@ final class ChatSession: Identifiable {
             flush()
             // Every way out of here settles the turn. Early returns used to leave a new turn in
             // its default "running" state, so the card said "Thinking…" with nothing running.
-            if var turn = lastTurn, turn.status == .running {
+            // A reply still going on the chat computer stays running: it is picked up again.
+            if var turn = lastTurn, turn.status == .running, !hasComputerRun {
                 turn.status = .stopped
                 replaceLastTurn(turn)
             }
             refreshStagedChanges()
             isRunning = false
             run = nil
+            computerHandle = nil
             saveSoon(immediately: true)
             if lastTurn?.status != .running {
                 UserDefaults.standard.removeObject(forKey: Self.autoResumeKey(chat.id))
@@ -1291,6 +1319,18 @@ final class ChatSession: Identifiable {
             app?.turnFinished(in: self)
         }
         guard let app else { return }
+        // A reply already running on the chat computer: follow it rather than start it again.
+        if let runID = chat.computerRunID {
+            if hasComputerRun {
+                await followComputerRun(runID, app: app)
+                return
+            }
+            // A run left over from an earlier reply: stop it so two replies never work at once.
+            chat.computerRunID = nil
+            if let control = app.connectors.computerControl() {
+                Task { let vm = VMControl(computer: control); try? await vm.stop(id: runID); try? await vm.remove(id: runID) }
+            }
+        }
         // Kiro checkpoint: the chat as it was before this message ran.
         await captureCheckpoint()
         guard app.openRouter.isSignedIn else {
@@ -2103,7 +2143,17 @@ final class ChatSession: Identifiable {
         )
         environment.onModelRestricted = { model in await account.markRestricted(model) }
 
-        let run = AgentLoop.start(input, environment: environment)
+        // Agent work runs on the owner's Linux computer (owner rule, 11 November 2026), so the
+        // reply keeps going when the app is closed. The phone only runs it when the computer
+        // can't take it, and the chat says why.
+        let run: AgentRun
+        if let computerRun = await startOnComputer(
+            input: input, app: app, repoContext: repoContext, attachmentData: attachmentData, lastMessage: lastMessage
+        ) {
+            run = computerRun
+        } else {
+            run = AgentLoop.start(input, environment: environment)
+        }
         self.run = run
         if !pendingSteers.isEmpty {
             let earlySteers = pendingSteers.map(\.text)
@@ -2147,7 +2197,7 @@ final class ChatSession: Identifiable {
             }
         }
         flush()
-        if var turn = lastTurn, turn.status == .running {
+        if var turn = lastTurn, turn.status == .running, !hasComputerRun {
             turn.status = .stopped
             replaceLastTurn(turn)
         }
@@ -2181,6 +2231,150 @@ final class ChatSession: Identifiable {
         }
         chat.updatedAt = Date()
         await nameChatIfNeeded()
+    }
+
+    // MARK: Replies on the chat computer
+
+    /// This chat's latest reply is running on the chat computer (or was, when the app last saw it).
+    var hasComputerRun: Bool {
+        guard let runID = chat.computerRunID, let last = chat.messages.last, last.assistantTurn != nil else { return false }
+        return runID == ComputerRuns.runID(forReply: last.id)
+    }
+
+    @ObservationIgnored private var lastTokenHandover = Date()
+
+    /// Hands this reply to the runner on the chat computer and follows it from here. Nil means
+    /// it runs on the phone; when a computer is set up, the chat says why it couldn't take it.
+    private func startOnComputer(input: AgentTurnInput, app: AppModel, repoContext: SystemPrompt.RepoContext?, attachmentData: [UUID: Data], lastMessage: String) async -> AgentRun? {
+        guard app.connectors.hasConfiguredComputer, input.allowTools,
+              let reply = chat.messages.last, reply.assistantTurn != nil else { return nil }
+        func fallBack(_ reason: String) -> AgentRun? {
+            if var turn = lastTurn {
+                let notice = VMNotices.fellBack(reason)
+                if !turn.notices.contains(notice) { turn.notices.append(notice) }
+                replaceLastTurn(turn)
+            }
+            return nil
+        }
+        if !chat.additionalRepos.isEmpty { return fallBack("this chat works on several repos, which only the phone can do so far") }
+        if let repoContext, repoContext.ref.isGitLab { return fallBack("GitLab projects only run on the phone so far") }
+        if chat.repo != nil, repoContext == nil { return nil }
+        if attachmentData.values.reduce(0, { $0 + $1.count }) > 3_000_000 { return fallBack("the attached files are too big to send there") }
+        let vm: VMControl
+        switch await ComputerRuns.prepare(app: app) {
+        case .ready(let ready): vm = ready
+        case .unavailable(let reason): return fallBack(reason)
+        }
+        guard let revision = ComputerRuns.revision else { return nil }
+        var githubToken: String?
+        if repoContext != nil {
+            githubToken = await ComputerRuns.githubToken(app: app)
+            if githubToken == nil { return fallBack("GitHub didn't give MAIPA-G a token for it") }
+        }
+        if userStoppedExplicitly { return nil }
+        var repo: VMTurnRepo?
+        if let repoContext, let chatRepo = chat.repo {
+            let staged = await changeWorkspace?.stagedChanges() ?? []
+            repo = VMTurnRepo(
+                repo: chatRepo, workingBranch: repoContext.branch, commit: repoContext.commit,
+                directSaveSetting: app.settings.savesDirectly(to: chatRepo.ref),
+                staged: staged.map(CheckpointFile.init), receipts: chat.saveReceipts ?? []
+            )
+        }
+        let id = ComputerRuns.runID(forReply: reply.id)
+        let request = VMTurnRequest(
+            id: id, chat: input.chat, route: input.route, systemPrompt: input.systemPrompt, allowTools: input.allowTools,
+            spendLimit: input.spendLimit, fallbackModels: input.fallbackModels, resumeNote: input.resumeNote,
+            lastUserMessage: lastMessage, webEnabled: webEnabled, repo: repo,
+            specMode: effectiveMode == .spec && repoContext != nil, specGate: chat.kiroSpec, specKind: specKind,
+            supervised: permissionMode == .supervised, acceptedChanges: chat.acceptedChanges ?? [],
+            attachmentData: attachmentData
+        )
+        let secrets = ComputerRuns.secrets(app: app, githubToken: githubToken)
+        do {
+            let packed = try VMCoding.pack(request)
+            try await AgentLoop.bounded(seconds: 120, label: "Handing the reply to your computer") {
+                try await vm.start(id: id, mode: .turn, revision: revision, request: packed, secrets: secrets)
+            }
+        } catch {
+            return fallBack("handing the reply over failed: \(ErrorExplainer.explain(error).message)")
+        }
+        chat.computerRunID = id
+        lastTokenHandover = Date()
+        if var turn = lastTurn {
+            if !turn.notices.contains(VMNotices.runningOnComputer) { turn.notices.append(VMNotices.runningOnComputer) }
+            replaceLastTurn(turn)
+        }
+        saveSoon(immediately: true)
+        return followRun(id: id, vm: vm, app: app)
+    }
+
+    private func followRun(id: String, vm: VMControl, app: AppModel) -> AgentRun {
+        let handle = VMRunHandle(id: id, control: vm)
+        computerHandle = handle
+        return AgentRun.onComputer(handle, startingTurn: lastTurn ?? AssistantTurn()) { [weak self, weak app] state in
+            await self?.applyComputerState(state, vm: vm, app: app)
+        }
+    }
+
+    /// Picks up a reply that kept running on the chat computer while the app was away.
+    private func followComputerRun(_ runID: String, app: AppModel) async {
+        guard let control = await app.connectors.ensureComputerSession(), control.commandTool != nil else {
+            if var turn = lastTurn {
+                let notice = "Can't reach your computer right now. The reply keeps going there, and MAIPA-G picks it up when the computer answers."
+                if !turn.notices.contains(notice) { turn.notices.append(notice) }
+                replaceLastTurn(turn)
+            }
+            return
+        }
+        let run = followRun(id: runID, vm: VMControl(computer: control), app: app)
+        self.run = run
+        for await event in run.events {
+            guard case .updated(let turn, let milestone) = event else { continue }
+            receive(turn, milestone: milestone)
+        }
+        flush()
+        if !userStoppedExplicitly, !pausedInBackground {
+            let unconsumed = await run.drainUnconsumedSteering()
+            if !unconsumed.isEmpty {
+                queuedSteering.insert(QueuedFollowUp(text: unconsumed.joined(separator: "\n\n")), at: 0)
+                syncQueuedFollowUpsToChat()
+            }
+        }
+        pendingSteers.removeAll()
+        guard !hasComputerRun else { return }
+        await refreshReviewState()
+        chat.updatedAt = Date()
+        await nameChatIfNeeded()
+    }
+
+    /// Each state the computer writes: its staged files and saves come to this phone, so Review,
+    /// Save and the next reply see exactly what it did.
+    private func applyComputerState(_ state: VMTurnState, vm: VMControl, app: AppModel?) async {
+        if let staged = state.staged {
+            let changes = staged.map(\.change)
+            if let workspace = changeWorkspace { await workspace.restoreStaged(changes) } else { pendingStagedRestore = changes }
+        }
+        if !state.receipts.isEmpty {
+            var known = Set((chat.saveReceipts ?? []).map(\.id))
+            for receipt in state.receipts where known.insert(receipt.id).inserted {
+                chat.saveReceipts = (chat.saveReceipts ?? []) + [receipt]
+            }
+        }
+        if state.isFinished {
+            if chat.computerRunID == state.id { chat.computerRunID = nil }
+            Task { try? await vm.remove(id: state.id) }
+            saveSoon(immediately: true)
+            return
+        }
+        // GitHub tokens last about an hour; a long reply gets a fresh one while it is followed.
+        if chat.repo != nil, Date().timeIntervalSince(lastTokenHandover) > 40 * 60, let app {
+            lastTokenHandover = Date()
+            let id = state.id
+            Task { @MainActor in
+                if let token = await ComputerRuns.githubToken(app: app) { try? await vm.handOverToken(id: id, token: token) }
+            }
+        }
     }
 
     /// Getting ready (connectors, the repo copy, the computer, the balance) may take this long in
@@ -2454,6 +2648,11 @@ final class ChatSession: Identifiable {
                     notes.append("MAIPA-G checked `\(control.machine)` with a real command before this message; it answered.")
                     switch ComputerControl.toolState(output) {
                     case .ready:
+                        // MAIPA-G's runner for this app build goes on with the tools (it is what
+                        // runs replies and jobs there); installing it carries on in the background.
+                        if let revision = ComputerRuns.revision {
+                            Task { _ = try? await VMControl(computer: control).ensureRunner(revision: revision) }
+                        }
                         if let failed = ComputerControl.failedTools(output) {
                             notes.append("MAIPA-G's tool setup finished on this machine, but these didn't install: \(failed). If a task needs one of them, say it is missing.")
                         }

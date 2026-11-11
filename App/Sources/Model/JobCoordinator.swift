@@ -64,12 +64,12 @@ final class JobCoordinator {
     func start(request: String, repo: ChatRepo, workflow: WorkflowDefinition? = nil, additionalState: [String: JSONValue] = [:]) async -> JobRecord? {
         guard let app else { return nil }
         guard app.settings.autonomousEnabled else {
-            lastError = "Autonomous is turned off in Settings. Turn it on to run repo jobs on GitHub, or switch 'Where it runs' to 'On this phone'."
+            lastError = "Autonomous is turned off in Settings. Turn it on to run repo jobs on your chat computer, or switch 'Where it runs' to 'On this phone'."
             return nil
         }
         guard !repo.ref.isGitLab else {
-            // Jobs, autonomous runs and preview builds run on GitHub Actions.
-            lastError = "\(repo.ref.fullName) is on GitLab. Jobs and preview builds run on GitHub Actions, so they need a GitHub repo; edit and save GitLab projects in the chat instead."
+            // Jobs keep their record in the GitHub data repo and work with GitHub's checks.
+            lastError = "\(repo.ref.fullName) is on GitLab. Jobs and preview builds need a GitHub repo; edit and save GitLab projects in the chat instead."
             return nil
         }
         guard let github = app.github.client else {
@@ -81,9 +81,19 @@ final class JobCoordinator {
             lastError = "MAIPA-G needs its private data repo before Autonomous can start."
             return nil
         }
-        let setup = AutonomousSetup(github: github)
-        let reviewedRevision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
-        let installed = (try? await setup.isInstalled(in: repo.ref, ref: repo.defaultBranch, reviewedRevision: reviewedRevision)) == true
+        // Jobs run on the owner's chat computer (owner rule, 11 November 2026: all agent work runs
+        // on his Linux VM; GitHub only builds the app), so nothing is installed in the repo and no
+        // repo secrets are set. Only a preview build still runs on GitHub Actions, because its
+        // result is an Actions artifact.
+        let isPreviewBuild = additionalState["previewBuild"]?.boolValue == true
+        let installed: Bool
+        if isPreviewBuild {
+            let setup = AutonomousSetup(github: github)
+            let reviewedRevision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String ?? ""
+            installed = (try? await setup.isInstalled(in: repo.ref, ref: repo.defaultBranch, reviewedRevision: reviewedRevision)) == true
+        } else {
+            installed = true
+        }
         let commit: String
         do { commit = try await github.resolveCommit(repo.ref, ref: repo.branch) }
         catch { lastError = app.github.describe(error); return nil }
@@ -129,7 +139,7 @@ final class JobCoordinator {
             dataBranch: "main",
             dataInstallationID: app.github.installationID,
             directSave: rules.directSave,
-            steps: [JobStepRecord(title: installed ? "Waiting for GitHub" : "Autonomous setup", status: installed ? .pending : .waiting)],
+            steps: [JobStepRecord(title: installed ? (isPreviewBuild ? "Waiting for GitHub" : "Waiting for your computer") : "Autonomous setup", status: installed ? .pending : .waiting)],
             questions: installed ? [] : [question]
         )
         do {
@@ -137,12 +147,31 @@ final class JobCoordinator {
             await reloadAndSync()
             selectedJobID = job.id
             app.sheet = .jobs
-            if installed { try await dispatch(job) }
+            if installed {
+                do { try await dispatch(job) }
+                catch let error as ComputerJobError { await failToStart(job.id, error.message); return job }
+            }
             return job
         } catch {
             lastError = app.github.describe(error)
             return nil
         }
+    }
+
+    struct ComputerJobError: LocalizedError {
+        var message: String
+        var errorDescription: String? { message }
+    }
+
+    /// The computer couldn't take the job: it says why, and waits for Resume.
+    private func failToStart(_ id: UUID, _ message: String) async {
+        guard var job = (await store.all()).first(where: { $0.id == id }) else { return }
+        job.status = .failed
+        job.steps = [JobStepRecord(title: "Starting on your computer", status: .failed, startedAt: Date())]
+        job.result = JobResult(summary: message)
+        _ = try? await store.checkpoint(job)
+        await reloadAndSync()
+        lastError = message
     }
 
     @discardableResult
@@ -472,6 +501,7 @@ final class JobCoordinator {
             if let run = job.workflowRunID, let repo = job.targetRepo, let github = app.github.client {
                 try? await github.cancelWorkflowRun(repo, runID: run)
             }
+            await stopOnComputer(job)
             await reloadAndSync()
         } catch { lastError = ErrorExplainer.explain(error).message }
     }
@@ -484,6 +514,7 @@ final class JobCoordinator {
             if ![.done, .failed, .stopped].contains(job.status) {
                 _ = try await store.stop(id)
                 await reloadAndSync()
+                await stopOnComputer(job)
                 if let runID = job.workflowRunID, let repo = job.targetRepo, let github = app.github.client {
                     try? await github.cancelWorkflowRun(repo, runID: runID)
                     // Let GitHub stop the runner before deleting the shared record, otherwise its
@@ -572,6 +603,7 @@ final class JobCoordinator {
         await app.sync.syncNow()
         let before = Dictionary(uniqueKeysWithValues: jobs.map { ($0.id, $0.status) })
         jobs = await store.all()
+        await refreshComputerJobTokens()
         for job in jobs where before[job.id] != job.status && (job.status == .done || job.status == .needsAnswer || job.status == .needsApproval) {
             let needs = job.status == .needsAnswer || job.status == .needsApproval
             app.notifications.post(
@@ -582,36 +614,10 @@ final class JobCoordinator {
         }
     }
 
-    func updateAutonomousWorkflows() async {
-        guard let app, let github = app.github.client,
-              let credentials = app.github.credentials,
-              let openRouterKey = app.openRouter.autonomousSecretKey,
-              let revision = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String,
-              revision.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil
-        else { return }
-        var secrets = [
-            "MAIPAG_APP_ID": String(credentials.appID),
-            "MAIPAG_APP_PRIVATE_KEY": credentials.privateKeyPEM,
-            "OPENROUTER_API_KEY": openRouterKey,
-        ]
-        if let connectorSecrets = app.connectors.autonomousSecretsJSON() { secrets["MAIPAG_MCP_SECRETS"] = connectorSecrets }
-        var failures: [String] = []
-        for var record in await provisioningStore.loadAll() {
-            do {
-                guard let repository = try await github.repositoryIfExists(record.repo) else { continue }
-                let setup = AutonomousSetup(github: github)
-                if try await setup.isInstalled(in: record.repo, ref: repository.defaultBranch, reviewedRevision: revision) { continue }
-                _ = try await setup.install(in: record.repo, branch: repository.defaultBranch, secrets: secrets, reviewedRevision: revision)
-                record.reviewedRevision = revision
-                record.managedSecrets = Set(secrets.keys)
-                record.updatedAt = Date()
-                try await provisioningStore.save(record)
-            } catch {
-                failures.append("\(record.repo.fullName): \(ErrorExplainer.explain(error).message)")
-            }
-        }
-        if !failures.isEmpty { lastError = "Autonomous workflow update failed for " + failures.joined(separator: "; ") }
-    }
+    /// Jobs run on the chat computer now (owner rule, 11 November 2026), so app updates no longer
+    /// rewrite `.github/workflows/maipa-g.yml` in repos. A preview build that finds an older one
+    /// asks to set it up again, as on first use.
+    func updateAutonomousWorkflows() async {}
 
     func reconcileAutonomousConnectorSecrets() async {
         guard let app, let github = app.github.client else { return }
@@ -720,6 +726,10 @@ final class JobCoordinator {
     }
 
     private func dispatch(_ job: JobRecord) async throws {
+        guard job.state["previewBuild"]?.boolValue == true else {
+            try await dispatchToComputer(job)
+            return
+        }
         guard let app, let github = app.github.client, let repo = job.targetRepo else { return }
         await app.sync.syncNow()
         if let connectorSecrets = app.connectors.autonomousSecretsJSON() {
@@ -756,6 +766,65 @@ final class JobCoordinator {
         _ = try await store.checkpoint(updated)
         jobs = await store.all()
         app.sync.request()
+    }
+
+    /// Starts the job with MAIPA-G's runner on the chat computer. Its record and checkpoints stay
+    /// in the private data repo, exactly as when it ran on GitHub, so following it is unchanged.
+    private func dispatchToComputer(_ job: JobRecord) async throws {
+        guard let app, let repo = job.targetRepo, let dataRepo = job.dataRepo else { return }
+        await app.sync.syncNow()
+        let vm: VMControl
+        switch await ComputerRuns.prepare(app: app) {
+        case .ready(let ready): vm = ready
+        case .unavailable(let reason):
+            throw ComputerJobError(message: "Jobs run on your chat computer, and it can't take this one yet: \(reason). Tap Resume once it is ready.")
+        }
+        guard let revision = ComputerRuns.revision else { throw ComputerJobError(message: "This app build doesn't say which runner it needs.") }
+        guard let token = await ComputerRuns.githubToken(app: app) else {
+            throw ComputerJobError(message: "GitHub didn't give MAIPA-G a token for this job. Check GitHub in Settings, then tap Resume.")
+        }
+        let request = VMJobRequest(
+            jobID: job.id, targetRepository: repo, targetRef: job.targetRef ?? job.defaultBranch ?? "main",
+            dataRepository: dataRepo, dataBranch: job.dataBranch
+        )
+        let id = VMRun.jobRunID(job.id)
+        // A resumed job starts from its checkpoint in a fresh folder.
+        try? await vm.stop(id: id)
+        try? await vm.remove(id: id)
+        do {
+            try await vm.start(id: id, mode: .job, revision: revision, request: try VMCoding.pack(request), secrets: ComputerRuns.secrets(app: app, githubToken: token))
+        } catch {
+            throw ComputerJobError(message: "Handing the job to your computer failed: \(ErrorExplainer.explain(error).message)")
+        }
+        jobTokenHandovers[job.id] = Date()
+        var updated = job
+        updated.status = .running
+        updated.steps = [JobStepRecord(title: "Starting on your computer", status: .running, startedAt: Date())]
+        _ = try await store.checkpoint(updated)
+        jobs = await store.all()
+        app.sync.request()
+    }
+
+    @ObservationIgnored private var jobTokenHandovers: [UUID: Date] = [:]
+
+    private func stopOnComputer(_ job: JobRecord) async {
+        guard job.state["previewBuild"]?.boolValue != true, job.targetRepo != nil,
+              let control = app?.connectors.computerControl() else { return }
+        let vm = VMControl(computer: control)
+        try? await vm.stop(id: VMRun.jobRunID(job.id))
+    }
+
+    /// GitHub tokens last about an hour. While the app is open, jobs on the computer get a fresh
+    /// one every 40 minutes.
+    private func refreshComputerJobTokens() async {
+        guard let app else { return }
+        let running = jobs.filter { [.running, .queued, .settingUp].contains($0.status) && $0.targetRepo != nil && $0.state["previewBuild"]?.boolValue != true }
+        let due = running.filter { Date().timeIntervalSince(jobTokenHandovers[$0.id] ?? .distantPast) > 40 * 60 }
+        guard !due.isEmpty, let control = app.connectors.computerControl(), let token = await ComputerRuns.githubToken(app: app) else { return }
+        let vm = VMControl(computer: control)
+        for job in due {
+            if (try? await vm.handOverToken(id: VMRun.jobRunID(job.id), token: token)) != nil { jobTokenHandovers[job.id] = Date() }
+        }
     }
 
     private func reloadAndSync() async {

@@ -299,9 +299,9 @@ struct JobDetailScreen: View {
     private var statusText: String {
         if current.isStuck { return "Stuck — no progress for 10 minutes" }
         switch current.status {
-        case .queued: return "Waiting for GitHub"
+        case .queued: return current.state["previewBuild"]?.boolValue == true ? "Waiting for GitHub" : "Waiting for your computer"
         case .settingUp: return "Setting up Autonomous"
-        case .running: return "Working on GitHub"
+        case .running: return current.state["previewBuild"]?.boolValue == true ? "Working on GitHub" : "Working on your computer"
         case .needsApproval, .needsAnswer: return "Needs you"
         case .handingOver: return "Saving and changing runners"
         case .done: return "Finished"

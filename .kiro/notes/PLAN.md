@@ -789,7 +789,8 @@ H. Safety, code, order
   - web: search (free with no key, e.g. DuckDuckGo's HTML results, plus OpenRouter's
     `openrouter:web_search` when allowed) and read a page;
   - asking numbered questions, memory add and edit, and MCP tools.
-- **Cloud jobs:** because of GitHub's terms, there is no central runner. The first time
+- **Cloud jobs:** **Replaced 11 November 2026 by "All agent work runs on the owner's Linux
+  computer" below.** The old design follows for the record. Because of GitHub's terms, there is no central runner. The first time
   Autonomous is used on a repo, add `.github/workflows/maipa-g.yml` there: a small caller of a
   reusable workflow in this repo. Set that repo's secrets (OpenRouter key, GitHub token) through
   the API, using a libsodium sealed box.
@@ -982,6 +983,45 @@ Where this and anything above disagree, this wins.
   connector changes aren't undone, as in Kiro.
 - **The Spec/Vibe picker is locked while a reply runs** (Kiro disables its selector during a run).
 - The old "Specs enabled" saved setting stays, unused (owner didn't ask to delete it).
+
+### All agent work runs on the owner's Linux computer (owner rule, 11 November 2026)
+Owner, 11 November 2026: "Nothing should fucking run on GitHub. They should all fucking run on the
+fucking Linux VM that I have constantly fucking going, like any other fucking AI app". **All agent
+work runs on his Linux VM (the chat computer, a Fly.io Sprite); GitHub only builds the app.** This
+overrides "Cloud jobs" above (Autonomous jobs on GitHub Actions). Where this and anything above
+disagree, this wins.
+
+- **Chat replies run on the computer.** The phone hands the turn (the chat, the route, the system
+  prompt, the staged files and the repo's commit) to MAIPA-G's runner there and follows it. The
+  runner is AgentCore's `MAIPAGRunner` (`turn <folder>`), started as its own long-running process
+  and held awake with the Sprites Tasks API (a 5-minute task renewed every minute, removed at the
+  end; docs.fly.io/sprites/keeping-sprites-running). The reply keeps going when the app is closed.
+  Commands run right there in a real shell. The runner writes the reply's state after every step
+  (and streamed text a few times a second) to `~/.maipa-g/runs/turn-<reply id>/state/<n>.json.gz`;
+  the phone picks up from the last state it saw when it comes back. Stop goes to the computer and
+  ends the run there; Steer is passed to the running reply as files the runner reads.
+- **Autonomous jobs run on the computer** (`MAIPAGRunner job <folder>`, the same CloudRunner as
+  before, with no 6-hour handover). The job's record and checkpoints stay in `MAIPA-G-data`. No
+  `.github/workflows/maipa-g.yml` is added and no repo secrets are set for new jobs; app updates no
+  longer rewrite it. `ios.yml` and `release.yml` stay: they build the app and publish the runner.
+  Preview builds still run on Actions for now, because their result is an Actions artifact
+  (question for the owner).
+- **Keys** (AI provider key, GitHub installation token, connector access tokens; never a refresh
+  token) go to the computer in a file only its user can read (made under umask 077), which the
+  runner deletes as soon as it has read them. Commands and connectors started by the runner get a
+  clean environment without them, and the runner's log lines are redacted. The Sprite's user has
+  passwordless sudo, so a separate user can't hide the keys from commands the AI runs there: the
+  same exposure as a hosted Actions runner had. GitHub installation tokens last about an hour; the
+  phone hands over a fresh one every 40 minutes while it is open.
+- **The runner is installed automatically** for the app's exact build (`runner-<commit>` release,
+  checked against its sha256) when the computer is first used, through the chat computer's setup
+  path. If that binary doesn't start with the computer's Swift, it is built there with Swift from
+  the same commit. Until it is ready the chat says so and the reply runs on the phone.
+- **When the computer can't take a reply** (not reachable, runner still installing, GitLab repo,
+  several repos, big attachments) the chat says why and the reply runs on the phone as before. A job
+  that can't start says why and waits for Resume.
+- The phone-only parts of a reply (memories, Workstation files, picture tools, helpers and
+  workflows) aren't available to a reply on the computer; the AI is told so.
 
 ### Deliberately not in this batch
 - Multi-repo editing (Kiro can select several repos and edit across them; MAIPA-G chats hold one
