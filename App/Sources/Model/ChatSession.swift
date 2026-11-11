@@ -2162,7 +2162,7 @@ final class ChatSession: Identifiable {
             // Quick Spec has no gates: once tasks.md is written it lands on the task list.
             if let state = chat.kiroSpec, state.kind == .quick, state.phase != .implementation, let tasksPath = state.path(.tasks) {
                 let hasTasks: Bool
-                if case .text? = try? await specChanges.read(tasksPath) { hasTasks = true } else { hasTasks = false }
+                if case .text = try? await specChanges.read(tasksPath) { hasTasks = true } else { hasTasks = false }
                 let next = KiroSpecs.afterQuickTurn(state, hasTasks: hasTasks)
                 if next != state { chat.kiroSpec = next; touch() }
             }

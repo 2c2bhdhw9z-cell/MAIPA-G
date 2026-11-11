@@ -467,7 +467,7 @@ struct Composer: View {
         .foregroundStyle(.primary)
         .disabled(isRunning)
         .accessibilityLabel("Mode: \(current.label)\(permissionMode == .supervised ? ", Supervised" : "")")
-        .accessibilityHint(isRunning ? "Locked while the reply runs" : "")
+        .accessibilityHint(Text(isRunning ? "Locked while the reply runs" : "Vibe or Spec, the spec workflow, and Autopilot or Supervised"))
     }
 
     private var plusMenu: some View {

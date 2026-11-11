@@ -191,7 +191,7 @@ extension SupervisedReview {
         case .write(_, _, let existed): status = existed ? .edited : .created
         case .delete: status = .deleted
         }
-        let hunks = texts.map { hunks(old: $0.old, new: $0.new) } ?? []
-        return ReviewFile(path: change.path, status: status, hunks: hunks, isAccepted: accepted.contains(fingerprint(change)), isText: texts != nil)
+        let found = texts.map { SupervisedReview.hunks(old: $0.old, new: $0.new) } ?? []
+        return ReviewFile(path: change.path, status: status, hunks: found, isAccepted: accepted.contains(fingerprint(change)), isText: texts != nil)
     }
 }
