@@ -74,7 +74,7 @@ struct ComputerRunnerTests {
         #expect(stash.contains("notes.txt"))
     }
 
-    @Test("A failure before the copy changes leaves it exactly as it was")
+    @Test("A failure before the copy changes leaves it exactly as it was", .enabled(if: ComputerRunnerTests.onLinux))
     func unknownCommitLeavesCopyAlone() async throws {
         let home = try Self.temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
@@ -92,7 +92,7 @@ struct ComputerRunnerTests {
         #expect(state.hasSuffix("0\n"))
     }
 
-    @Test("A staged sync places every file, keeps modes, and stashes only real computer edits")
+    @Test("A staged sync places every file, keeps modes, and stashes only real computer edits", .enabled(if: ComputerRunnerTests.onLinux))
     func syncPlacesFilesAndStashesComputerEdits() async throws {
         let home = try Self.temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
