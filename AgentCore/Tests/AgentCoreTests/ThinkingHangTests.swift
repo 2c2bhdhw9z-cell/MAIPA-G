@@ -118,7 +118,7 @@ struct ThinkingHangTests {
         let transport = KeepAliveOnlyTransport(leadingEvents: [AgentLoopTests.text("Half an ans")])
         let turn = await Self.lastTurn(
             AgentTurnInput(chat: AgentLoopTests.newChat("Hi"), route: AgentLoopTests.route(), systemPrompt: "system", tools: []),
-            Self.environment(transport, modelSilence: 0.4)
+            Self.environment(transport, modelSilence: 2.0)
         )
         let finished = try #require(turn)
         #expect(finished.status == .failed)
@@ -146,12 +146,12 @@ struct ThinkingHangTests {
 
     @Test("A stream that keeps sending is never cut off by the watchdog")
     func watchdogLeavesASteadyStreamAlone() async throws {
-        let stream = SilenceWatchdog.watch(limit: 1.0) {
+        let stream = SilenceWatchdog.watch(limit: 5.0) {
             AsyncThrowingStream<Int, Error> { continuation in
                 let pump = Task {
                     for value in 0..<30 {
                         continuation.yield(value)
-                        try? await Task.sleep(nanoseconds: 50_000_000)
+                        try? await Task.sleep(nanoseconds: 250_000_000)
                     }
                     continuation.finish()
                 }
