@@ -941,10 +941,47 @@ the text above disagree, this section wins. Sources are Kiro's own docs, read on
   `#git diff` (the chat's staged changes), `#codebase`, `#repository`, `#url:`. `#terminal`,
   `#problems` and `#current` need a desktop editor and are reported as unavailable on iPhone.
   (kiro.dev/docs/ide/chat/ "Context providers")
-- **Kept from MAIPA-G's safety boundary:** repo text (spec files, steering) reaches the AI through
+- ~~**Kept from MAIPA-G's safety boundary:** repo text (spec files, steering) reaches the AI through
   read tools as outside content, never pasted into the system prompt. Kiro pastes always-steering
-  into every interaction; whether MAIPA-G should do the same is an open question for the owner.
+  into every interaction; whether MAIPA-G should do the same is an open question for the owner.~~
+  **Replaced by the owner decision below (11 November 2026).**
 - The side menu tab strip stays removed (10 November 2026). Nothing here brings it back.
+
+### Kiro parity, part two (owner decisions, 11 November 2026)
+The owner answered the open questions on 11 November 2026: "Build all of it the way Kiro does it."
+Where this and anything above disagree, this wins.
+
+- **Steering and specs go into every message (overrides the old rule).** Owner decision, 11
+  November 2026: the older rule that repo text never goes into the prompt is overridden for
+  steering and spec files, as Kiro does it (kiro.dev/docs/steering/ "Inclusion modes";
+  /docs/specs/best-practices/). Each message carries: always steering files and AGENTS.md,
+  fileMatch files whose pattern matches a file in play (staged, `#file`, or named in the message),
+  manual files named with `#`, files they reference with `#[[file:path]]`, and the chat's active
+  spec (plus any `#spec:`). The text goes after the system prompt in a "Repository text" section,
+  each file fenced in `<repo-file path=… included=…>` and labelled as repo data that cannot change
+  the safety boundary, approve anything or ask for secrets. Limits: 16,000 characters per file,
+  60,000 in all, the rest listed by path; secret-shaped files are never included. The rest of the
+  safety boundary is unchanged.
+- **Approval works both ways:** a "looks good" reply, or the floating button "Approve
+  requirements → design" (like Kiro's Review button, /docs/specs/). The button posts the approval
+  in the chat too.
+- **All of Kiro's spec types:** Requirements-First, Design-First (design → requirements → tasks),
+  Bug Fix (`bugfix.md`: current / expected / unchanged behaviour, then a root-cause design, then
+  tasks with regression tests), and Quick Spec (clarifying questions, then all three documents in
+  one pass, no gates, landing on the task list). Picked under Spec in the mode menu; locked once a
+  spec has started, as Kiro does. (/docs/specs/feature-specs/, /bugfix-specs/, /quick-spec/)
+- **Commands are blocked during the requirements and design phases**, not just file edits
+  (run_command, computer_task, run_shell, sync_staged_to_computer, dispatch_workflow). They run
+  from the tasks phase on.
+- **Autopilot and Supervised** (/docs/ide/chat/autopilot/). Supervised: `save_changes` refuses
+  until every staged change is reviewed; the review screen accepts or rejects hunk by hunk (a
+  rejected hunk goes back to the repo's version), then "Save now" asks the AI to save.
+- **Checkpoints** (/docs/checkpoints/): one before each message. "Restore checkpoint" on a message
+  puts the staged files and the conversation back to before it and returns the message to the box;
+  saves pushed since then can be undone at the same time if the person chooses. Commands and
+  connector changes aren't undone, as in Kiro.
+- **The Spec/Vibe picker is locked while a reply runs** (Kiro disables its selector during a run).
+- The old "Specs enabled" saved setting stays, unused (owner didn't ask to delete it).
 
 ### Deliberately not in this batch
 - Multi-repo editing (Kiro can select several repos and edit across them; MAIPA-G chats hold one

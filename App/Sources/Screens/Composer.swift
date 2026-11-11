@@ -60,9 +60,17 @@ struct Composer: View {
     var onRestoreMemory: (() -> Void)? = nil
     /// This chat's mode (Vibe or Spec), shown next to the model and thinking pills. Nil hides it.
     var chatMode: ChatMode? = nil
-    /// The modes on offer: Spec is left out while Specs is off in Settings.
+    /// The modes on offer: always Vibe and Spec (Kiro parity, 11 November 2026).
     var chatModes: [ChatMode] = []
     var onPickMode: ((ChatMode) -> Void)? = nil
+    /// Spec's workflow (Requirements-First, Design-First, Bug Fix, Quick Spec), shown under Spec.
+    var specKind: KiroSpecKind? = nil
+    /// Kiro: the workflow can't change once a spec has started.
+    var specKindLocked = false
+    var onPickSpecKind: ((KiroSpecKind) -> Void)? = nil
+    /// Autopilot or Supervised. Nil hides it.
+    var permissionMode: PermissionMode? = nil
+    var onPickPermissionMode: ((PermissionMode) -> Void)? = nil
 
     private static let pasteAttachmentThreshold = 20_000
 
@@ -396,7 +404,9 @@ struct Composer: View {
         .accessibilityLabel("Thinking: \(thinking.label)")
     }
 
-    /// Vibe or Spec for this chat. Two modes, no third, switchable at any point in the chat.
+    /// Vibe or Spec for this chat, switchable at any point in the chat except while a reply runs
+    /// (Kiro disables its agent selector during a run). Under Spec: the spec workflow; then
+    /// Autopilot or Supervised.
     private func modeMenu(_ current: ChatMode) -> some View {
         Menu {
             Section("Mode") {
@@ -407,6 +417,33 @@ struct Composer: View {
                     } label: {
                         if mode == current { Label("\(mode.label) — \(mode.explanation)", systemImage: "checkmark") }
                         else { Text("\(mode.label) — \(mode.explanation)") }
+                    }
+                }
+            }
+            if current == .spec, let specKind {
+                Section(specKindLocked ? "Spec workflow (set for this spec)" : "Spec workflow") {
+                    ForEach(KiroSpecKind.allCases) { kind in
+                        Button {
+                            focused = false
+                            onPickSpecKind?(kind)
+                        } label: {
+                            if kind == specKind { Label("\(kind.title) — \(kind.explanation)", systemImage: "checkmark") }
+                            else { Text("\(kind.title) — \(kind.explanation)") }
+                        }
+                        .disabled(specKindLocked && kind != specKind)
+                    }
+                }
+            }
+            if let permissionMode {
+                Section("Changes") {
+                    ForEach(PermissionMode.allCases) { option in
+                        Button {
+                            focused = false
+                            onPickPermissionMode?(option)
+                        } label: {
+                            if option == permissionMode { Label("\(option.title) — \(option.explanation)", systemImage: "checkmark") }
+                            else { Text("\(option.title) — \(option.explanation)") }
+                        }
                     }
                 }
             }
@@ -425,9 +462,12 @@ struct Composer: View {
             .padding(.vertical, 7)
             .background(Theme.raised.opacity(0.9), in: Capsule())
             .overlay(Capsule().strokeBorder(Theme.stroke))
+            .opacity(isRunning ? 0.5 : 1)
         }
         .foregroundStyle(.primary)
-        .accessibilityLabel("Mode: \(current.label)")
+        .disabled(isRunning)
+        .accessibilityLabel("Mode: \(current.label)\(permissionMode == .supervised ? ", Supervised" : "")")
+        .accessibilityHint(isRunning ? "Locked while the reply runs" : "")
     }
 
     private var plusMenu: some View {

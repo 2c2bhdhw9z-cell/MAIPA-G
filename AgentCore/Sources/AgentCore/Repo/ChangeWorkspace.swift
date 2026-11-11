@@ -153,6 +153,44 @@ public actor ChangeWorkspace {
     public func stagedChanges() -> [StagedChange] { changes.values.sorted { $0.path < $1.path } }
     public func discardAll() { changes.removeAll() }
 
+    /// Puts the staged changes back exactly as a checkpoint had them (Kiro checkpoint restore).
+    public func restoreStaged(_ snapshot: [StagedChange]) {
+        changes.removeAll()
+        for change in snapshot { changes[change.path] = change }
+    }
+
+    /// The repo's text and the staged text of one staged file, for reviewing it hunk by hunk.
+    /// A created file has an empty original and a deleted one an empty new text. nil for binary files.
+    public func reviewTexts(_ rawPath: String) async -> (old: String, new: String)? {
+        guard let path = try? Self.safe(rawPath), let change = changes[path] else { return nil }
+        var old = ""
+        if case .text(let document, _)? = try? await readBase(path) { old = document.text }
+        switch change {
+        case .write(_, let data, let existed):
+            guard let staged = TextFileCodec.decode(data) else { return nil }
+            return (existed ? old : "", staged.text)
+        case .delete(_, let previous):
+            guard let before = TextFileCodec.decode(previous) else { return nil }
+            return (before.text, "")
+        }
+    }
+
+    /// Puts part of a staged file back (a rejected hunk). When the result matches the repo again
+    /// the file is no longer staged.
+    public func revertPart(path rawPath: String, text: String) async throws {
+        let path = try Self.safe(rawPath)
+        if case .text(let document, _)? = try? await readBase(path), document.text == text {
+            changes[path] = nil
+            return
+        }
+        try await edit(path: path, text: text, buildSetupApproved: true)
+    }
+
+    /// Drops one file's staged change, so it reads as the repo has it (a rejected change).
+    public func unstage(_ rawPath: String) {
+        changes[(try? Self.safe(rawPath)) ?? RepoWorkspace.normalize(rawPath)] = nil
+    }
+
     public func stagedData(for rawPath: String) -> Data? {
         let normalized = RepoWorkspace.normalize(rawPath)
         guard let change = changes[normalized] else { return nil }

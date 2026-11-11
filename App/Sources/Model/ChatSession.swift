@@ -28,6 +28,14 @@ final class ChatSession: Identifiable {
 
     private(set) var isRunning = false
     private(set) var isCompacting = false
+    /// Spec mode: the current phase's document is written and waits for approval (reply or button).
+    private(set) var specAwaitingApproval = false
+    /// Supervised mode: staged files not yet reviewed.
+    private(set) var unreviewedCount = 0
+    /// The approve button already moved the spec on; the next turn must not move it again.
+    @ObservationIgnored private var specApprovedByButton = false
+    /// Staged files a restored checkpoint puts back once the repo copy is open again.
+    @ObservationIgnored private var pendingStagedRestore: [StagedChange]?
     /// Unconsumed live steering notes waiting for the active run's next safe step boundary.
     private(set) var pendingSteers: [PendingSteer] = []
     /// Durable follow-up messages queued via `Queue` mode to run sequentially after the active turn finishes.
@@ -274,6 +282,7 @@ final class ChatSession: Identifiable {
         }
         pausedInBackground = false
         userStoppedExplicitly = false
+        specAwaitingApproval = false
         settleWaitingTurn()
         chat.messages.append(.user(message, attachments: attachments))
         chat.messages.append(ChatMessage(body: .assistant(AssistantTurn())))
@@ -813,6 +822,9 @@ final class ChatSession: Identifiable {
     var mode: ChatMode {
         get { ChatMode(rawValue: chat.mode ?? "") ?? .vibe }
         set {
+            // Locked while a reply runs, as Kiro disables its agent selector during a run
+            // (https://kiro.dev/docs/ide/chat/). Owner, 11 November 2026.
+            guard !isRunning else { return }
             chat.mode = newValue.rawValue
             touch()
         }
@@ -826,6 +838,187 @@ final class ChatSession: Identifiable {
 
     /// The mode this chat runs in: whatever was picked, Vibe by default.
     var effectiveMode: ChatMode { mode }
+
+    /// The Kiro spec workflow: the chat's spec's own, else the one picked, else Requirements-First.
+    var specKind: KiroSpecKind { chat.kiroSpec?.kind ?? chat.kiroSpecKind ?? .requirementsFirst }
+    /// Kiro: the workflow can't be switched once a spec has started (https://kiro.dev/docs/specs/best-practices/).
+    var specKindLocked: Bool { chat.kiroSpec != nil || isRunning }
+
+    func setSpecKind(_ kind: KiroSpecKind) {
+        guard !specKindLocked else { return }
+        chat.kiroSpecKind = kind
+        touch()
+    }
+
+    /// Autopilot or Supervised (https://kiro.dev/docs/ide/chat/autopilot/).
+    var permissionMode: PermissionMode { chat.permissionMode ?? .autopilot }
+
+    func setPermissionMode(_ newValue: PermissionMode) {
+        guard !isRunning else { return }
+        chat.permissionMode = newValue == .autopilot ? nil : newValue
+        touch()
+        Task { await refreshReviewState() }
+    }
+
+    static let supervisedInstructions = """
+
+
+    ## Supervised mode (this chat)
+    The person reviews every change before it is saved, the way Kiro's Supervised mode works. Stage \
+    changes with the file tools as usual, but don't call `save_changes` until they have accepted \
+    them: `save_changes` refuses while any staged file is unreviewed. When your changes are staged, \
+    finish the reply and say they are ready to review. After they accept (and ask), save.
+    """
+
+    // MARK: Spec approval button
+
+    /// "Approve requirements → design", shown when the current document waits for approval.
+    var specApprovalTitle: String? {
+        guard effectiveMode == .spec, specAwaitingApproval, !isRunning, let state = chat.kiroSpec else { return nil }
+        return KiroSpecs.approvalButtonTitle(state)
+    }
+
+    /// The button does what a "looks good" reply does, and the approval is posted in the chat too.
+    func approveSpecPhase() {
+        guard !isRunning, let state = chat.kiroSpec, KiroSpecs.approvalButtonTitle(state) != nil else { return }
+        chat.kiroSpec = KiroSpecs.approved(state, currentDocumentExists: true)
+        specAwaitingApproval = false
+        specApprovedByButton = true
+        touch()
+        send(KiroSpecs.approvalMessage(state))
+    }
+
+    // MARK: Supervised review
+
+    private var acceptedSet: Set<String> { Set(chat.acceptedChanges ?? []) }
+
+    /// Paths of staged files (every repo of the chat) not accepted yet.
+    func unreviewedPaths() async -> [String] {
+        guard permissionMode == .supervised else { return [] }
+        var staged: [StagedChange] = []
+        for workspace in allChangeWorkspaces { staged += await workspace.stagedChanges() }
+        return SupervisedReview.unreviewed(staged, accepted: acceptedSet).map(\.path)
+    }
+
+    func refreshReviewState() async {
+        var staged: [StagedChange] = []
+        for workspace in allChangeWorkspaces { staged += await workspace.stagedChanges() }
+        let pruned = SupervisedReview.pruned(acceptedSet, staged: staged)
+        if pruned != acceptedSet { chat.acceptedChanges = pruned.isEmpty ? nil : Array(pruned).sorted(); touch() }
+        unreviewedCount = permissionMode == .supervised ? SupervisedReview.unreviewed(staged, accepted: pruned).count : 0
+        refreshStagedChanges()
+    }
+
+    /// The staged files of the chat's main repo, hunk by hunk, for the review screen.
+    func reviewFiles() async -> [ReviewFile] {
+        guard let workspace = changeWorkspace else { return [] }
+        var files: [ReviewFile] = []
+        for change in await workspace.stagedChanges() {
+            let texts = await workspace.reviewTexts(change.path)
+            files.append(SupervisedReview.file(for: change, texts: texts, accepted: acceptedSet))
+        }
+        return files
+    }
+
+    func acceptReviewFile(_ path: String) async {
+        guard let workspace = changeWorkspace,
+              let change = await workspace.stagedChanges().first(where: { $0.path == path }) else { return }
+        var accepted = acceptedSet
+        accepted.insert(SupervisedReview.fingerprint(change))
+        chat.acceptedChanges = Array(accepted).sorted()
+        touch()
+        await refreshReviewState()
+    }
+
+    func acceptAllReview() async {
+        var accepted = acceptedSet
+        for workspace in allChangeWorkspaces {
+            for change in await workspace.stagedChanges() { accepted.insert(SupervisedReview.fingerprint(change)) }
+        }
+        chat.acceptedChanges = accepted.isEmpty ? nil : Array(accepted).sorted()
+        touch()
+        await refreshReviewState()
+    }
+
+    /// Kiro's per-hunk reject: that part of the staged file goes back to how the repo has it.
+    func rejectReviewHunk(path: String, hunk: ReviewHunk) async {
+        guard let workspace = changeWorkspace, let texts = await workspace.reviewTexts(path) else { return }
+        let change = await workspace.stagedChanges().first { $0.path == path }
+        if case .delete? = change {
+            await workspace.unstage(path)
+        } else {
+            do { try await workspace.revertPart(path: path, text: SupervisedReview.rejecting(hunk, new: texts.new)) }
+            catch { appendNotice("Couldn't reject that change: \(ErrorExplainer.explain(error).message)") }
+        }
+        await refreshReviewState()
+    }
+
+    /// Rejects every change to one file.
+    func rejectReviewFile(_ path: String) async {
+        guard let workspace = changeWorkspace else { return }
+        await workspace.unstage(path)
+        await refreshReviewState()
+    }
+
+    // MARK: Checkpoints (https://kiro.dev/docs/checkpoints/)
+
+    func hasCheckpoint(_ messageID: UUID) -> Bool {
+        chat.checkpoints?.contains { $0.messageID == messageID } == true
+    }
+
+    /// Saves pushed after this checkpoint that restoring could undo.
+    func savesAfterCheckpoint(_ messageID: UUID) -> Int {
+        guard let checkpoint = chat.checkpoints?.first(where: { $0.messageID == messageID }) else { return 0 }
+        return ChatCheckpoints.savesToUndo(after: checkpoint, receipts: chat.saveReceipts ?? []).count
+    }
+
+    /// One checkpoint per message, taken before the reply runs.
+    private func captureCheckpoint() async {
+        guard let message = chat.messages.last(where: { $0.userText != nil }), !hasCheckpoint(message.id) else { return }
+        let staged = await changeWorkspace?.stagedChanges() ?? []
+        let checkpoint = ChatCheckpoint(messageID: message.id, staged: staged, saveCount: chat.saveReceipts?.count ?? 0, kiroSpec: chat.kiroSpec, acceptedChanges: chat.acceptedChanges)
+        chat.checkpoints = ChatCheckpoints.adding(checkpoint, to: chat.checkpoints ?? [])
+    }
+
+    /// Restores files and conversation to just before this message, as Kiro's Restore does. The
+    /// message goes back into the box. With `undoSaves`, saves pushed since then are undone too.
+    func restoreCheckpoint(_ messageID: UUID, undoSaves: Bool) async {
+        guard !isRunning, !isCompacting,
+              let checkpoint = chat.checkpoints?.first(where: { $0.messageID == messageID }),
+              chat.messages.contains(where: { $0.id == messageID }) else { return }
+        var notes: [String] = []
+        if undoSaves {
+            for receipt in ChatCheckpoints.savesToUndo(after: checkpoint, receipts: chat.saveReceipts ?? []) {
+                if let problem = await undoSave(receipt.id) {
+                    notes.append("A save after this point couldn't be undone, so it stays: \(problem)")
+                    break
+                }
+            }
+        } else if savesAfterCheckpoint(messageID) > 0 {
+            notes.append("Saves made after this point are still in the repo.")
+        }
+        if checkpoint.filesComplete {
+            if let workspace = changeWorkspace {
+                await workspace.restoreStaged(checkpoint.stagedChanges)
+            } else if !checkpoint.files.isEmpty {
+                pendingStagedRestore = checkpoint.stagedChanges
+            }
+        } else {
+            notes.append("The staged files at this point were too big to keep, so files weren't restored.")
+        }
+        guard let index = chat.messages.firstIndex(where: { $0.id == messageID }) else { return }
+        let original = chat.messages[index].userText ?? ""
+        chat.messages.removeSubrange(index...)
+        chat.kiroSpec = checkpoint.kiroSpec
+        chat.acceptedChanges = checkpoint.acceptedChanges
+        chat.checkpoints = ChatCheckpoints.kept(chat.checkpoints ?? [], messageIDs: Set(chat.messages.map(\.id)))
+        specAwaitingApproval = false
+        pruneInvalidatedCompactionAfterRewind()
+        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { draft = original }
+        appendNotice((["Restored the checkpoint: files and conversation are back to before that message."] + notes).joined(separator: " "))
+        touch()
+        await refreshReviewState()
+    }
 
     /// Added to the system prompt in Spec mode when the chat has no repo to hold spec files:
     /// plan first, inside the chat, then build on "go".
@@ -848,7 +1041,7 @@ final class ChatSession: Identifiable {
         guard hasRepo else {
             return Self.specModeInstructions + " Spec files (`.kiro/specs/<feature>/requirements.md`, `design.md`, `tasks.md`) need a repo; this chat has none, so plan in the chat."
         }
-        return KiroSpecs.instructions(state: chat.kiroSpec, existingSpecs: existingSpecs)
+        return KiroSpecs.instructions(state: chat.kiroSpec, existingSpecs: existingSpecs, kind: specKind)
     }
 
     /// One line under a Spec-mode reply saying which document waits for approval and how to give it.
@@ -861,12 +1054,12 @@ final class ChatSession: Identifiable {
         }
         guard case .text = try? await workspace.read(path) else { return nil }
         let next: String
-        switch state.phase {
-        case .requirements: next = "move on to the design"
-        case .design: next = "move on to the tasks"
-        default: next = "start building"
+        switch state.nextPhase {
+        case .some(.implementation), .none: next = "start building"
+        case .some(let phase): next = "move on to the \(state.title(phase).lowercased())"
         }
-        return "Spec \(state.slug): \(path) is ready for review. Reply \u{201C}looks good\u{201D} to \(next), or say what to change."
+        let button = KiroSpecs.approvalButtonTitle(state).map { " or tap \u{201C}\($0)\u{201D}" } ?? ""
+        return "Spec \(state.slug): \(path) is ready for review. Reply \u{201C}looks good\u{201D}\(button) to \(next), or say what to change."
     }
 
     func setRepo(_ repo: ChatRepo?) {
@@ -1005,10 +1198,21 @@ final class ChatSession: Identifiable {
     }
 
     func undoLastSave() async {
+        guard let receipts = chat.saveReceipts,
+              let index = receipts.lastIndex(where: { $0.undoneAt == nil }) else { return }
+        if let problem = await undoSave(receipts[index].id) {
+            appendNotice("Undo stopped safely: \(problem)")
+        } else {
+            appendNotice("Undid MAIPA-G's last save.")
+        }
+    }
+
+    /// Undoes one save; nil when it worked, otherwise why not.
+    private func undoSave(_ receiptID: UUID) async -> String? {
         guard let app, var receipts = chat.saveReceipts,
-              let index = receipts.lastIndex(where: { $0.undoneAt == nil }),
-              let github = app.repoClient(for: receipts[index].repo) else { return }
+              let index = receipts.firstIndex(where: { $0.id == receiptID && $0.undoneAt == nil }) else { return "That save is no longer there." }
         let repo = receipts[index].repo
+        guard let github = app.repoClient(for: repo) else { return "Connect \(repo.hostName) first." }
         do {
             let undoReceipt = try await GitHubChangeService(github: github).undo(receipts[index])
             receipts[index].undoneAt = Date()
@@ -1028,8 +1232,8 @@ final class ChatSession: Identifiable {
                 workspace = nil
             }
             changeSession = nil
-            appendNotice("Undid MAIPA-G's last save.")
-        } catch { appendNotice("Undo stopped safely: \(app.describe(error, for: repo))") }
+            return nil
+        } catch { return app.describe(error, for: repo) }
     }
 
     private func appendNotice(_ text: String) {
@@ -1087,6 +1291,8 @@ final class ChatSession: Identifiable {
             app?.turnFinished(in: self)
         }
         guard let app else { return }
+        // Kiro checkpoint: the chat as it was before this message ran.
+        await captureCheckpoint()
         guard app.openRouter.isSignedIn else {
             fail(.signInNeeded, "Connect an AI provider (OpenRouter, OneProvider, SayGM, TeamoRouter, or OmniRoute) in Settings first.")
             return
@@ -1269,6 +1475,10 @@ final class ChatSession: Identifiable {
                     changes = ChangeWorkspace(base: workspace)
                     changeWorkspace = changes
                 }
+                if let restore = pendingStagedRestore {
+                    await changes.restoreStaged(restore)
+                    pendingStagedRestore = nil
+                }
                 let service = GitHubChangeService(github: github)
                 let directSaveSetting = app.settings.savesDirectly(to: repo.ref)
                 // Rules that couldn't be read in time never mean saving straight to the branch.
@@ -1378,6 +1588,9 @@ final class ChatSession: Identifiable {
         // Kiro specs: three files under .kiro/specs/<feature>/ in the chat's repo, read with
         // load_spec (Kiro's #spec), with Spec mode's approval gates enforced on the file tools.
         var existingSpecs: [String] = []
+        var inlineRepoText = ""
+        let approvedByButton = specApprovedByButton
+        specApprovedByButton = false
         if repoContext != nil, let specChanges = changeWorkspace {
             let readSpecFile: LoadSpecTool.Reader = { path in
                 guard case .text(let text, _) = try? await specChanges.read(path) else { return nil }
@@ -1388,28 +1601,65 @@ final class ChatSession: Identifiable {
             }
             tools.append(LoadSpecTool(read: readSpecFile, list: listRepoFiles))
             let references = KiroContextReferences.parse(lastMessage)
+            let kind = specKind
             if effectiveMode == .spec {
                 existingSpecs = await setupStep(setupDeadline, fallback: [], label: "listing specs") { KiroSpecs.slugs(in: await listRepoFiles()) }
                 if let state = chat.kiroSpec {
-                    // An approval reply moves the spec on one phase, once that phase's document exists.
-                    let documentExists: Bool
-                    if let path = state.path(state.phase) { documentExists = await readSpecFile(path) != nil } else { documentExists = true }
-                    let next = KiroSpecs.afterMessage(lastMessage, state: state, currentDocumentExists: documentExists)
-                    if next != state { chat.kiroSpec = next; touch() }
+                    // An approval reply moves the spec on one phase, once that phase's document
+                    // exists. The approve button has already done it for its own message.
+                    if !approvedByButton {
+                        let documentExists: Bool
+                        if let path = state.path(state.phase) { documentExists = await readSpecFile(path) != nil } else { documentExists = true }
+                        let next = KiroSpecs.afterMessage(lastMessage, state: state, currentDocumentExists: documentExists)
+                        if next != state { chat.kiroSpec = next; touch() }
+                    }
                 } else if let named = references.specs.first(where: KiroSpecs.isValidSlug) {
                     // `#spec:<name>` in Spec mode picks up a spec already in the repo where it left off.
                     let base = KiroSpecs.folder + named + "/"
                     let hasRequirements = await readSpecFile(base + "requirements.md") != nil
+                    let hasBugfix = await readSpecFile(base + "bugfix.md") != nil
                     let hasDesign = await readSpecFile(base + "design.md") != nil
                     let hasTasks = await readSpecFile(base + "tasks.md") != nil
-                    if hasRequirements || hasDesign || hasTasks {
-                        chat.kiroSpec = KiroSpecs.resume(slug: named, hasRequirements: hasRequirements, hasDesign: hasDesign, hasTasks: hasTasks)
+                    if hasRequirements || hasBugfix || hasDesign || hasTasks {
+                        chat.kiroSpec = KiroSpecs.resume(slug: named, hasRequirements: hasRequirements, hasDesign: hasDesign, hasTasks: hasTasks, hasBugfix: hasBugfix)
                         touch()
                     }
                 }
                 let gateState = chat.kiroSpec
-                tools = KiroSpecGatedTool.wrap(tools, state: { gateState })
+                tools = KiroSpecGatedTool.wrap(tools, kind: kind, state: { gateState })
             }
+            // Kiro puts steering and the spec into every message (owner decision, 11 November 2026):
+            // always files, fileMatch files for the files in play, manual ones named with #, the
+            // files they reference with #[[file:]], and this chat's spec. Marked as repo text, size-limited.
+            let stagedPaths = await specChanges.stagedChanges().map(\.path)
+            let inPlay = stagedPaths + references.files + KiroInlineContext.mentionedPaths(in: lastMessage)
+            let steering = KiroInlineContext.steeringItems(repoContext?.ruleDocuments ?? [], paths: inPlay, referencedNames: Set(references.steering))
+            var items = steering
+            var followed = 0
+            for item in steering {
+                for reference in KiroInlineContext.fileReferences(in: item.text) where followed < KiroInlineContext.maxFileReferences {
+                    followed += 1
+                    if let text = await readSpecFile(reference) {
+                        items.append(KiroInlineContext.Item(path: reference, text: text, reason: "referenced from \(item.path)"))
+                    }
+                }
+            }
+            var specSlugs: [String] = []
+            if effectiveMode == .spec, let state = chat.kiroSpec { specSlugs.append(state.slug) }
+            for named in references.specs where KiroSpecs.isValidSlug(named) && !specSlugs.contains(named) { specSlugs.append(named) }
+            for slug in specSlugs.prefix(3) {
+                for document in KiroSpecs.documents {
+                    let path = KiroSpecs.folder + slug + "/" + document
+                    if let text = await readSpecFile(path) {
+                        items.append(KiroInlineContext.Item(path: path, text: text, reason: slug == chat.kiroSpec?.slug ? "this chat's spec" : "referenced with #spec:\(slug)"))
+                    }
+                }
+            }
+            inlineRepoText = KiroInlineContext.section(items)
+        }
+        // Supervised (Kiro's permission mode): nothing is saved until the person has reviewed it.
+        if permissionMode == .supervised {
+            tools = SupervisedSaveGate.wrap(tools, unreviewed: { [weak self] in await self?.unreviewedPaths() ?? [] })
         }
         for problem in hookProblems {
             _ = app.report(RepoHookProblem(message: problem), area: "hooks", operation: "read repo hooks")
@@ -1820,7 +2070,9 @@ final class ChatSession: Identifiable {
                 isAutonomous: isAutonomousTurn,
                 skippedAttachments: skippedAttachments
             ) + specModeSection(hasRepo: repoContext != nil, existingSpecs: existingSpecs)
-              + KiroContextReferences.parse(lastMessage).promptSection,
+              + (permissionMode == .supervised ? Self.supervisedInstructions : "")
+              + KiroContextReferences.parse(lastMessage).promptSection
+              + inlineRepoText,
             tools: tools,
             allowTools: app.openRouter.supportsTools(chat.model),
             spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil,
@@ -1903,15 +2155,29 @@ final class ChatSession: Identifiable {
         // record inside the app: pick up the spec the AI started, and say what is waiting for approval.
         if effectiveMode == .spec, chat.repo != nil, let specChanges = changeWorkspace {
             let staged = await specChanges.stagedChanges().map(\.path)
-            if let found = KiroSpecs.discovered(stagedPaths: staged, current: chat.kiroSpec), found != chat.kiroSpec {
+            if let found = KiroSpecs.discovered(stagedPaths: staged, current: chat.kiroSpec, kind: specKind), found != chat.kiroSpec {
                 chat.kiroSpec = found
                 touch()
+            }
+            // Quick Spec has no gates: once tasks.md is written it lands on the task list.
+            if let state = chat.kiroSpec, state.kind == .quick, state.phase != .implementation, let tasksPath = state.path(.tasks) {
+                let hasTasks: Bool
+                if case .text? = try? await specChanges.read(tasksPath) { hasTasks = true } else { hasTasks = false }
+                let next = KiroSpecs.afterQuickTurn(state, hasTasks: hasTasks)
+                if next != state { chat.kiroSpec = next; touch() }
             }
             if let state = chat.kiroSpec, var current = lastTurn, current.status == .done,
                let notice = await Self.specPhaseNotice(state, workspace: specChanges) {
                 if !current.notices.contains(notice) { current.notices.append(notice) }
                 replaceLastTurn(current)
+                specAwaitingApproval = state.phase != .implementation
             }
+        }
+        await refreshReviewState()
+        if permissionMode == .supervised, unreviewedCount > 0, var current = lastTurn {
+            let notice = "Supervised: \(unreviewedCount) changed file\(unreviewedCount == 1 ? " is" : "s are") waiting for your review. Tap Review changes to accept or reject each change before it's saved."
+            if !current.notices.contains(notice) { current.notices.append(notice) }
+            replaceLastTurn(current)
         }
         chat.updatedAt = Date()
         await nameChatIfNeeded()

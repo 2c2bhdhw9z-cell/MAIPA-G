@@ -100,6 +100,14 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
     /// The Kiro-style spec this chat is writing or building (`.kiro/specs/<slug>/` in its repo) and
     /// its phase. nil until Spec mode writes requirements or a `#spec:` reference picks one up.
     public var kiroSpec: KiroSpecState?
+    /// The Kiro spec workflow picked for this chat's next spec (Requirements-First when nil).
+    public var kiroSpecKind: KiroSpecKind?
+    /// Autopilot (nil) or Supervised: whether each change is reviewed before it's saved.
+    public var permissionMode: PermissionMode?
+    /// Staged changes the person accepted in Supervised review (fingerprints).
+    public var acceptedChanges: [String]?
+    /// Kiro-style checkpoints, one before each of the person's messages.
+    public var checkpoints: [ChatCheckpoint]?
 
     /// `repo` first, then the others, without duplicates.
     public var allRepos: [ChatRepo] {
@@ -144,6 +152,10 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         self.mode = nil
         self.additionalRepos = nil
         self.kiroSpec = nil
+        self.kiroSpecKind = nil
+        self.permissionMode = nil
+        self.acceptedChanges = nil
+        self.checkpoints = nil
     }
 
     enum CodingKeys: String, CodingKey {
@@ -152,6 +164,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         case compactedSummary, compactedThroughMessageID
         case previousCompactedSummary, previousCompactedThroughMessageID
         case queuedFollowUps, activeWorkflowRuns, mode, additionalRepos, kiroSpec
+        case kiroSpecKind, permissionMode, acceptedChanges, checkpoints
     }
 
     public init(from decoder: Decoder) throws {
@@ -181,6 +194,10 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         mode = try c.decodeIfPresent(String.self, forKey: .mode)
         additionalRepos = try c.decodeIfPresent([ChatRepo].self, forKey: .additionalRepos)
         kiroSpec = try c.decodeIfPresent(KiroSpecState.self, forKey: .kiroSpec)
+        kiroSpecKind = try? c.decodeIfPresent(KiroSpecKind.self, forKey: .kiroSpecKind)
+        permissionMode = try? c.decodeIfPresent(PermissionMode.self, forKey: .permissionMode)
+        acceptedChanges = try c.decodeIfPresent([String].self, forKey: .acceptedChanges)
+        checkpoints = (try? c.decodeIfPresent([ChatCheckpoint].self, forKey: .checkpoints)) ?? nil
     }
 
     /// Everything the chat has cost so far, in dollars, as OpenRouter reported it.

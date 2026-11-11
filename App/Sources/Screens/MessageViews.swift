@@ -14,6 +14,8 @@ struct TurnActions {
     var signIn: () -> Void
     var openURL: (URL) -> Void
     var toggleStar: (UUID) -> Void
+    /// Kiro's checkpoint Restore on one of the person's messages.
+    var restoreCheckpoint: (UUID) -> Void = { _ in }
 }
 
 /// One message. Equatable, so while a reply streams in only the reply being written redraws.
@@ -39,7 +41,8 @@ struct MessageRow: View, Equatable {
                     actions.toggleStar(message.id)
                     Haptics.selection()
                 },
-                onEdit: { actions.editMessage(message.id, user.text) }
+                onEdit: { actions.editMessage(message.id, user.text) },
+                onRestore: { actions.restoreCheckpoint(message.id) }
             )
         case .assistant(let turn):
             AssistantTurnView(
@@ -70,6 +73,7 @@ struct UserBubble: View {
     var canStar: Bool
     var onToggleStar: () -> Void
     var onEdit: () -> Void
+    var onRestore: (() -> Void)? = nil
     @Environment(\.theme) private var theme
     @State private var showingFullText = false
 
@@ -165,6 +169,9 @@ struct UserBubble: View {
                         }
                         if message.text.count <= 20_000 {
                             Button(action: onEdit) { Label("Edit and resend", systemImage: "pencil") }
+                        }
+                        if let onRestore {
+                            Button(action: onRestore) { Label("Restore checkpoint", systemImage: "clock.arrow.circlepath") }
                         }
                         Button { UIPasteboard.general.string = message.text } label: { Label("Copy", systemImage: "doc.on.doc") }
                     }

@@ -17,6 +17,9 @@ struct ChatScreen: View {
     @State private var editedMessageText = ""
     @State private var showingDiff = false
     @State private var userIsScrolling = false
+    @State private var restoringMessageID: UUID?
+    @State private var noCheckpoint = false
+    @State private var showingReview = false
 
     private let bottomID = "chat-bottom-anchor"
 
@@ -88,7 +91,43 @@ struct ChatScreen: View {
         .background(Theme.background.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .onChange(of: session.isRunning) { _, running in
-            if !running { session.refreshStagedChanges() }
+            if !running {
+                session.refreshStagedChanges()
+                Task { await session.refreshReviewState() }
+            }
+        }
+        .sheet(isPresented: $showingReview) { SupervisedReviewScreen(session: session) }
+        .confirmationDialog(
+            "Restore this checkpoint?",
+            isPresented: Binding(get: { restoringMessageID != nil }, set: { if !$0 { restoringMessageID = nil } }),
+            titleVisibility: .visible
+        ) {
+            if let id = restoringMessageID {
+                let saves = session.savesAfterCheckpoint(id)
+                if saves > 0 {
+                    Button("Restore and undo \(saves) save\(saves == 1 ? "" : "s")", role: .destructive) {
+                        restoringMessageID = nil
+                        Task { await session.restoreCheckpoint(id, undoSaves: true) }
+                    }
+                    Button("Restore, keep saves") {
+                        restoringMessageID = nil
+                        Task { await session.restoreCheckpoint(id, undoSaves: false) }
+                    }
+                } else {
+                    Button("Restore", role: .destructive) {
+                        restoringMessageID = nil
+                        Task { await session.restoreCheckpoint(id, undoSaves: false) }
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) { restoringMessageID = nil }
+        } message: {
+            Text("Staged files and the conversation go back to before this message, and the message returns to the box. Commands and connector changes aren't undone.")
+        }
+        .alert("No checkpoint for this message", isPresented: $noCheckpoint) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Checkpoints are taken before each reply runs. This message was sent before checkpoints existed, or a reply is still running.")
         }
         .alert("Checks did not pass", isPresented: Binding(get: { session.mergeWarning != nil }, set: { if !$0 { session.cancelMergeWarning() } })) {
             Button("Add it anyway", role: .destructive) { Task { await session.addLastSave(force: true) } }
@@ -340,7 +379,43 @@ struct ChatScreen: View {
                     .padding(.horizontal, 12)
                 }
 
-                if hasPendingSave {
+                if let approval = session.specApprovalTitle {
+                    // Kiro's floating review button for a spec document: approve and move on.
+                    Button {
+                        Haptics.tap()
+                        session.approveSpecPhase()
+                    } label: {
+                        Label(approval, systemImage: "checkmark.seal")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(theme.accent)
+                            .padding(.horizontal, 18)
+                            .frame(minHeight: 44)
+                            .glassPanel(cornerRadius: 22, interactive: false)
+                            .contentShape(Capsule())
+                            .shadow(color: .black.opacity(0.16), radius: 8, y: 3)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Approves this spec document and moves to the next step, the same as replying looks good")
+                    .padding(.horizontal, 12)
+                }
+
+                if session.permissionMode == .supervised, session.unreviewedCount > 0 {
+                    Button {
+                        showingReview = true
+                    } label: {
+                        Label("Review \(session.unreviewedCount) change\(session.unreviewedCount == 1 ? "" : "s")", systemImage: "checklist")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(theme.accent)
+                            .padding(.horizontal, 18)
+                            .frame(minHeight: 44)
+                            .glassPanel(cornerRadius: 22, interactive: false)
+                            .contentShape(Capsule())
+                            .shadow(color: .black.opacity(0.16), radius: 8, y: 3)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Supervised: accept or reject each change before it's saved")
+                    .padding(.horizontal, 12)
+                } else if hasPendingSave {
                     Button {
                         app.sheet = .workstation(.chat(session.id), .changes)
                     } label: {
@@ -407,7 +482,12 @@ struct ChatScreen: View {
                     onRestoreMemory: { session.restoreFullMemory() },
                     chatMode: session.effectiveMode,
                     chatModes: session.availableModes,
-                    onPickMode: { session.mode = $0 }
+                    onPickMode: { session.mode = $0 },
+                    specKind: session.specKind,
+                    specKindLocked: session.specKindLocked,
+                    onPickSpecKind: { session.setSpecKind($0) },
+                    permissionMode: session.chat.repo != nil ? session.permissionMode : nil,
+                    onPickPermissionMode: { session.setPermissionMode($0) }
                 )
                 .padding(.horizontal, 12)
                 .padding(.bottom, 6)
@@ -508,7 +588,10 @@ struct ChatScreen: View {
                 }
             },
             openURL: { openURL($0) },
-            toggleStar: { session.toggleStar($0) }
+            toggleStar: { session.toggleStar($0) },
+            restoreCheckpoint: { id in
+                if !session.isRunning, session.hasCheckpoint(id) { restoringMessageID = id } else { noCheckpoint = true }
+            }
         )
     }
 }
