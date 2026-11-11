@@ -155,7 +155,7 @@ public struct VMTurnRunner: Sendable {
             chat: request.chat, route: request.route.route, systemPrompt: request.systemPrompt + Self.promptNote(machine: machine, hasConnectors: setup.connectorCount > 0),
             tools: setup.tools, allowTools: request.allowTools, spendLimit: request.spendLimit,
             attachmentData: request.attachmentData, fallbackModels: request.fallbackModels, requiresInitialSpendApproval: false,
-            steering: steering, resumeNote: request.resumeNote
+            steering: steering, resumeNote: request.resumeNote, autoApprove: true
         )
         let run = AgentLoop.start(input, environment: setup.environment)
         for text in request.earlySteering { await run.steer(text) }

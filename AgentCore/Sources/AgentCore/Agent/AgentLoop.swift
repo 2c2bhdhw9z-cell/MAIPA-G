@@ -240,11 +240,19 @@ public struct AgentTurnInput: Sendable {
     public var steering: SteeringInbox?
     /// False for background sub-agents and workflow steps that run autonomously without pausing for interactive questions.
     public var allowAskUser: Bool
+    /// Tools just run, the way Kiro runs commands without asking (owner, 11 November 2026: "You
+    /// don't ask to run commands"). Only something that can't be undone at all still asks.
+    public var autoApprove: Bool
+    /// When every tool in a step is one of these and worked, the reply ends there: the picture
+    /// is the answer, and another model call only added 10 to 20 seconds.
+    public var endAfterTools: Set<String>
     /// Set when the person tapped Retry on a reply that stopped early. The turn carries on from
     /// where it stopped, and the model is told plainly that it was cut off. Not saved in the chat.
     public var resumeNote: String?
 
-    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 250, spendLimit: Double? = nil, attachmentData: [UUID: Data] = [:], serverTools: [ToolSpec] = [], fallbackModels: [String] = [], requiresInitialSpendApproval: Bool = false, agent: AgentDefinition? = nil, steering: SteeringInbox? = nil, allowAskUser: Bool = true, resumeNote: String? = nil) {
+    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 250, spendLimit: Double? = nil, attachmentData: [UUID: Data] = [:], serverTools: [ToolSpec] = [], fallbackModels: [String] = [], requiresInitialSpendApproval: Bool = false, agent: AgentDefinition? = nil, steering: SteeringInbox? = nil, allowAskUser: Bool = true, resumeNote: String? = nil, autoApprove: Bool = false) {
+        self.autoApprove = autoApprove
+        self.endAfterTools = []
         self.chat = chat
         self.route = route
         self.systemPrompt = systemPrompt
@@ -481,6 +489,8 @@ private struct Runner {
     /// False for sub-agents, workflow steps and background helpers, which can never show a person
     /// an approval prompt. A tool needing one must fail honestly instead of parking forever.
     let allowAskUser: Bool
+    let autoApprove: Bool
+    let endAfterTools: Set<String>
     let environment: AgentEnvironment
     let continuation: AsyncStream<AgentEvent>.Continuation
     var maxPayloadBytes = Transcript.defaultMaxPayloadBytes
@@ -527,6 +537,8 @@ private struct Runner {
         requiresInitialSpendApproval = input.requiresInitialSpendApproval
         steering = input.steering
         allowAskUser = input.allowAskUser
+        autoApprove = input.autoApprove
+        endAfterTools = input.endAfterTools
         self.environment = environment
         self.continuation = continuation
         if let note = input.resumeNote {
@@ -621,6 +633,17 @@ private struct Runner {
                     addTiming(\.toolSeconds, since: toolsStartedAt, step: last)
                     if waitingForUser {
                         turn.status = .waitingForUser
+                        break
+                    }
+                    let calls = turn.steps[last].toolCalls
+                    if !endAfterTools.isEmpty, !calls.isEmpty, calls.allSatisfy({ endAfterTools.contains($0.name) && $0.status == .done }),
+                       !(await steering?.hasPendingSteer() ?? false) {
+                        if turn.steps[last].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            turn.steps[last].text = calls.count == 1 ? calls[0].summary + "." : "Done."
+                        }
+                        turn.steps[last].finishedAt = turn.steps[last].finishedAt ?? Date()
+                        clearStoppedEarly()
+                        turn.status = .done
                         break
                     }
                     continue
@@ -1190,10 +1213,15 @@ private struct Runner {
             }
             let wasApproved: Bool
             var pendingApproval: ToolApprovalRequest?
+            var autoApproved = false
             if call.questions == nil {
                 pendingApproval = await tool.approvalRequest(for: arguments)
                 if pendingApproval == nil, outsideContentSeen() {
                     pendingApproval = await tool.approvalAfterOutsideContent(for: arguments)
+                }
+                if pendingApproval != nil, autoApprove, !(await tool.alwaysAsks(for: arguments)) {
+                    pendingApproval = nil
+                    autoApproved = true
                 }
             }
             if let questions = call.questions {
@@ -1235,7 +1263,7 @@ private struct Runner {
                 waiting = true
                 continue
             } else {
-                wasApproved = false
+                wasApproved = autoApproved
             }
             let priorSubs = turn.steps[stepIndex].toolCalls[callIndex].subagents
             turn.steps[stepIndex].toolCalls[callIndex].status = .running

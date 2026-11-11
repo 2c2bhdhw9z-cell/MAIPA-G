@@ -26,7 +26,11 @@ struct SendFileTests {
         let zip: Data
         init(zip: Data) { self.zip = zip }
         func send(_ request: HTTPRequest) async throws -> HTTPResponse {
-            HTTPResponse(status: 200, headers: [:], body: zip)
+            // Real GitHub, 11 November 2026: an artifact zip asked for as octet-stream is a 415.
+            if request.url.path.contains("/actions/artifacts/"), request.headers["Accept"] == "application/octet-stream" {
+                return HTTPResponse(status: 415, headers: [:], body: Data(#"{"message":"Unsupported 'Accept' header: 'application/octet-stream'. Must accept 'application/json'."}"#.utf8))
+            }
+            return HTTPResponse(status: 200, headers: [:], body: zip)
         }
         func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse {
             HTTPStreamResponse(status: 500, headers: [:], body: AsyncThrowingStream { $0.finish() })
@@ -53,6 +57,9 @@ struct SendFileTests {
         #expect(file.isFile && !file.isVideo)
         #expect(file.attachment.path.hasPrefix("media/"))
         #expect(try await store.data(for: file.attachment) == Data("deb-bytes".utf8))
+        // The link to the artifact on the run's page works too.
+        let fromPage = try await tool.run(arguments: ["url": "https://github.com/me/vellum/actions/runs/43071169514/artifacts/1", "pick": "Vellum.dylib"]) { _ in }
+        #expect(fromPage.generatedImages.first?.attachment.name == "Vellum.dylib")
         // Two files and no pick: the zip itself.
         let whole = try await tool.run(arguments: ["url": "https://api.github.com/repos/me/vellum/actions/artifacts/1/zip"]) { _ in }
         #expect(whole.generatedImages.first?.attachment.name == "artifact.zip")

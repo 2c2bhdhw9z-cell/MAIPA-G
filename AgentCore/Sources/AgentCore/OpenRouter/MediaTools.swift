@@ -358,3 +358,35 @@ public enum MediaRequest {
         return chatHasPictures && refersToPicture
     }
 }
+
+/// What the picture screen's buttons send. These go straight to the picture or video model, like
+/// Grok, with no chat model in between (that took a minute for a colour change).
+public enum QuickPictureRequest: Equatable, Sendable {
+    case edit(String)
+    case redo
+    case video
+
+    public static let editPrefix = "Edit this picture: "
+    public static let redoText = "Make another version of this picture: the same idea, a fresh take."
+    public static let videoText = "Turn this picture into a short video."
+
+    public static func parse(_ message: String) -> QuickPictureRequest? {
+        let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text == redoText { return .redo }
+        if text == videoText { return .video }
+        if text.hasPrefix(editPrefix) {
+            let change = String(text.dropFirst(editPrefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            return change.isEmpty ? nil : .edit(change)
+        }
+        return nil
+    }
+
+    /// The prompt for the picture model.
+    public var prompt: String {
+        switch self {
+        case .edit(let change): "\(change). Keep everything else in the picture exactly the same: the composition, the shapes, the shading and the background."
+        case .redo: "Make another version of this picture: the same subject and style, a fresh take on it."
+        case .video: "Bring this picture to life with gentle, natural motion and a slow camera move. Keep its look and colours."
+        }
+    }
+}

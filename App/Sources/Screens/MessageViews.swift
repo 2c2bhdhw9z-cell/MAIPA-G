@@ -1000,11 +1000,7 @@ struct GeneratedImageCard: View {
         }
     }
 
-    private var modelName: String {
-        if let model = app.openRouter.modelsByID[result.model] { return model.shortName }
-        if result.model.hasPrefix("mcp-") || result.model == app.settings.chatComputerMachineName { return "Made on your computer" }
-        return AIProviderModelID.rawModelID(result.model).split(separator: "/").last.map(String.init) ?? "Picture"
-    }
+    private var modelName: String { MediaNames.model(result.model, app: app) }
 }
 
 /// The AI's thinking, folded away under "Thought for 12s".

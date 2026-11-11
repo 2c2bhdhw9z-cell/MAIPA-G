@@ -109,12 +109,7 @@ struct PictureViewer: View {
     }
 
     /// The model's own name ("Gemini 3 Pro Image"), not its id; "Your computer" for one made there.
-    private func modelName(_ picture: GeneratedImageResult) -> String {
-        if let model = app.openRouter.modelsByID[picture.model] { return model.shortName }
-        if picture.model.hasPrefix("mcp-") || picture.model == app.settings.chatComputerMachineName { return "Made on your computer" }
-        let raw = AIProviderModelID.rawModelID(picture.model)
-        return raw.split(separator: "/").last.map { $0.replacingOccurrences(of: "-", with: " ").capitalized } ?? "Picture"
-    }
+    private func modelName(_ picture: GeneratedImageResult) -> String { MediaNames.model(picture.model, app: app) }
 
     /// Four round buttons under the picture, then the prompt behind a tap.
     @ViewBuilder
@@ -123,10 +118,10 @@ struct PictureViewer: View {
             HStack(spacing: 0) {
                 if session != nil {
                     roundButton("Redo", systemImage: "arrow.triangle.2.circlepath") {
-                        ask("Make another version of this picture: the same idea, a fresh take.", about: picture)
+                        ask(QuickPictureRequest.redoText, about: picture)
                     }
                     roundButton("Video", systemImage: "play.fill") {
-                        ask("Turn this picture into a short video.", about: picture)
+                        ask(QuickPictureRequest.videoText, about: picture)
                     }
                 }
                 roundButton(saveLabel, systemImage: saveState == .saved ? "checkmark" : "arrow.down.to.line") {
@@ -233,7 +228,7 @@ struct PictureViewer: View {
         guard !text.isEmpty else { return }
         change = ""
         changeFocused = false
-        ask("Edit this picture: \(text)", about: picture)
+        ask(QuickPictureRequest.editPrefix + text, about: picture)
     }
 
     private func loadImage() async {

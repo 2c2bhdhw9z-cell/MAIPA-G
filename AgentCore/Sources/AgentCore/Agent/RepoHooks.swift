@@ -165,6 +165,7 @@ public struct HookedTool: AgentTool {
     public func initialSubagents(for arguments: JSONValue, callID: String) -> [SubagentRunItem]? {
         inner.initialSubagents(for: arguments, callID: callID)
     }
+    public func alwaysAsks(for arguments: JSONValue) async -> Bool { await inner.alwaysAsks(for: arguments) }
     public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? { await inner.approvalRequest(for: arguments) }
 
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {

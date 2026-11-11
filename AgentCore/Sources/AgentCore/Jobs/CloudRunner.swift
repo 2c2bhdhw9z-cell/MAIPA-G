@@ -297,7 +297,8 @@ public struct CloudRunner: Sendable {
                 systemPrompt: cloudPrompt(repo: configuration.targetRepository, branch: workBranch, rules: writeRules),
                 tools: tools,
                 spendLimit: job.state["spendLimit"]?.doubleValue,
-                requiresInitialSpendApproval: !route.isFree
+                requiresInitialSpendApproval: !route.isFree,
+                autoApprove: true
             )
             let environment = AgentEnvironment(
                 openRouter: ai.client,
@@ -454,7 +455,8 @@ public struct CloudRunner: Sendable {
                 chat: chat, route: route,
                 systemPrompt: SystemPrompt.make(userLogin: nil, repo: repoContext, agent: invocation.definition, workflowContext: invocation.context),
                 tools: workflowTools + invocation.tools, spendLimit: invocation.spendLimit,
-                requiresInitialSpendApproval: !route.isFree, agent: invocation.definition
+                requiresInitialSpendApproval: !route.isFree, agent: invocation.definition,
+                autoApprove: true
             )
             var final: AssistantTurn?
             let agentRun = AgentLoop.start(input, environment: environment)
@@ -775,7 +777,7 @@ public struct CloudRunner: Sendable {
         var chat = Chat(title: definition.name)
         chat.messages = [.user([definition.prompt(task: task), context].filter { !$0.isEmpty }.joined(separator: "\n\nContext:\n")), ChatMessage(body: .assistant(AssistantTurn()))]
         let repo = SystemPrompt.RepoContext(ref: configuration.targetRepository, branch: "checked workspace", commit: try await git(["rev-parse", "HEAD"]).stdout.trimmingCharacters(in: .whitespacesAndNewlines), isPrivate: true, summary: nil, ruleDocuments: rules.documents)
-        let input = AgentTurnInput(chat: chat, route: route, systemPrompt: SystemPrompt.make(userLogin: nil, repo: repo, agent: definition, workflowContext: context), tools: tools, spendLimit: spendLimit, requiresInitialSpendApproval: !route.isFree, agent: definition)
+        let input = AgentTurnInput(chat: chat, route: route, systemPrompt: SystemPrompt.make(userLogin: nil, repo: repo, agent: definition, workflowContext: context), tools: tools, spendLimit: spendLimit, requiresInitialSpendApproval: !route.isFree, agent: definition, autoApprove: true)
         let environment = AgentEnvironment(openRouter: openRouter, freeRoute: { ModelRouter.route(choice: .free, difficulty: definition.difficulty, thinking: .medium, account: AccountState(), catalogue: catalogue, openRouterAvailable: hasOpenRouter) }, onOutOfCredits: {})
         var final: AssistantTurn?
         for await event in AgentLoop.run(input, environment: environment) { if case .updated(let turn, _) = event { final = turn } }

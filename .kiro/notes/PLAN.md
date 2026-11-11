@@ -233,6 +233,17 @@ Not done (owner: "No appetize shit for now"): a real iPhone simulator preview (V
   phone, as Kiro would. When an hour-long token runs out on the computer, the reply waits up to 10
   minutes for the phone's next one instead of failing.
 
+## Second follow-up of 11 November 2026 (owner, after testing build 170)
+- "Send me the deb" took 19 minutes: send_file asked GitHub for the artifact zip as
+  `application/octet-stream`, GitHub answered 415 (artifacts must be asked for as JSON), and the AI
+  rebuilt the tweak from source on the computer. Fixed, and github.com run/release links work too.
+- "You don't ask to run commands" / "you're not on autonomous and I haven't had to do that": tools
+  never ask, in Autopilot or Supervised (Supervised still means reviewing file changes before they
+  are saved). Only destroying a machine, repo, account or database still asks. Sub-agents and
+  workflow steps run their tools too instead of failing on "needs approval".
+- Picture screen Edit, Redo and Video go straight to the picture or video model with no chat model
+  in between; other picture replies end once the picture is made. Models show by name.
+
 ## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
 He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,
 ask_user, generate_image) and Kiro's (read_file, list_directory, file_search, grep_search, code,

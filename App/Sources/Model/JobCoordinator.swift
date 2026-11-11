@@ -310,7 +310,8 @@ final class JobCoordinator {
                 tools: sharedTools + invocation.tools,
                 spendLimit: invocation.spendLimit,
                 requiresInitialSpendApproval: !route.isFree,
-                agent: invocation.definition
+                agent: invocation.definition,
+                autoApprove: true
             )
             let environment = AgentEnvironment(
                 openRouter: aiClient,

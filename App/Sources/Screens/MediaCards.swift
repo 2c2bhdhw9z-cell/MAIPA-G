@@ -122,3 +122,21 @@ struct GeneratedVideoCard: View {
         }
     }
 }
+
+
+/// A picture model's own name for showing ("Gemini 3 Pro Image"), never its id.
+@MainActor
+enum MediaNames {
+    static func model(_ id: String, app: AppModel) -> String {
+        if let model = app.openRouter.modelsByID[id] { return model.shortName }
+        if id == "file" { return "File" }
+        if id.hasPrefix("mcp-") || id == app.settings.chatComputerMachineName { return "Made on your computer" }
+        let raw = AIProviderModelID.rawModelID(id)
+        if let match = app.openRouter.allSelectableModels.first(where: { AIProviderModelID.rawModelID($0.id) == raw }) { return match.shortName }
+        let last = raw.split(separator: "/").last.map(String.init) ?? raw
+        return last.split(separator: "-").map { word in
+            let text = String(word)
+            return text.count <= 3 && text.contains(where: \.isNumber) ? text : text.prefix(1).uppercased() + text.dropFirst()
+        }.joined(separator: " ")
+    }
+}

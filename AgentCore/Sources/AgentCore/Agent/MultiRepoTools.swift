@@ -74,6 +74,11 @@ public struct RepoRoutedTool: AgentTool {
         guard let routed = try? route(arguments) else { return nil }
         return routed.tool.initialSubagents(for: routed.arguments, callID: callID)
     }
+    public func alwaysAsks(for arguments: JSONValue) async -> Bool {
+        guard let routed = try? route(arguments) else { return false }
+        return await routed.tool.alwaysAsks(for: routed.arguments)
+    }
+
     public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
         guard let routed = try? route(arguments) else { return nil }
         guard var request = await routed.tool.approvalRequest(for: routed.arguments) else { return nil }

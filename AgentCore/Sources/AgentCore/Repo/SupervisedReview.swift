@@ -142,6 +142,7 @@ public struct SupervisedSaveGate: AgentTool {
     public var spec: ToolSpec { inner.spec }
     public var bringsOutsideContent: Bool { inner.bringsOutsideContent }
     public func runningSummary(for arguments: JSONValue) -> String { inner.runningSummary(for: arguments) }
+    public func alwaysAsks(for arguments: JSONValue) async -> Bool { await inner.alwaysAsks(for: arguments) }
     public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
         await refusal() == nil ? await inner.approvalRequest(for: arguments) : nil
     }

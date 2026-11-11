@@ -96,12 +96,16 @@ public protocol AgentTool: Sendable {
     /// connector write, a command that reaches the network, paid generation) pauses for the
     /// person, so text from a page, repo or connector can never set it off on its own.
     func approvalAfterOutsideContent(for arguments: JSONValue) async -> ToolApprovalRequest?
+    /// Something that can't be undone at all (destroying the chat computer, deleting a repo):
+    /// asked about even when tools otherwise just run.
+    func alwaysAsks(for arguments: JSONValue) async -> Bool
 }
 
 public extension AgentTool {
     var bringsOutsideContent: Bool { false }
     func initialSubagents(for arguments: JSONValue, callID: String) -> [SubagentRunItem]? { nil }
     func approvalAfterOutsideContent(for arguments: JSONValue) async -> ToolApprovalRequest? { nil }
+    func alwaysAsks(for arguments: JSONValue) async -> Bool { false }
     func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? { nil }
     func runLive(arguments: JSONValue, update: @escaping @Sendable (ToolLiveUpdate) -> Void) async throws -> ToolOutput {
         try await run(arguments: arguments) { message in

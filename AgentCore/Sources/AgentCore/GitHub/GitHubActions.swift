@@ -127,7 +127,8 @@ public extension GitHubClient {
     }
 
     func artifactArchive(_ repo: RepoRef, artifactID: Int) async throws -> Data {
-        try await send("GET", Self.path(repo, "/actions/artifacts/\(artifactID)/zip"), accept: "application/octet-stream").body
+        // GitHub answers 415 to this endpoint unless the request accepts JSON (it then sends the zip).
+        try await send("GET", Self.path(repo, "/actions/artifacts/\(artifactID)/zip"), accept: "application/vnd.github+json").body
     }
 
     /// Streams an authenticated `api.github.com` Actions artifact or Release asset URL to disk
@@ -138,7 +139,9 @@ public extension GitHubClient {
         }
         if parsed.host?.lowercased() == "api.github.com" {
             let apiPath = parsed.path
-            let response = try await send("GET", apiPath, accept: "application/octet-stream", allow: [301, 302, 303, 307, 308], followsRedirects: false)
+            // Artifacts must be asked for as JSON (GitHub answers 415 otherwise); release assets as bytes.
+            let accept = apiPath.contains("/actions/artifacts/") ? "application/vnd.github+json" : "application/octet-stream"
+            let response = try await send("GET", apiPath, accept: accept, allow: [301, 302, 303, 307, 308], followsRedirects: false)
             if response.isSuccess {
                 try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try response.body.write(to: destination, options: .atomic)

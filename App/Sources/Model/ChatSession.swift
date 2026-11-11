@@ -1357,6 +1357,12 @@ final class ChatSession: Identifiable {
         let hasOpenRouter = app.openRouter.hasOpenRouterKey
 
         let lastMessage = chat.messages.last { $0.userText != nil }?.userText ?? ""
+        // The picture screen's Edit, Redo and Video go straight to the picture or video model.
+        if resumeNote == nil, let quick = QuickPictureRequest.parse(lastMessage),
+           let picture = chat.messages.last(where: { $0.userText != nil })?.userAttachments.first(where: { $0.kind == .image }),
+           await runQuickPictureTurn(quick, picture: picture, client: aiClient, app: app) {
+            return
+        }
         if case .model(let pickedID) = chat.model,
            let pickedModel = app.openRouter.modelsByID[pickedID],
            pickedModel.isPureImageModel {
@@ -1924,7 +1930,8 @@ final class ChatSession: Identifiable {
                         spendLimit: invocation.spendLimit,
                         requiresInitialSpendApproval: false,
                         agent: invocation.definition,
-                        allowAskUser: false
+                        allowAskUser: false,
+                        autoApprove: true
                     )
                     let helperEnv = AgentEnvironment(
                         openRouter: aiClient,
@@ -2144,7 +2151,7 @@ final class ChatSession: Identifiable {
             generatesImages: routeModelInfo?.generatesImages ?? false,
             supportsTools: app.openRouter.supportsTools(chat.model)
         )
-        let input = AgentTurnInput(
+        var input = AgentTurnInput(
             chat: chat,
             route: route,
             systemPrompt: SystemPrompt.make(
@@ -2168,8 +2175,11 @@ final class ChatSession: Identifiable {
             fallbackModels: fallbackModels,
             requiresInitialSpendApproval: false,
             steering: turnSteering,
-            resumeNote: resumeNote
+            resumeNote: resumeNote,
+            autoApprove: true
         )
+        // A picture or video request ends once the picture is made: no extra model call to describe it.
+        if isMediaTurn { input.endAfterTools = ["generate_image", "generate_video"] }
         let account = app.openRouter
         let attachmentStore = app.attachmentStore
         var environment = AgentEnvironment(
@@ -2916,6 +2926,66 @@ final class ChatSession: Identifiable {
 
     // MARK: Pure Image-Generation Model Turns, Workstation Files, & Kiro Chat Workflows
 
+    /// Edit, Redo or Video from the picture screen: one call to the picture or video model, picked
+    /// for the job, and nothing else. False when there's no model for it, so the chat answers instead.
+    private func runQuickPictureTurn(_ request: QuickPictureRequest, picture: AttachmentReference, client: OpenRouterClient, app: AppModel) async -> Bool {
+        let pool = (app.openRouter.allSelectableModels.isEmpty ? app.openRouter.models : app.openRouter.allSelectableModels).filter(\.generatesImages)
+        let tool: any AgentTool
+        var arguments: JSONValue
+        switch request {
+        case .edit, .redo:
+            guard let best = ImageModelChooser.best(for: .edit, among: pool), best.acceptsImages else { return false }
+            tool = GenerateImageTool(client: client, store: app.attachmentStore, model: best.id, maySpend: false, availableImages: [picture], candidates: pool, chooseAutomatically: true)
+            arguments = ["prompt": .string(request.prompt), "reference_images": [.string(picture.name)]]
+        case .video:
+            let videoModels = await VideoCatalogue.shared.models(using: client)
+            guard !videoModels.isEmpty else { return false }
+            tool = GenerateVideoTool(client: client, store: app.attachmentStore, availableImages: [picture], models: { videoModels })
+            arguments = ["prompt": .string(request.prompt), "first_frame": .string(picture.name), "duration_seconds": 5]
+        }
+        let argumentText = (try? JSONCoding.encoder().encode(arguments)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        var call = ToolCallRecord(id: UUID().uuidString, name: tool.name, arguments: argumentText, summary: tool.runningSummary(for: arguments), status: .running)
+        var step = AssistantStep()
+        step.toolCalls = [call]
+        if var turn = lastTurn {
+            turn.status = .running
+            turn.steps = [step]
+            replaceLastTurn(turn)
+        }
+        do {
+            let output = try await tool.runApproved(arguments: arguments) { [weak self] message in
+                Task { @MainActor in
+                    guard let self, var turn = self.lastTurn, !turn.steps.isEmpty, !turn.steps[0].toolCalls.isEmpty else { return }
+                    turn.steps[0].toolCalls[0].summary = message
+                    self.replaceLastTurn(turn)
+                }
+            }
+            call.status = .done
+            call.summary = output.summary
+            call.result = output.forModel
+            call.finishedAt = Date()
+            if output.billedCost > 0 { call.billedCost = output.billedCost }
+            step.toolCalls = [call]
+            step.generatedImages = output.generatedImages.isEmpty ? nil : output.generatedImages
+            step.model = output.generatedImages.first?.model
+            step.text = output.summary + "."
+            step.finishedAt = Date()
+            var turn = lastTurn ?? AssistantTurn()
+            turn.steps = [step]
+            turn.status = .done
+            replaceLastTurn(turn)
+            chat.updatedAt = Date()
+            saveSoon(immediately: true)
+            app.sync.request()
+        } catch let apiErr as OpenRouterAPIError where apiErr.kind == .outOfCredits {
+            app.openRouter.markOutOfCredits()
+            fail(.outOfCredits, app.openRouter.describe(apiErr))
+        } catch {
+            fail(.other, app.openRouter.describe(error))
+        }
+        return true
+    }
+
     private func runPureImageTurn(
         model: ModelInfo,
         prompt: String,
@@ -3229,7 +3299,8 @@ final class ChatSession: Identifiable {
                     spendLimit: invocation.spendLimit,
                     requiresInitialSpendApproval: false,
                     agent: invocation.definition,
-                    allowAskUser: false
+                    allowAskUser: false,
+                    autoApprove: true
                 )
                 let stepEnv = AgentEnvironment(
                     openRouter: aiClient,

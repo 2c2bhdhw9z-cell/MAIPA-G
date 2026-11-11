@@ -23,6 +23,12 @@ public struct MCPTool: AgentTool {
         ConnectorActionPolicy.approval(for: definition, arguments: arguments)
     }
 
+    /// Destroying a machine, a repo, an account or a database can't be taken back, so it asks
+    /// even when everything else just runs.
+    public func alwaysAsks(for arguments: JSONValue) async -> Bool {
+        ConnectorActionPolicy.isIrreversible(definition.originalName)
+    }
+
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         // The agent loop asks first; this second check keeps any other caller from skipping it.
         if let approval = ConnectorActionPolicy.approval(for: definition, arguments: arguments) {
@@ -57,6 +63,13 @@ public struct MCPTool: AgentTool {
 /// how the request or the model's message is worded. Server hints can add an approval; nothing a
 /// server says removes one for deleting, spending, access changes or a risky command.
 public enum ConnectorActionPolicy {
+    public static func isIrreversible(_ toolName: String) -> Bool {
+        let parts = words(toolName)
+        if parts.contains("destroy") { return true }
+        guard parts.contains(where: { ["delete", "remove", "drop", "wipe"].contains($0) }) else { return false }
+        return parts.contains(where: { ["sprite", "sprites", "machine", "vm", "repo", "repository", "account", "project", "database", "org", "organization", "bucket"].contains($0) })
+    }
+
     public enum Risk: Equatable, Sendable {
         case deletes, spends, changesAccess, runsRiskyCommand(String), destructiveHint
     }

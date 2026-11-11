@@ -60,12 +60,14 @@ public struct SendFileTool: AgentTool {
             file = folder.appendingPathComponent("download")
             if host == "api.github.com" || host == "github.com" {
                 guard let github else { throw ToolInputError("GitHub isn't connected, so its files can't be downloaded.") }
-                try await github.downloadAuthenticatedArtifact(at: raw, to: file)
+                let apiURL = try await Self.apiDownloadURL(for: url, github: github)
+                if apiURL.contains("/releases/assets/") { shownName = url.lastPathComponent }
+                try await github.downloadAuthenticatedArtifact(at: apiURL, to: file)
             } else {
                 let response = try await transport.download(HTTPRequest(url: url, idleTimeout: 180), to: file, progress: nil)
                 guard response.isSuccess else { throw ToolInputError("The download answered HTTP \(response.status).") }
             }
-            if url.path.contains("/actions/artifacts/") { shownName = "artifact.zip" }
+            if url.path.contains("/artifacts/") { shownName = "artifact.zip" }
         } else {
             throw ToolInputError("Give an https url or a computer_path.")
         }
@@ -86,6 +88,26 @@ public struct SendFileTool: AgentTool {
             summary: "Sent \(shownName)",
             generatedImages: [result]
         )
+    }
+
+    /// The API address for a GitHub page or download link: an artifact on a run's page
+    /// (github.com/o/r/actions/runs/1/artifacts/2) or a release download
+    /// (github.com/o/r/releases/download/tag/file), which private repos only serve through the API.
+    static func apiDownloadURL(for url: URL, github: GitHubClient) async throws -> String {
+        let parts = url.path.split(separator: "/").map(String.init)
+        guard url.host?.lowercased() == "github.com", parts.count >= 4 else { return url.absoluteString }
+        let repo = RepoRef(owner: parts[0], name: parts[1])
+        if let index = parts.firstIndex(of: "artifacts"), index + 1 < parts.count, Int(parts[index + 1]) != nil {
+            return "https://api.github.com/repos/\(repo.owner)/\(repo.name)/actions/artifacts/\(parts[index + 1])/zip"
+        }
+        if parts.count >= 6, parts[2] == "releases", parts[3] == "download" {
+            let tag = parts[4], name = parts[5...].joined(separator: "/")
+            let release = try await github.send("GET", GitHubClient.path(repo, "/releases/tags/\(GitHubClient.escape(tag))"))
+            guard let asset = JSONValue.parse(release.body)?["assets"]?.arrayValue?.first(where: { $0["name"]?.stringValue == name }),
+                  let id = asset["id"]?.intValue else { throw ToolInputError("The release \(tag) has no file called \(name).") }
+            return "https://api.github.com/repos/\(repo.owner)/\(repo.name)/releases/assets/\(id)"
+        }
+        return url.absoluteString
     }
 
     static func isZip(_ file: URL) -> Bool {
