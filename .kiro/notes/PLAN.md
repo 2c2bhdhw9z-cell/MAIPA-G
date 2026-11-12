@@ -1356,7 +1356,7 @@ backwards. This is a second reason Workflows defaults to off.
 
 ## Tenth follow-up: full audit (12 November 2026)
 
-Five audits (tools, sync, engine, canvas, app screens). The fixes are in build 188.
+Five audits (tools, sync, engine, canvas, app screens). The fixes are in build 190.
 
 **Done**
 - **Tools work like Kiro's:**
