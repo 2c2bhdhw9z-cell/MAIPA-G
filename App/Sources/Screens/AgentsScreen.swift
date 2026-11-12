@@ -78,6 +78,8 @@ struct AgentDetailScreen: View {
     @State private var didSetDefaultTarget = false
     @State private var running = false
     @State private var confirmDelete = false
+    /// The run this screen started: its progress shows here instead of the Jobs screen popping up.
+    @State private var startedJobID: UUID?
 
     private var current: AgentDefinition {
         app.automations.agents.first { $0.id == agent.id } ?? agent
@@ -89,6 +91,11 @@ struct AgentDetailScreen: View {
 
     private var chosenRepo: ChatRepo? {
         useRepo ? availableRepo : nil
+    }
+
+    private var startedJob: JobRecord? {
+        guard let startedJobID else { return nil }
+        return app.jobs.jobs.first { $0.id == startedJobID }
     }
 
     var body: some View {
@@ -126,10 +133,29 @@ struct AgentDetailScreen: View {
                     }
                 }
                 .disabled(running || request.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if let job = startedJob {
+                    NavigationLink { JobDetailScreen(job: job) } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Label(Self.runStatus(job), systemImage: Self.runIcon(job))
+                                .font(.subheadline.weight(.medium))
+                            if let line = Self.runLine(job) {
+                                Text(line)
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.secondaryText)
+                                    .lineLimit(3)
+                            }
+                        }
+                    }
+                    .accessibilityHint("Shows every step of this run and its answer")
+                } else if startedJobID != nil {
+                    Label("Started. It's in Jobs.", systemImage: "checkmark.circle")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.secondaryText)
+                }
             } header: {
                 Text("Run this agent")
             } footer: {
-                Text("Starts a background run and opens Jobs so you can watch progress and read the finished answer.")
+                Text("Starts a background run. Its progress shows here: tap it for every step and the finished answer. It's in Jobs too.")
             }
 
             Section("How it works") {
@@ -199,9 +225,45 @@ struct AgentDetailScreen: View {
         let node = WorkflowNode.agent(title: current.name, agent: current.id, instruction: trimmed)
         let workflow = WorkflowDefinition(id: "agent-run:\(UUID().uuidString)", name: current.name, summary: trimmed, steps: [node], isApproved: true)
         Task {
-            _ = await app.automations.run(workflow, request: trimmed, repo: chosenRepo)
+            // The run shows on this screen; the Jobs screen doesn't take its place.
+            if let job = await app.automations.run(workflow, request: trimmed, repo: chosenRepo, openJobsSheet: false) {
+                startedJobID = job.id
+                Haptics.success()
+            }
             running = false
         }
+    }
+
+    private static func runStatus(_ job: JobRecord) -> String {
+        if job.isStuck { return "Stuck — no progress for 10 minutes" }
+        switch job.status {
+        case .queued: return "Waiting to start"
+        case .settingUp: return "Setting up"
+        case .running: return "Working"
+        case .needsApproval, .needsAnswer: return "Needs you"
+        case .handingOver: return "Changing runners"
+        case .done: return "Finished"
+        case .stopped: return "Stopped"
+        case .failed: return "Didn't finish"
+        }
+    }
+
+    private static func runIcon(_ job: JobRecord) -> String {
+        switch job.status {
+        case .done: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        case .needsApproval, .needsAnswer: return "person.crop.circle.badge.questionmark"
+        case .stopped: return "stop.circle"
+        default: return "gearshape.2"
+        }
+    }
+
+    /// The finished answer (or why it stopped), or the step it is on now.
+    private static func runLine(_ job: JobRecord) -> String? {
+        if let summary = job.result?.summary.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
+            return summary
+        }
+        return job.steps.last(where: { $0.status == .running || $0.status == .waiting })?.title
     }
 }
 

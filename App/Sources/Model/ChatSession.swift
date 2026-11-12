@@ -34,7 +34,16 @@ final class ChatSession: Identifiable {
         var text: String
     }
 
-    private(set) var isRunning = false
+    private(set) var isRunning = false {
+        didSet {
+            guard isRunning != oldValue else { return }
+            listedAtWhileRunning = isRunning ? chat.updatedAt : nil
+            app?.library.sessionRunningChanged(id, isRunning: isRunning)
+        }
+    }
+    /// Where the chat list places this chat while its reply runs: the chat's updatedAt when the
+    /// reply started. Nil when no reply is running. See ChatLibrary.listSummary.
+    @ObservationIgnored private(set) var listedAtWhileRunning: Date?
     private(set) var isCompacting = false
     /// Spec mode: the current phase's document is written and waits for approval (reply or button).
     private(set) var specAwaitingApproval = false
@@ -85,8 +94,11 @@ final class ChatSession: Identifiable {
     @ObservationIgnored private var workflowTasks: [String: Task<Void, Never>] = [:]
     var currentChangeWorkspace: ChangeWorkspace? { changeWorkspace }
     var hasActiveWorkflowRuns: Bool { activeWorkflowRuns.contains(where: \.isRunning) }
+    /// A finished workflow run is kept in the chat file, so it no longer keeps the session in
+    /// memory; a paused one does while its engine (needed to resume it) is still here.
     var hasInMemoryWorkToPreserve: Bool {
-        changeWorkspace != nil || !extraChangeWorkspaces.isEmpty || !workstationFiles.isEmpty || !activeWorkflowRuns.isEmpty
+        changeWorkspace != nil || !extraChangeWorkspaces.isEmpty || !workstationFiles.isEmpty
+            || activeWorkflowRuns.contains { Self.workflowRunIsUnfinished($0) && workflowEngines[$0.id] != nil }
     }
 
     func hasUnsavedStagedWork() async -> Bool {
@@ -137,8 +149,14 @@ final class ChatSession: Identifiable {
         if !workstationFiles.isEmpty {
             lines.append("Workstation files in chat: \(workstationFiles.count)")
         }
-        for wf in activeWorkflowRuns {
-            lines.append("Chat workflow \(wf.definition.name) (\(wf.id)): \(wf.isRunning ? "running" : (wf.checkpoint.pendingQuestion != nil ? "paused" : "stopped/done")) · cost $\(String(format: "%.4f", wf.checkpoint.cumulativeCost))")
+        // Only runs that can still do something go to the AI; a finished run's result is already in
+        // the chat's replies.
+        for wf in activeWorkflowRuns where Self.workflowRunIsUnfinished(wf) {
+            lines.append("Chat workflow \(wf.definition.name) (\(wf.id)): \(wf.isRunning ? "running" : "paused") · cost $\(String(format: "%.4f", wf.checkpoint.cumulativeCost))")
+        }
+        let finishedWorkflowRuns = activeWorkflowRuns.filter { !Self.workflowRunIsUnfinished($0) }.count
+        if finishedWorkflowRuns > 0 {
+            lines.append("Finished workflow runs in this chat: \(finishedWorkflowRuns) (their results are in the chat's replies)")
         }
         return lines
     }
@@ -165,6 +183,8 @@ final class ChatSession: Identifiable {
         // Any run still marked "running" when a session is built has no in-memory engine behind it,
         // so settle it here: every load path builds a session, and the card would otherwise be stuck.
         settleInterruptedWorkflowRunsOnLaunch()
+        // Chats saved before finished runs were trimmed: the next save writes the trimmed list.
+        pruneFinishedWorkflowRuns()
     }
 
     var backgroundStatusSubtitle: String {
@@ -2473,6 +2493,7 @@ final class ChatSession: Identifiable {
         if milestone || turn.status != .running {
             refreshStagedChanges()
             rememberSavingStyle(from: turn)
+            applySessionInformationUpdates(from: turn)
         }
         if milestone || turn.status != .running || Date().timeIntervalSince(lastSaved) >= 4.0 {
             chat.updatedAt = Date()
@@ -2512,6 +2533,27 @@ final class ChatSession: Identifiable {
                     settings.directSaveRepos[repoKey] = parsed.straightToBranch
                 }
             }
+        }
+    }
+
+    /// The AI's tool for naming the chat and saying where its work is.
+    static let sessionInformationToolName = "update_session_information"
+    @ObservationIgnored private var appliedSessionInformationCalls = Set<String>()
+
+    /// Finished `update_session_information` calls (title, description, status) land here once
+    /// each, from a reply on the phone or on the chat computer, the same way `set_saving_style`
+    /// does above. Called from `publish` at every milestone and when the reply ends.
+    private func applySessionInformationUpdates(from turn: AssistantTurn) {
+        for call in turn.steps.flatMap(\.toolCalls) where call.name == Self.sessionInformationToolName && call.status == .done {
+            guard appliedSessionInformationCalls.insert(call.id).inserted else { continue }
+            // TODO(update_session_information): parse `call.arguments` with
+            // `SessionInformationUpdate.parse(arguments:)` once AgentCore has it, then:
+            // - title: set `chat.title` (trimmed, at most 80 characters, as `rename(_:)` does) unless
+            //   `chat.titleIsCustom` is true (the person's own name wins), then `saveSoon()`.
+            // - description / status: the chat list's status line is `ChatSummary.activityLine`
+            //   (built in ChatSummary.init from the running tool call's summary, or the reply's first
+            //   line) and its state is `ChatSummary.activity`. Nothing on `Chat` stores an AI-written
+            //   status yet, so it needs a field there (or on this session) that ChatSummary.init reads.
         }
     }
 
@@ -3353,6 +3395,7 @@ final class ChatSession: Identifiable {
         }
         guard changed else { return }
         chat.activeWorkflowRuns = activeWorkflowRuns
+        pruneFinishedWorkflowRuns()
         saveSoon(immediately: true)
     }
 
@@ -3363,6 +3406,45 @@ final class ChatSession: Identifiable {
             activeWorkflowRuns.insert(snapshot, at: 0)
         }
         chat.activeWorkflowRuns = activeWorkflowRuns
+        pruneFinishedWorkflowRuns()
+    }
+
+    /// How many finished workflow runs a chat keeps, newest first, for inspect and Retry. Older
+    /// finished runs are dropped: their results are already in the chat's replies, and each kept
+    /// run is carried in the chat file.
+    static let finishedWorkflowRunsKept = 3
+
+    /// A run that can still do something: running, or paused (waiting on an answer, or paused by
+    /// the person). Completed, stopped and failed runs are finished.
+    nonisolated static func workflowRunIsUnfinished(_ run: ActiveWorkflowRunSnapshot) -> Bool {
+        if run.isRunning { return true }
+        guard !run.checkpoint.isCancelled, run.errorMessage == nil else { return false }
+        return run.checkpoint.pendingQuestion != nil || run.checkpoint.isPausedByUser
+    }
+
+    /// Keeps every unfinished run and the newest few finished ones (runs are newest first).
+    private func pruneFinishedWorkflowRuns() {
+        var finishedSeen = 0
+        var kept: [ActiveWorkflowRunSnapshot] = []
+        var dropped: [String] = []
+        for run in activeWorkflowRuns {
+            if Self.workflowRunIsUnfinished(run) {
+                kept.append(run)
+                continue
+            }
+            finishedSeen += 1
+            if finishedSeen <= Self.finishedWorkflowRunsKept {
+                kept.append(run)
+            } else {
+                dropped.append(run.id)
+            }
+        }
+        guard !dropped.isEmpty else { return }
+        for runID in dropped where workflowTasks[runID] == nil {
+            workflowEngines[runID] = nil
+        }
+        activeWorkflowRuns = kept
+        chat.activeWorkflowRuns = kept
     }
 
     private func refreshWorkflowSnapshotFromMessage(runID: String, event: WorkflowMessageEvent) {
@@ -3384,9 +3466,19 @@ final class ChatSession: Identifiable {
             return "No active workflow run or saved workflow matches `\(q)`."
         }
         var sections: [String] = []
-        if !activeWorkflowRuns.isEmpty {
-            sections.append("## Active / Recent Workflow Runs in This Chat\n" + activeWorkflowRuns.map { $0.formattedTreeSummary() }.joined(separator: "\n\n"))
-        } else {
+        let unfinished = activeWorkflowRuns.filter { Self.workflowRunIsUnfinished($0) }
+        let finished = activeWorkflowRuns.filter { !Self.workflowRunIsUnfinished($0) }
+        if !unfinished.isEmpty {
+            sections.append("## Active Workflow Runs in This Chat\n" + unfinished.map { $0.formattedTreeSummary() }.joined(separator: "\n\n"))
+        }
+        if !finished.isEmpty {
+            // One line each once finished; asking for a run by id still gives its full tree.
+            let lines = finished.map { run in
+                run.formattedTreeSummary().split(separator: "\n", maxSplits: 1).first.map(String.init) ?? run.definition.name
+            }
+            sections.append("## Recent Finished Workflow Runs\n" + lines.map { "- \($0)" }.joined(separator: "\n"))
+        }
+        if activeWorkflowRuns.isEmpty {
             sections.append("No workflow runs in this chat yet.")
         }
         if let workflows = app?.automations.workflows, !workflows.isEmpty {

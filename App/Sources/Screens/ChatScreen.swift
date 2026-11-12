@@ -280,13 +280,15 @@ struct ChatScreen: View {
 
             VStack(spacing: 8) {
                 if !session.pendingSteers.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 0) {
                         ForEach(session.pendingSteers) { steer in
                             HStack(spacing: 8) {
                                 Image(systemName: "arrow.turn.down.right")
                                     .font(.caption.weight(.bold))
                                     .foregroundStyle(theme.accent)
-                                Text("Steering active reply: \(steer.text)")
+                                    .accessibilityHidden(true)
+                                // The reply reads it at its next step; until then it can be taken back.
+                                Text("Steering message queued: \(steer.text)")
                                     .font(.caption.weight(.medium))
                                     .foregroundStyle(.primary)
                                     .lineLimit(2)
@@ -295,16 +297,25 @@ struct ChatScreen: View {
                                     session.cancelPendingSteer(steer.id)
                                     Haptics.selection()
                                 } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .foregroundStyle(Theme.secondaryText)
+                                    HStack(spacing: 3) {
+                                        Text("Edit")
+                                            .font(.caption2.weight(.semibold))
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.caption)
+                                    }
+                                    .foregroundStyle(Theme.secondaryText)
+                                    .frame(minWidth: 44, minHeight: 44)
+                                    .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
-                                .accessibilityLabel("Edit or cancel live steer")
+                                .accessibilityLabel("Take back steering message")
+                                .accessibilityHint("Puts it back in the message box so you can edit or delete it before the reply reads it")
                             }
                         }
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
+                    .padding(.leading, 12)
+                    .padding(.trailing, 4)
+                    .padding(.vertical, 1)
                     .background(theme.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(theme.accent.opacity(0.32)))
                     .padding(.horizontal, 12)

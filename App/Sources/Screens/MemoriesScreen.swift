@@ -54,7 +54,10 @@ struct MemoriesScreen: View {
                 }
                 ToolbarItem(placement: .primaryAction) { NavigationLink { MemoryEditorScreen() } label: { Image(systemName: "plus") } }
             }
-            .task { await app.memories.load() }
+            // Read once: the list then keeps itself current (adding, editing, turning off, deleting
+            // and memories saved on another device all reload it). Pull down to read it again.
+            .task { if !app.memories.isLoaded { await app.memories.load() } }
+            .refreshable { await app.memories.load() }
             .alert("Delete this memory?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
                 Button("Delete", role: .destructive) {
                     if let deleting { Task { await app.memories.delete(deleting.id) } }

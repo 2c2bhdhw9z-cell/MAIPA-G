@@ -24,6 +24,9 @@ final class SpecCoordinator {
 
     func preview(_ values: [SpecRecord]) { specs = values }
 
+    /// A spec step or task is running as a job, so its status is worth refreshing.
+    var hasActiveJobs: Bool { specs.contains { $0.activeJobID != nil } }
+
     @discardableResult
     func create(title: String, request: String, repo: ChatRepo) async -> SpecRecord? {
         do {
@@ -89,7 +92,8 @@ final class SpecCoordinator {
             workingBranch = record.branch
         }
         let repo = ChatRepo(ref: record.repo, branch: workingBranch, defaultBranch: record.defaultBranch, isPrivate: app.knownRepo(record.repo)?.isPrivate ?? false)
-        guard let job = await app.jobs.start(workflow: workflow, request: task.title, repo: repo) else { return }
+        // The task shows on its spec; the Jobs screen doesn't pop up over it.
+        guard let job = await app.jobs.start(workflow: workflow, request: task.title, repo: repo, openJobsSheet: false) else { return }
         do { _ = try await core.setActiveJob(job.id, for: record.id, taskID: task.id); specs = await core.all() }
         catch { lastError = ErrorExplainer.explain(error).message }
     }

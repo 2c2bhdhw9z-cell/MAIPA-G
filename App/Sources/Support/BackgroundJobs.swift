@@ -45,7 +45,7 @@ final class BackgroundJobs {
             refresh.expirationHandler = { [weak owner] in
                 work.cancel()
                 Task { @MainActor [weak owner] in
-                    owner?.lastFailure = "iOS ended MAIPA-G’s background refresh before job status finished updating. The GitHub job keeps running; open Jobs to refresh it."
+                    owner?.lastFailure = "iOS ended MAIPA-G’s background refresh before job status finished updating. The job keeps running on your computer (or on GitHub, for a preview build); open Jobs to refresh it."
                 }
             }
         }
@@ -70,7 +70,7 @@ final class BackgroundJobs {
                         }
                         ticks = min(ticks + 1, 99)
                         box.value.progress.completedUnitCount = ticks
-                        let subtitle = app.library.activeWorkSummary ?? "Checking Autonomous jobs"
+                        let subtitle = app.library.activeWorkSummary ?? Self.jobsSubtitle(app.jobs.activeCount)
                         box.value.updateTitle("MAIPA-G is working", subtitle: subtitle)
                         try? await Task.sleep(nanoseconds: 4_000_000_000)
                     }
@@ -84,11 +84,20 @@ final class BackgroundJobs {
                         owner.isContinuedProcessingActive = false
                         if (owner.app?.jobs.activeCount ?? 0) > 0 {
                             let title = owner.app?.jobs.jobs.first(where: { ![.done, .failed, .stopped].contains($0.status) })?.title ?? "the active job"
-                            owner.lastFailure = "iOS stopped background monitoring for \(title). The GitHub job itself keeps running; open Jobs to see its result."
+                            owner.lastFailure = "iOS stopped watching \(title) in the background. The job itself keeps running on your computer (or on GitHub, for a preview build); open Jobs to see its result."
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// The background task's subtitle when only jobs are running.
+    nonisolated static func jobsSubtitle(_ count: Int) -> String {
+        switch count {
+        case ..<1: return "Checking on your jobs"
+        case 1: return "Checking on 1 running job"
+        default: return "Checking on \(count) running jobs"
         }
     }
 
@@ -104,7 +113,7 @@ final class BackgroundJobs {
         }
 
         if #available(iOS 26.0, *), anyActive {
-            let subtitle = chatSubtitle ?? (hasActiveChats ? "Finishing active chat & sub-agents" : "Watching Autonomous jobs")
+            let subtitle = chatSubtitle ?? (hasActiveChats ? "Finishing a reply" : Self.jobsSubtitle(app?.jobs.activeCount ?? 0))
             let request = BGContinuedProcessingTaskRequest(
                 identifier: Self.continuedIdentifier,
                 title: "MAIPA-G is working",

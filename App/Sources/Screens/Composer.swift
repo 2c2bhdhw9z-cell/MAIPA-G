@@ -74,6 +74,27 @@ struct Composer: View {
 
     private static let pasteAttachmentThreshold = 20_000
 
+    /// Splits `new` into the text it shares with `old` at the start, what was pasted, and the text
+    /// it shares with `old` at the end. Text the paste replaced (a selection) is in neither end.
+    static func pastedPart(old: String, new: String) -> (before: String, pasted: String, after: String) {
+        var oldStart = old.startIndex
+        var newStart = new.startIndex
+        while oldStart < old.endIndex, newStart < new.endIndex, old[oldStart] == new[newStart] {
+            old.formIndex(after: &oldStart)
+            new.formIndex(after: &newStart)
+        }
+        var oldEnd = old.endIndex
+        var newEnd = new.endIndex
+        while oldEnd > oldStart, newEnd > newStart {
+            let oldPrevious = old.index(before: oldEnd)
+            let newPrevious = new.index(before: newEnd)
+            guard old[oldPrevious] == new[newPrevious] else { break }
+            oldEnd = oldPrevious
+            newEnd = newPrevious
+        }
+        return (String(new[..<newStart]), String(new[newStart..<newEnd]), String(new[newEnd...]))
+    }
+
     @FocusState private var focused: Bool
     @Environment(AppModel.self) private var app
     @Environment(\.theme) private var theme
@@ -81,6 +102,8 @@ struct Composer: View {
     @State private var choosingPhoto = false
     @State private var takingPhoto = false
     @State private var importError: String?
+    /// Pasted text put back in the box because it couldn't become a file; not converted again.
+    @State private var pasteRestoredText: String?
     @State private var attachmentsExpanded = false
     @State private var showingPlusMenu = false
 
@@ -275,28 +298,37 @@ struct Composer: View {
             }
         }
         .onChange(of: text) { oldValue, newValue in
+            // The text put back after a paste couldn't become a file: leave it as text.
+            if let restored = pasteRestoredText {
+                pasteRestoredText = nil
+                if newValue == restored { return }
+            }
             guard newValue.count >= Self.pasteAttachmentThreshold,
                   newValue.count - oldValue.count >= 4_000
             else { return }
-            let keptPrefix: String
-            let pastedBody: String
-            if !oldValue.isEmpty, oldValue.count < 2_000, newValue.hasPrefix(oldValue) {
-                keptPrefix = oldValue
-                pastedBody = String(newValue.dropFirst(oldValue.count))
-            } else {
-                keptPrefix = ""
-                pastedBody = newValue
-            }
-            text = keptPrefix
+            // What was pasted is what lies between the text kept at the start and at the end,
+            // wherever the cursor was.
+            let parts = Self.pastedPart(old: oldValue, new: newValue)
+            let remaining = parts.before + parts.after
+            text = remaining
             let existingCount = attachments.filter { $0.name.hasPrefix("Pasted text") }.count
             let fileName = existingCount == 0 ? "Pasted text.txt" : "Pasted text \(existingCount + 1).txt"
-            let data = Data(pastedBody.utf8)
+            let data = Data(parts.pasted.utf8)
             Task {
                 do {
                     let attached = try await AttachmentImporter.importFile(data, name: fileName, store: app.attachmentStore)
                     await keep(attached)
                 } catch {
-                    importError = error.localizedDescription
+                    // Nothing pasted is lost: it goes back in the box as text.
+                    let restored: String
+                    if text == remaining {
+                        restored = newValue
+                    } else {
+                        restored = text.isEmpty ? parts.pasted : text + "\n" + parts.pasted
+                    }
+                    pasteRestoredText = restored
+                    text = restored
+                    importError = "The pasted text couldn't be added as a file, so it stays in the message box. \(error.localizedDescription)"
                 }
             }
         }
@@ -908,5 +940,6 @@ struct AutonomousSwitch: View {
         .animation(.snappy(duration: 0.18), value: isOn)
         .accessibilityLabel("Autonomous")
         .accessibilityValue(isOn ? "On" : "Off")
+        .accessibilityAddTraits(.isToggle)
     }
 }
