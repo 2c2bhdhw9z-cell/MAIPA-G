@@ -365,6 +365,18 @@ close to how you function." Then "Yes" to the proposal. Built:
   try isn't run (it was the fourth). In the SDK 58 chat the same broken sync ran four times.
 - Each such repeat goes into the diagnostics ("tool X failed twice"), so the tool gets fixed.
 
+## Seventh follow-up of 12 November 2026: videos ("Still can't do something so simple")
+Kling 3.0 on OneProvider was working the whole time. Every request got `{"request_id":"task_…"}`
+back, and MAIPA-G didn't know that name for a job id, so it threw each started video away and
+called it a failure (11 times in the Logo flipped chat; OneProvider charges when a video finishes,
+so those may have been paid for). OneProvider's video guide (docs/guides/video-generation) gives the
+exact API; MAIPA-G now follows it: POST /v1/videos/generations, poll /v1/videos/generations/{id}
+(pending, done, failed), download from `video.url`, a path on OneProvider's own host. Only what it
+takes is sent (5 or 10 s, 16:9 or 9:16, 720p or 1080p; a square ask was a 400 three times), with its
+prices. `generate_video` takes `video_job` to collect a video that was already started instead of
+paying for a new one. Kling 3.0 Turbo answered 502 (OneProvider's "temporarily unavailable") on
+every call, so that one really was down.
+
 ## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
 He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,
 ask_user, generate_image) and Kiro's (read_file, list_directory, file_search, grep_search, code,

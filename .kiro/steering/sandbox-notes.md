@@ -50,6 +50,9 @@ Things that cost time to find out. Keep them short and true.
   same run with `gh api -X POST …/actions/workflows/release.yml/dispatches -f ref=main -f
   "inputs[sha]=$(git rev-parse origin/main)"`: Release finds any green iOS run of the exact commit,
   the tag's included. Don't let main build it a second time before publishing.
+- The macOS "AgentCore tests" step sometimes hangs until its 15-minute limit with nothing failing
+  (12 November 2026: four unrelated tests stuck, green on a plain re-run). Re-run just the failed
+  job (`gh api -X POST …/actions/runs/<id>/rerun-failed-jobs`) before looking for a bug.
 - Never type a run id or a commit sha by hand: look them up (`git rev-parse`, `gh api
   "…/actions/runs?branch=<tag>&per_page=1" --jq '.workflow_runs[0].id'`). A mistyped run id made
   the wait loop spin its full half hour on 404s, twice.

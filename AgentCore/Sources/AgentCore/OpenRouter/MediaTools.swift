@@ -128,12 +128,13 @@ public extension OpenRouterClient {
     /// (openrouter.ai/docs/guides/overview/multimodal/video-generation).
     func generateVideo(
         prompt: String, model: String, duration: Int?, resolution: String?, aspectRatio: String?,
-        firstFrame: ImageInput?, pollEvery: TimeInterval = 10, giveUpAfter: TimeInterval = 900,
+        firstFrame: ImageInput?, resumeJob: String? = nil, pollEvery: TimeInterval = 10, giveUpAfter: TimeInterval = 900,
         progress: @escaping @Sendable (String) -> Void = { _ in }
     ) async throws -> GeneratedVideo {
         if let gateway = providerEndpoint(for: model) {
             return try await AIProviderGateway.generateVideo(
                 prompt: prompt, rawModelID: gateway.rawModelID, duration: duration, aspectRatio: aspectRatio, firstFrame: firstFrame,
+                resolution: resolution, resumeJob: resumeJob,
                 endpoint: gateway.endpoint, transport: transport, pollEvery: pollEvery, giveUpAfter: giveUpAfter, progress: progress
             )
         }
@@ -259,11 +260,12 @@ public struct GenerateVideoTool: AgentTool {
             "duration_seconds": ["type": "integer", "description": "Optional; short (4 to 8 seconds) unless the person asks for longer."],
             "aspect_ratio": ["type": "string", "enum": ["16:9", "9:16", "1:1"]],
             "resolution": ["type": "string", "enum": ["480p", "720p", "1080p"]],
+            "video_job": ["type": "string", "description": "The job id of a video that was already started (an error or an earlier reply named it, like task_…), to collect it instead of paying for a new one. Give the same model."],
         ]
         if !availableImages.isEmpty {
             properties["first_frame"] = ["type": "string", "enum": .array(availableImages.map { .string($0.name) }), "description": "A picture from this chat to start the video from."]
         }
-        return ToolSpec(name: name, description: "Make a real video (it takes a minute or more) and save it with the chat. Videos are billed by the second, so keep them short unless asked.", parameters: [
+        return ToolSpec(name: name, description: "Make a real video (it takes one to three minutes) and save it with the chat. Videos are billed by the second, so keep them short unless asked. Use only the durations, aspect ratios and resolutions list_media_models gives for the model. If a video was started but not collected, pass its job id in video_job rather than starting another.", parameters: [
             "type": "object", "properties": .object(properties), "required": ["prompt"], "additionalProperties": false,
         ])
     }
@@ -310,7 +312,13 @@ public struct GenerateVideoTool: AgentTool {
 
     public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let prompt = try arguments.requiredString("prompt")
-        let choices = try await candidates(arguments)
+        // Collecting a video that was already started: only that model, never a new one elsewhere.
+        let resumeJob = arguments.optionalString("video_job")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let resumeJob, !resumeJob.isEmpty, (arguments.optionalString("model") ?? "").isEmpty {
+            throw ToolInputError("Give the model the video \(resumeJob) was started with, so MAIPA-G knows where to collect it.")
+        }
+        let allChoices = try await candidates(arguments)
+        let choices = (resumeJob?.isEmpty == false) ? Array(allChoices.prefix(1)) : allChoices
         var firstFrame: ImageInput?
         if let name = arguments.optionalString("first_frame") {
             guard let picture = availableImages.first(where: { $0.name == name }) else {
@@ -332,7 +340,7 @@ public struct GenerateVideoTool: AgentTool {
                 let video = try await client.generateVideo(
                     prompt: prompt, model: candidate.id, duration: Self.seconds(arguments, model: candidate),
                     resolution: arguments.optionalString("resolution"), aspectRatio: arguments.optionalString("aspect_ratio"),
-                    firstFrame: firstFrame, progress: progress
+                    firstFrame: firstFrame, resumeJob: arguments.optionalString("video_job"), progress: progress
                 )
                 made = (video, candidate)
                 break

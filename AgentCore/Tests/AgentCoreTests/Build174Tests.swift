@@ -376,3 +376,62 @@ struct AnotherWayTests {
         #expect(turn?.status == .done)
     }
 }
+
+extension GatewayVideoTests {
+    /// OneProvider exactly as its video guide describes it (12 November 2026).
+    final class DocumentedOneProvider: HTTPTransport, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _bodies: [JSONValue] = []
+        private var _polls = 0
+        var bodies: [JSONValue] { lock.withLock { _bodies } }
+
+        func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+            let url = request.url.absoluteString
+            guard request.headers["Authorization"] == "Bearer sk-one" else { return HTTPResponse(status: 401, headers: [:], body: Data()) }
+            if url == "https://api.oneprovider.dev/v1/videos/generations", request.method == "POST" {
+                let body = request.body.flatMap { JSONValue.parse($0) } ?? .null
+                lock.withLock { _bodies.append(body) }
+                let ok = [5, 10].contains(body["duration"]?.intValue ?? 0) && ["16:9", "9:16"].contains(body["aspect_ratio"]?.stringValue ?? "16:9")
+                    && ["720p", "1080p"].contains(body["resolution"]?.stringValue ?? "720p")
+                return ok
+                    ? HTTPResponse(status: 200, headers: [:], body: Data(#"{"request_id":"task_abc"}"#.utf8))
+                    : HTTPResponse(status: 400, headers: [:], body: Data(#"{"error":{"message":"This combination of model, duration, resolution and options is not available"}}"#.utf8))
+            }
+            if url == "https://api.oneprovider.dev/v1/videos/generations/task_abc" {
+                let polls = lock.withLock { _polls += 1; return _polls }
+                return polls < 2
+                    ? HTTPResponse(status: 200, headers: [:], body: Data(#"{"request_id":"task_abc","status":"pending","progress":50}"#.utf8))
+                    : HTTPResponse(status: 200, headers: [:], body: Data(#"{"request_id":"task_abc","status":"done","progress":100,"video":{"url":"/v1/videos/generations/task_abc/content","duration":5}}"#.utf8))
+            }
+            if url == "https://api.oneprovider.dev/v1/videos/generations/task_abc/content" {
+                return HTTPResponse(status: 200, headers: ["content-type": "video/mp4"], body: Data("documented-mp4".utf8))
+            }
+            return HTTPResponse(status: 404, headers: [:], body: Data())
+        }
+        func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse {
+            HTTPStreamResponse(status: 500, headers: [:], body: AsyncThrowingStream { $0.finish() })
+        }
+    }
+
+    @Test("OneProvider's documented flow: request_id, pending, done with a path on its own host, then the file")
+    func documentedOneProviderFlow() async throws {
+        let gateway = DocumentedOneProvider()
+        // A square 8-second ask becomes what OneProvider takes (16:9, 10 s, 720p) instead of a 400.
+        let video = try await AIProviderGateway.generateVideo(prompt: "blobs merge", rawModelID: "kling-3.0", duration: 8, aspectRatio: "1:1", firstFrame: nil, endpoint: Self.oneProvider, transport: gateway, pollEvery: 0.01)
+        #expect(video.data == Data("documented-mp4".utf8))
+        let sent = try #require(gateway.bodies.first)
+        #expect(sent["duration"]?.intValue == 10)
+        #expect(sent["aspect_ratio"]?.stringValue == "16:9")
+        #expect(sent["resolution"]?.stringValue == "720p")
+        #expect(sent["seconds"] == nil && sent["size"] == nil)
+    }
+
+    @Test("A video already started is collected by its job id, without starting (and paying for) a new one")
+    func collectsAStartedVideo() async throws {
+        let gateway = DocumentedOneProvider()
+        let video = try await AIProviderGateway.generateVideo(prompt: "", rawModelID: "kling-3.0", duration: nil, aspectRatio: nil, firstFrame: nil, resumeJob: "task_abc", endpoint: Self.oneProvider, transport: gateway, pollEvery: 0.01)
+        #expect(video.data == Data("documented-mp4".utf8))
+        #expect(gateway.bodies.isEmpty)
+        #expect(AIProviderGateway.videoModels(for: Self.oneProvider).first?.aspectRatios == ["16:9", "9:16"])
+    }
+}
