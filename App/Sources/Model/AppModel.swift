@@ -401,6 +401,7 @@ final class AppModel {
                 grace.end()
             }
         case .active:
+            sync.appBecameActive()
             guard started else { return }
             // Launch carries on the replies left running itself, once connectors and models are in.
             if resumedRunningChats { library.resumePausedChats() }

@@ -707,7 +707,7 @@ public struct ComputerTaskTool: AgentTool {
 /// eliminating ambiguity with external sandbox MCP tools (such as Hugging Face's `hf_sandbox`)
 /// and enforcing `ShellRisk` + post-outside-content network egress approvals consistently.
 ///
-/// Like Kiro's command tool: a time limit the AI sets (`timeout_seconds`, 2 minutes unless it asks
+/// Like Kiro's command tool: a time limit the AI sets (`timeout_seconds`, 15 minutes unless it asks
 /// for up to 30), `run_in_background` for servers and long jobs, any folder as `cwd`, and the exit
 /// code on the first line of the result.
 public struct RunCommandTool: AgentTool {
@@ -716,7 +716,7 @@ public struct RunCommandTool: AgentTool {
     let homePath: String?
     let checkout: CheckoutPreparer?
 
-    public static let defaultTimeoutSeconds = 120
+    public static let defaultTimeoutSeconds = 900
     public static let maxTimeoutSeconds = Int(BoundedProcess.maxTimeout)
     static let missingFolderMarker = "maipa-g-no-such-folder"
 

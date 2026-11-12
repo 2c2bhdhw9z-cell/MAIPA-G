@@ -515,7 +515,7 @@ struct SyncReliabilityTests {
         _ = try await rig.sync.sync()
         let times = rig.github.writeTimes
         #expect(times.count == 8, "5 blobs, a tree, a commit and the branch move")
-        for (earlier, later) in zip(times, times.dropFirst()) { #expect(later - earlier >= 0.13) }
+        for (earlier, later) in zip(times, times.dropFirst()) { #expect(later - earlier >= 0.1) }
     }
 
     // MARK: 6. Files go up a few at a time

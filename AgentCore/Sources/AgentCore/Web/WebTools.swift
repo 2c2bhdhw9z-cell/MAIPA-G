@@ -113,7 +113,7 @@ public struct ReadWebPageTool: AgentTool {
     let reader: WebPageReader
     public let name = "read_web_page"
     /// What mode "truncated" (the default) returns, like Kiro's web fetch.
-    public static let truncatedCharacters = 8_000
+    public static let truncatedCharacters = 30_000
     public init(transport: any HTTPTransport) { reader = WebPageReader(transport: transport) }
     public var spec: ToolSpec {
         ToolSpec(
@@ -121,7 +121,7 @@ public struct ReadWebPageTool: AgentTool {
             description: """
             Read a public web page (http or https) and get its readable text: headings, paragraphs, lists and tables, without \
             scripts, menus or footers. JSON, XML, Markdown and plain-text addresses are read as they are. Use it for docs, articles, \
-            READMEs, changelogs and API answers, usually after web_search. mode "truncated" (the default) returns the first 8,000 \
+            READMEs, changelogs and API answers, usually after web_search. mode "truncated" (the default) returns the first 30,000 \
             characters; "full" returns the whole text (up to 200,000 characters); "selective" returns only the parts that mention \
             search_phrase, with a few lines around each. The result always says when text was left out and how to get it. \
             Private and local addresses are refused, pages over 2 MB aren't read, and it can't sign in, run JavaScript or fill in forms. \
@@ -131,7 +131,7 @@ public struct ReadWebPageTool: AgentTool {
                 "type": "object",
                 "properties": [
                     "url": ["type": "string", "description": "The full address, starting with https:// or http://."],
-                    "mode": ["type": "string", "enum": ["truncated", "full", "selective"], "description": "truncated (default): the first 8,000 characters. full: the whole page. selective: only the parts that mention search_phrase."],
+                    "mode": ["type": "string", "enum": ["truncated", "full", "selective"], "description": "truncated (default): the first 30,000 characters. full: the whole page. selective: only the parts that mention search_phrase."],
                     "search_phrase": ["type": "string", "description": "For mode selective: the word or phrase to find, like \"rate limit\"."],
                 ],
                 "required": ["url"],

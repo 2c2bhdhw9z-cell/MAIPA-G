@@ -53,8 +53,8 @@ struct ChatUIRegressionTests {
     func workstationReviewActions() throws {
         let workstation = try source("App/Sources/Screens/WorkstationScreen.swift")
         #expect(workstation.contains("tab = initialTab"))
-        #expect(compact(workstation).contains("case.changes:changesWorkspace"))
-        let changes = compact(try section(workstation, from: "private var changesWorkspace", to: "// MARK: - Data Aggregation"))
+        #expect(compact(workstation).contains("case.changes:WorkstationChangesTab(session:session"))
+        let changes = compact(try section(workstation, from: "private struct WorkstationChangesTab", to: "// MARK: - Preview sheet"))
         for (title, action) in [("Add it", "addLastSave"), ("Throw away", "throwAwayLastSave"), ("Undo", "undoLastSave")] {
             let role = title == "Throw away" ? ",role:.destructive" : ""
             let expected = "Button(\"\(title)\"\(role)){Task{awaitsession.\(action)()}}"

@@ -1353,3 +1353,66 @@ one — it is the owner's biggest complaint and a wrong fix wastes his time.
 Workflows cost far more than sub-agents — each step is a full model call re-sending context, so a
 five-step workflow costs more than eight parallel sub-agents. Earlier reasoning in this file had it
 backwards. This is a second reason Workflows defaults to off.
+
+## Tenth follow-up: full audit (12 November 2026)
+
+Five audits (tools, sync, engine, canvas, app screens). The fixes are in build 188.
+
+**Done**
+- **Tools work like Kiro's:**
+  - A long result keeps its start and end (30k limit). On the computer, the full output is saved to `~/.maipa-g/outputs/<callID>.txt`.
+  - `run_command` takes `timeout_seconds` (default 900, at most 1800), `run_in_background` and `cwd`, and puts the exit code first.
+  - `read_file` takes offset/limit and always has a footer.
+  - `search_code` takes context_lines, exclude_glob and max_per_file, and keeps indentation.
+  - New tools: `file_search`, `code` (ast-grep) and `update_session_information`.
+  - `create_file` can overwrite. Edits say when they used a whitespace-tolerant match. Append adds a line break first. Delete works on binary files.
+  - `read_web_page` has truncated (30k), full and selective modes. web_search refuses queries over 200 characters and says when it couldn't read the results page.
+  - `list_files on_computer` works on the runner. `invoke_sub_agent` takes contextFiles.
+- **Sync:**
+  - Never deletes from a cut-short file list.
+  - Commits every 25 files or 20 s and keeps a journal of uploaded blobs.
+  - A rate limit commits what went up and continues later. It honours retry-after and spaces writes 1 s apart.
+  - Sends 4 files at a time and notices edited 1-20 MB files.
+  - Safe writes retry after a dropped connection (-1005).
+  - The watchdog follows real progress, and background uploads are never cancelled.
+  - A streaming chat is held until its reply ends. The status says "paused" instead of failed.
+- **Engine:**
+  - Retry doesn't re-follow an ended run.
+  - Stop retries and is remembered when the computer is unreachable.
+  - Steering isn't lost when a send fails or arrives in the last second.
+  - A cut-off reply isn't marked done, and stopped tools aren't re-run.
+  - Sub-agents share one spending limit. Old states are kept while the phone reads them.
+- **Canvas:**
+  - New `WorkstationCanvasModel`: lists are built off the main thread, with a spatial index. Positions are saved in a JSON file, and new cards never move old ones.
+  - Gestures: pinch zooms around the fingers, a flick glides, double tap zooms.
+  - Cards are drawn at three levels of detail.
+  - New `ThumbnailPipeline`: cached, deduplicated, at most 4 decodes, cancellable, video frames.
+  - The Files tab shows every file, and its search runs off the main thread.
+  - Chat views: lazy gallery, lazy pill grid, cheap row comparison.
+- **App screens:**
+  - Synced running chats are settled or followed, never re-run. Resume waits for connectors and models.
+  - A failed paste-to-file keeps the text.
+  - Health check: the Actions check is live.
+  - Agent and spec runs no longer swap to the Jobs sheet.
+  - Chat rows hold their place while a reply streams, and the running status updates live.
+  - Old workflow runs are trimmed. Chat save failures are logged and retried.
+  - Fewer refreshes on foreground and background.
+  - Accessibility fixes.
+
+**Not done yet (next batch)**
+1. Phone side of saving cut tool output: call `ToolOutputArchive.setDefault(DirectoryToolOutputSaver(directory: <app support>/tool-outputs))` at launch.
+2. `update_session_information` on the phone: fill in `ChatSession.applySessionInformationUpdates(from:)` (marked TODO).
+   - Title goes to `chat.title` unless `titleIsCustom`.
+   - The status line needs a new field on `Chat`, read by `ChatSummary.init`.
+3. `list_files on_computer` from the phone: pass `computer:`/`computerPath:` to `ListFilesTool` (ChatSession ~1573).
+4. `search_code` default is 100 results (was 120). Put it back to 120.
+5. JobCoordinator's 20-second watcher still runs `syncNow()` with no jobs.
+6. `ChatLibrary.open()` resumes a running chat before launch has resumed it.
+7. `ChatSession.suspendForBackgroundIfNeeded` is unused.
+8. Steers lost when a reply runs on the phone and the app goes to the background.
+9. Chat segmenting for big chat uploads (sync, long term).
+10. Check on the phone:
+    - Canvas pinch/flick/double-tap.
+    - Drawn cards at 18-45% zoom.
+    - Folder rows in Files (custom chevron).
+    - That `stop()` (up to ~26 s against a stuck runner) fits the connector's time limit.

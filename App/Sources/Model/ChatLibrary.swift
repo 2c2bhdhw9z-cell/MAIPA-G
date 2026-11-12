@@ -286,7 +286,7 @@ final class ChatLibrary {
                           !candidate.isRunning,
                           !candidate.hasActiveWorkflowRuns else { return }
                     let hasStaged = await candidate.hasUnsavedStagedWork()
-                    if !hasStaged && candidate.workstationFiles.isEmpty && candidate.activeWorkflowRuns.isEmpty {
+                    if !hasStaged && candidate.workstationFiles.isEmpty && !candidate.activeWorkflowRuns.contains(where: ChatSession.workflowRunIsUnfinished) {
                         self.sessions[id] = nil
                     }
                 }

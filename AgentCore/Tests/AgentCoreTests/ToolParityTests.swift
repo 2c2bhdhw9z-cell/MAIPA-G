@@ -241,7 +241,7 @@ struct ToolParityTests {
         #expect(slow.forModel.contains("Stopped after 1 second"))
         #expect(!slow.forModel.contains("late"))
         #expect(RunCommandTool.timeoutSeconds(["timeout_seconds": 99_999]) == 1_800)
-        #expect(RunCommandTool.timeoutSeconds([:]) == 120)
+        #expect(RunCommandTool.timeoutSeconds([:]) == 900)
         #expect(BoundedProcess.maxTimeout == 1_800)
         let properties = tool.spec.function.parameters["properties"]?.objectValue ?? [:]
         #expect(["command", "cwd", "working_directory", "timeout_seconds", "run_in_background"].allSatisfy { properties[$0] != nil })
@@ -295,7 +295,7 @@ struct ToolParityTests {
     func heartbeatReportsProgress() async throws {
         let beats = LineRecorder()
         let value = try await RunCommandTool.withHeartbeat("Running make", progress: { beats.exec($0) }, every: 1) {
-            try await Task.sleep(nanoseconds: 1_500_000_000)
+            try await Task.sleep(nanoseconds: 2_600_000_000)
             return 7
         }
         #expect(value == 7)
@@ -405,12 +405,12 @@ struct ToolParityTests {
 
     @Test("read_web_page reads the first part, the whole page, or only the parts about a phrase, and says what was left out")
     func readWebPageModes() async throws {
-        let filler = (1...400).map { "Paragraph \($0) says nothing in particular about anything at all." }.joined(separator: "</p><p>")
+        let filler = (1...700).map { "Paragraph \($0) says nothing in particular about anything at all." }.joined(separator: "</p><p>")
         let html = "<html><head><title>Docs</title></head><body><p>\(filler)</p><p>The rate limit is 60 requests per minute.</p><p>The end.</p></body></html>"
         let transport = PageTransport { _ in HTTPResponse(status: 200, headers: ["content-type": "text/html"], body: Data(html.utf8)) }
         let tool = ReadWebPageTool(transport: transport)
         let first = try await tool.run(arguments: ["url": "https://example.com/docs"]) { _ in }
-        #expect(first.forModel.contains("[Showing the first 8000 of"))
+        #expect(first.forModel.contains("[Showing the first 30000 of"))
         #expect(!first.forModel.contains("The end."))
         let full = try await tool.run(arguments: ["url": "https://example.com/docs", "mode": "full"]) { _ in }
         #expect(full.forModel.contains("The end.") && !full.forModel.contains("[Showing the first"))
