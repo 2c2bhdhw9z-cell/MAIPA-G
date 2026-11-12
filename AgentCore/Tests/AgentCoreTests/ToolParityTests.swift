@@ -295,7 +295,8 @@ struct ToolParityTests {
     func heartbeatReportsProgress() async throws {
         let beats = LineRecorder()
         let value = try await RunCommandTool.withHeartbeat("Running make", progress: { beats.exec($0) }, every: 1) {
-            try await Task.sleep(nanoseconds: 2_600_000_000)
+            // Wait for a beat instead of a fixed time, so a busy test machine can't race it.
+            for _ in 0..<600 where beats.execs.isEmpty { try await Task.sleep(nanoseconds: 50_000_000) }
             return 7
         }
         #expect(value == 7)
