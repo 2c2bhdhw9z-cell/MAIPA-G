@@ -35,8 +35,9 @@ struct GeneratedFileCard: View {
     }
 
     var body: some View {
-        let url = try? app.attachmentStore.fileURL(for: result.attachment)
-        let exists = url.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        let location = GeneratedMediaLocations.location(for: result.attachment, store: app.attachmentStore)
+        let url = location.url
+        let exists = location.exists
         HStack(spacing: 12) {
             Image(systemName: icon)
                 .font(.title2)
@@ -76,6 +77,8 @@ struct GeneratedVideoCard: View {
     @Environment(AppModel.self) private var app
     let result: GeneratedImageResult
     @State private var player: AVPlayer?
+    /// The video's file, worked out once when it opens rather than on every redraw.
+    @State private var shareURL: URL?
     @State private var failed = false
 
     var body: some View {
@@ -104,8 +107,8 @@ struct GeneratedVideoCard: View {
                 Label("Made video", systemImage: "play.rectangle")
                 Spacer()
                 if let cost = result.cost { Text(cost.dollars) }
-                if let url = try? app.attachmentStore.fileURL(for: result.attachment), player != nil {
-                    ShareLink(item: url) { Image(systemName: "square.and.arrow.up") }
+                if let shareURL, player != nil {
+                    ShareLink(item: shareURL) { Image(systemName: "square.and.arrow.up") }
                         .accessibilityLabel("Share the video")
                 }
             }
@@ -118,8 +121,24 @@ struct GeneratedVideoCard: View {
                 failed = true
                 return
             }
+            shareURL = url
             player = AVPlayer(url: url)
         }
+    }
+}
+
+/// Where a made file is on the phone. Once a file is there it stays, so after the first look the
+/// answer comes from memory instead of the disk on every redraw.
+@MainActor
+enum GeneratedMediaLocations {
+    private static var present: [UUID: URL] = [:]
+
+    static func location(for attachment: AttachmentReference, store: AttachmentStore) -> (url: URL?, exists: Bool) {
+        if let known = present[attachment.id] { return (known, true) }
+        guard let url = try? store.fileURL(for: attachment) else { return (nil, false) }
+        let exists = FileManager.default.fileExists(atPath: url.path)
+        if exists { present[attachment.id] = url }
+        return (url, exists)
     }
 }
 
