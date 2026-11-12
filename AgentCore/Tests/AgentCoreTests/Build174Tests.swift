@@ -472,3 +472,17 @@ extension GatewayVideoTests {
         #expect(abs(output.billedCost - 0.672 * 5) < 0.001)
     }
 }
+
+extension Build174Tests {
+    @Test("Web pages are read through one long-lived session, never a new one per page (the runner crash)")
+    func webPagesShareOneSession() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let reader = try String(contentsOf: root.appendingPathComponent("Sources/AgentCore/Web/WebPageReader.swift"), encoding: .utf8)
+        let send = reader.components(separatedBy: "static func send(").dropFirst().first ?? ""
+        #expect(!send.isEmpty)
+        #expect(!send.contains("URLSession(configuration"))
+        #expect(reader.contains("static let session: URLSession"))
+        let client = try String(contentsOf: root.appendingPathComponent("Sources/AgentCore/MCP/ConnectorClient.swift"), encoding: .utf8)
+        #expect(client.contains("private func retireTransport()"))
+    }
+}

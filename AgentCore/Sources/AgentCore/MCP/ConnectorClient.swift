@@ -221,6 +221,16 @@ public actor MCPConnectorSession {
     /// of each sending the same refresh token: the second one used to get "Refresh token not found"
     /// and the computer looked unreachable from then on.
     private var refreshing: Task<ConnectorCredential, Error>?
+    /// Transports this session has finished with, kept rather than freed. Each owns a URLSession,
+    /// and on Linux (the runner on the computer) freeing one right after a request aborts the
+    /// whole process (swift-corelibs-foundation#5203). Only the last few are kept.
+    private var retired: [HTTPClientTransport] = []
+
+    private func retireTransport() {
+        if let transport { retired.append(transport) }
+        if retired.count > 8 { retired.removeFirst(retired.count - 8) }
+        transport = nil
+    }
 
     public init(configuration: ConnectorConfiguration, credential: ConnectorCredential? = nil, staticHeaders: [String: String] = [:], refreshCredential: CredentialRefresher? = nil, upgradeScopes: ScopeUpgrader? = nil) {
         self.configuration = configuration; self.credential = credential; self.staticHeaders = staticHeaders
@@ -254,7 +264,7 @@ public actor MCPConnectorSession {
         self.transport = transport; connected = true
     }
 
-    public func disconnect() async { await client.disconnect(); transport = nil; connected = false }
+    public func disconnect() async { await client.disconnect(); retireTransport(); connected = false }
 
     public func tools() async throws -> [ConnectorToolDefinition] {
         do { return try await listTools() }
@@ -330,7 +340,7 @@ public actor MCPConnectorSession {
     private func authorizeAdditionalScopes(_ required: Set<String>) async throws {
         guard let current = credential, let upgradeScopes else { throw MCPAuthorizationError.insufficientScope(required) }
         if connected { await client.disconnect() }
-        connected = false; transport = nil
+        connected = false; retireTransport()
         credential = try await upgradeScopes(current, current.scopes.union(required))
         client = Client(name: "MAIPA-G", version: "0.1.0", title: "MAIPA-G", websiteUrl: OpenRouterClient.appURL)
     }
@@ -375,7 +385,7 @@ public actor MCPConnectorSession {
         // Whoever waited on the same renewal finds the new sign-in already in place.
         guard updated.accessToken != credential?.accessToken else { return }
         if connected { await client.disconnect() }
-        connected = false; transport = nil
+        connected = false; retireTransport()
         credential = updated
         client = Client(name: "MAIPA-G", version: "0.1.0", title: "MAIPA-G", websiteUrl: OpenRouterClient.appURL)
     }
@@ -383,7 +393,7 @@ public actor MCPConnectorSession {
     private func resetSession() async {
         if connected { await client.disconnect() }
         connected = false
-        transport = nil
+        retireTransport()
         client = Client(name: "MAIPA-G", version: "0.1.0", title: "MAIPA-G", websiteUrl: OpenRouterClient.appURL)
     }
 

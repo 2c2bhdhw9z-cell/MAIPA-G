@@ -388,6 +388,17 @@ every call, so that one really was down.
 - The live preview waited ten minutes, twice, on an Expo server that had gone quiet. It gives up
   after two minutes of no new output, with the server's last lines, and says not to start again.
 
+## Ninth follow-up of 12 November 2026 ("Can't reach your computer", Thinking… forever)
+- The runner on the computer crashed three times today (exit 134, "deallocated with non-zero
+  retain count… dangling reference"), each while a sub-agent was reading web pages. Reading a page
+  made a new URLSession and freed it straight after; Linux Foundation with a recent libcurl aborts
+  on that (swift-corelibs-foundation#5203, fix in review as #5491). Pages now share one session
+  for the life of the runner, and connector sessions keep their old transports instead of freeing
+  them.
+- When the phone couldn't reach the computer on picking a reply back up, it tried once and left
+  the reply on "Thinking…" with nothing trying again. It now keeps trying (3 s, 5 s, 10 s… up to
+  30 s apart) for 20 minutes, then says so and offers Retry.
+
 ## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
 He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,
 ask_user, generate_image) and Kiro's (read_file, list_directory, file_search, grep_search, code,

@@ -115,6 +115,24 @@ public struct WebPageReader: Sendable {
 }
 
 private enum SafeWebRequest {
+    /// One session for every page, kept for the life of the app or runner. A new session per page,
+    /// released right after its request, crashed the runner on the computer: Linux Foundation with
+    /// a recent libcurl aborts with "_MultiHandle deallocated with non-zero retain count"
+    /// (swift-corelibs-foundation#5203). It killed three replies on 12 November 2026, each while a
+    /// sub-agent was reading web pages. Redirects are still never followed by the session; every
+    /// hop is checked here.
+    static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 30
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.httpMaximumConnectionsPerHost = 4
+        return URLSession(configuration: configuration, delegate: NoRedirectDelegate(), delegateQueue: nil)
+    }()
+
     static func send(_ initial: URL, maxBytes: Int) async throws -> HTTPResponse {
         var url = initial
         var resolutions: [String: Set<IPAddress>] = [:]
@@ -125,19 +143,11 @@ private enum SafeWebRequest {
             if let prior = resolutions[host.lowercased()], prior != addresses { throw WebPageError.unsafeURL }
             resolutions[host.lowercased()] = addresses
 
-            let delegate = NoRedirectDelegate()
-            let configuration = URLSessionConfiguration.ephemeral
-            configuration.timeoutIntervalForRequest = 30
-            configuration.timeoutIntervalForResource = 30
-            configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-            configuration.urlCache = nil
-            configuration.httpShouldSetCookies = false
-            let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
-            defer { session.finishTasksAndInvalidate() }
             var request = URLRequest(url: url)
+            request.httpShouldHandleCookies = false
             request.timeoutInterval = 30
             WebPageReader.headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
-            let (data, rawResponse) = try await session.data(for: request)
+            let (data, rawResponse) = try await Self.session.data(for: request)
             guard let response = rawResponse as? HTTPURLResponse else { throw HTTPError.transport("Not an HTTP response", isOffline: false) }
             guard data.count <= maxBytes else { throw WebPageError.tooLarge }
             if (300..<400).contains(response.statusCode), let location = response.value(forHTTPHeaderField: "Location"), let next = URL(string: location, relativeTo: url)?.absoluteURL {

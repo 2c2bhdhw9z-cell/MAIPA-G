@@ -2160,13 +2160,37 @@ final class ChatSession: Identifiable {
 
     /// Picks up a reply that kept running on the chat computer while the app was away.
     private func followComputerRun(_ runID: String, app: AppModel) async {
-        guard let control = await app.connectors.ensureComputerSession(), control.commandTool != nil else {
-            if var turn = lastTurn {
-                let notice = "Can't reach your computer right now. The reply keeps going there, and MAIPA-G picks it up when the computer answers."
-                if !turn.notices.contains(notice) { turn.notices.append(notice) }
+        // Keeps trying to reach the computer instead of giving up at the first try, which left the
+        // reply on "Thinking…" with nothing trying again (12 November 2026).
+        let notice = "Can't reach your computer right now. The reply keeps going there, and MAIPA-G keeps trying to reach it."
+        var control: ComputerControl?
+        let waits: [UInt64] = [0, 3, 5, 10, 15, 20, 30]
+        let gaveUpAt = Date().addingTimeInterval(20 * 60)
+        var attempt = 0
+        while control == nil {
+            if let found = await app.connectors.ensureComputerSession(), found.commandTool != nil { control = found; break }
+            if userStoppedExplicitly || Task.isCancelled || chat.computerRunID != runID { return }
+            if var turn = lastTurn, !turn.notices.contains(notice) {
+                turn.notices.append(notice)
                 replaceLastTurn(turn)
             }
-            return
+            guard Date() < gaveUpAt else {
+                if var turn = lastTurn {
+                    turn.notices.removeAll { $0 == notice }
+                    turn.notices.append("MAIPA-G couldn't reach your computer for 20 minutes, so it stopped waiting. The reply may have finished there: tap Retry to pick it up, or check the computer in Settings → Check everything.")
+                    turn.status = .stopped
+                    turn.stoppedEarly = true
+                    replaceLastTurn(turn)
+                }
+                return
+            }
+            attempt += 1
+            try? await Task.sleep(nanoseconds: waits[min(attempt, waits.count - 1)] * 1_000_000_000)
+        }
+        guard let control else { return }
+        if var turn = lastTurn, turn.notices.contains(notice) {
+            turn.notices.removeAll { $0 == notice }
+            replaceLastTurn(turn)
         }
         let run = followRun(id: runID, vm: VMControl(computer: control), app: app)
         self.run = run
