@@ -106,20 +106,25 @@ public struct VMTurnRequest: Codable, Sendable, Hashable {
     public var earlySteering: [String]
     /// Pictures and PDFs on the newest message, keyed by attachment id.
     public var attachmentData: [UUID: Data]
+    /// The person's saved memories, so the AI on the computer can add and edit them like it does
+    /// on the phone. What it saves comes back in `VMTurnState.memories`.
+    public var memories: [MemoryRecord]?
     public var createdAt: Date
 
     public init(
         id: String, chat: Chat, route: Route, systemPrompt: String, allowTools: Bool, spendLimit: Double?,
         fallbackModels: [String], resumeNote: String?, lastUserMessage: String, webEnabled: Bool,
         repo: VMTurnRepo?, specMode: Bool = false, specGate: KiroSpecState? = nil, specKind: KiroSpecKind? = nil,
-        supervised: Bool = false, acceptedChanges: [String] = [], earlySteering: [String] = [], attachmentData: [UUID: Data] = [:], createdAt: Date = Date()
+        supervised: Bool = false, acceptedChanges: [String] = [], earlySteering: [String] = [], attachmentData: [UUID: Data] = [:],
+        memories: [MemoryRecord]? = nil, createdAt: Date = Date()
     ) {
         format = Self.currentFormat
         self.id = id; self.chat = chat; self.route = VMRoute(route); self.systemPrompt = systemPrompt
         self.allowTools = allowTools; self.spendLimit = spendLimit; self.fallbackModels = fallbackModels
         self.resumeNote = resumeNote; self.lastUserMessage = lastUserMessage; self.webEnabled = webEnabled
         self.repo = repo; self.specMode = specMode; self.specGate = specGate; self.specKind = specKind; self.supervised = supervised
-        self.acceptedChanges = acceptedChanges; self.earlySteering = earlySteering; self.attachmentData = attachmentData; self.createdAt = createdAt
+        self.acceptedChanges = acceptedChanges; self.earlySteering = earlySteering; self.attachmentData = attachmentData
+        self.memories = memories; self.createdAt = createdAt
     }
 }
 
@@ -181,13 +186,15 @@ public struct VMTurnState: Codable, Sendable, Hashable {
     public var steersTaken: Int
     /// Steering that arrived too late for the AI to see; the phone sends it as the next message.
     public var unconsumedSteering: [String]
+    /// Memories the AI added or changed during this reply, for the phone to save.
+    public var memories: [MemoryRecord]?
     public var error: String?
     public var updatedAt: Date
 
-    public init(id: String, seq: Int, phase: Phase, turn: AssistantTurn, staged: [CheckpointFile]? = nil, stagedVersion: Int = 0, receipts: [SaveReceipt] = [], steersTaken: Int = 0, unconsumedSteering: [String] = [], error: String? = nil, updatedAt: Date = Date()) {
+    public init(id: String, seq: Int, phase: Phase, turn: AssistantTurn, staged: [CheckpointFile]? = nil, stagedVersion: Int = 0, receipts: [SaveReceipt] = [], steersTaken: Int = 0, unconsumedSteering: [String] = [], memories: [MemoryRecord]? = nil, error: String? = nil, updatedAt: Date = Date()) {
         self.id = id; self.seq = seq; self.phase = phase; self.turn = turn; self.staged = staged; self.stagedVersion = stagedVersion
         self.receipts = receipts; self.steersTaken = steersTaken; self.unconsumedSteering = unconsumedSteering
-        self.error = error; self.updatedAt = updatedAt
+        self.memories = memories; self.error = error; self.updatedAt = updatedAt
     }
 
     public var isFinished: Bool { phase == .finished }

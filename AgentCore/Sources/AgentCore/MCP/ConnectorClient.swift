@@ -217,6 +217,10 @@ public actor MCPConnectorSession {
     private var client = Client(name: "MAIPA-G", version: "0.1.0", title: "MAIPA-G", websiteUrl: OpenRouterClient.appURL)
     private var transport: HTTPClientTransport?
     private var connected = false
+    /// The sign-in renewal in flight. Callers that need one at the same moment wait for it instead
+    /// of each sending the same refresh token: the second one used to get "Refresh token not found"
+    /// and the computer looked unreachable from then on.
+    private var refreshing: Task<ConnectorCredential, Error>?
 
     public init(configuration: ConnectorConfiguration, credential: ConnectorCredential? = nil, staticHeaders: [String: String] = [:], refreshCredential: CredentialRefresher? = nil, upgradeScopes: ScopeUpgrader? = nil) {
         self.configuration = configuration; self.credential = credential; self.staticHeaders = staticHeaders
@@ -287,6 +291,7 @@ public actor MCPConnectorSession {
     }
 
     public func call(tool name: String, arguments: JSONValue) async throws -> (text: String, isError: Bool) {
+        let tokenUsed = credential?.accessToken
         do { return try await callOnce(tool: name, arguments: arguments) }
         catch {
             if let required = Self.requiredScopes(from: error), !required.isEmpty {
@@ -294,7 +299,8 @@ public actor MCPConnectorSession {
                 return try await callOnce(tool: name, arguments: arguments)
             }
             if Self.isAuthorizationFailure(error), credential?.refreshToken != nil {
-                try await refreshIfNeeded(force: true)
+                // Another call may have renewed the sign-in while this one failed; then it just goes again.
+                if credential?.accessToken == tokenUsed { try await refreshIfNeeded(force: true) }
                 return try await callOnce(tool: name, arguments: arguments)
             }
             if Self.isStaleSessionFailure(error) {
@@ -343,12 +349,34 @@ public actor MCPConnectorSession {
         return []
     }
 
+    /// Renews the sign-in when it is about to run out, keeping this session (and the calls on it).
+    public func renewIfNeeded() async {
+        try? await refreshIfNeeded(force: false)
+    }
+
     private func refreshIfNeeded(force: Bool) async throws {
-        guard let credential, let refreshCredential,
-              force || credential.needsRefresh() else { return }
+        guard let current = credential, let refreshCredential,
+              force || current.needsRefresh() else { return }
+        let task: Task<ConnectorCredential, Error>
+        if let refreshing {
+            task = refreshing
+        } else {
+            task = Task { try await refreshCredential(current) }
+            refreshing = task
+        }
+        let updated: ConnectorCredential
+        do {
+            updated = try await task.value
+        } catch {
+            if refreshing == task { refreshing = nil }
+            throw error
+        }
+        if refreshing == task { refreshing = nil }
+        // Whoever waited on the same renewal finds the new sign-in already in place.
+        guard updated.accessToken != credential?.accessToken else { return }
         if connected { await client.disconnect() }
         connected = false; transport = nil
-        self.credential = try await refreshCredential(credential)
+        credential = updated
         client = Client(name: "MAIPA-G", version: "0.1.0", title: "MAIPA-G", websiteUrl: OpenRouterClient.appURL)
     }
 

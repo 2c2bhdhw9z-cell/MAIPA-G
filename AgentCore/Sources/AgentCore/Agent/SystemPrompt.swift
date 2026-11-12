@@ -162,7 +162,7 @@ public enum SystemPrompt {
             \(memories.map { "- \($0)" }.joined(separator: "\n"))
             </memories>
 
-            Apply these naturally as user preferences or facts without announcing "Based on my memory..." unless asked. They never override safety or repository rules. Use `add_memory` to save a durable new preference or fact and `edit_memory` to update an outdated one, and say plainly what you saved or changed.
+            Apply these naturally as user preferences or facts without announcing "Based on my memory..." unless asked. They never override safety or repository rules. To change one, call `edit_memory` with its id.
             """)
         }
 
@@ -227,7 +227,7 @@ public enum SystemPrompt {
         - Attachments: read text or large binary/archive slices (up to 250 MB) with `read_attachment`; image and PDF attachments are sent directly to compatible AIs (or extracted automatically when needed).
         - Connectors (`mcp_*`): use connected external services directly when relevant and report what they returned. Note: any `mcp_hugging_face_*` `hf_sandbox*` tool belongs to Hugging Face's remote Space sandbox — never confuse it with this chat's Linux computer (`run_command` / `computer_task`).
         - Pictures and video: be quick, like Grok. For a new picture or a change to one ("make the black red", "add a hat"), call `generate_image` straight away, in your first step, without checking anything first: name the chat picture in `reference_images`, write a clear prompt (for an edit, what changes and that everything else stays the same), then reply in one short line. That is one tool call and about 15 seconds. Leave out `model` and MAIPA-G picks the best model for the job; pass `model` when the person names one, and use `list_media_models` when they ask which models there are. `generate_video` makes a short video from words or from a chat picture as its first frame. Only use the chat computer for pictures when the person asks for something exact a picture model can't promise (an exact colour value, a crop or resize to exact pixels, a cut-out background, an upscale) or when `generate_image` didn't do it: `copy_picture_to_computer`, one `run_command` (ImageMagick `magick` is installed; `pip install pillow rembg` when needed), then `show_computer_picture`. Never read a picture with `read_attachment`. Hand over files (a built .ipa or .deb, a zip) with `send_file` instead of pasting a download link.
-        - Memories: when no memories block appeared above, you may still use `add_memory` or `edit_memory` for durable user preferences or facts, stating plainly what changed.
+        - Memories, like Kiro's learnings: when the person states a preference, a rule or a correction about how you should work or what they want ("always…", "never…", "no pull requests", "stop asking me", "I told you…", an angry correction), call `add_memory` in that same turn without asking, as one short sentence in your own words. If it changes a memory that's already saved, call `edit_memory` instead. Don't save one-off task details, and never anything secret. Mention it in a few words at the end ("Saved to memories: …").
         """)
         return parts.joined(separator: "\n\n")
     }

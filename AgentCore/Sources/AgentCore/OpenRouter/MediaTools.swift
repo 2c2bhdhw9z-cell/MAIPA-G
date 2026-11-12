@@ -21,6 +21,12 @@ public enum ImageModelChooser {
     ]
 
     public static func best(for job: Job, among models: [ModelInfo]) -> ModelInfo? {
+        ranked(for: job, among: models).first
+    }
+
+    /// Every usable picture model for the job, best first. When the best one's service is down,
+    /// the next is tried, so the same family on another provider comes before a different family.
+    public static func ranked(for job: Job, among models: [ModelInfo]) -> [ModelInfo] {
         let usable = models.filter { $0.generatesImages && (job == .new || $0.acceptsImages) }
         let pool = usable.isEmpty && job == .edit ? models.filter(\.generatesImages) : usable
         let order = job == .edit ? editPreference : newPreference
@@ -30,7 +36,7 @@ public enum ImageModelChooser {
         }
         // Equal families: a paid model before its free twin (free ones are rate-limited hard), then
         // the newest.
-        return pool.min { a, b in
+        return pool.sorted { a, b in
             let ra = rank(a), rb = rank(b)
             if ra != rb { return ra < rb }
             if a.isFree != b.isFree { return !a.isFree }
@@ -382,11 +388,20 @@ public enum QuickPictureRequest: Equatable, Sendable {
     }
 
     /// The prompt for the picture model.
-    public var prompt: String {
+    public var prompt: String { prompt(earlier: []) }
+
+    /// The prompt, with the earlier changes asked for in this chat (oldest first). A follow-up like
+    /// "No, I said purple gold" only makes sense next to what was asked before; on its own the
+    /// picture model guessed.
+    public func prompt(earlier: [String]) -> String {
         switch self {
-        case .edit(let change): "\(change). Keep everything else in the picture exactly the same: the composition, the shapes, the shading and the background."
-        case .redo: "Make another version of this picture: the same subject and style, a fresh take on it."
-        case .video: "Bring this picture to life with gentle, natural motion and a slow camera move. Keep its look and colours."
+        case .edit(let change):
+            let clean = change.trimmingCharacters(in: CharacterSet(charactersIn: " .\n"))
+            let history = earlier.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty && $0 != change }.suffix(4)
+            let context = history.isEmpty ? "" : " Earlier changes asked for in this chat, oldest first: " + history.map { "\"\($0)\"" }.joined(separator: "; ") + ". The newest request wins; if it corrects an earlier one, fix what was misunderstood."
+            return "Change this picture: \(clean).\(context) Keep everything else in the picture exactly the same: the composition, the shapes, the shading and the background."
+        case .redo: return "Make another version of this picture: the same subject and style, a fresh take on it."
+        case .video: return "Bring this picture to life with gentle, natural motion and a slow camera move. Keep its look and colours."
         }
     }
 }

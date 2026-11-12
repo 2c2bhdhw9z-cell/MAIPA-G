@@ -51,6 +51,8 @@ final class ChatSession: Identifiable {
     @ObservationIgnored private var run: AgentRun?
     /// Set while this reply runs on the chat computer: Stop goes to the computer through it.
     @ObservationIgnored private var computerHandle: VMRunHandle?
+    /// Memories from the computer already saved here, by id and version.
+    @ObservationIgnored private var appliedComputerMemories: [UUID: Date] = [:]
     /// Set by Retry on a reply that stopped early: the next run carries that reply on instead of
     /// starting it again, and the model is told it was cut off.
     @ObservationIgnored private var pendingResumeNote: String?
@@ -2366,7 +2368,7 @@ final class ChatSession: Identifiable {
             lastUserMessage: lastMessage, webEnabled: webEnabled, repo: repo,
             specMode: effectiveMode == .spec && repoContext != nil, specGate: chat.kiroSpec, specKind: specKind,
             supervised: permissionMode == .supervised, acceptedChanges: chat.acceptedChanges ?? [],
-            attachmentData: attachmentData
+            attachmentData: attachmentData, memories: app.memories.memories
         )
         let secrets = ComputerRuns.secrets(app: app, githubToken: githubToken)
         do {
@@ -2442,6 +2444,17 @@ final class ChatSession: Identifiable {
             var known = Set((chat.saveReceipts ?? []).map(\.id))
             for receipt in state.receipts where known.insert(receipt.id).inserted {
                 chat.saveReceipts = (chat.saveReceipts ?? []) + [receipt]
+            }
+        }
+        // Memories the AI saved on the computer go into the phone's Memories (and MAIPA-G-data).
+        if let app, let memories = state.memories {
+            let fresh = memories.filter { appliedComputerMemories[$0.id] != $0.updatedAt }
+            if !fresh.isEmpty {
+                for record in fresh {
+                    if (try? await app.memories.store.save(record)) != nil { appliedComputerMemories[record.id] = record.updatedAt }
+                }
+                await app.memories.load()
+                app.sync.request()
             }
         }
         if state.isFinished {
@@ -2951,7 +2964,13 @@ final class ChatSession: Identifiable {
         case .edit, .redo:
             guard let best = ImageModelChooser.best(for: .edit, among: pool), best.acceptsImages else { return false }
             tool = GenerateImageTool(client: client, store: app.attachmentStore, model: best.id, maySpend: false, availableImages: [picture], candidates: pool, chooseAutomatically: true)
-            arguments = ["prompt": .string(request.prompt), "reference_images": [.string(picture.name)]]
+            // Earlier changes asked for in this chat, so a follow-up ("No, I said purple gold") is
+            // read next to what came before.
+            let earlier = chat.messages.dropLast(2).compactMap { message -> String? in
+                guard let text = message.userText, case .edit(let change)? = QuickPictureRequest.parse(text) else { return nil }
+                return change
+            }
+            arguments = ["prompt": .string(request.prompt(earlier: earlier)), "reference_images": [.string(picture.name)]]
         case .video:
             let videoModels = await VideoCatalogue.shared.models(using: client)
             guard !videoModels.isEmpty else { return false }
@@ -2992,11 +3011,29 @@ final class ChatSession: Identifiable {
             chat.updatedAt = Date()
             saveSoon(immediately: true)
             app.sync.request()
-        } catch let apiErr as OpenRouterAPIError where apiErr.kind == .outOfCredits {
-            app.openRouter.markOutOfCredits()
-            fail(.outOfCredits, app.openRouter.describe(apiErr))
         } catch {
-            fail(.other, app.openRouter.describe(error))
+            // The failure shows on the picture call too; it used to spin as "Working from your
+            // picture…" forever under the error.
+            let described = app.openRouter.describe(error)
+            call.status = .failed
+            call.result = "Error: \(described)"
+            call.detail = described
+            call.finishedAt = Date()
+            step.toolCalls = [call]
+            step.finishedAt = Date()
+            if var turn = lastTurn {
+                turn.steps = [step]
+                replaceLastTurn(turn)
+            }
+            if let apiErr = error as? OpenRouterAPIError, apiErr.kind == .outOfCredits {
+                app.openRouter.markOutOfCredits()
+                fail(.outOfCredits, described)
+            } else if let apiErr = error as? OpenRouterAPIError, apiErr.isTemporary {
+                fail(.providerFailed, "Every picture service MAIPA-G tried was down just now (\(described)). Tap Try again in a minute.")
+            } else {
+                fail(.other, described)
+            }
+            saveSoon(immediately: true)
         }
         return true
     }

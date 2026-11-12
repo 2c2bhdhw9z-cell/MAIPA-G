@@ -193,8 +193,9 @@ public struct VMTurnRunner: Sendable {
             }
             let receipts = await setup.newReceipts()
             let taken = await StateBox.shared.steersTaken
+            let memories = await setup.changedMemories()
             let snapshot = turn, current = version
-            _ = try? await writer.write { VMTurnState(id: request.id, seq: $0, phase: .running, turn: snapshot, stagedVersion: current, receipts: receipts, steersTaken: taken) }
+            _ = try? await writer.write { VMTurnState(id: request.id, seq: $0, phase: .running, turn: snapshot, stagedVersion: current, receipts: receipts, steersTaken: taken, memories: memories) }
         }
         pump.cancel()
         if turn.status == .running { turn.status = .stopped }
@@ -202,9 +203,10 @@ public struct VMTurnRunner: Sendable {
         staged = await setup.stagedFiles()
         let receipts = await setup.newReceipts()
         let taken = await StateBox.shared.steersTaken
+        let memories = await setup.changedMemories()
         let final = turn
         let finalVersion = version
-        try await writer.write { VMTurnState(id: request.id, seq: $0, phase: .finished, turn: final, staged: staged, stagedVersion: finalVersion, receipts: receipts, steersTaken: taken, unconsumedSteering: unconsumed) }
+        try await writer.write { VMTurnState(id: request.id, seq: $0, phase: .finished, turn: final, staged: staged, stagedVersion: finalVersion, receipts: receipts, steersTaken: taken, unconsumedSteering: unconsumed, memories: memories) }
         await setup.close()
         logger.progress("MAIPA-G finished reply \(request.id): \(final.status.rawValue).")
     }
@@ -214,7 +216,7 @@ public struct VMTurnRunner: Sendable {
 
 
         ## Where this reply runs
-        This reply runs on the person's own Linux computer (`\(machine)`), not on the phone. It keeps going when the app is closed. `run_command` and `computer_task` run right here in a real shell. The phone's own features (memories, the Workstation, making pictures with picture models, helpers and workflows\(hasConnectors ? "" : ", connectors")) aren't available in this reply; if the task needs one, say so.
+        This reply runs on the person's own Linux computer (`\(machine)`), not on the phone. It keeps going when the app is closed. `run_command` and `computer_task` run right here in a real shell. The phone's own features (the Workstation, making pictures with picture models, helpers and workflows\(hasConnectors ? "" : ", connectors")) aren't available in this reply; if the task needs one, say so.
         """
     }
 
@@ -228,6 +230,9 @@ public struct VMTurnRunner: Sendable {
         var initialReceiptIDs: Set<UUID>
         var connectorCount: Int
         var sessions: [MCPConnectorSession]
+        /// The person's memories, copied here so `add_memory` and `edit_memory` work on the computer.
+        var memoryStore: ProductStore<MemoryRecord>? = nil
+        var initialMemories: [UUID: MemoryRecord] = [:]
 
         func stagedFiles() async -> [CheckpointFile]? {
             guard let changes else { return nil }
@@ -237,6 +242,13 @@ public struct VMTurnRunner: Sendable {
         func newReceipts() async -> [SaveReceipt] {
             guard let saves else { return [] }
             return await saves.receipts().filter { !initialReceiptIDs.contains($0.id) }
+        }
+
+        /// Memories added or changed during this reply; the phone saves them.
+        func changedMemories() async -> [MemoryRecord]? {
+            guard let memoryStore else { return nil }
+            let changed = await memoryStore.loadAll().filter { initialMemories[$0.id] != $0 }
+            return changed.isEmpty ? nil : changed
         }
 
         func close() async {}
@@ -314,6 +326,15 @@ public struct VMTurnRunner: Sendable {
         let media = AttachmentStore(dataDirectory: folder.appendingPathComponent(VMMedia.folder, isDirectory: true))
         let fileGitHub = secrets.githubToken.flatMap { $0.isEmpty ? nil : GitHubClient(transport: transport, tokens: HandedOverTokens(token: $0, refreshFile: folder.appendingPathComponent("token-refresh.json.gz"))) }
         tools.append(SendFileTool(github: fileGitHub, transport: transport, computer: control, store: media))
+        // Memories work here as on the phone: the AI saves what the person wants remembered, and
+        // each state carries the new ones back to the phone's Memories.
+        let memoryStore = ProductStore<MemoryRecord>(dataDirectory: folder.appendingPathComponent("memories-copy", isDirectory: true), folder: "memories")
+        var initialMemories: [UUID: MemoryRecord] = [:]
+        for record in request.memories ?? [] {
+            if (try? await memoryStore.save(record)) != nil, let saved = await memoryStore.load(record.id) { initialMemories[record.id] = saved }
+        }
+        tools.append(AddMemoryTool(store: memoryStore))
+        tools.append(EditMemoryTool(store: memoryStore))
         tools.append(ShowComputerPictureTool(control: control, store: media))
         if request.webEnabled {
             tools.append(WebSearchTool(transport: transport))
@@ -353,7 +374,7 @@ public struct VMTurnRunner: Sendable {
             onOutOfCredits: {}
         )
         return Setup(tools: tools, environment: environment, changes: changes, saves: saves, initialReceiptIDs: initialReceiptIDs,
-                     connectorCount: sessions.count, sessions: sessions)
+                     connectorCount: sessions.count, sessions: sessions, memoryStore: memoryStore, initialMemories: initialMemories)
     }
 
     func prepareCheckout(repo: VMTurnRepo, token: String, path: String, logger: RedactingLogger) async {

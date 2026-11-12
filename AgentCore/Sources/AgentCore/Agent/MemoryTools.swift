@@ -35,9 +35,9 @@ public struct AddMemoryTool: AgentTool {
     }
 
     public var spec: ToolSpec {
-        ToolSpec(name: name, description: "Save a useful fact or preference for future new chats. Do not save temporary task details.", parameters: [
+        ToolSpec(name: name, description: "Remember something for future chats, without asking first: a preference, rule or correction the person stated about how to work or what they want (\"no pull requests\", \"never ask before running commands\"), or a lasting fact about them or their projects. One short sentence. Not one-off task details, never secrets.", parameters: [
             "type": "object",
-            "properties": ["text": ["type": "string", "description": "The concise fact or preference to remember."]],
+            "properties": ["text": ["type": "string", "description": "The preference, rule or fact, as one short sentence."]],
             "required": ["text"],
         ])
     }

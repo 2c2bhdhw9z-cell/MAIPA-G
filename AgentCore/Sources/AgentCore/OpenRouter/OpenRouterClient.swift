@@ -175,12 +175,30 @@ public struct OpenRouterAPIError: Error, Sendable, Hashable, CustomStringConvert
             }
             return .badRequest
         case 404: return .noModelAvailable
-        case 408, 502, 504, 520, 522, 524: return .providerFailed
+        case 408, 502, 504, 520, 522, 524, 529: return .providerFailed
         case 503: return .noModelAvailable
         default:
             if code == "server_error" || lowered.contains("provider") { return .providerFailed }
+            // "The service is temporarily unable to serve this request. Please retry shortly." (a
+            // gateway's 500) is a service that is down for a moment, not a broken request.
+            if status >= 500, Self.soundsTemporary(lowered) { return .providerFailed }
             return .other
         }
+    }
+
+    /// The service is down or busy for a moment: trying again soon, or with another provider,
+    /// can work. A broken request, a bad key or no credit can't be fixed that way.
+    public var isTemporary: Bool {
+        switch kind {
+        case .providerFailed, .rateLimited, .busyRetrySoon: return true
+        case .noModelAvailable: return (Int(code) ?? httpStatus) == 503
+        case .other: return (Int(code) ?? httpStatus) >= 500 || httpStatus >= 500
+        default: return false
+        }
+    }
+
+    static func soundsTemporary(_ lowered: String) -> Bool {
+        ["temporar", "overload", "retry", "try again", "unavailable", "capacity", "busy"].contains { lowered.contains($0) }
     }
 
     public var description: String {

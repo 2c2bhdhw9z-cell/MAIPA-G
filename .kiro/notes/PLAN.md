@@ -1,6 +1,6 @@
 # MAIPA-G plan
 
-**Status (11 November 2026): Owner OK'd the batch below ("Only things to change from that are get rid of the make a picture tab… and make it pick the best [model]"; no Appetize for now). Built and tested (Linux and the iPhone build, checked on a temporary tag first), then pushed to main as one build.**
+**Status (11 November 2026, evening): Build 174 fixes the owner's build 173 reports (pictures failing on a down gateway, memories never saved, "Lost contact with your computer", commands stuck for 15 minutes). The redesign in "Fourth follow-up" below (Settings, Workflows, Jobs, sub-agents) is a proposal waiting for his OK and answers; nothing of it is built.**
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
 saving works (Settings and the side menu showed "Saved just now", and the 173 MB Continuum .ipa is
@@ -256,6 +256,59 @@ Not done (owner: "No appetize shit for now"): a real iPhone simulator preview (V
   coloured icon rows with their current value, each opening its own page.
 - His "recent photos" never arrived: pictures sent while a reply is running don't come through, only
   the text. He needs to attach them to a normal message.
+
+## Fourth follow-up of 11 November 2026 (owner, after testing build 173)
+
+### Fixed in build 174 (found from his chats and diagnostics in MAIPA-G-data)
+- **Picture edits failing ("The service is temporarily unable… retry shortly", 7 times).** The picture
+  model MAIPA-G picked was on TeamoRouter, whose `/images/edits` kept answering HTTP 500, and nothing
+  retried or tried another model. Now `generate_image` tries once more after a short wait, then the
+  next best picture model, the same model on another provider first (OneProvider's
+  gemini-3-pro-image worked every time the chat model picked it). A 500 that says "temporarily"
+  counts as a service that's down for a moment for chat replies too. A failed picture shows as
+  failed instead of spinning under the error.
+- **Follow-up picture edits.** "No, I said purple gold" went to the picture model on its own, so it
+  guessed. Edits now carry the changes asked for earlier in the chat.
+- **The AI never saved a memory.** Almost every reply runs on the computer, and the runner there had
+  no memory tools and told the AI memories weren't available. It has them now, and what it saves
+  comes back to the phone's Memories. The prompt now tells the AI to save preferences, rules and
+  corrections without being asked, like Kiro's learnings (it only said it "may").
+- **"Lost contact with your computer."** The phone follows a reply on the computer through Sprites'
+  connector with a sign-in that renews about hourly, and renewal tokens work once. Two sessions (or
+  two calls at once) renewed with the same token, the second got "Refresh token not found", and
+  the reply's follower kept that dead session for good. Now there's one renewal at a time, the
+  newest sign-in is always read from the Keychain, every call uses the current session, a broken
+  session is rebuilt, each check gives up after 45 seconds, and time the phone was asleep isn't
+  counted as the computer being gone. A refused sign-in says to sign in again instead.
+- **Commands stuck for 15 minutes.** A command that started a server in the background
+  (`expo start … &`) looked busy until its time ran out, because the background server kept the
+  command's watch file open. Commands now run in a shell that lets go of it first (checked on
+  Linux: 25 s before, 0.1 s after). Exit codes on the computer were also always 0, so a failed build
+  looked fine to the AI; they come through now.
+
+### Proposed, waiting for his OK (not built)
+1. **Settings, really cleaned up.** Main page: Accounts (GitHub, GitLab), AI (providers and
+   spending), Computer, Memories, Appearance, About (build, updates, backup, Check everything).
+   Gone: the per-repo "Save straight to branch" list (the AI sets it when told, and repo rules
+   decide), the inline GitLab form (one Connect GitLab row instead), the computer's cost and machine
+   name, the Features switches, the website-preview host list (managed from the preview), and the
+   long status lines in AI providers (one row each with its balance; details inside).
+2. **Workflows removed, the way Kiro works.** No workflow library, no Workstation Workflows tab, no
+   run_workflow tools or auto-routing. The AI plans the work itself, runs sub-agents, and Spec mode
+   covers structured work.
+3. **Jobs, the way Kiro does them.** Autonomous is a switch in the composer when starting a chat. An
+   autonomous chat runs on the computer to the end by itself and shows in the normal chat list with
+   its status (Working, Needs you, Done, Failed) and a one-line description. No separate Jobs screen.
+4. **Sub-agents, the way Kiro does them.** The AI calls a sub-agent by name (context gatherer,
+   general task, reviewer…) with a task, several at once. Each shows in the chat as its own card:
+   its name, what it was asked, live progress, and its report, collapsible. They also work in
+   replies on the computer (they don't exist there now).
+
+### Questions for him
+1. OK to build 1–4 as written?
+2. "I want these" with the last two screenshots: which ones? From Kiro: the chat's elapsed time and
+   credits, the Recap button, Add to group, several repos per chat, the Autonomous switch. From the
+   other app: the file card (in since build 170) and GitHub link chips with icons in replies.
 
 ## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
 He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,

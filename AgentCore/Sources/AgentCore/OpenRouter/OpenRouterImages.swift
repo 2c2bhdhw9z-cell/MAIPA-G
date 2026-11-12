@@ -348,7 +348,43 @@ public struct GenerateImageTool: AgentTool {
         let quality = arguments.optionalString("quality").flatMap(ImageQuality.init(rawValue:)) ?? .standard
         let referenceNames = arguments["reference_images"]?.arrayValue?.compactMap(\.stringValue) ?? []
         let inputs = try await inputImages(named: referenceNames)
-        let generated = try await client.generateImages(prompt: prompt, model: model, options: ImageGenerationOptions(aspectRatio: aspect, quality: quality), inputImages: inputs, progress: progress)
+        // When MAIPA-G picked the model, a picture service that's down for a moment (TeamoRouter's
+        // "temporarily unable … retry shortly", 7 times on 11 November 2026) is tried once more,
+        // then the next best model is used, on another provider first. A model the person named
+        // is only retried.
+        let named = arguments.optionalString("model").map { !$0.isEmpty && $0.lowercased() != "auto" } ?? false
+        let job: ImageModelChooser.Job = inputs.isEmpty ? .new : .edit
+        let backups = chooseAutomatically && !named
+            ? ImageModelChooser.ranked(for: job, among: candidates).map(\.id).filter { $0 != model }
+            : []
+        let options = ImageGenerationOptions(aspectRatio: aspect, quality: quality)
+        var generated: [GeneratedImage] = []
+        var used = model
+        var skippedProviders = Set<String>()
+        var lastError: Error?
+        var fellBackFrom: [String] = []
+        for candidate in ([model] + backups) {
+            if fellBackFrom.count >= 4 { break }
+            let provider = AIProviderModelID.providerID(candidate)
+            if skippedProviders.contains(provider) { continue }
+            do {
+                generated = try await Self.retryingOnce {
+                    try await client.generateImages(prompt: prompt, model: candidate, options: options, inputImages: inputs, progress: progress)
+                }
+                used = candidate
+                lastError = nil
+                break
+            } catch {
+                if error is CancellationError || Task.isCancelled { throw error }
+                guard let reason = Self.tryAnother(error) else { throw error }
+                lastError = error
+                fellBackFrom.append(candidate)
+                // No credit or a dead service on one provider: its other models won't do better.
+                if reason == .provider { skippedProviders.insert(provider) }
+                progress("That picture service didn't answer, trying another…")
+            }
+        }
+        if let lastError, generated.isEmpty { throw lastError }
         var results: [GeneratedImageResult] = []
         for image in generated {
             let ext = image.mimeType.contains("jpeg") || image.mimeType.contains("jpg") ? "jpg" : (image.mimeType.contains("webp") ? "webp" : "png")
@@ -358,12 +394,50 @@ public struct GenerateImageTool: AgentTool {
             results.append(result)
         }
         let cost = results.compactMap(\.cost).reduce(0, +)
+        let fallbackNote = fellBackFrom.isEmpty ? "" : " (\(fellBackFrom.joined(separator: ", ")) didn't answer, so \(used) made it)"
+        var details: [String] = []
+        if cost > 0 { details.append("Cost: $\(String(format: "%.4f", cost))") }
+        if !fellBackFrom.isEmpty { details.append("Made with \(used) because \(fellBackFrom.joined(separator: ", ")) didn't answer.") }
         return ToolOutput(
-            forModel: "Generated \(results.count) saved picture(s) using \(model)" + (inputs.isEmpty ? "." : " from " + inputs.map(\.name).joined(separator: ", ") + "."),
+            forModel: "Generated \(results.count) saved picture(s) using \(used)" + (inputs.isEmpty ? "" : " from " + inputs.map(\.name).joined(separator: ", ")) + fallbackNote + ".",
             summary: results.count == 1 ? "Generated a picture" : "Generated \(results.count) pictures",
-            detail: cost > 0 ? "Cost: $\(String(format: "%.4f", cost))" : nil,
+            detail: details.isEmpty ? nil : details.joined(separator: " "),
             generatedImages: results,
             billedCost: cost
         )
+    }
+
+    enum Retry { case model, provider }
+
+    /// Whether another picture model may succeed where this one failed, and whether to skip the
+    /// rest of that provider. Nil for a request no model can take (a refused prompt, a bad picture).
+    static func tryAnother(_ error: Error) -> Retry? {
+        if let api = error as? OpenRouterAPIError {
+            if api.kind == .outOfCredits || api.kind == .spendingCapReached || api.kind == .invalidKey { return .provider }
+            if api.isTemporary { return (Int(api.code) ?? api.httpStatus) >= 500 ? .provider : .model }
+            if api.kind == .noModelAvailable || api.kind == .appRestricted { return .model }
+            return nil
+        }
+        if error is ImageInputNotSupported { return .model }
+        if let http = error as? HTTPError {
+            if http.isOffline { return nil }
+            if case .transport = http { return .model }
+            if let status = http.statusCode, status >= 500 || status == 429 { return .provider }
+        }
+        return nil
+    }
+
+    /// One more try after a short wait when the service said it's down for a moment.
+    static func retryingOnce<T: Sendable>(_ work: @Sendable () async throws -> T) async throws -> T {
+        do { return try await work() }
+        catch {
+            if error is CancellationError { throw error }
+            let wait: TimeInterval
+            if let api = error as? OpenRouterAPIError, api.isTemporary { wait = min(api.retryAfter ?? 2, 10) }
+            else if let http = error as? HTTPError, case .transport = http, !http.isOffline { wait = 2 }
+            else { throw error }
+            try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+            return try await work()
+        }
     }
 }

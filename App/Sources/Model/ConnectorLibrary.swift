@@ -22,6 +22,10 @@ final class ConnectorLibrary {
     @ObservationIgnored private var setupKeepAwakeTask: Task<Void, Never>?
     /// Failed reconnects in a row, and when the last one failed, so a broken connector backs off.
     @ObservationIgnored private var reconnectFailures: [UUID: (count: Int, at: Date)] = [:]
+    /// One sign-in renewal per connector at a time, whichever session asks.
+    @ObservationIgnored private var refreshTasks: [UUID: Task<ConnectorCredential, Error>] = [:]
+    /// When the computer's session was last rebuilt after a failed call.
+    @ObservationIgnored private var lastComputerRecovery: Date?
 
     init(transport: any HTTPTransport, paths: AppPaths) {
         self.transport = transport; cacheURL = paths.connectorCatalogue
@@ -504,7 +508,9 @@ final class ConnectorLibrary {
                ConnectorReconnectPolicy.shouldRetry(state: state, consecutiveFailures: failures?.count ?? 0, lastFailureAt: failures?.at) {
                 due.append(configuration)
             } else if state == .connected, let credential, credential.needsRefresh(), credential.refreshToken != nil {
-                due.append(configuration)
+                // Renewed on the session that's in use. Building a new session for it left the
+                // old one, still following a reply, holding a refresh token that no longer worked.
+                if let session = sessions[configuration.id] { await session.renewIfNeeded() } else { due.append(configuration) }
             }
         }
         guard !due.isEmpty else { return }
@@ -644,9 +650,35 @@ final class ConnectorLibrary {
 
     func computerControl() -> ComputerControl? {
         guard let configuration = computerConnector(), let session = sessions[configuration.id], let machine = app?.settings.chatComputerMachineName else { return nil }
-        return ComputerControl(tools: toolDefinitions[configuration.id] ?? [], machine: machine) { name, arguments in
-            try await session.call(tool: name, arguments: arguments)
+        let id = configuration.id
+        // Each call uses the session that's current now. A reply being followed used to keep the
+        // session it started with for good, so once that one's sign-in went stale every check on
+        // the computer failed ("Lost contact with your computer") while the computer was fine.
+        return ComputerControl(tools: toolDefinitions[configuration.id] ?? [], machine: machine) { [weak self] name, arguments in
+            let live = await self?.liveSession(id) ?? session
+            do {
+                return try await live.call(tool: name, arguments: arguments)
+            } catch {
+                guard !(error is CancellationError), let self, await self.recoverComputerSession(id, failed: live) else { throw error }
+                let fresh = await self.liveSession(id) ?? live
+                return try await fresh.call(tool: name, arguments: arguments)
+            }
         }
+    }
+
+    private func liveSession(_ id: UUID) -> MCPConnectorSession? { sessions[id] }
+
+    /// After a call on the computer's session threw (not a command that failed: the connection
+    /// itself), opens a fresh session from the saved sign-in, at most every 30 seconds. True when
+    /// there is a different session to try now.
+    private func recoverComputerSession(_ id: UUID, failed: MCPConnectorSession) async -> Bool {
+        if let current = sessions[id], current !== failed { return true }
+        if let last = lastComputerRecovery, Date().timeIntervalSince(last) < 30 { return false }
+        guard let configuration = connected.first(where: { $0.id == id }), configuration.kind == .remote else { return false }
+        lastComputerRecovery = Date()
+        await restore(configuration)
+        guard states[id] == .connected, let current = sessions[id] else { return false }
+        return current !== failed
     }
 
     /// True when a chat computer is configured at all, even if its session has not been opened yet.
@@ -716,16 +748,39 @@ final class ConnectorLibrary {
 
     private func refreshCredential(_ credential: ConnectorCredential, for configuration: ConnectorConfiguration) async throws -> ConnectorCredential {
         guard let endpoint = configuration.endpoint, credential.refreshToken != nil else { return credential }
-        let oauth = MCPOAuthClient(transport: transport)
-        let (resource, server) = try await oauth.discover(endpoint: endpoint)
-        let updated = try await oauth.refresh(credential, server: server, resource: resource.resource)
-        Keychain.setValue(updated, account: credentialKey(configuration.id))
-        if updated.scopes != configuration.scopes {
-            var copy = configuration
-            copy.scopes = updated.scopes
-            await save(copy)
+        let id = configuration.id
+        let key = credentialKey(id)
+        // The newest sign-in is the one in the Keychain: another session may have renewed it
+        // already, and then only its refresh token still works (refresh tokens are used once).
+        let stored = Keychain.value(ConnectorCredential.self, account: key)
+        if let stored, stored.accessToken != credential.accessToken, !stored.needsRefresh() { return stored }
+        if let running = refreshTasks[id] { return try await running.value }
+        let base = stored ?? credential
+        let transport = self.transport
+        let task = Task<ConnectorCredential, Error> {
+            let oauth = MCPOAuthClient(transport: transport)
+            let (resource, server) = try await oauth.discover(endpoint: endpoint)
+            return try await oauth.refresh(base, server: server, resource: resource.resource)
         }
-        return updated
+        refreshTasks[id] = task
+        defer { if refreshTasks[id] == task { refreshTasks[id] = nil } }
+        do {
+            let updated = try await task.value
+            Keychain.setValue(updated, account: key)
+            if updated.scopes != configuration.scopes {
+                var copy = configuration
+                copy.scopes = updated.scopes
+                await save(copy)
+            }
+            return updated
+        } catch {
+            if let latest = Keychain.value(ConnectorCredential.self, account: key), latest.refreshToken != base.refreshToken { return latest }
+            if ConnectorReconnectPolicy.isSignInRefused(error) {
+                states[id] = .authorizationNeeded
+                errors[id] = "\(configuration.displayName) no longer accepts MAIPA-G's sign-in. Sign in again in Connectors."
+            }
+            throw error
+        }
     }
 
     private func credentialKey(_ id: UUID) -> String { "mcp.\(id.uuidString.lowercased()).credential" }

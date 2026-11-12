@@ -19,6 +19,8 @@ public actor VMRunHandle {
 
 extension AgentRun {
     public static let computerPollInterval: UInt64 = 1_200_000_000
+    /// The longest one check on the reply may take before it's given up and asked again.
+    static let pollTimeLimit: TimeInterval = 45
 
     /// Follows a reply on the chat computer. Each state the runner writes arrives as an event, the
     /// same as a reply running on the phone; steering typed meanwhile is sent to the runner.
@@ -55,10 +57,16 @@ extension AgentRun {
                     stopSent = true
                     try? await handle.control.stop(id: handle.id)
                 }
+                let asked = Date()
                 do {
-                    let poll = try await handle.control.poll(id: handle.id, after: seq)
-                    if failures >= 8 {
-                        turn.notices.removeAll { $0 == VMNotices.lostContact }
+                    // A check that hangs is given up on, so one stuck request can't hold the reply's
+                    // progress back; the next check goes out straight after.
+                    let id = handle.id, control = handle.control, after = seq
+                    let poll = try await AgentLoop.bounded(seconds: AgentRun.pollTimeLimit, label: "Checking on the reply") {
+                        try await control.poll(id: id, after: after)
+                    }
+                    if turn.notices.contains(VMNotices.lostContact) || turn.notices.contains(VMNotices.signInNeeded) {
+                        turn.notices.removeAll { $0 == VMNotices.lostContact || $0 == VMNotices.signInNeeded }
                         continuation.yield(.updated(turn, milestone: false))
                     }
                     failures = 0
@@ -105,8 +113,18 @@ extension AgentRun {
                 } catch is CancellationError {
                     break
                 } catch {
+                    if Task.isCancelled { break }
+                    // The phone was asleep in the middle of the check (iOS froze the app): that
+                    // says nothing about the computer, so it isn't counted.
+                    if Date().timeIntervalSince(asked) > AgentRun.pollTimeLimit * 2 { continue }
                     failures += 1
-                    if failures == 8 {
+                    if ConnectorReconnectPolicy.isSignInRefused(error) {
+                        if !turn.notices.contains(VMNotices.signInNeeded) {
+                            turn.notices.removeAll { $0 == VMNotices.lostContact }
+                            turn.notices.append(VMNotices.signInNeeded)
+                            continuation.yield(.updated(turn, milestone: true))
+                        }
+                    } else if failures == 8 {
                         // The reply may well still be going on the computer. The app keeps
                         // trying, more slowly, and picks it up the moment the computer answers
                         // (it used to stop trying until the app was closed and opened again).
@@ -129,6 +147,7 @@ public enum VMNotices {
     public static let cantStayAwake = "Your computer couldn't hold itself awake, so this reply only moves on while the app is open."
     public static let runnerEnded = "The reply ended on your computer without finishing (the runner stopped). Tap retry to carry on from where it stopped."
     public static let lostContact = "Lost contact with your computer. The reply keeps going there, and MAIPA-G keeps trying to reach it."
+    public static let signInNeeded = "Your computer's connector needs you to sign in again (Settings → Connectors). The reply keeps going there, and shows up here once you do."
 
     public static func fellBack(_ reason: String) -> String {
         "Your computer couldn't take this reply (\(reason)), so it runs on the phone and stops if you leave the app."
