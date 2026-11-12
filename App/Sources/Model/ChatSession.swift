@@ -1838,7 +1838,11 @@ final class ChatSession: Identifiable {
             tools.append(GenerateImageTool(client: aiClient, store: app.attachmentStore, model: imageModel.id, maySpend: !imageModel.isFree, availableImages: chatPictures(), candidates: pictureModels, chooseAutomatically: !pickedPictureModel))
             let videoClient = aiClient
             tools.append(ListMediaModelsTool(imageModels: pictureModels, videoModels: { await VideoCatalogue.shared.models(using: videoClient) }))
-            tools.append(GenerateVideoTool(client: aiClient, store: app.attachmentStore, availableImages: chatPictures(), models: { await VideoCatalogue.shared.models(using: videoClient) }))
+            tools.append(GenerateVideoTool(
+                client: aiClient, store: app.attachmentStore, availableImages: chatPictures(),
+                models: { await VideoCatalogue.shared.models(using: videoClient) },
+                frames: { video, mimeType in await VideoStills.grab(video, mimeType: mimeType) }
+            ))
         }
         let isExternalRoute = AIProviderModelID.decode(route.model) != nil
         let isExplicitPick: Bool = {
@@ -2729,10 +2733,11 @@ final class ChatSession: Identifiable {
             }
             arguments = ["prompt": .string(request.prompt(earlier: earlier)), "reference_images": [.string(picture.name)]]
         case .video:
-            let videoModels = await VideoCatalogue.shared.models(using: client)
-            guard !videoModels.isEmpty else { return false }
-            tool = GenerateVideoTool(client: client, store: app.attachmentStore, availableImages: [picture], models: { videoModels })
-            arguments = ["prompt": .string(request.prompt), "first_frame": .string(picture.name), "duration_seconds": 5]
+            // The chat's AI writes a video's prompt: it sees the picture and what the person asked
+            // for earlier, and it can describe the picture when the video model only reads words. A
+            // fixed "gentle motion" prompt sent straight to Kling, which can't take the picture, made
+            // a mountain lake from the mascot (12 November 2026). A video takes minutes anyway.
+            return false
         }
         let argumentText = (try? JSONCoding.encoder().encode(arguments)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         var call = ToolCallRecord(id: UUID().uuidString, name: tool.name, arguments: argumentText, summary: tool.runningSummary(for: arguments), status: .running)

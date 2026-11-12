@@ -269,7 +269,9 @@ extension GatewayVideoTests {
         let frame = ImageInput(name: "p.png", mimeType: "image/png", data: Data([1, 2, 3]))
         let video = try await AIProviderGateway.generateVideo(prompt: "blobs merge", rawModelID: "kling-3.0", duration: 5, aspectRatio: "16:9", firstFrame: frame, endpoint: Self.oneProvider, transport: gateway, pollEvery: 0.01)
         #expect(video.data == Data("kling-mp4".utf8))
-        #expect(gateway.bodies.first?["image"]?.stringValue?.hasPrefix("data:image/png;base64,") == true)
+        // OneProvider's API has no picture field, so none is sent (it was ignored, and the video
+        // came out as something else).
+        #expect(gateway.bodies.first?["image"] == nil)
         #expect(gateway.bodies.first?["model"]?.stringValue == "kling-3.0")
     }
 
@@ -433,5 +435,40 @@ extension GatewayVideoTests {
         #expect(video.data == Data("documented-mp4".utf8))
         #expect(gateway.bodies.isEmpty)
         #expect(AIProviderGateway.videoModels(for: Self.oneProvider).first?.aspectRatios == ["16:9", "9:16"])
+    }
+}
+
+extension GatewayVideoTests {
+    @Test("A video from a picture never goes to a model that only reads words; the AI is told to describe the picture instead")
+    func pictureVideoSkipsWordsOnlyModels() async throws {
+        let gateway = DocumentedOneProvider()
+        let client = OpenRouterClient(transport: gateway, apiKey: nil, extraProviders: [Self.oneProvider])
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("maipa-g-vp-\(UUID().uuidString)")
+        let store = AttachmentStore(dataDirectory: dir)
+        let picture = try await store.importGeneratedImage(Data([0x89, 0x50, 0x4E, 0x47, 1, 2, 3]), name: "mascot.png", mimeType: "image/png")
+        let models = AIProviderGateway.videoModels(for: Self.oneProvider)
+        #expect(models.allSatisfy { !$0.takesFirstFrame })
+        let tool = GenerateVideoTool(client: client, store: store, availableImages: [picture], models: { models })
+        do {
+            _ = try await tool.runApproved(arguments: ["prompt": "it morphs", "first_frame": .string(picture.name)]) { _ in }
+            Issue.record("expected the picture to be refused")
+        } catch let error as ToolInputError {
+            #expect(error.message.contains("can't start a video from a picture"))
+            #expect(error.message.contains("without first_frame"))
+        }
+        #expect(gateway.bodies.isEmpty)
+    }
+
+    @Test("A finished video comes back with stills for the AI to check, and its price from the price list")
+    func finishedVideoHasStillsAndPrice() async throws {
+        let gateway = DocumentedOneProvider()
+        let client = OpenRouterClient(transport: gateway, apiKey: nil, extraProviders: [Self.oneProvider])
+        let store = AttachmentStore(dataDirectory: FileManager.default.temporaryDirectory.appendingPathComponent("maipa-g-vs-\(UUID().uuidString)"))
+        let still = ToolInlineImage(name: "middle.jpg", mimeType: "image/jpeg", data: Data([1, 2, 3]))
+        let tool = GenerateVideoTool(client: client, store: store, availableImages: [], models: { AIProviderGateway.videoModels(for: Self.oneProvider) }, frames: { _, _ in [still] })
+        let output = try await tool.runApproved(arguments: ["prompt": "a blue blob morphs", "model": "oneprovider::kling-3.0"]) { _ in }
+        #expect(output.inlineImages == [still])
+        #expect(output.forModel.contains("Look at them before you answer"))
+        #expect(abs(output.billedCost - 0.672 * 5) < 0.001)
     }
 }

@@ -377,6 +377,17 @@ prices. `generate_video` takes `video_job` to collect a video that was already s
 paying for a new one. Kling 3.0 Turbo answered 502 (OneProvider's "temporarily unavailable") on
 every call, so that one really was down.
 
+## Eighth follow-up of 12 November 2026 ("more failures than things just working")
+- The Video button made a mountain lake from the mascot: it sent a fixed "gentle motion" prompt
+  with the picture to Kling on OneProvider, whose API takes words only, so the picture was ignored.
+  Now the Video button goes through the chat's AI (it sees the picture and what was asked before),
+  a picture never goes to a words-only model (the AI is told to describe the picture instead),
+  OneProvider's Kling is listed as words only, and the price comes from OneProvider's list.
+- The AI said "Made a video" without seeing it. Now three stills (start, middle, end) come back
+  with every video, and it's told to check them against the ask and say plainly when it's wrong.
+- The live preview waited ten minutes, twice, on an Expo server that had gone quiet. It gives up
+  after two minutes of no new output, with the server's last lines, and says not to start again.
+
 ## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
 He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,
 ask_user, generate_image) and Kiro's (read_file, list_directory, file_search, grep_search, code,

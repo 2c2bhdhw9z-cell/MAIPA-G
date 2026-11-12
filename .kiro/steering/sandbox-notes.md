@@ -44,6 +44,10 @@ Things that cost time to find out. Keep them short and true.
   `check-<sha12>-kiro` for the commit and dispatch `ios.yml` on it
   (`gh api -X POST …/actions/workflows/ios.yml/dispatches -f ref=<tag>`). Release only publishes
   commits on `main`, so a tag run is a check only. Delete the tag afterwards.
+- Before building against an outside service (a provider, an API, a CLI), read its own docs
+  first (llms.txt, the guide pages, the sitemap) and build to what they say. The video path to
+  OneProvider was guessed twice before its guide (docs/guides/video-generation) was read, and the
+  owner paid for that. Guessing is for when there are truly no docs, and then say so.
 - One build per batch, never two (owner, 12 November 2026: "Is there any possible way we can skip
   the 30-minute waits"). A full iOS run takes about 11 minutes. Either push to main and wait for
   that run (Release only publishes a green one), or check on a tag first and then publish from that

@@ -150,13 +150,19 @@ public enum AppPreview {
       static) setsid nohup python3 -m http.server "$port" --bind 127.0.0.1 > "$d/server.log" 2>&1 < /dev/null & ;;
     esac
     echo $! > "$d/server.pid"
-    up=""
+    up=""; quiet=0; size=0
     for i in $(seq 1 240); do
       curl -fs -o /dev/null --max-time 5 "http://localhost:$port/" && { up=yes; break; }
       alive "$(cat "$d/server.pid")" || break
+      # A dev server that prints nothing new for two minutes is stuck, not slow: say so then,
+      # with its last words, instead of after ten minutes (12 November 2026: two starts in a row
+      # sat on "Starting the expo dev server" for ten minutes each).
+      now=$(wc -c < "$d/server.log" 2>/dev/null || echo 0)
+      if [ "$now" = "$size" ]; then quiet=$((quiet + 1)); else quiet=0; size=$now; fi
+      [ "$quiet" -ge 120 ] && fail "The $kind dev server printed nothing new for 2 minutes and isn't answering, so it's stuck. Its last lines: $(tail -n 4 "$d/server.log" 2>/dev/null | tr '\n' ' ' | cut -c1-400)"
       sleep 1
     done
-    [ -n "$up" ] || fail "The dev server didn't start: $(tail -n 3 "$d/server.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)"
+    [ -n "$up" ] || fail "The dev server didn't start: $(tail -n 4 "$d/server.log" 2>/dev/null | tr '\n' ' ' | cut -c1-400)"
     echo "ready $kind $host $rel" > "$d/state"
     log "Preview ready"
     # Keeps the computer awake while the preview runs (docs.fly.io/sprites/keeping-sprites-running),
@@ -309,7 +315,8 @@ public struct AppPreviewTool: AgentTool {
                     break
                 }
             }
-            return ToolOutput(forModel: "The preview is still starting after \(Int(waitUpTo / 60)) minutes (\(lastStep)). Check again with app_preview status.", summary: "The preview is still starting")
+            let (_, log) = (try? await control.previewStatus()) ?? (.stopped, "")
+            return ToolOutput(forModel: "The preview is still starting after \(Int(waitUpTo / 60)) minutes (\(lastStep)). Don't start it again: find out why from the output below (and ~/.maipa-g/preview/), fix that, then check with app_preview status.\(log.isEmpty ? "" : "\nLatest output:\n" + ConnectorOutputLimit.cap(log))", summary: "The preview is still starting")
         default:
             throw ToolInputError("operation must be start, status or stop.")
         }

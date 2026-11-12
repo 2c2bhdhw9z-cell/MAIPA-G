@@ -229,6 +229,8 @@ public struct ListMediaModelsTool: AgentTool {
                 if let price = video.pricePerSecond { notes.append("about $\(String(format: "%.2f", price)) a second") }
                 if !video.durations.isEmpty { notes.append("\(video.durations.map(String.init).joined(separator: "/")) s") }
                 if !video.resolutions.isEmpty { notes.append(video.resolutions.joined(separator: "/")) }
+                if !video.aspectRatios.isEmpty { notes.append(video.aspectRatios.joined(separator: "/")) }
+                notes.append(video.takesFirstFrame ? "can start from a picture" : "words only, can't start from a picture")
                 lines.append("- \(video.name) (`\(video.id)`)\(notes.isEmpty ? "" : ": " + notes.joined(separator: ", "))")
             }
         }
@@ -245,12 +247,18 @@ public struct GenerateVideoTool: AgentTool {
     let store: AttachmentStore
     let availableImages: [AttachmentReference]
     let models: @Sendable () async -> [VideoModelInfo]
+    /// Stills from a finished video (start, middle, end), so the AI can see what it made and say
+    /// so when it's wrong. A mountain lake came back for a mascot on 12 November 2026 and the AI
+    /// called it done. The phone grabs them; nil where nothing can.
+    public typealias FrameGrabber = @Sendable (_ video: Data, _ mimeType: String) async -> [ToolInlineImage]
+    let frames: FrameGrabber?
 
-    public init(client: OpenRouterClient, store: AttachmentStore, availableImages: [AttachmentReference], models: @escaping @Sendable () async -> [VideoModelInfo]) {
+    public init(client: OpenRouterClient, store: AttachmentStore, availableImages: [AttachmentReference], models: @escaping @Sendable () async -> [VideoModelInfo], frames: FrameGrabber? = nil) {
         self.client = client
         self.store = store
         self.availableImages = availableImages.filter { $0.kind == .image }
         self.models = models
+        self.frames = frames
     }
 
     public var spec: ToolSpec {
@@ -263,7 +271,7 @@ public struct GenerateVideoTool: AgentTool {
             "video_job": ["type": "string", "description": "The job id of a video that was already started (an error or an earlier reply named it, like task_…), to collect it instead of paying for a new one. Give the same model."],
         ]
         if !availableImages.isEmpty {
-            properties["first_frame"] = ["type": "string", "enum": .array(availableImages.map { .string($0.name) }), "description": "A picture from this chat to start the video from."]
+            properties["first_frame"] = ["type": "string", "enum": .array(availableImages.map { .string($0.name) }), "description": "A picture from this chat to start the video from. Only some models take one (list_media_models says which); for the others, describe the picture in the prompt instead."]
         }
         return ToolSpec(name: name, description: "Make a real video (it takes one to three minutes) and save it with the chat. Videos are billed by the second, so keep them short unless asked. Use only the durations, aspect ratios and resolutions list_media_models gives for the model. If a video was started but not collected, pass its job id in video_job rather than starting another.", parameters: [
             "type": "object", "properties": .object(properties), "required": ["prompt"], "additionalProperties": false,
@@ -332,10 +340,17 @@ public struct GenerateVideoTool: AgentTool {
         var skippedProviders = Set<String>()
         var lastError: Error?
         var tried: [String] = []
+        var cantTakePicture: [String] = []
         for candidate in choices {
             if tried.count >= 4 { break }
             let provider = AIProviderModelID.providerID(candidate.id)
             if skippedProviders.contains(provider) { continue }
+            // A model that can't start from a picture would ignore it and make something else
+            // entirely (Kling on OneProvider made a mountain lake from the mascot), and charge for it.
+            if firstFrame != nil, !candidate.takesFirstFrame, resumeJob?.isEmpty != false {
+                cantTakePicture.append(candidate.name)
+                continue
+            }
             do {
                 let video = try await client.generateVideo(
                     prompt: prompt, model: candidate.id, duration: Self.seconds(arguments, model: candidate),
@@ -357,21 +372,34 @@ public struct GenerateVideoTool: AgentTool {
                 progress("\(candidate.name) couldn't make it, trying another…")
             }
         }
-        guard let made else { throw lastError ?? ToolInputError("No video model could make it.") }
+        guard let made else {
+            if !cantTakePicture.isEmpty {
+                let others = tried.isEmpty ? "" : " The ones that can (\(tried.joined(separator: ", "))) couldn't: \(lastError.map { ErrorExplainer.describe($0).message } ?? "they failed")."
+                throw ToolInputError("\(cantTakePicture.joined(separator: ", ")) can't start a video from a picture; it only reads the words.\(others) Call generate_video again without first_frame, with a prompt that describes the picture exactly (each shape, colour, the eyes, the background and the style) and then the motion the person asked for. Say plainly that the video is made from a description of their picture.")
+            }
+            throw lastError ?? ToolInputError("No video model could make it.")
+        }
         let video = made.video, model = made.model
         progress("Saved (\(Self.estimate(arguments, model: model)))")
         let ext = video.mimeType.contains("webm") ? "webm" : (video.mimeType.contains("quicktime") ? "mov" : "mp4")
         let id = UUID()
         let reference = try await store.importGeneratedMedia(video.data, name: "video-\(id.uuidString.lowercased()).\(ext)", mimeType: video.mimeType, kind: .file)
-        let result = GeneratedImageResult(attachment: reference, prompt: prompt, model: model.id, aspectRatio: arguments.optionalString("aspect_ratio") ?? "", quality: arguments.optionalString("resolution") ?? "", cost: video.cost)
+        // OneProvider doesn't say the price in the job; its price list does.
+        let cost = video.cost ?? model.pricePerSecond.map { $0 * Double(Self.seconds(arguments, model: model) ?? 5) }
+        let result = GeneratedImageResult(attachment: reference, prompt: prompt, model: model.id, aspectRatio: arguments.optionalString("aspect_ratio") ?? "", quality: arguments.optionalString("resolution") ?? "", cost: cost)
         try await store.saveGeneratedMetadata(result)
+        let stills = await frames?(video.data, video.mimeType) ?? []
+        let look = stills.isEmpty
+            ? " You can't see the video, so don't describe what's in it; tell the person it's ready to watch."
+            : " Here are \(stills.count) stills from it (start, middle, end). Look at them before you answer: if the video isn't what the person asked for, say so plainly and what's wrong, and offer to make it again."
         return ToolOutput(
-            forModel: "Made a video with \(model.name) and saved it with the chat as \(reference.name)." + (firstFrame.map { " It starts from \($0.name)." } ?? "")
-                + (tried.isEmpty ? "" : " (\(tried.joined(separator: ", ")) couldn't, so \(model.name) made it.)"),
+            forModel: "Made a video with \(model.name) and saved it with the chat as \(reference.name)." + (firstFrame.map { " It starts from \($0.name)." } ?? " It was made from the words alone.")
+                + (tried.isEmpty ? "" : " (\(tried.joined(separator: ", ")) couldn't, so \(model.name) made it.)") + look,
             summary: "Made a video",
-            detail: video.cost.map { "Cost: $\(String(format: "%.4f", $0))" },
+            detail: cost.map { "Cost: about $\(String(format: "%.2f", $0))" },
             generatedImages: [result],
-            billedCost: video.cost ?? 0
+            inlineImages: stills,
+            billedCost: cost ?? 0
         )
     }
 }

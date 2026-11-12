@@ -39,7 +39,9 @@ public extension AIProviderGateway {
                 resolutions: ["720p", "1080p"],
                 aspectRatios: ["16:9", "9:16"],
                 pricePerSecond: model.pricePerSecond,
-                takesFirstFrame: true
+                // OneProvider's video API takes words only (no picture field in its guide); a picture
+                // sent along was ignored and the video came out as something else.
+                takesFirstFrame: false
             )
         }
     }
@@ -87,9 +89,9 @@ public extension AIProviderGateway {
                 fields["seconds"] = .string(String(seconds))
                 fields["size"] = .string(size)
             }
-            if let firstFrame {
+            if let firstFrame, !oneProvider {
                 fields["image"] = .string(firstFrame.dataURL)
-                if !oneProvider { fields["input_reference"] = .string(firstFrame.dataURL) }
+                fields["input_reference"] = .string(firstFrame.dataURL)
             }
             let body = JSONValue.object(fields)
             var started: HTTPResponse?
