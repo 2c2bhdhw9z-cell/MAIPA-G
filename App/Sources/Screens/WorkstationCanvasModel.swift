@@ -1107,6 +1107,9 @@ final class WorkstationCanvasModel {
     var previewingItem: WorkstationItem?
     private(set) var index = CanvasSpatialIndex()
     private(set) var isLayoutReady = false
+    /// Goes up whenever every card's place is worked out again (layout loaded, items changed,
+    /// Arrange), so whatever depends on which cards are where can ask again.
+    private(set) var layoutRevision = 0
 
     @ObservationIgnored private var positions: [String: CGPoint] = [:]
     @ObservationIgnored private var legacyPositions: [String: CGPoint] = [:]
@@ -1349,6 +1352,7 @@ final class WorkstationCanvasModel {
             scheduleLayoutSave()
         }
         index = fresh
+        layoutRevision &+= 1
     }
 
     private static func nextFreeSlot(_ grid: inout WorkstationCanvasLayout.SlotGrid, in index: CanvasSpatialIndex) -> CGPoint {

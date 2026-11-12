@@ -23,9 +23,12 @@ struct WorkstationScreen: View {
 
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var tab: Tab = .canvas
     @State private var canvas = WorkstationCanvasModel()
+    @State private var diffScope = 0
+    @State private var diffText = "Loading changes…"
 
     @State private var fileQuery = ""
     @State private var expandedFolders: Set<String> = ["staged", "uploads", "generated", "diagrams", "repo", "computer"]
@@ -89,7 +92,7 @@ struct WorkstationScreen: View {
                     onLoadComputer: { Task { await loadComputerFiles() } }
                 )
             case .changes:
-                WorkstationChangesTab(session: session)
+                WorkstationChangesTab(session: session, diffScope: $diffScope, diffText: $diffText)
             }
         }
         .background(Theme.background.ignoresSafeArea())
@@ -111,6 +114,10 @@ struct WorkstationScreen: View {
         .onDisappear {
             canvas.flushLayout()
             canvas.saveViewport()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // Leaving the app: write any card move still waiting for its one-second save.
+            if phase != .active { canvas.flushLayout() }
         }
         .task(id: canvas.activeRepo) {
             await loadRepoTreeIfNeeded()
@@ -522,6 +529,7 @@ private struct CanvasMovingCard: Equatable {
 private struct LiteMediaRequest: Equatable {
     var cells: CanvasSpatialIndex.CellRange
     var revision: Int
+    var layout: Int
     var pixels: Int
 }
 
@@ -536,6 +544,7 @@ private struct WorkstationCanvasBoard: View {
     @Environment(\.theme) private var theme
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.displayScale) private var displayScale
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
 
     @GestureState private var dragTranslation: CGSize = .zero
     @GestureState private var pinch: BoardPinch? = nil
@@ -559,7 +568,7 @@ private struct WorkstationCanvasBoard: View {
     @ViewBuilder
     private func boardContent(viewport: CGSize, now: Date) -> some View {
         let shown = liveTransform(base: canvas.displayedTransform(at: now), viewport: viewport)
-        let detail = WorkstationCanvasLayout.detail(zoom: shown.zoom, itemCount: canvas.items.count)
+        let detail = detailLevel(zoom: shown.zoom)
         ZStack {
             CanvasDotGrid(pan: shown.pan, zoom: shown.zoom, isDark: colorScheme == .dark)
                 .contentShape(Rectangle())
@@ -585,6 +594,13 @@ private struct WorkstationCanvasBoard: View {
         .onChange(of: liteRequest(detail: detail, shown: shown, viewport: viewport), initial: true) { _, request in
             loadLiteMedia(request)
         }
+    }
+
+    /// How cards are drawn at a zoom. With VoiceOver on, the drawn (lite) range uses real cards,
+    /// which VoiceOver can read and tap.
+    private func detailLevel(zoom: CGFloat) -> WorkstationCanvasLayout.Detail {
+        let level = WorkstationCanvasLayout.detail(zoom: zoom, itemCount: canvas.items.count)
+        return level == .lite && voiceOverEnabled ? .full : level
     }
 
     /// The resting (or animating) view with the gesture in progress applied: zoom around the
@@ -660,17 +676,18 @@ private struct WorkstationCanvasBoard: View {
 
     // MARK: Gestures
 
-    /// Double tap opens a drawn card (as on a real card) or zooms in around the tap, and back out
-    /// when already in. One tap selects the card on top under the finger, or clears the selection.
+    /// One tap selects the card on top under the finger, or clears the selection, at once. A
+    /// double tap also opens a drawn card (as on a real card) or zooms in around the tap, and back
+    /// out when already in.
     private func tapGesture(viewport: CGSize) -> some Gesture {
-        SpatialTapGesture(count: 2)
+        SpatialTapGesture(count: 1)
             .onEnded { value in
-                handleDoubleTap(at: value.location, viewport: viewport)
+                handleTap(at: value.location, viewport: viewport)
             }
-            .exclusively(
-                before: SpatialTapGesture(count: 1)
+            .simultaneously(
+                with: SpatialTapGesture(count: 2)
                     .onEnded { value in
-                        handleTap(at: value.location, viewport: viewport)
+                        handleDoubleTap(at: value.location, viewport: viewport)
                     }
             )
     }
@@ -679,8 +696,7 @@ private struct WorkstationCanvasBoard: View {
         let shown = canvas.displayedTransform(at: Date())
         let hit = canvas.item(at: location, viewport: viewport, transform: shown)
         canvas.selectedItemID = hit?.id
-        if hit != nil, canvas.tool == .pointer,
-           WorkstationCanvasLayout.detail(zoom: shown.zoom, itemCount: canvas.items.count) == .lite {
+        if hit != nil, canvas.tool == .pointer, detailLevel(zoom: shown.zoom) == .lite {
             Haptics.selection()
         }
     }
@@ -688,7 +704,7 @@ private struct WorkstationCanvasBoard: View {
     private func handleDoubleTap(at location: CGPoint, viewport: CGSize) {
         let shown = canvas.displayedTransform(at: Date())
         if canvas.tool == .pointer,
-           WorkstationCanvasLayout.detail(zoom: shown.zoom, itemCount: canvas.items.count) == .lite,
+           detailLevel(zoom: shown.zoom) == .lite,
            let hit = canvas.item(at: location, viewport: viewport, transform: shown) {
             canvas.previewingItem = hit
             return
@@ -730,7 +746,7 @@ private struct WorkstationCanvasBoard: View {
     private func cardToMove(at location: CGPoint, viewport: CGSize) -> String? {
         guard canvas.tool == .pointer else { return nil }
         let shown = canvas.displayedTransform(at: Date())
-        guard WorkstationCanvasLayout.detail(zoom: shown.zoom, itemCount: canvas.items.count) == .lite else { return nil }
+        guard detailLevel(zoom: shown.zoom) == .lite else { return nil }
         return canvas.item(at: location, viewport: viewport, transform: shown)?.id
     }
 
@@ -751,7 +767,12 @@ private struct WorkstationCanvasBoard: View {
         guard detail == .lite,
               let cells = CanvasSpatialIndex.cellRange(for: shown.visibleCanvasRect(viewport: viewport, marginX: 40, marginY: 40)) else { return nil }
         let pixels = Int((WorkstationCanvasLayout.previewHeight * shown.zoom * max(displayScale, 2)).rounded(.up))
-        return LiteMediaRequest(cells: cells, revision: canvas.itemsRevision, pixels: ThumbnailPipeline.bucket(for: max(128, pixels)))
+        return LiteMediaRequest(
+            cells: cells,
+            revision: canvas.itemsRevision,
+            layout: canvas.layoutRevision,
+            pixels: ThumbnailPipeline.bucket(for: max(128, pixels))
+        )
     }
 
     private func loadLiteMedia(_ request: LiteMediaRequest?) {
@@ -1170,17 +1191,6 @@ private struct WorkstationCanvasCard: View, Equatable {
     static let cardWidth: CGFloat = WorkstationCanvasLayout.cardWidth
     static let cardHeight: CGFloat = WorkstationCanvasLayout.cardHeight
 
-    init(item: WorkstationItem, isSelected: Bool, pointerEnabled: Bool, zoom: CGFloat, canvas: WorkstationCanvasModel) {
-        self.item = item
-        self.isSelected = isSelected
-        self.pointerEnabled = pointerEnabled
-        self.zoom = zoom
-        self.canvas = canvas
-        // Show what's already decoded (this size or a smaller one) on the first frame.
-        _thumbnail = State(initialValue: Self.cachedThumbnail(for: item, pixels: Self.thumbnailPixels(zoom: zoom, scale: 3)))
-        _snippet = State(initialValue: WorkstationSnippetCache.snippet(for: item))
-    }
-
     nonisolated static func == (lhs: WorkstationCanvasCard, rhs: WorkstationCanvasCard) -> Bool {
         lhs.item.id == rhs.item.id
             && lhs.item.revision == rhs.item.revision
@@ -1213,12 +1223,15 @@ private struct WorkstationCanvasCard: View, Equatable {
     }
 
     var body: some View {
+        // Until this card's own load finishes, show what's already decoded (this size or a
+        // smaller one) on the first frame. Equatable cards rerun this only when they change,
+        // not on every frame of a pan.
         WorkstationCardFace(
             item: item,
             zoom: zoom,
             isSelected: isSelected,
-            thumbnail: thumbnail,
-            snippet: snippet,
+            thumbnail: thumbnail ?? Self.cachedThumbnail(for: item, pixels: thumbnailPixelSize),
+            snippet: snippet ?? WorkstationSnippetCache.snippet(for: item),
             showsLiveDiagram: zoom >= 0.85,
             showsShadow: zoom >= 0.8
         )
@@ -1328,6 +1341,8 @@ final class WorkstationLiteMedia {
     private(set) var snippets: [String: String] = [:]
 
     @ObservationIgnored private var loads: [String: Task<Void, Never>] = [:]
+    /// The size each running picture load asked for.
+    @ObservationIgnored private var loadingPixels: [String: Int] = [:]
     @ObservationIgnored private var loadedPixels: [String: Int] = [:]
     @ObservationIgnored private var pendingThumbnails: [String: UIImage] = [:]
     @ObservationIgnored private var pendingSnippets: [String: String] = [:]
@@ -1338,6 +1353,7 @@ final class WorkstationLiteMedia {
         for (id, task) in loads where !wanted.contains(id) {
             task.cancel()
             loads[id] = nil
+            loadingPixels[id] = nil
         }
         if thumbnails.count > wanted.count + 200 {
             thumbnails = thumbnails.filter { wanted.contains($0.key) }
@@ -1346,7 +1362,14 @@ final class WorkstationLiteMedia {
         if snippets.count > 3_000 {
             snippets = snippets.filter { wanted.contains($0.key) }
         }
-        for item in items where loads[item.id] == nil {
+        for item in items {
+            if let running = loads[item.id] {
+                // A picture still loading at the old size (the zoom moved on): start again at this one.
+                guard let started = loadingPixels[item.id], started != pixels else { continue }
+                running.cancel()
+                loads[item.id] = nil
+                loadingPixels[item.id] = nil
+            }
             if Self.wantsThumbnail(item), loadedPixels[item.id] != pixels {
                 loadThumbnail(item, pixels: pixels, store: store)
             } else if Self.wantsSnippet(item), snippets[item.id] == nil {
@@ -1358,6 +1381,7 @@ final class WorkstationLiteMedia {
     func clear() {
         for task in loads.values { task.cancel() }
         loads = [:]
+        loadingPixels = [:]
         loadedPixels = [:]
         pendingThumbnails = [:]
         pendingSnippets = [:]
@@ -1390,6 +1414,7 @@ final class WorkstationLiteMedia {
                 return
             }
         }
+        loadingPixels[id] = pixels
         loads[id] = Task { [weak self] in
             let image: UIImage?
             if case .stagedChange(_, let data, _, _) = item.kind {
@@ -1401,6 +1426,7 @@ final class WorkstationLiteMedia {
             }
             guard let self, !Task.isCancelled else { return }
             self.loads[id] = nil
+            self.loadingPixels[id] = nil
             self.loadedPixels[id] = pixels
             if let image { self.deliver(thumbnail: image, for: id) }
         }
@@ -1876,9 +1902,9 @@ private struct WorkstationFilesTab: View {
 
 private struct WorkstationChangesTab: View {
     let session: ChatSession?
-
-    @State private var diffScope = 0
-    @State private var diffText = "Loading changes…"
+    /// Kept by the screen, so "Whole branch" stays picked across tab switches.
+    @Binding var diffScope: Int
+    @Binding var diffText: String
 
     var body: some View {
         Group {

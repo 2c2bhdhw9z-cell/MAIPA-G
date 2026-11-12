@@ -12,6 +12,7 @@ import UniformTypeIdentifiers
 /// - Kept in memory (up to 160 MB / 1,500 pictures) and, up to 1024 pixels, on disk in Caches.
 /// - Two cards asking for the same picture at the same size wait for one decode.
 /// - At most four decodes run at once; one whose cards all scrolled away is dropped before it starts.
+///   Full-size pictures for a viewer (over 1024 pixels) go to the front of the line.
 /// - Files are read straight from their path (no trip through the attachment store's queue),
 ///   decoded at the size needed rather than in full.
 final class ThumbnailPipeline: @unchecked Sendable {
@@ -129,7 +130,7 @@ final class ThumbnailPipeline: @unchecked Sendable {
         let pixels = Self.bucket(for: maxPixelSize)
         if let cached = cachedImage(key: key, maxPixelSize: pixels) { return cached }
         return await work.run(ThumbnailJobKey(key: key, pixels: pixels)) { [self] in
-            guard await self.gate.acquire() else { return nil }
+            guard await self.gate.acquire(urgent: Self.isViewerSize(pixels)) else { return nil }
             let image = Task.isCancelled ? nil : ImageDownsampler.image(from: data, maxPixelSize: pixels)
             await self.gate.release()
             if let image { self.store(image, key: key, maxPixelSize: pixels) }
@@ -137,8 +138,13 @@ final class ThumbnailPipeline: @unchecked Sendable {
         }
     }
 
+    /// Bigger than any card thumbnail: a picture someone opened to look at.
+    static func isViewerSize(_ pixels: Int) -> Bool {
+        pixels > buckets[buckets.count - 1]
+    }
+
     private func make(kind: SourceKind, url: URL, key: String, pixels: Int, diskName: String) async -> UIImage? {
-        guard await gate.acquire() else { return nil }
+        guard await gate.acquire(urgent: Self.isViewerSize(pixels)) else { return nil }
         let image = await decode(kind: kind, url: url, pixels: pixels, diskName: diskName)
         await gate.release()
         if let image { store(image, key: key, maxPixelSize: pixels) }
@@ -291,11 +297,12 @@ actor ThumbnailWork {
     }
 }
 
-/// At most `limit` decodes at once; the rest wait their turn, and leave the queue if cancelled.
+/// At most `limit` decodes at once; the rest wait their turn (urgent ones first), and leave the
+/// queue if cancelled.
 actor ThumbnailDecodeGate {
     private let limit: Int
     private var running = 0
-    private var waiting: [(id: UInt64, continuation: CheckedContinuation<Bool, Never>)] = []
+    private var waiting: [(id: UInt64, urgent: Bool, continuation: CheckedContinuation<Bool, Never>)] = []
     private var nextID: UInt64 = 0
 
     init(limit: Int) {
@@ -303,7 +310,8 @@ actor ThumbnailDecodeGate {
     }
 
     /// True once a slot is taken (call `release()` after); false if cancelled while waiting.
-    func acquire() async -> Bool {
+    /// An urgent request waits ahead of every non-urgent one.
+    func acquire(urgent: Bool = false) async -> Bool {
         if Task.isCancelled { return false }
         if running < limit {
             running += 1
@@ -313,7 +321,12 @@ actor ThumbnailDecodeGate {
         let id = nextID
         let granted = await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-                waiting.append((id: id, continuation: continuation))
+                if urgent {
+                    let firstNormal = waiting.firstIndex(where: { !$0.urgent }) ?? waiting.count
+                    waiting.insert((id: id, urgent: true, continuation: continuation), at: firstNormal)
+                } else {
+                    waiting.append((id: id, urgent: false, continuation: continuation))
+                }
             }
         } onCancel: {
             Task { await self.cancelWaiter(id) }
