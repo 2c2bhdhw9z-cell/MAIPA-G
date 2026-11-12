@@ -44,6 +44,15 @@ Things that cost time to find out. Keep them short and true.
   `check-<sha12>-kiro` for the commit and dispatch `ios.yml` on it
   (`gh api -X POST …/actions/workflows/ios.yml/dispatches -f ref=<tag>`). Release only publishes
   commits on `main`, so a tag run is a check only. Delete the tag afterwards.
+- One build per batch, never two (owner, 12 November 2026: "Is there any possible way we can skip
+  the 30-minute waits"). A full iOS run takes about 11 minutes. Either push to main and wait for
+  that run (Release only publishes a green one), or check on a tag first and then publish from that
+  same run with `gh api -X POST …/actions/workflows/release.yml/dispatches -f ref=main -f
+  "inputs[sha]=$(git rev-parse origin/main)"`: Release finds any green iOS run of the exact commit,
+  the tag's included. Don't let main build it a second time before publishing.
+- Never type a run id or a commit sha by hand: look them up (`git rev-parse`, `gh api
+  "…/actions/runs?branch=<tag>&per_page=1" --jq '.workflow_runs[0].id'`). A mistyped run id made
+  the wait loop spin its full half hour on 404s, twice.
 - Scripts run by AgentCore tests also run on GitHub's Mac: no `stat -c` or `base64 -w0` there
   (use `wc -c < f` and `base64 | tr -d '\n'`).
 

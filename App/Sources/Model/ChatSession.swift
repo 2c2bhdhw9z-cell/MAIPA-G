@@ -1464,7 +1464,15 @@ final class ChatSession: Identifiable {
             guard case .write(_, let data, _) = staged.first(where: { $0.path == stagedPath }) else { return nil }
             return String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
         }
-        let listWorkstationTool = ListWorkstationFilesTool(listProvider: listWorkstationProvider)
+        // The Workstation screen counts the repo's files too; the tool used to leave them out
+        // without saying, so its total disagreed with the screen (6,613 against 8,587).
+        let repoFileCountProvider: @Sendable () async -> (repo: String, count: Int)? = { [weak self] in
+            guard let cw = await MainActor.run(body: { self?.changeWorkspace }) else { return nil }
+            let base = cw.base
+            guard let tree = try? await base.tree() else { return nil }
+            return (base.repo.fullName, tree.entries.filter(\.isFile).count)
+        }
+        let listWorkstationTool = ListWorkstationFilesTool(listProvider: listWorkstationProvider, repoFileCount: repoFileCountProvider)
         let readWorkstationTool = ReadWorkstationFileTool(
             store: app.attachmentStore,
             listProvider: listWorkstationProvider,

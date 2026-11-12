@@ -106,7 +106,15 @@ extension AgentRun {
                         let since = goneSince ?? Date()
                         goneSince = since
                         if Date().timeIntervalSince(since) > 4 {
-                            finish(stopSent ? "Stopped on your computer." : VMNotices.runnerEnded, stoppedEarly: !stopSent)
+                            if stopSent {
+                                finish("Stopped on your computer.", stoppedEarly: false)
+                            } else {
+                                // Say why, from the runner's own last words (a crash or the computer
+                                // ending it); "the runner stopped" alone told nobody anything.
+                                let id = handle.id, control = handle.control
+                                let words = (try? await AgentLoop.bounded(seconds: 20, label: "Reading why the runner stopped") { try await control.logTail(id: id) }) ?? ""
+                                finish(VMNotices.runnerEnded + (words.isEmpty ? "" : " Its last words: \(words)"), stoppedEarly: true)
+                            }
                             break
                         }
                     }

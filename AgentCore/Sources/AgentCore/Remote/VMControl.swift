@@ -363,6 +363,22 @@ public struct VMControl: Sendable {
         try await upload(try VMCoding.pack(VMSecrets(openRouterKey: nil, githubToken: token)), to: "\(VMRun.folder(id))/token-refresh.json.gz")
     }
 
+    /// The last lines the runner printed, for when it stopped without finishing: a crash, or the
+    /// computer ending it, says why there.
+    public func logTail(id: String) async throws -> String {
+        guard VMRun.isRunID(id) else { throw Failure.badID }
+        let raw = try await computer.run("tail -c 3000 \"$HOME/\(VMRun.folder(id))/runner.log\" 2>/dev/null; true")
+        return VMControl.lastWords(ComputerControl.plainOutput(raw))
+    }
+
+    /// The end of a runner log as one short line: the last few non-empty lines, without secrets.
+    static func lastWords(_ log: String) -> String {
+        let lines = log.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let tail = lines.suffix(3).joined(separator: " · ")
+        let clean = SensitiveDataRedactor().redact(tail)
+        return clean.count > 300 ? "…" + String(clean.suffix(299)) : clean
+    }
+
     /// Removes a finished run's folder (its keys were already deleted when it started).
     public func remove(id: String) async throws {
         guard VMRun.isRunID(id) else { throw Failure.badID }

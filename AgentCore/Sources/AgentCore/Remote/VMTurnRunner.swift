@@ -138,9 +138,13 @@ public struct VMTurnRunner: Sendable {
         try await writer.write { VMTurnState(id: request.id, seq: $0, phase: .starting, turn: startingTurn) }
         logger.progress("MAIPA-G started reply \(request.id) on \(machine).")
 
+        // One inbox for the reply and its sub-agents: a message typed while a sub-agent works reaches
+        // the AI then, instead of after the sub-agent's half hour ("What is taking so long", 12
+        // November 2026, waited 31 minutes).
+        let steering = SteeringInbox()
         let setup: Setup
         do {
-            setup = try await prepare(request: request, secrets: secrets, logger: logger)
+            setup = try await prepare(request: request, secrets: secrets, logger: logger, steering: steering)
         } catch {
             var failed = turn
             failed.status = .failed
@@ -150,7 +154,6 @@ public struct VMTurnRunner: Sendable {
             return
         }
 
-        let steering = SteeringInbox()
         let input = AgentTurnInput(
             chat: request.chat, route: request.route.route, systemPrompt: request.systemPrompt + Self.promptNote(machine: machine, hasConnectors: setup.connectorCount > 0),
             tools: setup.tools, allowTools: request.allowTools, spendLimit: request.spendLimit,
@@ -254,7 +257,7 @@ public struct VMTurnRunner: Sendable {
         func close() async {}
     }
 
-    func prepare(request: VMTurnRequest, secrets: VMSecrets, logger: RedactingLogger) async throws -> Setup {
+    func prepare(request: VMTurnRequest, secrets: VMSecrets, logger: RedactingLogger, steering: SteeringInbox? = nil) async throws -> Setup {
         let control = ComputerControl.local(machine: machine, home: home)
         var tools: [any AgentTool] = []
         var changes: ChangeWorkspace?
@@ -387,7 +390,7 @@ public struct VMTurnRunner: Sendable {
             let definitions = SubAgentSetup.definitions(excluding: ["introspect", "custom-agent-creator"])
             let coordinator = AgentHelperCoordinator(
                 lead: SubAgentSetup.lead, definitions: definitions, context: request.lastUserMessage,
-                spendLimit: request.spendLimit, steering: nil, runner: subAgents.runner()
+                spendLimit: request.spendLimit, steering: steering, runner: subAgents.runner()
             )
             tools.append(InvokeSubAgentTool(lead: SubAgentSetup.lead, definitions: definitions, coordinator: coordinator))
         }
@@ -441,7 +444,9 @@ public struct VMTurnRunner: Sendable {
                 for model in fetched.models { catalogue[model.id] = model }
             }
         }
-        let client = OpenRouterClient(transport: transport, apiKey: hasOpenRouter ? key : nil, extraProviders: endpoints)
+        // With the prices, so replies on the computer have a cost ("price unknown" on every one of
+        // them before, as the phone's client had the catalogue and this one didn't).
+        let client = OpenRouterClient(transport: transport, apiKey: hasOpenRouter ? key : nil, extraProviders: endpoints, catalogueByID: catalogue)
         return (client, catalogue, hasOpenRouter)
     }
 }

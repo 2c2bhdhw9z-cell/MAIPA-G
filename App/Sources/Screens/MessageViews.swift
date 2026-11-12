@@ -1138,30 +1138,37 @@ struct ToolLine: View {
             }
 
             if open, let detail = call.detail ?? call.result {
-                if detail.count > 600 || detail.filter({ $0 == "\n" }).count >= 10 {
-                    ScrollView([.horizontal, .vertical]) {
-                        Text(detail)
+                // Lines wrap. A web page read as one very long line, laid out unwrapped, was too
+                // wide to draw and showed as an empty grey box (12 November 2026).
+                let shown = Self.shownDetail(detail)
+                if shown.count > 600 || shown.filter({ $0 == "\n" }).count >= 10 {
+                    ScrollView(.vertical) {
+                        Text(shown)
                             .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(Theme.secondaryText)
                             .textSelection(.enabled)
-                            .fixedSize()
+                            .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(10)
                     }
                     .frame(height: 220)
                     .background(Theme.codeBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 } else {
-                    ScrollView(.horizontal) {
-                        Text(detail)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(Theme.secondaryText)
-                            .textSelection(.enabled)
-                            .fixedSize()
-                            .padding(10)
-                    }
-                    .background(Theme.codeBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    Text(shown)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(Theme.secondaryText)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .background(Theme.codeBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
             }
         }
+    }
+
+    /// The tool's output as the row shows it: at most 20,000 characters, with a note when cut.
+    static func shownDetail(_ detail: String) -> String {
+        guard detail.count > 20_000 else { return detail }
+        return String(detail.prefix(20_000)) + "\n\n… (\(detail.count - 20_000) more characters)"
     }
 
     private var parsedSubagentBadge: (title: String, badge: String)? {
@@ -1627,7 +1634,8 @@ private struct SubagentItemCard: View {
                                 .font(.caption2.weight(.bold))
                                 .tracking(0.5)
                                 .foregroundStyle(theme.accent)
-                            Text(thought)
+                            // Thought titles came glued with their asterisks ("**A****B**").
+                            Text(ReasoningText.readable(thought))
                                 .font(.caption)
                                 .foregroundStyle(Theme.secondaryText)
                                 .lineLimit(8)

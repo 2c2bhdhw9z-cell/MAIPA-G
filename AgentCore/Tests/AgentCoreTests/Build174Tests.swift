@@ -215,3 +215,129 @@ struct KiroSubAgentTests {
         #expect(items.first?.status == .completed)
     }
 }
+
+extension Build174Tests {
+    @Test("A script too long for one argument still runs on the computer (the bun.lock sync)", .enabled(if: onLinux))
+    func longScriptsRunFromAFile() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("maipa-g-long-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let control = ComputerControl.local(machine: "test", home: home)
+        let payload = String(repeating: "a", count: 300_000)
+        let output = try await control.run("x='\(payload)'; echo \"length ${#x}\"; exit 4")
+        #expect(output.contains("length 300000"), "\(output.prefix(300))")
+        #expect(output.contains("(exit code 4)"))
+    }
+}
+
+extension GatewayVideoTests {
+    /// OneProvider as it answered on 12 November 2026: JSON only, a job in Kling's shape.
+    final class JSONOnlyGateway: HTTPTransport, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _bodies: [JSONValue] = []
+        var bodies: [JSONValue] { lock.withLock { _bodies } }
+        var answer = #"{"code":0,"data":{"task_id":"k1","task_status":"submitted"}}"#
+
+        func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+            let url = request.url.absoluteString
+            if url == "https://api.oneprovider.dev/v1/videos", request.method == "POST" {
+                guard request.headers["Content-Type"]?.contains("json") == true, let body = request.body.flatMap({ JSONValue.parse($0) }) else {
+                    return HTTPResponse(status: 400, headers: [:], body: Data(#"{"error":{"message":"request body must be a JSON object"}}"#.utf8))
+                }
+                lock.withLock { _bodies.append(body) }
+                return HTTPResponse(status: 200, headers: [:], body: Data(answer.utf8))
+            }
+            if url == "https://api.oneprovider.dev/v1/videos/k1" {
+                return HTTPResponse(status: 404, headers: [:], body: Data())
+            }
+            if url == "https://api.oneprovider.dev/v1/video/generations/k1" {
+                return HTTPResponse(status: 200, headers: [:], body: Data(#"{"data":{"task_id":"k1","task_status":"succeed","task_result":{"videos":[{"url":"https://cdn.example.com/k1.mp4"}]}}}"#.utf8))
+            }
+            if url == "https://cdn.example.com/k1.mp4" {
+                return HTTPResponse(status: 200, headers: ["content-type": "video/mp4"], body: Data("kling-mp4".utf8))
+            }
+            return HTTPResponse(status: 404, headers: [:], body: Data())
+        }
+        func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse {
+            HTTPStreamResponse(status: 500, headers: [:], body: AsyncThrowingStream { $0.finish() })
+        }
+    }
+
+    @Test("A video from a picture is asked for as JSON, and a Kling-style job is found and followed")
+    func jsonWithFirstFrameAndKlingJob() async throws {
+        let gateway = JSONOnlyGateway()
+        let frame = ImageInput(name: "p.png", mimeType: "image/png", data: Data([1, 2, 3]))
+        let video = try await AIProviderGateway.generateVideo(prompt: "blobs merge", rawModelID: "kling-3.0", duration: 5, aspectRatio: "16:9", firstFrame: frame, endpoint: Self.oneProvider, transport: gateway, pollEvery: 0.01)
+        #expect(video.data == Data("kling-mp4".utf8))
+        #expect(gateway.bodies.first?["image"]?.stringValue?.hasPrefix("data:image/png;base64,") == true)
+        #expect(gateway.bodies.first?["model"]?.stringValue == "kling-3.0")
+    }
+
+    @Test("A 200 with no job says what the gateway answered")
+    func noJobSaysWhatCameBack() async {
+        let gateway = JSONOnlyGateway()
+        gateway.answer = #"{"object":"list","message":"queued elsewhere"}"#
+        do {
+            _ = try await AIProviderGateway.generateVideo(prompt: "x", rawModelID: "kling-3.0", duration: 5, aspectRatio: nil, firstFrame: nil, endpoint: Self.oneProvider, transport: gateway, pollEvery: 0.01)
+            Issue.record("expected an error")
+        } catch let error as OpenRouterAPIError {
+            #expect(error.message.contains("queued elsewhere"))
+            #expect(MediaFallback.tryAnother(error) != nil)
+        } catch {
+            Issue.record("unexpected \(error)")
+        }
+    }
+
+    @Test("Commands show as what they ran, like a terminal")
+    func commandPreviews() {
+        #expect(RunCommandTool.commandPreview("cd /home/sprite/repos/o/r && bun install --frozen-lockfile") == "bun install --frozen-lockfile")
+        #expect(RunCommandTool.commandPreview("git status --short\ngit diff") == "git status --short")
+        #expect(RunCommandTool.commandPreview("   ") == "a command")
+        #expect(RunCommandTool.commandPreview(String(repeating: "x", count: 100)).count == 60)
+    }
+}
+
+extension Build174Tests {
+    @Test("The Workstation list gives the full total and kinds, pages 200 at a time, searches, and counts the repo's files")
+    func workstationListPagesAndCounts() async throws {
+        var items: [WorkstationFileItem] = (0..<450).map { WorkstationFileItem(id: "a\($0)", name: "photo-\($0).png", mimeType: "image/png", byteCount: 10, source: "chat_attachment") }
+        items.append(WorkstationFileItem(id: "g1", name: "logo.png", mimeType: "image/png", byteCount: 10, source: "generated_image"))
+        let all = items
+        let tool = ListWorkstationFilesTool(listProvider: { all }, repoFileCount: { ("o/Continuum-", 1_974) })
+        let first = try await tool.run(arguments: [:]) { _ in }
+        #expect(first.forModel.contains("451 in total (450 attachments, 1 generated)"))
+        #expect(first.forModel.contains("Showing 1–200 of 451"))
+        #expect(first.forModel.contains("offset 200"))
+        #expect(first.forModel.contains("1974 files of the repo o/Continuum-"))
+        #expect(first.forModel.contains("2425"))
+        #expect(first.forModel.split(separator: "\n").filter { $0.hasPrefix("- ") }.count == 200)
+        let last = try await tool.run(arguments: ["offset": 400]) { _ in }
+        #expect(last.forModel.contains("Showing 401–451 of 451"))
+        let found = try await tool.run(arguments: ["query": "LOGO"]) { _ in }
+        #expect(found.forModel.contains("1 match"))
+        #expect(found.forModel.contains("logo.png"))
+    }
+}
+
+extension Build174Tests {
+    @Test("A runner that dies says why, from its log", .enabled(if: onLinux))
+    func deadRunnerSaysWhy() async throws {
+        let home = try ComputerRunnerTests.temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let id = VMRun.newTurnID()
+        let folder = home.appendingPathComponent(VMRun.folder(id), isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try "starting\nFatal error: Index out of range\nmaipa-g-runner-exit 132\n".write(to: folder.appendingPathComponent("runner.log"), atomically: true, encoding: .utf8)
+        let vm = VMControl(computer: ComputerControl.local(machine: "test", home: home))
+        var running = AssistantTurn()
+        running.status = .running
+        let run = AgentRun.onComputer(VMRunHandle(id: id, control: vm), startingTurn: running, pollInterval: 200_000_000) { _ in }
+        var last: AssistantTurn?
+        for await event in run.events {
+            if case .updated(let turn, _) = event { last = turn }
+        }
+        let notice = last?.notices.first { $0.hasPrefix(VMNotices.runnerEnded) }
+        #expect(notice?.contains("Fatal error: Index out of range") == true, "\(last?.notices ?? [])")
+        #expect(notice?.contains("maipa-g-runner-exit 132") == true)
+    }
+}

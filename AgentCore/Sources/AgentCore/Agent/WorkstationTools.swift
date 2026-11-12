@@ -31,18 +31,27 @@ public struct WorkstationFileItem: Sendable, Hashable {
 public struct ListWorkstationFilesTool: AgentTool {
     public let name = "list_workstation_files"
     private let listProvider: @Sendable () async -> [WorkstationFileItem]
+    private let repoFileCount: (@Sendable () async -> (repo: String, count: Int)?)?
 
-    public init(listProvider: @escaping @Sendable () async -> [WorkstationFileItem]) {
+    /// The most names one call lists; the rest come with `offset` or a `query`.
+    public static let pageSize = 200
+
+    public init(listProvider: @escaping @Sendable () async -> [WorkstationFileItem], repoFileCount: (@Sendable () async -> (repo: String, count: Int)?)? = nil) {
         self.listProvider = listProvider
+        self.repoFileCount = repoFileCount
     }
 
     public var spec: ToolSpec {
         ToolSpec(
             name: name,
-            description: "List all files currently in this chat's Workstation (uploaded attachments, Canvas/HTML/Mermaid artifacts, generated media, and staged repo files).",
+            description: "List the files in this chat's Workstation: attachments, Canvas/HTML/Mermaid artifacts, generated media and staged repo changes. It gives the total, how many of each kind, and up to 200 names at a time: narrow it with `query` (part of a name) or `kind`, and page with `offset`. The Workstation screen also shows the chat's repo files (use list_files and read_file for those) and files on the computer (use run_command).",
             parameters: [
                 "type": "object",
-                "properties": [:],
+                "properties": [
+                    "query": ["type": "string", "description": "Only files whose name contains this (any case)."],
+                    "kind": ["type": "string", "enum": ["attachment", "generated", "artifact", "staged"], "description": "Only one kind of file."],
+                    "offset": ["type": "integer", "description": "Skip this many matches (for the next page)."],
+                ],
                 "additionalProperties": false,
             ]
         )
@@ -50,18 +59,49 @@ public struct ListWorkstationFilesTool: AgentTool {
 
     public func runningSummary(for arguments: JSONValue) -> String { "Listing Workstation files…" }
 
+    static func kind(of item: WorkstationFileItem) -> String {
+        let source = item.source.lowercased()
+        if item.stagedPath != nil || source.contains("staged") { return "staged" }
+        if source.contains("generat") || source.contains("media") { return "generated" }
+        if source.contains("canvas") || source.contains("artifact") || source.contains("diagram") || source.contains("workstation") { return "artifact" }
+        return "attachment"
+    }
+
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let items = await listProvider()
+        let repo = await repoFileCount?()
+        let repoLine = repo.map { "\nThe Workstation screen also shows the \($0.count) files of the repo \($0.repo); list and read those with list_files and read_file. (The screen's total counts them too, so it is \(items.count + $0.count) plus any computer files.)" } ?? ""
         guard !items.isEmpty else {
-            return ToolOutput(forModel: "Workstation has no files in this chat yet.", summary: "Workstation · 0 files", detail: "No files")
+            return ToolOutput(forModel: "This chat's Workstation has no attachments, artifacts, generated media or staged files yet." + repoLine, summary: "Workstation · 0 files", detail: "No files")
         }
-        let lines = items.map { item in
-            "- \(item.name) [id: \(item.id), source: \(item.source), type: \(item.mimeType), size: \(Format.bytes(item.byteCount))]"
+        var counts: [String: Int] = [:]
+        for item in items { counts[Self.kind(of: item), default: 0] += 1 }
+        let breakdown = ["attachment", "generated", "artifact", "staged"].compactMap { kind in counts[kind].map { "\($0) \(kind)\($0 == 1 ? "" : "s")" } }.joined(separator: ", ")
+        let query = arguments.optionalString("query")?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let kindFilter = arguments.optionalString("kind")
+        let matches = items.filter { item in
+            (query.isEmpty || item.name.lowercased().contains(query) || (item.stagedPath?.lowercased().contains(query) ?? false))
+                && (kindFilter == nil || Self.kind(of: item) == kindFilter)
+        }
+        let offset = max(0, arguments["offset"]?.intValue ?? 0)
+        let page = matches.dropFirst(offset).prefix(Self.pageSize)
+        let lines = page.map { item in
+            "- \(item.name) [id: \(item.id), \(Self.kind(of: item)), \(item.mimeType), \(Format.bytes(item.byteCount))]"
         }.joined(separator: "\n")
+        var header = "Workstation files: \(items.count) in total (\(breakdown))."
+        if !query.isEmpty || kindFilter != nil { header += " \(matches.count) match." }
+        if matches.isEmpty {
+            header += " None match."
+        } else {
+            header += " Showing \(offset + 1)–\(offset + page.count) of \(matches.count)."
+            if offset + page.count < matches.count { header += " Call again with offset \(offset + page.count) for the next \(min(Self.pageSize, matches.count - offset - page.count))." }
+        }
         return ToolOutput(
-            forModel: "Workstation files (\(items.count)):\n\(lines)",
-            summary: "Listed \(items.count) Workstation file\(items.count == 1 ? "" : "s")",
-            detail: lines
+            forModel: header + repoLine + (lines.isEmpty ? "" : "\n" + lines),
+            summary: query.isEmpty && kindFilter == nil
+                ? "Listed \(page.count) of \(items.count) Workstation files"
+                : "Found \(matches.count) Workstation files" + (query.isEmpty ? "" : " matching “\(query)”"),
+            detail: header + repoLine + (lines.isEmpty ? "" : "\n" + lines)
         )
     }
 }

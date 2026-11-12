@@ -682,10 +682,19 @@ public struct RunCommandTool: AgentTool {
     public var bringsOutsideContent: Bool { true }
 
     public func runningSummary(for arguments: JSONValue) -> String {
-        let cmd = (arguments.optionalString("command") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let firstLine = cmd.split(whereSeparator: \.isNewline).first.map(String.init) ?? cmd
-        let preview = firstLine.isEmpty ? "command" : String(firstLine.prefix(48))
-        return "mcp-maipa-g · \(preview)"
+        "Running " + Self.commandPreview(arguments.optionalString("command") ?? "")
+    }
+
+    /// The command as the chat shows it, like a terminal line: the first line, without the
+    /// `cd` into the repo, short enough for one row ("mcp-maipa-g · ran command" 56 times told
+    /// nobody anything, 12 November 2026).
+    static func commandPreview(_ command: String) -> String {
+        var line = command.trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        if line.hasPrefix("cd "), let joint = line.range(of: " && ") { line = String(line[joint.upperBound...]) }
+        line = line.trimmingCharacters(in: .whitespaces)
+        if line.isEmpty { return "a command" }
+        return line.count > 60 ? String(line.prefix(59)) + "…" : line
     }
 
     public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
@@ -745,9 +754,10 @@ public struct RunCommandTool: AgentTool {
         let redacted = SensitiveDataRedactor().redact(plain)
         let capped = ConnectorOutputLimit.cap(redacted)
         let shown = capped.isEmpty ? "(command exited with no output)" : capped
+        let failed = shown.range(of: #"\(exit code -?\d+\)\s*$"#, options: .regularExpression) != nil
         return ToolOutput(
             forModel: shown,
-            summary: "mcp-maipa-g · ran command",
+            summary: (failed ? "Failed: " : "Ran ") + Self.commandPreview(command),
             detail: String(shown.prefix(4_000))
         )
     }

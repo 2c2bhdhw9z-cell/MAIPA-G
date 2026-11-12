@@ -410,7 +410,7 @@ struct ComputerRunnerTests {
             if case .updated(let turn, _) = event { last = turn }
         }
         #expect(last?.status == .stopped)
-        #expect(last?.notices.contains(VMNotices.runnerEnded) == true)
+        #expect(last?.notices.contains { $0.hasPrefix(VMNotices.runnerEnded) } == true)
     }
 
     @Test("Cancelling only stops following; the run's files stay for later", .enabled(if: ComputerRunnerTests.onLinux))

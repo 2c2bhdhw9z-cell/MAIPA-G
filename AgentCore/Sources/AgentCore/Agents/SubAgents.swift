@@ -176,7 +176,10 @@ public struct SubAgentSetup: Sendable {
                       }) {
                 choice = .model(other.id)
             }
-            let thinking = invocation.preferredEffort ?? setup.thinking
+            // Sub-agents think at most High unless asked otherwise. At Max, two of them sat silent
+            // for five minutes after 16 and 18 actions and were stopped (12 November 2026), and a
+            // lockfile task took 31 minutes.
+            let thinking = invocation.preferredEffort ?? min(setup.thinking, .high)
             let route = ModelRouter.route(
                 choice: choice, difficulty: invocation.definition.difficulty, thinking: thinking, account: setup.account,
                 catalogue: setup.catalogue, requiresImageInput: false, openRouterAvailable: setup.openRouterAvailable
@@ -198,9 +201,10 @@ public struct SubAgentSetup: Sendable {
                 onOutOfCredits: {}
             )
             invocation.onLiveProgress?(AgentLiveProgress(model: route.model, toolCallCount: 0, latestActivity: "Starting…"))
-            let run = AgentLoop.start(input, environment: environment)
+            var run = AgentLoop.start(input, environment: environment)
             var finalTurn: AssistantTurn?
             var lastSignature = ""
+            var resumed = false
             func stopped() -> AgentExecutionResult {
                 run.cancel()
                 let calls = finalTurn?.steps.flatMap(\.toolCalls) ?? []
@@ -211,6 +215,7 @@ public struct SubAgentSetup: Sendable {
                 )
             }
             do {
+              while true {
                 for await event in run.events {
                     try Task.checkCancellation()
                     guard case .updated(let updated, _) = event else { continue }
@@ -240,6 +245,25 @@ public struct SubAgentSetup: Sendable {
                         ))
                     }
                 }
+                // The AI went quiet or the provider dropped out after real work: carry on once
+                // from where it stopped, the way Retry does, instead of reporting a failure.
+                guard !resumed, !Task.isCancelled, var partial = finalTurn, partial.status == .failed,
+                      [.providerFailed, .offline].contains(partial.failure?.kind), AgentLoop.didWork(partial.steps) else { break }
+                resumed = true
+                let partialText = partial.steps.map(\.text).joined(separator: "\n\n")
+                partial.status = .running
+                partial.failure = nil
+                var again = chat
+                again.messages[again.messages.count - 1] = ChatMessage(body: .assistant(partial))
+                var retry = input
+                retry.chat = again
+                retry.resumeNote = AgentLoop.resumeNote(partialText: partialText)
+                invocation.onLiveProgress?(AgentLiveProgress(
+                    model: route.model, toolCallCount: partial.steps.flatMap(\.toolCalls).count, latestActivity: "The AI went quiet, carrying on…",
+                    toolSummaries: partial.steps.flatMap(\.toolCalls).map(\.summary)
+                ))
+                run = AgentLoop.start(retry, environment: environment)
+              }
             } catch is CancellationError {
                 return stopped()
             }

@@ -1,6 +1,6 @@
 # MAIPA-G plan
 
-**Status (12 November 2026, early morning Eastern): Build 175 had the picture, memory, lost-contact and stuck-command fixes. The owner OK'd items 1–4 below ("1-4 yes") and the circled GitHub marks; this batch builds them plus videos through OneProvider. Checked on Linux and on a temporary tag before it goes to main.**
+**Status (12 November 2026, morning Eastern): Build 176 shipped the OK'd Settings, Workflows, Jobs and sub-agent changes. This batch fixes what his build 176 screenshots and chats showed (below, "Fifth follow-up"); checked on Linux and on a temporary tag, then published from that one build.**
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
 saving works (Settings and the side menu showed "Saved just now", and the 173 MB Continuum .ipa is
@@ -330,6 +330,29 @@ Not done (owner: "No appetize shit for now"): a real iPhone simulator preview (V
   3.0 and 3.0 Turbo are offered, and a video falls back from OpenRouter to them. OneProvider
   doesn't document its video address, so MAIPA-G tries OpenAI's /videos and then
   /video/generations and says plainly if neither exists. TeamoRouter lists no video models.
+
+## Fifth follow-up of 12 November 2026 (his 15 screenshots after build 176, no words)
+Found from the chats in MAIPA-G-data and fixed:
+- Videos: OneProvider refused every video from a picture ("request body must be a JSON object", the
+  app sent a form upload), and its Kling answered 200 with a job the app couldn't read. Video
+  requests are JSON now, the job id and status are read in the shapes gateways use (Kling's
+  `data.task_id`, `task_result.videos`), both check addresses are tried, a 200 without a job says
+  what came back, and one Kling model down (Turbo, 502) no longer rules out the other.
+- On the computer, any command over 128 KB failed ("Argument list too long"), so syncing the
+  bun.lock stopped three times and an SDK 58 upgrade took 38 minutes. Long scripts run from a file.
+- Replies on the computer had no prices ("price unknown"): its AI client lacked the price list.
+- Sub-agents on the computer couldn't be steered ("What is taking so long" waited 31 minutes); they
+  share the reply's steering now. Sub-agents think at most High, and one that goes quiet after real
+  work carries on once instead of showing Failed (two did at Max, after 16 and 18 actions).
+- Commands show what they ran ("bun install --frozen-lockfile", "Failed: …") instead of
+  "mcp-maipa-g · ran command".
+- list_workstation_files printed all 6,613 names (a 200k-token prompt that then went silent) and
+  left out the repo's 1,974 files without saying. It gives the total and kinds, 200 names a page,
+  searches, and counts the repo files the screen shows.
+- A tool's output read as one very long line showed as an empty grey box; it wraps now.
+- Sub-agent "Thinking live" titles showed glued with asterisks.
+- A runner that dies says why, from the last lines of its log (the first SDK 58 reply ended with
+  only "the runner stopped").
 
 ## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
 He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,

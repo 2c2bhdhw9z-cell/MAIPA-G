@@ -341,7 +341,11 @@ public struct GenerateVideoTool: AgentTool {
                 guard choices.count > 1, let reason = MediaFallback.tryAnother(error) else { throw error }
                 lastError = error
                 tried.append(candidate.name)
-                if reason == .provider { skippedProviders.insert(provider) }
+                // No credit, a refused key or no video address: that provider's other models can't
+                // do better. A model that's down (OneProvider's Kling Turbo answering 502) doesn't
+                // rule out its siblings (Kling 3.0 on the same account).
+                let api = error as? OpenRouterAPIError
+                if reason == .provider, api?.isTemporary != true || api?.code == "video_unsupported" { skippedProviders.insert(provider) }
                 progress("\(candidate.name) couldn't make it, trying another…")
             }
         }
