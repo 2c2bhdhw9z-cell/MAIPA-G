@@ -138,7 +138,23 @@ public struct CreateFileTool: AgentTool {
     public let rules: RepoWriteRules
     public let name = "create_file"
     public init(workspace: ChangeWorkspace, authorization: ChangeAuthorization = ChangeAuthorization(request: ""), rules: RepoWriteRules = RepoWriteRules()) { self.workspace = workspace; self.authorization = authorization; self.rules = rules }
-    public var spec: ToolSpec { ToolSpec(name: name, description: "Stage a new UTF-8 text file. The file is not saved to GitHub until save_changes is used.", parameters: ["type": "object", "properties": ["path": ["type": "string"], "content": ["type": "string"]], "required": ["path", "content"]]) }
+    public var spec: ToolSpec {
+        ToolSpec(
+            name: name,
+            description: """
+            Create a new UTF-8 text file in the repository with exactly this content. Parent folders are made as needed.             The file is staged, not saved: it goes to GitHub only with save_changes. A file that already exists is an error             unless you pass overwrite: true, which replaces the whole file. To change part of an existing file use             edit_file (old_text/new_text); to add to the end use append_file. Don't use it for binary files such as pictures.
+            """,
+            parameters: [
+                "type": "object",
+                "properties": [
+                    "path": ["type": "string", "description": "Repository path of the new file, like \"Sources/App/NewView.swift\"."],
+                    "content": ["type": "string", "description": "The complete file content."],
+                    "overwrite": ["type": "boolean", "description": "Replace the file if it already exists. Default false (an existing file is an error)."],
+                ],
+                "required": ["path", "content"],
+            ]
+        )
+    }
     public func runningSummary(for arguments: JSONValue) -> String { "Creating \(arguments.optionalString("path") ?? "a file")…" }
     public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
         guard let path = arguments.optionalString("path"), ChangeWorkspace.isBuildSetup(RepoWorkspace.normalize(path)),
@@ -149,7 +165,12 @@ public struct CreateFileTool: AgentTool {
         let path = try arguments.requiredString("path")
         if ChangeWorkspace.isBuildSetup(RepoWorkspace.normalize(path)), !rules.permitsBuildSetup(at: path) { throw ToolInputError("Repository rules do not allow changing build setup at \(path).") }
         guard let content = arguments["content"]?.stringValue else { throw ToolInputError("Missing \"content\".") }
-        try await workspace.create(path: path, text: content, buildSetupApproved: true)
+        let overwrite = arguments.optionalBool("overwrite") ?? false
+        let existed = overwrite ? await workspace.exists(path) : false
+        try await workspace.create(path: path, text: content, buildSetupApproved: true, overwrite: overwrite)
+        if existed {
+            return ToolOutput(forModel: "Replaced the whole of \(path) (staged, \(content.utf8.count) bytes).", summary: "Replaced \(path)", detail: content)
+        }
         return ToolOutput(forModel: "Staged new file \(path).", summary: "Created \(path)", detail: content)
     }
 }
@@ -166,7 +187,9 @@ public struct EditFileTool: AgentTool {
             description: """
             Stage an edit to an existing UTF-8 text file (not saved to GitHub until save_changes). \
             Prefer surgical edits with old_text and new_text so large files are never truncated or rewritten from scratch; \
-            only pass content when intentionally replacing an entire small file.
+            only pass content when intentionally replacing an entire small file. old_text must match one place exactly \
+            (or every place with replace_all); if it only matches once leading/trailing spaces are ignored, that one place \
+            is replaced and the result says which lines.
             """,
             parameters: [
                 "type": "object",
@@ -205,8 +228,13 @@ public struct EditFileTool: AgentTool {
                 buildSetupApproved: true
             )
             let noun = result.count == 1 ? "1 block" : "\(result.count) blocks"
+            var note = ""
+            if let lines = result.whitespaceTolerantLines {
+                let span = lines.count == 1 ? "line \(lines.lowerBound)" : "lines \(lines.lowerBound)-\(lines.upperBound)"
+                note = " old_text didn't match exactly, so a whitespace-tolerant match was used: it replaced \(span), whose text matched once leading and trailing spaces and tabs were ignored. Check the indentation there with read_file."
+            }
             return ToolOutput(
-                forModel: "Staged surgical edit to \(path) (\(noun) replaced).",
+                forModel: "Staged surgical edit to \(path) (\(noun) replaced).\(note)",
                 summary: "Edited \(path)",
                 detail: result.diffPreview
             )
@@ -228,7 +256,7 @@ public struct AppendFileTool: AgentTool {
     public var spec: ToolSpec {
         ToolSpec(
             name: name,
-            description: "Stage UTF-8 text appended to the end of a repository file (or create it if create_if_missing is true) without rewriting existing lines.",
+            description: "Stage UTF-8 text appended to the end of a repository file (or create it if create_if_missing is true) without rewriting existing lines. When the file doesn't end with a line break, one is added first so the new text starts on its own line.",
             parameters: [
                 "type": "object",
                 "properties": [
@@ -253,9 +281,10 @@ public struct AppendFileTool: AgentTool {
         }
         guard let content = arguments["content"]?.stringValue else { throw ToolInputError("Missing \"content\".") }
         let createIfMissing = arguments.optionalBool("create_if_missing") ?? false
+        let addedLineBreak = await workspace.needsLineBreakBeforeAppend(path)
         let created = try await workspace.append(path: path, text: content, createIfMissing: createIfMissing, buildSetupApproved: true)
         return ToolOutput(
-            forModel: created ? "Created \(path) and staged content (\(content.utf8.count) bytes)." : "Staged \(content.utf8.count) bytes appended to \(path).",
+            forModel: created ? "Created \(path) and staged content (\(content.utf8.count) bytes)." : "Staged \(content.utf8.count) bytes appended to \(path).\(addedLineBreak ? " The file didn't end with a line break, so one was added before the new text." : "")",
             summary: created ? "Created \(path)" : "Appended to \(path)",
             detail: String(content.prefix(10_000))
         )
@@ -268,7 +297,18 @@ public struct DeleteFileTool: AgentTool {
     public let rules: RepoWriteRules
     public let name = "delete_file"
     public init(workspace: ChangeWorkspace, authorization: ChangeAuthorization = ChangeAuthorization(request: ""), rules: RepoWriteRules = RepoWriteRules()) { self.workspace = workspace; self.authorization = authorization; self.rules = rules }
-    public var spec: ToolSpec { ToolSpec(name: name, description: "Stage deletion of a file. MAIPA-G always asks the person before deleting.", parameters: ["type": "object", "properties": ["path": ["type": "string"]], "required": ["path"]]) }
+    public var spec: ToolSpec {
+        ToolSpec(
+            name: name,
+            description: """
+            Delete one file from the repository: text or binary (pictures, archives, large files) or a link. The deletion is \
+            staged and goes to GitHub only with save_changes; until then it can be undone. MAIPA-G asks the person first when \
+            its settings say so. Folders aren't deleted in one go: delete the files inside them. Don't use it to empty a file \
+            (use edit_file) or to rename one (create_file the new path, then delete the old one).
+            """,
+            parameters: ["type": "object", "properties": ["path": ["type": "string", "description": "Repository path of the file to delete."]], "required": ["path"]]
+        )
+    }
     public func runningSummary(for arguments: JSONValue) -> String { "Deleting \(arguments.optionalString("path") ?? "a file")…" }
     public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
         guard let path = arguments.optionalString("path") else { return nil }

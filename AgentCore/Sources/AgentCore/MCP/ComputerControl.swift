@@ -33,8 +33,9 @@ public struct ComputerControl: Sendable {
             case .noCommandTool: "This computer service has no command tool MAIPA-G can use."
             case .noCreateTool: "This computer service has no tool for creating a machine."
             case .noCheckpointTool: "This computer service has no checkpoint tool."
-            case .commandFailed(let detail): "The computer ran the command but reported a failure: \(detail.prefix(400))"
-            case .machineUnavailable(let detail): "The machine isn't available: \(detail.prefix(400))"
+            // The whole detail: the tool-result limit (Transcript) cuts it in the middle if it is long.
+            case .commandFailed(let detail): "The computer ran the command but reported a failure: \(detail)"
+            case .machineUnavailable(let detail): "The machine isn't available: \(detail)"
             }
         }
     }
@@ -102,7 +103,7 @@ public struct ComputerControl: Sendable {
         return keys.first { $0.lowercased().contains("command") || $0.lowercased().contains("cmd") }
     }
 
-    public func commandArguments(_ command: String, tool: ConnectorToolDefinition) -> JSONValue {
+    public func commandArguments(_ command: String, tool: ConnectorToolDefinition, timeout: TimeInterval? = nil) -> JSONValue {
         var arguments: [String: JSONValue] = [:]
         if let key = Self.machineKey(tool.inputSchema) { arguments[key] = .string(machine) }
         let key = Self.commandKey(tool.inputSchema) ?? "command"
@@ -113,7 +114,40 @@ public struct ComputerControl: Sendable {
         } else {
             arguments[key] = .string(command)
         }
+        if let timeout, let (timeoutKey, inMilliseconds) = Self.timeoutKey(tool.inputSchema) {
+            let seconds = max(1, Int(timeout.rounded(.up)))
+            arguments[timeoutKey] = .number(Double(inMilliseconds ? seconds * 1_000 : seconds))
+        }
         return .object(arguments)
+    }
+
+    /// The command tool's own time-limit property, when it has one, and whether it counts milliseconds.
+    static func timeoutKey(_ schema: JSONValue) -> (key: String, milliseconds: Bool)? {
+        let properties = properties(schema)
+        for key in ["timeout_seconds", "timeout_secs", "timeoutSeconds"] where properties[key] != nil { return (key, false) }
+        for key in ["timeout_ms", "timeoutMs", "timeout_millis"] where properties[key] != nil { return (key, true) }
+        // A bare `timeout` is only used when its description says the unit; otherwise the shell's
+        // `timeout` is safer than guessing seconds against milliseconds.
+        if let timeout = properties["timeout"] {
+            let description = (timeout["description"]?.stringValue ?? "").lowercased()
+            if description.contains("millisecond") || description.contains("(ms)") || description.contains(" ms") { return ("timeout", true) }
+            if description.contains("second") { return ("timeout", false) }
+        }
+        return nil
+    }
+
+    /// The command stopped after `seconds` by the machine's own `timeout` (coreutils), for command
+    /// tools without a time-limit property. Where there's no `timeout` it runs without one.
+    static func withShellTimeout(_ command: String, seconds: Int) -> String {
+        let quoted = shellQuote(command)
+        return "if command -v timeout >/dev/null 2>&1; then timeout -k 10 \(seconds) bash -c \(quoted); maipa_g_code=$?; if [ \"$maipa_g_code\" -eq 124 ]; then echo \"(the command ran out of time after \(spokenDuration(seconds: seconds)))\"; fi; exit \"$maipa_g_code\"; else bash -c \(quoted); fi"
+    }
+
+    /// "2 minutes", "90 seconds", "15 minutes".
+    static func spokenDuration(seconds: Int) -> String {
+        if seconds >= 120, seconds % 60 == 0 { return "\(seconds / 60) minutes" }
+        if seconds == 60 { return "1 minute" }
+        return seconds == 1 ? "1 second" : "\(seconds) seconds"
     }
 
     static func allowsArray(_ schema: JSONValue?) -> Bool {
@@ -131,19 +165,26 @@ public struct ComputerControl: Sendable {
     /// Runs one command chosen by the app's own code, never by the model. A script too long for
     /// one command call is uploaded as a file first and run from there, so nothing is lost to the
     /// service's address-length limit.
-    public func run(_ command: String) async throws -> String {
+    ///
+    /// `timeout` stops the command after that many seconds (the AI's `run_command`); without it
+    /// the command tool's own limit applies (15 minutes on the computer's runner).
+    public func run(_ command: String, timeout: TimeInterval? = nil) async throws -> String {
+        var command = command
+        if let timeout, let tool = commandTool, Self.timeoutKey(tool.inputSchema) == nil {
+            command = Self.withShellTimeout(command, seconds: max(1, Int(timeout.rounded(.up))))
+        }
         if let limit = commandSizeLimit, command.utf8.count > limit {
             let name = ".maipa-g/scripts/run-\(UUID().uuidString.prefix(12).lowercased()).sh"
             try await writeFile(Data(command.utf8), toHomePath: name)
-            return try await runInline("f=\"$HOME/\(name)\"; bash -l \"$f\"; code=$?; rm -f \"$f\"; exit $code")
+            return try await runInline("f=\"$HOME/\(name)\"; bash -l \"$f\"; code=$?; rm -f \"$f\"; exit $code", timeout: timeout)
         }
-        return try await runInline(command)
+        return try await runInline(command, timeout: timeout)
     }
 
     /// One command call, exactly as given.
-    func runInline(_ command: String) async throws -> String {
+    func runInline(_ command: String, timeout: TimeInterval? = nil) async throws -> String {
         guard let tool = commandTool else { throw Failure.noCommandTool }
-        let result = try await call(tool.originalName, commandArguments(command, tool: tool))
+        let result = try await call(tool.originalName, commandArguments(command, tool: tool, timeout: timeout))
         let text = Self.withoutShellNoise(result.text)
         if result.isError { throw Failure.commandFailed(text) }
         return text
@@ -498,9 +539,14 @@ extension ComputerControl {
     }
 
     public func startBackground(_ command: String, homePath: String?, id: String = "task-" + UUID().uuidString.prefix(8).lowercased()) async throws -> String {
-        guard Self.isTaskID(id) else { throw Failure.commandFailed("Bad task id") }
         if let homePath { guard Self.isSafeRelativePath(homePath) else { throw Failure.commandFailed("Unsafe checkout path \(homePath)") } }
-        let folder = homePath.map { "\"$HOME/\($0)\"" } ?? "\"$HOME\""
+        return try await startBackground(command, folderExpression: homePath.map { "\"$HOME/\($0)\"" } ?? "\"$HOME\"", id: id)
+    }
+
+    /// The same, in a folder given as a shell expression the caller has quoted (`'/srv/app'`,
+    /// `"$HOME"/'repos/x'`).
+    public func startBackground(_ command: String, folderExpression folder: String, id: String = "task-" + UUID().uuidString.prefix(8).lowercased()) async throws -> String {
+        guard Self.isTaskID(id) else { throw Failure.commandFailed("Bad task id") }
         let wrapped = "cd \(folder) && { \(command) ; } ; echo \"maipa-g-exit $?\""
         if let service = serviceTool {
             var arguments: [String: JSONValue] = [:]
@@ -553,7 +599,8 @@ extension ComputerControl {
         if grep -q '^maipa-g-exit ' "$log"; then echo "finished: $(grep '^maipa-g-exit ' "$log" | tail -n 1)";
         elif [ -f "$pid_file" ] && ! alive "$(cat "$pid_file")"; then echo "stopped without finishing";
         else echo running; fi
-        echo ---; tail -n 60 "$log" | cut -c1-400
+        echo "log: ~/.maipa-g/tasks/\(id).log"
+        echo ---; tail -n 200 "$log" | cut -c1-2000
         """)
     }
 
@@ -588,12 +635,20 @@ public struct ComputerTaskTool: AgentTool {
     }
 
     public var spec: ToolSpec {
-        ToolSpec(name: name, description: "Run a long command (over a few minutes) in the background on the chat computer, in the repo's copy when the chat has a repo, then check or stop it by id. Output is kept in ~/.maipa-g/tasks/<id>.log.", parameters: [
+        ToolSpec(name: name, description: """
+        Start a long command in the background on the person's computer (`\(control.machine)`), then check on it or stop it by its id. \
+        Use it for builds, test suites, installs and servers that take more than a couple of minutes, or that should keep running while \
+        you do other work (run_command with run_in_background: true starts the same kind of task). operation "start" (with command) \
+        returns a task_id; "status" says whether it is still running or its exit code once finished, and shows the last 200 lines of its \
+        output; "stop" ends it and everything it started. It runs in the repo's checkout\(homePath.map { " (~/\($0))" } ?? "") when the chat \
+        has a repo, otherwise in $HOME. The whole output is kept in ~/.maipa-g/tasks/<task_id>.log (read more of it with run_command, \
+        e.g. tail -n 500). Don't use it for quick commands: use run_command.
+        """, parameters: [
             "type": "object",
             "properties": [
-                "operation": ["type": "string", "enum": ["start", "status", "stop"]],
-                "command": ["type": "string", "description": "For start: the shell command."],
-                "task_id": ["type": "string", "description": "For status and stop."],
+                "operation": ["type": "string", "enum": ["start", "status", "stop"], "description": "start a command, or check (status) or stop a task by task_id."],
+                "command": ["type": "string", "description": "For start: the bash command to run."],
+                "task_id": ["type": "string", "description": "For status and stop: the id start returned, like task-1a2b3c4d."],
             ],
             "required": ["operation"],
             "additionalProperties": false,
@@ -641,7 +696,7 @@ public struct ComputerTaskTool: AgentTool {
             let command = try arguments.requiredString("command")
             try await checkout?.ensure()
             let id = try await control.startBackground(command, homePath: homePath)
-            return ToolOutput(forModel: "Started background task \(id) on \(control.machine). Check it with computer_task status and task_id \(id).", summary: "Started background task \(id)", detail: command)
+            return ToolOutput(forModel: "Started background task \(id) on \(control.machine). Its output goes to ~/.maipa-g/tasks/\(id).log. Check it with computer_task status and task_id \(id).", summary: "Started background task \(id)", detail: command)
         default:
             throw ToolInputError("operation must be start, status or stop.")
         }
@@ -651,11 +706,19 @@ public struct ComputerTaskTool: AgentTool {
 /// Dedicated foreground command tool for MAIPA-G's connected Linux computer (`mcp-maipa-g`),
 /// eliminating ambiguity with external sandbox MCP tools (such as Hugging Face's `hf_sandbox`)
 /// and enforcing `ShellRisk` + post-outside-content network egress approvals consistently.
+///
+/// Like Kiro's command tool: a time limit the AI sets (`timeout_seconds`, 2 minutes unless it asks
+/// for up to 30), `run_in_background` for servers and long jobs, any folder as `cwd`, and the exit
+/// code on the first line of the result.
 public struct RunCommandTool: AgentTool {
     public let name = "run_command"
     let control: ComputerControl
     let homePath: String?
     let checkout: CheckoutPreparer?
+
+    public static let defaultTimeoutSeconds = 120
+    public static let maxTimeoutSeconds = Int(BoundedProcess.maxTimeout)
+    static let missingFolderMarker = "maipa-g-no-such-folder"
 
     public init(control: ComputerControl, homePath: String?, checkout: CheckoutPreparer? = nil) {
         self.control = control
@@ -664,14 +727,28 @@ public struct RunCommandTool: AgentTool {
     }
 
     public var spec: ToolSpec {
-        ToolSpec(
+        let home = homePath.map { "the repo's checkout, `~/\($0)`" } ?? "`$HOME`"
+        return ToolSpec(
             name: name,
-            description: "Run a foreground shell command on this chat's connected Linux computer (`\(control.machine)` via `mcp-maipa-g`). Defaults to the repository checkout directory when the chat has a repository, or `$HOME` otherwise. For commands lasting longer than 2 minutes, use `computer_task` instead.",
+            description: """
+            Run a bash command on the person's computer (`\(control.machine)`, via `mcp-maipa-g`) and get its result: the first line is \
+            "Exit code: N", then the output (stdout, then stderr). Use it to build, test, run scripts, install a project's packages, use git, \
+            or look at files that exist only on the computer. Batch related steps with &&. It runs in \(home) unless you pass cwd (an absolute \
+            path, or one relative to $HOME); a cwd that doesn't exist is an error, not a silent change of folder. It waits up to timeout_seconds \
+            (default \(Self.defaultTimeoutSeconds), at most \(Self.maxTimeoutSeconds)) and then stops the command, so pass a larger timeout_seconds \
+            for long builds and tests. For servers, watchers or jobs you don't need to wait for, pass run_in_background: true: it starts the \
+            command and returns a task id at once (output in ~/.maipa-g/tasks/<id>.log; check or stop it with computer_task). Output over about \
+            30,000 characters is cut in the middle and the whole output is saved (the result says where). Don't use it for interactive programs \
+            that wait for input, and don't edit repo files here that you mean to save: use edit_file/create_file and save_changes.
+            """,
             parameters: [
                 "type": "object",
                 "properties": [
-                    "command": ["type": "string", "description": .string("Shell command to run in bash on `\(control.machine)`.")],
-                    "working_directory": ["type": "string", "description": "Optional safe relative path inside `$HOME` (defaults to the repo checkout when attached)."],
+                    "command": ["type": "string", "description": .string("The bash command to run on `\(control.machine)`.")],
+                    "cwd": ["type": "string", "description": .string("Folder to run in: an absolute path like \"/srv/app\", or one relative to $HOME like \"repos/me/app\". Default: \(homePath.map { "~/\($0)" } ?? "$HOME").")],
+                    "working_directory": ["type": "string", "description": "Same as cwd (older name)."],
+                    "timeout_seconds": ["type": "integer", "minimum": 1, "maximum": .number(Double(Self.maxTimeoutSeconds)), "description": .string("Stop the command after this many seconds. Default \(Self.defaultTimeoutSeconds), at most \(Self.maxTimeoutSeconds).")],
+                    "run_in_background": ["type": "boolean", "description": "Start the command and return straight away with a task id instead of waiting for it. Default false."],
                 ],
                 "required": ["command"],
                 "additionalProperties": false,
@@ -722,43 +799,136 @@ public struct RunCommandTool: AgentTool {
         return try await runApproved(arguments: arguments, progress: progress)
     }
 
+    /// Where a command runs: a shell expression for the folder, how to show it, and whether it is
+    /// the repo's checkout (which MAIPA-G copies onto the computer first).
+    struct Folder: Sendable, Equatable {
+        var expression: String?
+        var display: String
+        var explicit: Bool
+        var isRepoHome: Bool
+    }
+
+    static func folder(from arguments: JSONValue, homePath: String?) throws -> Folder {
+        guard let raw = arguments.optionalString("cwd") ?? arguments.optionalString("working_directory") else {
+            if let homePath, ComputerControl.isSafeRelativePath(homePath) {
+                return Folder(expression: "\"$HOME/\(homePath)\"", display: "~/\(homePath)", explicit: false, isRepoHome: true)
+            }
+            return Folder(expression: nil, display: "~", explicit: false, isRepoHome: false)
+        }
+        guard !raw.contains("\n"), !raw.contains("\r"), !raw.contains("\u{0}") else {
+            throw ToolInputError("cwd must be one folder path, without line breaks.")
+        }
+        var path = raw
+        if path == "~" || path == "$HOME" || path == "${HOME}" {
+            return Folder(expression: "\"$HOME\"", display: "~", explicit: true, isRepoHome: false)
+        }
+        for prefix in ["~/", "$HOME/", "${HOME}/"] where path.hasPrefix(prefix) {
+            path = String(path.dropFirst(prefix.count))
+            break
+        }
+        if path.hasPrefix("/") {
+            let absolute = path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path
+            return Folder(expression: ComputerControl.shellQuote(absolute), display: absolute, explicit: true, isRepoHome: false)
+        }
+        let relative = RepoWorkspace.normalize(path)
+        guard !relative.isEmpty else { return Folder(expression: "\"$HOME\"", display: "~", explicit: true, isRepoHome: false) }
+        return Folder(expression: "\"$HOME\"/" + ComputerControl.shellQuote(relative), display: "~/\(relative)", explicit: true, isRepoHome: relative == homePath)
+    }
+
+    static func timeoutSeconds(_ arguments: JSONValue) -> Int {
+        min(max(arguments.optionalInt("timeout_seconds") ?? arguments.optionalInt("timeout") ?? defaultTimeoutSeconds, 1), maxTimeoutSeconds)
+    }
+
     public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let command = try arguments.requiredString("command")
-        let customDir = arguments.optionalString("working_directory")?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let effectiveRelPath: String?
-        if let customDir, !customDir.isEmpty {
-            guard ComputerControl.isSafeRelativePath(customDir) else {
-                throw ToolInputError("working_directory must be a safe relative path inside $HOME.")
-            }
-            effectiveRelPath = customDir
-        } else {
-            effectiveRelPath = homePath
-        }
+        let folder = try Self.folder(from: arguments, homePath: homePath)
+        let timeout = Self.timeoutSeconds(arguments)
         // The repo's copy goes onto the computer before the first command that needs it, private
         // repos included. If that fails, the command still runs and the reason is shown.
         var checkoutNote = ""
-        if effectiveRelPath == homePath, let checkout {
+        if folder.isRepoHome, let checkout {
             do { try await checkout.ensure() } catch {
                 checkoutNote = "MAIPA-G couldn't copy the repo onto the computer: \(ErrorExplainer.explain(error).message)\n"
             }
         }
-        let dirSetup: String
-        if let rel = effectiveRelPath, ComputerControl.isSafeRelativePath(rel) {
-            dirSetup = "if [ -d \"$HOME/\(rel)\" ]; then cd \"$HOME/\(rel)\"; else echo \"(MAIPA-G: ~/\(rel) isn't on this computer, so this ran in $HOME)\"; fi; "
-        } else {
-            dirSetup = ""
+        let environment = ". \"$HOME/.maipa-g/env.sh\" 2>/dev/null || true; "
+        if arguments.optionalBool("run_in_background") ?? arguments.optionalBool("background") ?? false {
+            if folder.explicit, let expression = folder.expression {
+                let check = try await control.run("if [ -d \(expression) ]; then echo maipa-g-folder-ok; else echo \(Self.missingFolderMarker); fi")
+                if check.contains(Self.missingFolderMarker) { throw Self.missingFolder(folder, machine: control.machine) }
+            }
+            let id = try await control.startBackground(environment + command, folderExpression: folder.expression ?? "\"$HOME\"")
+            let text = """
+            Started in the background as task \(id) on \(control.machine), in \(folder.display).
+            Output goes to ~/.maipa-g/tasks/\(id).log. Check it with computer_task (operation "status", task_id "\(id)"), or stop it with operation "stop".
+            """
+            return ToolOutput(forModel: checkoutNote + text, summary: "Started " + Self.commandPreview(command) + " in the background", detail: command)
         }
-        let wrapped = ". \"$HOME/.maipa-g/env.sh\" 2>/dev/null || true; \(dirSetup)\(command)"
-        let raw = try await control.run(wrapped)
-        let plain = checkoutNote + ComputerControl.plainOutput(raw)
-        let redacted = SensitiveDataRedactor().redact(plain)
-        let capped = ConnectorOutputLimit.cap(redacted)
-        let shown = capped.isEmpty ? "(command exited with no output)" : capped
-        let failed = shown.range(of: #"\(exit code -?\d+\)\s*$"#, options: .regularExpression) != nil
+        let folderSetup: String
+        if let expression = folder.expression {
+            if folder.explicit {
+                folderSetup = "if [ -d \(expression) ]; then cd \(expression); else echo \(Self.missingFolderMarker); exit 97; fi; "
+            } else {
+                folderSetup = "if [ -d \(expression) ]; then cd \(expression); else echo \"(MAIPA-G: \(folder.display) isn't on this computer, so this ran in $HOME)\"; fi; "
+            }
+        } else {
+            folderSetup = ""
+        }
+        let wrapped = environment + folderSetup + command
+        let preview = Self.commandPreview(command)
+        let raw = try await Self.withHeartbeat("Running \(preview)", progress: progress) {
+            try await control.run(wrapped, timeout: TimeInterval(timeout))
+        }
+        let plain = ComputerControl.plainOutput(raw)
+        if folder.explicit, plain.split(whereSeparator: \.isNewline).contains(where: { $0.trimmingCharacters(in: .whitespaces) == Self.missingFolderMarker }) {
+            throw Self.missingFolder(folder, machine: control.machine)
+        }
+        let redacted = SensitiveDataRedactor().redact(checkoutNote + plain)
+        let status = Self.exitStatus(redacted)
+        var shown = "Exit code: \(status.code)\n"
+        if status.timedOut {
+            shown += "(Stopped after \(ComputerControl.spokenDuration(seconds: timeout)), its time limit. Run it again with a larger timeout_seconds, up to \(Self.maxTimeoutSeconds), or with run_in_background: true and check it with computer_task.)\n"
+        }
+        shown += status.output.isEmpty ? "(no output)" : status.output
         return ToolOutput(
             forModel: shown,
-            summary: (failed ? "Failed: " : "Ran ") + Self.commandPreview(command),
+            summary: (status.code != 0 ? "Failed: " : "Ran ") + preview,
             detail: String(shown.prefix(4_000))
         )
+    }
+
+    static func missingFolder(_ folder: Folder, machine: String) -> ToolInputError {
+        ToolInputError("The folder \(folder.display) doesn't exist on \(machine), so the command didn't run. Check the path (run_command with `ls` in a folder you know), or create it first with `mkdir -p`.")
+    }
+
+    /// The exit code from the "(exit code N)" line the computer adds after a failing command (none
+    /// means 0), the output without that line, and whether it ran out of time.
+    static func exitStatus(_ text: String) -> (code: Int, output: String, timedOut: Bool) {
+        var output = text
+        var code = 0
+        if let range = output.range(of: #"\n?\(exit code -?[0-9]+\)\s*$"#, options: .regularExpression) {
+            let digits = output[range].filter { $0.isNumber || $0 == "-" }
+            code = Int(digits) ?? 1
+            output.removeSubrange(range)
+        }
+        let timedOut = output.contains("(the command ran out of time after")
+        if timedOut, code == 0 { code = 124 }
+        return (code, output.trimmingCharacters(in: .newlines), timedOut)
+    }
+
+    /// Says the command is still going every 30 seconds, so a long build never looks like a tool
+    /// that went quiet (the agent loop stops those).
+    static func withHeartbeat<T: Sendable>(_ label: String, progress: @escaping @Sendable (String) -> Void, every seconds: UInt64 = 30, _ work: () async throws -> T) async throws -> T {
+        let started = Date()
+        let beat = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+                if Task.isCancelled { break }
+                let elapsed = Int(Date().timeIntervalSince(started))
+                progress("\(label) · \(elapsed >= 60 ? "\(elapsed / 60) min" : "\(elapsed) s")")
+            }
+        }
+        defer { beat.cancel() }
+        return try await work()
     }
 }

@@ -1436,6 +1436,7 @@ final class ChatSession: Identifiable {
                 return app.liveStatusText(for: self)
             }
         })
+        tools.append(UpdateSessionInformationTool())
         // Files the AI hands over (a built .ipa or .deb, a zip) as cards, not links that need a GitHub sign-in.
         tools.append(SendFileTool(github: app.github.client, transport: app.transport, computer: app.connectors.computerControl(), store: app.attachmentStore))
         var readOnlyExtraTools: [any AgentTool] = []
@@ -1571,13 +1572,14 @@ final class ChatSession: Identifiable {
                 let savingChoice = SavingStyleChoice()
                 let listTool = ListFilesTool(workspace: workspace, changes: changes)
                 let searchTool = SearchCodeTool(workspace: workspace, changes: changes)
+                let fileSearchTool = FileSearchTool(workspace: workspace, changes: changes)
                 let readTool = ReadFileTool(workspace: workspace, changes: changes)
                 let readRefTool = ReadRepoFileTool(github: github)
                 let loadRulesTool = LoadRepoRulesTool(documents: rules.documents)
-                let helperRepoTools: [any AgentTool] = [listTool, searchTool, readTool, readRefTool, loadRulesTool]
+                let helperRepoTools: [any AgentTool] = [listTool, searchTool, fileSearchTool, readTool, readRefTool, loadRulesTool]
                 readOnlyHelperTools.append(contentsOf: helperRepoTools)
                 let repoTools: [any AgentTool] = [
-                    listTool, searchTool, readTool, readRefTool, loadRulesTool,
+                    listTool, searchTool, fileSearchTool, readTool, readRefTool, loadRulesTool,
                     CreateFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
                     EditFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
                     AppendFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
@@ -1665,6 +1667,7 @@ final class ChatSession: Identifiable {
                 }
                 tools.append(RunCommandTool(control: control, homePath: repoHome, checkout: checkout))
                 tools.append(ComputerTaskTool(control: control, homePath: repoHome, checkout: checkout))
+                tools.append(CodeTool(control: control, homePath: repoHome, checkout: checkout))
                 // The app being built, running live on the computer, shown in the chat.
                 if let repoContext, let checkout {
                     let previewHome = "repos/\(repoContext.ref.owner)/\(repoContext.ref.name)"
@@ -1900,7 +1903,7 @@ final class ChatSession: Identifiable {
                 spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil,
                 steering: turnSteering, runner: subAgents.runner()
             )
-            tools.append(InvokeSubAgentTool(lead: SubAgentSetup.lead, definitions: definitions, coordinator: coordinator))
+            tools.append(InvokeSubAgentTool(lead: SubAgentSetup.lead, definitions: definitions, coordinator: coordinator, contextTools: tools))
         }
 
         await readBalanceBefore(modelID: route.model, app: app, deadline: setupDeadline)
@@ -2495,6 +2498,7 @@ final class ChatSession: Identifiable {
         let helpers: [any AgentTool] = [
             ListFilesTool(workspace: base, changes: changes),
             SearchCodeTool(workspace: base, changes: changes),
+            FileSearchTool(workspace: base, changes: changes),
             ReadFileTool(workspace: base, changes: changes),
             LoadRepoRulesTool(documents: rules.documents),
         ]
