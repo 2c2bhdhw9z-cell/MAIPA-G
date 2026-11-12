@@ -115,6 +115,16 @@ private struct GrokStackPhotoCard: View {
     @Environment(AppModel.self) private var app
     @State private var image: UIImage?
 
+    init(attachment: AttachmentReference, width: CGFloat, height: CGFloat, maxPixels: Int, fitTallPortrait: Bool = false) {
+        self.attachment = attachment
+        self.width = width
+        self.height = height
+        self.maxPixels = maxPixels
+        self.fitTallPortrait = fitTallPortrait
+        // Already decoded (this size or smaller): shown on the first frame instead of a spinner.
+        _image = State(initialValue: ThumbnailPipeline.shared.bestCachedThumbnail(for: attachment, maxPixelSize: maxPixels))
+    }
+
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -155,7 +165,12 @@ private struct GrokStackPhotoCard: View {
         )
         .shadow(color: .black.opacity(0.24), radius: 10, x: 0, y: 4)
         .task(id: attachment.id) {
-            image = await ImageDownsampler.attachmentThumbnail(attachment, store: app.attachmentStore, maxPixelSize: maxPixels)
+            if let cached = ThumbnailPipeline.shared.bestCachedThumbnail(for: attachment, maxPixelSize: maxPixels) {
+                image = cached
+            }
+            if let decoded = await ThumbnailPipeline.shared.thumbnail(for: attachment, store: app.attachmentStore, maxPixelSize: maxPixels), !Task.isCancelled {
+                image = decoded
+            }
         }
     }
 }
@@ -166,25 +181,58 @@ struct PhotoStackGallerySheet: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
     @State private var selection: Int
+    /// The page in view, tracked by the paging scroll view.
+    @State private var scrolledIndex: Int?
 
     init(images: [AttachmentReference], initialIndex: Int) {
         self.images = images
         self.initialIndex = initialIndex
-        _selection = State(initialValue: min(max(initialIndex, 0), max(0, images.count - 1)))
+        let start = min(max(initialIndex, 0), max(0, images.count - 1))
+        _selection = State(initialValue: start)
+        _scrolledIndex = State(initialValue: start)
     }
 
     var body: some View {
         ZStack(alignment: .top) {
             Color.black.ignoresSafeArea()
 
-            TabView(selection: $selection) {
-                ForEach(Array(images.enumerated()), id: \.element.id) { idx, item in
-                    ZoomableGalleryPhoto(attachment: item)
-                        .tag(idx)
+            // One page per photo, but only the pages next to the one in view are built: a single
+            // message can carry thousands of photos.
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal) {
+                    LazyHStack(spacing: 0) {
+                        ForEach(images.indices, id: \.self) { idx in
+                            ZoomableGalleryPhoto(attachment: images[idx])
+                                .containerRelativeFrame([.horizontal, .vertical])
+                                .id(idx)
+                        }
+                    }
+                    .scrollTargetLayout()
+                }
+                .scrollTargetBehavior(.paging)
+                .scrollIndicators(.hidden)
+                .scrollPosition(id: $scrolledIndex)
+                .onAppear {
+                    // Open on the photo that was tapped.
+                    proxy.scrollTo(selection, anchor: .leading)
                 }
             }
-            .tabViewStyle(.page(indexDisplayMode: images.count > 1 ? .automatic : .never))
             .ignoresSafeArea()
+            .onChange(of: scrolledIndex) { _, index in
+                if let index { selection = index }
+            }
+
+            if images.count > 1 {
+                VStack {
+                    Spacer()
+                    GalleryPageDots(count: images.count, current: selection) { page in
+                        selection = page
+                        scrolledIndex = page
+                    }
+                    .fixedSize()
+                    .padding(.bottom, 14)
+                }
+            }
 
             HStack {
                 Button {
@@ -257,12 +305,57 @@ enum ShareableAttachmentURL {
     }
 }
 
+/// The gallery's page dots (as the paged TabView showed them), scrubbable to jump between photos.
+private struct GalleryPageDots: UIViewRepresentable {
+    let count: Int
+    let current: Int
+    let onSelect: (Int) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onSelect: onSelect)
+    }
+
+    func makeUIView(context: Context) -> UIPageControl {
+        let control = UIPageControl()
+        control.hidesForSinglePage = true
+        control.numberOfPages = count
+        control.currentPage = current
+        control.addTarget(context.coordinator, action: #selector(Coordinator.pageChanged(_:)), for: .valueChanged)
+        return control
+    }
+
+    func updateUIView(_ control: UIPageControl, context: Context) {
+        context.coordinator.onSelect = onSelect
+        if control.numberOfPages != count { control.numberOfPages = count }
+        if control.currentPage != current { control.currentPage = current }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var onSelect: (Int) -> Void
+
+        init(onSelect: @escaping (Int) -> Void) {
+            self.onSelect = onSelect
+            super.init()
+        }
+
+        @objc func pageChanged(_ sender: UIPageControl) {
+            onSelect(sender.currentPage)
+        }
+    }
+}
+
 private struct ZoomableGalleryPhoto: View {
     let attachment: AttachmentReference
     @Environment(AppModel.self) private var app
     @State private var image: UIImage?
     @State private var scale: CGFloat = 1
     @State private var baseScale: CGFloat = 1
+
+    init(attachment: AttachmentReference) {
+        self.attachment = attachment
+        _image = State(initialValue: ThumbnailPipeline.shared.bestCachedThumbnail(for: attachment, maxPixelSize: 2_048))
+    }
 
     var body: some View {
         ZStack {
@@ -272,9 +365,9 @@ private struct ZoomableGalleryPhoto: View {
                     .scaledToFit()
                     .scaleEffect(scale)
                     .gesture(
-                        MagnificationGesture()
+                        MagnifyGesture()
                             .onChanged { value in
-                                scale = min(max(baseScale * value, 1), 5)
+                                scale = min(max(baseScale * value.magnification, 1), 5)
                             }
                             .onEnded { _ in
                                 if scale < 1.05 {
@@ -302,21 +395,26 @@ private struct ZoomableGalleryPhoto: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: attachment.id) {
-            image = await ImageDownsampler.attachmentThumbnail(attachment, store: app.attachmentStore, maxPixelSize: 2_048)
+            // Off the main thread; dropped if this page is swiped far away before it loads.
+            if let decoded = await ThumbnailPipeline.shared.thumbnail(for: attachment, store: app.attachmentStore, maxPixelSize: 2_048), !Task.isCancelled {
+                image = decoded
+            }
         }
     }
 }
 
 // MARK: - Non-Image File Pill + Preview Sheet
 
+/// A file in a message. Tapping it asks the group it's in to open its preview, so thousands of
+/// pills share one sheet.
 struct ChatFileAttachmentPill: View {
     let attachment: AttachmentReference
+    var onOpen: () -> Void
     @Environment(\.theme) private var theme
-    @State private var showingPreview = false
 
     var body: some View {
         Button {
-            showingPreview = true
+            onOpen()
         } label: {
             HStack(spacing: 7) {
                 Image(systemName: icon)
@@ -341,9 +439,6 @@ struct ChatFileAttachmentPill: View {
             .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Theme.stroke))
         }
         .buttonStyle(.plain)
-        .sheet(isPresented: $showingPreview) {
-            AttachmentQuickPreviewSheet(attachment: attachment)
-        }
     }
 
     private var icon: String {
@@ -417,7 +512,7 @@ struct AttachmentQuickPreviewSheet: View {
                    FileManager.default.fileExists(atPath: resolvedURL.path) {
                     fileURL = resolvedURL
                     if attachment.kind == .image {
-                        downsampledImage = await ImageDownsampler.attachmentThumbnail(attachment, store: app.attachmentStore, maxPixelSize: 2_400)
+                        downsampledImage = await ThumbnailPipeline.shared.thumbnail(for: attachment, store: app.attachmentStore, maxPixelSize: 2_400)
                     } else if attachment.kind != .pdf && !attachment.name.lowercased().hasSuffix(".pdf") {
                         previewSlice = (try? await app.attachmentStore.readSlice(for: attachment, offsetBytes: 0, maxBytes: 256_000))?.data
                     }

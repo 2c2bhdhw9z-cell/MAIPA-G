@@ -4,42 +4,20 @@ import ImageIO
 import PDFKit
 import UIKit
 
-/// Decodes a thumbnail directly from compressed bytes and keeps an in-memory bounded cache so
-/// scrolling past photo stacks, composer chips, generated images, or Canvas cards stays 120Hz smooth.
+/// Decodes a thumbnail directly from compressed bytes. Pictures are kept in ThumbnailPipeline's
+/// memory cache, so scrolling past photo stacks, composer chips, generated images, or Canvas
+/// cards stays smooth.
 enum ImageDownsampler {
-    nonisolated(unsafe) private static let memoryCache: NSCache<NSString, UIImage> = {
-        let cache = NSCache<NSString, UIImage>()
-        cache.countLimit = 180
-        cache.totalCostLimit = 64 * 1_024 * 1_024
-        return cache
-    }()
-
-    nonisolated(unsafe) private static var registeredMemoryWarning = false
-
-    private static func ensureMemoryObserver() {
-        guard !registeredMemoryWarning else { return }
-        registeredMemoryWarning = true
-        NotificationCenter.default.addObserver(
-            forName: UIApplication.didReceiveMemoryWarningNotification,
-            object: nil,
-            queue: nil
-        ) { _ in
-            ImageDownsampler.clearMemoryCache()
-        }
-    }
-
     static func clearMemoryCache() {
-        memoryCache.removeAllObjects()
+        ThumbnailPipeline.shared.clearMemory()
     }
 
     static func cachedImage(key: String, maxPixelSize: Int) -> UIImage? {
-        memoryCache.object(forKey: "\(key)@\(maxPixelSize)" as NSString)
+        ThumbnailPipeline.shared.cachedImage(key: key, maxPixelSize: maxPixelSize)
     }
 
     static func store(_ image: UIImage, key: String, maxPixelSize: Int) {
-        ensureMemoryObserver()
-        let pixels = Int(image.size.width * image.scale * image.size.height * image.scale)
-        memoryCache.setObject(image, forKey: "\(key)@\(maxPixelSize)" as NSString, cost: max(1, pixels * 4))
+        ThumbnailPipeline.shared.store(image, key: key, maxPixelSize: maxPixelSize)
     }
 
     static func image(from data: Data, maxPixelSize: Int = 2_048, cacheKey: String? = nil) -> UIImage? {
@@ -61,23 +39,19 @@ enum ImageDownsampler {
         return decoded
     }
 
-    /// Loads and caches an attachment thumbnail off the main thread.
+    /// Loads an attachment thumbnail off the main thread, through ThumbnailPipeline. The load
+    /// carries on if the caller goes away, as it always has; views that can be cancelled call
+    /// `ThumbnailPipeline.shared.thumbnail(for:store:maxPixelSize:)` instead.
     static func attachmentThumbnail(
         _ attachment: AttachmentReference,
         store: AttachmentStore,
         maxPixelSize: Int
     ) async -> UIImage? {
-        let key = "att-\(attachment.id.uuidString)"
-        if let cached = cachedImage(key: key, maxPixelSize: maxPixelSize) {
+        if let cached = ThumbnailPipeline.shared.cachedThumbnail(for: attachment, maxPixelSize: maxPixelSize) {
             return cached
         }
-        guard let data = try? await store.data(for: attachment) else { return nil }
-        let isPDF = attachment.kind == .pdf || attachment.name.lowercased().hasSuffix(".pdf")
-        return await Task.detached(priority: .userInitiated) {
-            if isPDF {
-                return Self.pdfThumbnail(from: data, maxPixelSize: maxPixelSize, cacheKey: key)
-            }
-            return Self.image(from: data, maxPixelSize: maxPixelSize, cacheKey: key)
+        return await Task {
+            await ThumbnailPipeline.shared.thumbnail(for: attachment, store: store, maxPixelSize: maxPixelSize)
         }.value
     }
 
@@ -86,7 +60,16 @@ enum ImageDownsampler {
         if let cacheKey, let cached = cachedImage(key: cacheKey, maxPixelSize: maxPixelSize) {
             return cached
         }
-        guard let doc = PDFDocument(data: data), let page = doc.page(at: 0) else { return nil }
+        guard let doc = PDFDocument(data: data), let page = doc.page(at: 0),
+              let rendered = renderPDFPage(page, maxPixelSize: maxPixelSize) else { return nil }
+        if let cacheKey {
+            store(rendered, key: cacheKey, maxPixelSize: maxPixelSize)
+        }
+        return rendered
+    }
+
+    /// One PDF page drawn on white, its longer side `maxPixelSize` pixels at most.
+    static func renderPDFPage(_ page: PDFPage, maxPixelSize: Int) -> UIImage? {
         let bounds = page.bounds(for: .mediaBox)
         guard bounds.width > 1, bounds.height > 1 else { return nil }
         let scale = min(CGFloat(maxPixelSize) / max(bounds.width, bounds.height), 2.0)
@@ -94,7 +77,7 @@ enum ImageDownsampler {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         format.opaque = true
-        let rendered = UIGraphicsImageRenderer(size: targetSize, format: format).image { ctx in
+        return UIGraphicsImageRenderer(size: targetSize, format: format).image { ctx in
             UIColor.white.setFill()
             ctx.fill(CGRect(origin: .zero, size: targetSize))
             ctx.cgContext.saveGState()
@@ -103,9 +86,5 @@ enum ImageDownsampler {
             page.draw(with: .mediaBox, to: ctx.cgContext)
             ctx.cgContext.restoreGState()
         }
-        if let cacheKey {
-            store(rendered, key: cacheKey, maxPixelSize: maxPixelSize)
-        }
-        return rendered
     }
 }

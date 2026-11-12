@@ -6,6 +6,10 @@ import UIKit
 
 /// Unified Workstation combining Runable's infinite pan-and-zoom Canvas (upgraded to display EVERY
 /// file type, not just images), Arena's Workspace folder tree, and Kiro's Changes/Reviews diff panel.
+///
+/// The lists, card places and view live in `WorkstationCanvasModel`. This screen only gathers what
+/// they're made from and lays out the header and the three tabs, each its own view, so a pinch or
+/// a drag redraws the Canvas board and nothing else.
 struct WorkstationScreen: View {
     enum Tab: String, CaseIterable, Identifiable {
         case canvas = "Canvas"
@@ -14,28 +18,14 @@ struct WorkstationScreen: View {
         var id: String { rawValue }
     }
 
-    enum CanvasTool: String {
-        case pointer
-        case hand
-    }
-
     let target: ComposerTarget
     var initialTab: Tab = .canvas
 
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.theme) private var theme
-    @Environment(\.colorScheme) private var colorScheme
 
     @State private var tab: Tab = .canvas
-    @State private var tool: CanvasTool = .pointer
-    @State private var zoom: CGFloat = 1.0
-    @State private var baseZoom: CGFloat = 1.0
-    @State private var pan: CGSize = .zero
-    @State private var dragPanDelta: CGSize = .zero
-    @State private var positions: [String: CGPoint] = [:]
-    @State private var selectedItemID: String?
-    @State private var previewingItem: WorkstationItem?
+    @State private var canvas = WorkstationCanvasModel()
 
     @State private var fileQuery = ""
     @State private var expandedFolders: Set<String> = ["staged", "uploads", "generated", "diagrams", "repo", "computer"]
@@ -50,18 +40,9 @@ struct WorkstationScreen: View {
     @State private var localAddedAttachments: [AttachmentReference] = []
     @State private var importError: String?
 
-    @State private var diffScope = 0
-    @State private var diffText = "Loading changes…"
-
-    private static let zoomSteps: [CGFloat] = [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 1.0, 1.5, 2.0, 3.0]
-
     private var session: ChatSession? {
         if case .chat(let id) = target { return app.library.session(id) }
         return nil
-    }
-
-    private var activeRepo: ChatRepo? {
-        app.repo(for: target)
     }
 
     private var storageKey: String {
@@ -73,29 +54,65 @@ struct WorkstationScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            topHeader
+            WorkstationHeader(
+                tab: $tab,
+                canvas: canvas,
+                onExport: { exportAllLocalAttachments() },
+                onClose: { dismiss() }
+            )
             Divider().opacity(0.6)
 
             switch tab {
             case .canvas:
-                canvasWorkspace
+                WorkstationCanvasBoard(
+                    canvas: canvas,
+                    photoItems: $photoItems,
+                    actions: WorkstationBoardActions(
+                        addToChat: { addItemToChat($0) },
+                        share: { shareItem($0) },
+                        remove: { removeDraftItem($0) },
+                        pickFiles: { pickFilesForWorkstation() }
+                    )
+                )
             case .files:
-                filesWorkspace
+                WorkstationFilesTab(
+                    canvas: canvas,
+                    query: $fileQuery,
+                    expandedFolders: $expandedFolders,
+                    repoLoading: repoLoading,
+                    computerAvailable: app.connectors.computerControl() != nil,
+                    machineName: app.settings.chatComputerMachineName,
+                    computerLoading: computerLoading,
+                    computerFileCount: computerFiles.count,
+                    onOpen: { canvas.previewingItem = $0 },
+                    onAddToChat: { addItemToChat($0) },
+                    onLoadComputer: { Task { await loadComputerFiles() } }
+                )
             case .changes:
-                changesWorkspace
+                WorkstationChangesTab(session: session)
             }
         }
         .background(Theme.background.ignoresSafeArea())
+        .background(
+            WorkstationSourceObserver(
+                target: target,
+                canvas: canvas,
+                localAdded: localAddedAttachments,
+                repoEntries: repoEntries,
+                repoCommit: repoCommit,
+                computerFiles: computerFiles,
+                stagedChanges: $stagedChanges
+            )
+        )
         .onAppear {
             tab = initialTab
-            loadSavedPositions()
+            canvas.configure(storageKey: storageKey)
         }
-        .task(id: session?.chat.updatedAt) {
-            if let session {
-                stagedChanges = await session.currentStagedChanges()
-            }
+        .onDisappear {
+            canvas.flushLayout()
+            canvas.saveViewport()
         }
-        .task(id: activeRepo) {
+        .task(id: canvas.activeRepo) {
             await loadRepoTreeIfNeeded()
         }
         .onChange(of: photoItems) { _, picked in
@@ -103,10 +120,10 @@ struct WorkstationScreen: View {
             photoItems = []
             importPickedPhotos(picked)
         }
-        .sheet(item: $previewingItem) { item in
+        .sheet(item: Binding(get: { canvas.previewingItem }, set: { canvas.previewingItem = $0 })) { item in
             WorkstationItemPreviewSheet(
                 item: item,
-                repo: activeRepo,
+                repo: canvas.activeRepo,
                 repoCommit: repoCommit,
                 onAddToChat: { addItemToChat(item) }
             )
@@ -118,9 +135,281 @@ struct WorkstationScreen: View {
         }
     }
 
-    // MARK: - Top Header (`Canvas | Files | Changes`)
+    // MARK: - Actions
 
-    private var topHeader: some View {
+    private func addItemToChat(_ item: WorkstationItem) {
+        if let att = item.attachment {
+            switch target {
+            case .home:
+                if !app.home.attachments.contains(where: { $0.id == att.id }) {
+                    app.home.attachments.append(att)
+                }
+            case .chat(let id):
+                if let s = app.library.session(id), !s.draftAttachments.contains(where: { $0.id == att.id }) {
+                    s.draftAttachments.append(att)
+                }
+            }
+            Haptics.selection()
+            dismiss()
+            return
+        }
+        if let path = item.repoPath, let repo = canvas.activeRepo {
+            app.reference(repo: repo.ref, commit: repoCommit ?? repo.branch, path: path, in: target)
+            Haptics.selection()
+            dismiss()
+            return
+        }
+        if case .computerFile(let path) = item.kind {
+            let note = "Inspect `\(path)` on `\(app.settings.chatComputerMachineName)`"
+            switch target {
+            case .home: app.home.text = app.home.text.isEmpty ? note : "\(app.home.text)\n\(note)"
+            case .chat(let id):
+                if let s = app.library.session(id) {
+                    s.draft = s.draft.isEmpty ? note : "\(s.draft)\n\(note)"
+                }
+            }
+            Haptics.selection()
+            dismiss()
+        }
+    }
+
+    private func removeDraftItem(_ item: WorkstationItem) {
+        guard let att = item.attachment else { return }
+        localAddedAttachments.removeAll { $0.id == att.id }
+        switch target {
+        case .home:
+            app.home.attachments.removeAll { $0.id == att.id }
+        case .chat(let id):
+            app.library.session(id)?.draftAttachments.removeAll { $0.id == att.id }
+        }
+        if canvas.selectedItemID == item.id { canvas.selectedItemID = nil }
+        Haptics.selection()
+    }
+
+    private func shareItem(_ item: WorkstationItem) {
+        guard let att = item.attachment else { return }
+        Task {
+            if let url = await ShareableAttachmentURL.prepare(attachment: att, store: app.attachmentStore) {
+                SharePresenter.present(items: [url])
+            }
+        }
+    }
+
+    private func exportAllLocalAttachments() {
+        let items = canvas.exportableAttachments
+        guard !items.isEmpty else { return }
+        Task {
+            var urls: [URL] = []
+            for att in items.prefix(30) {
+                if let url = await ShareableAttachmentURL.prepare(attachment: att, store: app.attachmentStore) {
+                    urls.append(url)
+                }
+            }
+            if !urls.isEmpty {
+                SharePresenter.present(items: urls)
+            }
+        }
+    }
+
+    private func pickFilesForWorkstation() {
+        AttachmentFilePicker.shared.present(
+            onPick: { files in
+                Task {
+                    var failures: [String] = []
+                    for picked in files {
+                        do {
+                            let imported = try await AttachmentImporter.importFileURL(picked.url, name: picked.name, store: app.attachmentStore)
+                            appendDraftAttachment(imported)
+                        } catch let error as AttachmentImporter.Failure {
+                            failures.append("\(picked.name): \(error.localizedDescription)")
+                        } catch {
+                            failures.append("Couldn't add \(picked.name).")
+                        }
+                    }
+                    if !failures.isEmpty {
+                        importError = failures.joined(separator: "\n")
+                    }
+                }
+            },
+            onFailure: { importError = $0 }
+        )
+    }
+
+    private func importPickedPhotos(_ picked: [PhotosPickerItem]) {
+        Task {
+            var idx = canvas.uploadItems.filter { $0.attachment?.kind == .image }.count + 1
+            for item in picked {
+                if let imported = try? await AttachmentImporter.importPhoto(item, baseName: picked.count > 1 ? "Photo \(idx)" : nil, store: app.attachmentStore) {
+                    appendDraftAttachment(imported)
+                    idx += 1
+                }
+            }
+        }
+    }
+
+    private func appendDraftAttachment(_ attachment: AttachmentReference) {
+        if !localAddedAttachments.contains(where: { $0.id == attachment.id }) {
+            localAddedAttachments.append(attachment)
+        }
+        switch target {
+        case .home:
+            if !app.home.attachments.contains(where: { $0.id == attachment.id }) {
+                app.home.attachments.append(attachment)
+            }
+        case .chat(let id):
+            if let s = app.library.session(id), !s.draftAttachments.contains(where: { $0.id == attachment.id }) {
+                s.draftAttachments.append(attachment)
+            }
+        }
+        Haptics.selection()
+    }
+
+    private func loadRepoTreeIfNeeded() async {
+        guard let repo = canvas.activeRepo, let github = app.repoClient(for: repo.ref) else {
+            repoEntries = []
+            repoCommit = nil
+            return
+        }
+        repoLoading = true
+        defer { repoLoading = false }
+        do {
+            let commit = try await github.resolveCommit(repo.ref, ref: repo.branch)
+            let ws = RepoWorkspace(repo: repo.ref, branch: repo.branch, commit: commit, github: github, store: app.snapshots)
+            let tree = try await ws.tree().entries
+            repoCommit = commit
+            repoEntries = tree
+        } catch {
+            repoEntries = []
+        }
+    }
+
+    private func loadComputerFiles() async {
+        guard let control = app.connectors.computerControl(), !computerLoading else { return }
+        computerLoading = true
+        defer { computerLoading = false }
+        if let output = try? await control.run("find ~ -maxdepth 3 -not -path '*/.*' -type f 2>/dev/null | head -n 120") {
+            computerFiles = output
+                .components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+    }
+}
+
+/// Wide enough to stay roughly square. A hard cap of 8 turned a few hundred cards into a
+/// single tall strip, which then had to be zoomed until every card was a speck.
+extension WorkstationCanvasLayout {
+    static func idealGridColumns(for count: Int) -> Int {
+        if count <= 1 { return 1 }
+        if count <= 4 { return 2 }
+        if count <= 9 { return 3 }
+        return Int(ceil(sqrt(Double(count))))
+    }
+}
+
+extension WorkstationBadgeTint {
+    var color: Color {
+        switch self {
+        case .blue: return .blue
+        case .red: return .red
+        case .mint: return .mint
+        case .orange: return .orange
+        case .purple: return .purple
+        case .green: return .green
+        case .indigo: return .indigo
+        case .teal: return .teal
+        }
+    }
+}
+
+extension WorkstationItem {
+    var badgeColor: Color { badgeTint.color }
+}
+
+// MARK: - Sources
+
+/// Reads the chat (which changes on every word of a streaming reply) so the screen doesn't have
+/// to, and hands the model plain copies. The model rebuilds only what actually changed.
+private struct WorkstationSourceObserver: View {
+    let target: ComposerTarget
+    let canvas: WorkstationCanvasModel
+    let localAdded: [AttachmentReference]
+    let repoEntries: [GitTreeEntry]
+    let repoCommit: String?
+    let computerFiles: [String]
+    @Binding var stagedChanges: [StagedChange]
+
+    @Environment(AppModel.self) private var app
+
+    private struct Key: Equatable {
+        var signature: WorkstationSourceSignature
+        var pendingChanges: Int
+        var repo: ChatRepo?
+    }
+
+    var body: some View {
+        let session = currentSession
+        let repo = app.repo(for: target)
+        let sources = makeSources(session: session, repo: repo)
+        let signature = sources.signature()
+        let pending = pendingChanges(session)
+        Color.clear
+            .onChange(of: Key(signature: signature, pendingChanges: pending, repo: repo), initial: true) {
+                canvas.sync(sources, signature: signature, pendingChanges: pending, activeRepo: repo)
+            }
+            .task(id: session?.chat.updatedAt) {
+                if let session {
+                    stagedChanges = await session.currentStagedChanges()
+                }
+            }
+    }
+
+    private var currentSession: ChatSession? {
+        if case .chat(let id) = target { return app.library.session(id) }
+        return nil
+    }
+
+    private func makeSources(session: ChatSession?, repo: ChatRepo?) -> WorkstationSources {
+        var sources = WorkstationSources()
+        sources.localAdded = localAdded
+        if let session {
+            sources.hasSession = true
+            sources.workstationFiles = session.workstationFiles
+            sources.draftAttachments = session.draftAttachments
+            sources.messages = session.chat.messages
+        } else {
+            sources.homeAttachments = app.home.attachments
+        }
+        sources.staged = stagedChanges
+        sources.repoName = repo?.ref.name
+        sources.repoCommit = repoCommit
+        sources.repoEntries = repoEntries
+        sources.machineName = app.settings.chatComputerMachineName
+        sources.computerFiles = computerFiles
+        return sources
+    }
+
+    private func pendingChanges(_ session: ChatSession?) -> Int {
+        if !stagedChanges.isEmpty { return stagedChanges.count }
+        guard let session else { return 0 }
+        if let receipt = session.chat.saveReceipts?.last, receipt.resolution == nil, receipt.undoneAt == nil {
+            return 1
+        }
+        return 0
+    }
+}
+
+// MARK: - Top Header (`Canvas | Files | Changes`)
+
+private struct WorkstationHeader: View {
+    @Binding var tab: WorkstationScreen.Tab
+    let canvas: WorkstationCanvasModel
+    let onExport: @MainActor () -> Void
+    let onClose: @MainActor () -> Void
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
         VStack(spacing: 10) {
             HStack(spacing: 10) {
                 HStack(spacing: 6) {
@@ -133,13 +422,13 @@ struct WorkstationScreen: View {
 
                 Spacer()
 
-                Text("\(allItems.count) \(allItems.count == 1 ? "item" : "items") · \(formattedTotalBytes)")
+                Text("\(canvas.allCount) \(canvas.allCount == 1 ? "item" : "items") · \(canvas.totalBytesText)")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(Theme.secondaryText)
 
-                if !exportableAttachments.isEmpty {
+                if !canvas.exportableAttachments.isEmpty {
                     Button {
-                        exportAllLocalAttachments()
+                        onExport()
                     } label: {
                         Image(systemName: "arrow.down.to.line")
                             .font(.subheadline.weight(.semibold))
@@ -153,7 +442,7 @@ struct WorkstationScreen: View {
                 }
 
                 Button {
-                    dismiss()
+                    onClose()
                 } label: {
                     Image(systemName: "xmark")
                         .font(.subheadline.weight(.bold))
@@ -169,9 +458,9 @@ struct WorkstationScreen: View {
             }
 
             HStack(spacing: 6) {
-                tabButton(.canvas, badge: canvasItems.count)
-                tabButton(.files, badge: allItems.count)
-                tabButton(.changes, badge: pendingChangesCount)
+                tabButton(.canvas, badge: canvas.items.count)
+                tabButton(.files, badge: canvas.allCount)
+                tabButton(.changes, badge: canvas.pendingChangesCount)
             }
         }
         .padding(.horizontal, 16)
@@ -180,7 +469,7 @@ struct WorkstationScreen: View {
         .background(Theme.surface.opacity(0.6))
     }
 
-    private func tabButton(_ candidate: Tab, badge: Int) -> some View {
+    private func tabButton(_ candidate: WorkstationScreen.Tab, badge: Int) -> some View {
         let selected = tab == candidate
         return Button {
             withAnimation(.snappy(duration: 0.22)) { tab = candidate }
@@ -205,182 +494,351 @@ struct WorkstationScreen: View {
         }
         .buttonStyle(.plain)
     }
+}
 
-    // MARK: - Infinite Pan & Zoom Canvas Tab (All File Types)
+// MARK: - Infinite Pan & Zoom Canvas Tab (All File Types)
 
-    private var canvasWorkspace: some View {
+/// What the board's buttons do that needs the screen (the chat's draft, sharing, the file picker).
+struct WorkstationBoardActions {
+    var addToChat: @MainActor (WorkstationItem) -> Void
+    var share: @MainActor (WorkstationItem) -> Void
+    var remove: @MainActor (WorkstationItem) -> Void
+    var pickFiles: @MainActor () -> Void
+}
+
+private struct BoardPinch: Equatable {
+    var magnification: CGFloat
+    var anchor: CGPoint
+}
+
+/// A card being dragged on the drawn (lite) cards, by a screen offset.
+private struct CanvasMovingCard: Equatable {
+    let id: String
+    let offset: CGSize
+}
+
+/// Which pictures and snippets the lite cards need: the 512-point squares in view, so it changes
+/// a few times across a long pan rather than on every frame.
+private struct LiteMediaRequest: Equatable {
+    var cells: CanvasSpatialIndex.CellRange
+    var revision: Int
+    var pixels: Int
+}
+
+/// The Canvas. A gesture in progress lives in `@GestureState` here and moves one transformed
+/// layer; the model's zoom and pan change once, when the gesture ends.
+private struct WorkstationCanvasBoard: View {
+    let canvas: WorkstationCanvasModel
+    @Binding var photoItems: [PhotosPickerItem]
+    let actions: WorkstationBoardActions
+
+    @Environment(AppModel.self) private var app
+    @Environment(\.theme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.displayScale) private var displayScale
+
+    @GestureState private var dragTranslation: CGSize = .zero
+    @GestureState private var pinch: BoardPinch? = nil
+    /// The drag being tracked (by where it started) and, on drawn cards, the card it moves.
+    @State private var dragStart: CGPoint?
+    @State private var dragCardID: String?
+    @State private var liteMedia = WorkstationLiteMedia()
+
+    var body: some View {
         GeometryReader { geo in
-            let items = canvasItems
-            let effectivePan = CGSize(
-                width: pan.width + dragPanDelta.width,
-                height: pan.height + dragPanDelta.height
-            )
-
-            ZStack {
-                CanvasDotGrid(pan: effectivePan, zoom: zoom, isDark: colorScheme == .dark)
-                    .contentShape(Rectangle())
-                    .gesture(
-                        SpatialTapGesture().onEnded { value in
-                            selectedItemID = items.enumerated().first { index, item in
-                                Self.cardFrame(
-                                    position: position(for: item.id, index: index, count: items.count),
-                                    zoom: zoom,
-                                    pan: effectivePan,
-                                    viewport: geo.size
-                                ).contains(value.location)
-                            }?.element.id
-                        }
-                    )
-                    .gesture(canvasBackgroundPanGesture)
-
-                if items.isEmpty {
-                    emptyCanvasPlaceholder
-                } else if Self.useOverview(zoom: zoom, itemCount: items.count) {
-                    CanvasOverviewMarks(
-                        items: items,
-                        zoom: zoom,
-                        pan: effectivePan,
-                        viewport: geo.size,
-                        selectedID: selectedItemID,
-                        position: { id, index in position(for: id, index: index, count: items.count) }
-                    )
-                    .allowsHitTesting(false)
-                } else {
-                    let cull = CGRect(origin: .zero, size: geo.size).insetBy(dx: -120, dy: -160)
-                    let visible = items.enumerated().filter { index, item in
-                        Self.cardFrame(
-                            position: position(for: item.id, index: index, count: items.count),
-                            zoom: zoom,
-                            pan: effectivePan,
-                            viewport: geo.size
-                        ).intersects(cull)
-                    }
-                    ZStack {
-                        ForEach(visible, id: \.element.id) { pair in
-                            let index = pair.offset
-                            let item = pair.element
-                            let pos = position(for: item.id, index: index, count: items.count)
-                            WorkstationCanvasCard(
-                                item: item,
-                                isSelected: selectedItemID == item.id,
-                                pointerEnabled: tool == .pointer,
-                                zoom: zoom,
-                                showsPreview: true,
-                                onSelect: {
-                                    selectedItemID = item.id
-                                    Haptics.selection()
-                                },
-                                onDoubleTap: {
-                                    previewingItem = item
-                                },
-                                onMove: { delta in
-                                    let current = position(for: item.id, index: index, count: items.count)
-                                    positions[item.id] = CGPoint(
-                                        x: current.x + delta.width / max(zoom, 0.01),
-                                        y: current.y + delta.height / max(zoom, 0.01)
-                                    )
-                                },
-                                onMoveEnd: {
-                                    savePositions()
-                                }
-                            )
-                            .frame(
-                                width: max(1, WorkstationCanvasCard.cardWidth * zoom),
-                                height: max(1, WorkstationCanvasCard.cardHeight * zoom)
-                            )
-                            .position(
-                                x: geo.size.width * 0.5 + effectivePan.width + pos.x * zoom,
-                                y: geo.size.height * 0.46 + effectivePan.height + pos.y * zoom
-                            )
-                        }
-                    }
-                    .allowsHitTesting(tool == .pointer)
-                }
-
-                // Top controls: `Arrange` + `Center` on the left, `[ - | 100% | + ]` zoom pill on the right
-                VStack {
-                    HStack(spacing: 8) {
-                        if !items.isEmpty {
-                            HStack(spacing: 2) {
-                                Button {
-                                    arrangeAllCards(in: geo.size, items: items)
-                                } label: {
-                                    Label("Arrange", systemImage: "square.grid.2x2")
-                                        .font(.caption.weight(.semibold))
-                                        .padding(.horizontal, 11)
-                                        .frame(minHeight: 38)
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-
-                                Divider().frame(height: 16)
-
-                                Button {
-                                    centerOnCards(items: items)
-                                } label: {
-                                    Label("Center", systemImage: "scope")
-                                        .font(.caption.weight(.semibold))
-                                        .padding(.horizontal, 11)
-                                        .frame(minHeight: 38)
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            .padding(.horizontal, 4)
-                            .glassPanel(cornerRadius: 19, interactive: false)
-                        }
-                        Spacer()
-                        zoomPill(viewport: geo.size, items: items)
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.top, 12)
-
-                    Spacer()
-
-                    if let selectedID = selectedItemID,
-                       let selectedItem = items.first(where: { $0.id == selectedID }) {
-                        selectionActionBar(for: selectedItem)
-                            .padding(.bottom, 6)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
-                    }
-
-                    bottomCanvasDock(viewport: geo.size, items: items)
-                        .padding(.bottom, 12)
-                }
+            let viewport = geo.size
+            TimelineView(.animation(minimumInterval: nil, paused: canvas.animation == nil)) { timeline in
+                boardContent(viewport: viewport, now: timeline.date)
             }
-            .clipped()
-            .simultaneousGesture(canvasPinchGesture)
+        }
+        .onDisappear {
+            liteMedia.clear()
         }
     }
 
-    private var canvasBackgroundPanGesture: some Gesture {
+    @ViewBuilder
+    private func boardContent(viewport: CGSize, now: Date) -> some View {
+        let shown = liveTransform(base: canvas.displayedTransform(at: now), viewport: viewport)
+        let detail = WorkstationCanvasLayout.detail(zoom: shown.zoom, itemCount: canvas.items.count)
+        ZStack {
+            CanvasDotGrid(pan: shown.pan, zoom: shown.zoom, isDark: colorScheme == .dark)
+                .contentShape(Rectangle())
+                .gesture(tapGesture(viewport: viewport))
+                .gesture(dragGesture(viewport: viewport))
+
+            if canvas.items.isEmpty {
+                if canvas.hasBuiltItems {
+                    emptyCanvasPlaceholder
+                }
+            } else if canvas.isLayoutReady {
+                cardsLayer(detail: detail, shown: shown, viewport: viewport)
+            }
+
+            controls(viewport: viewport, shown: shown)
+        }
+        .clipped()
+        .simultaneousGesture(pinchGesture(viewport: viewport))
+        .onChange(of: pinch != nil) { _, pinching in
+            // A pinch stops a running animation where it is, as a drag does.
+            if pinching { canvas.interruptAnimation() }
+        }
+        .onChange(of: liteRequest(detail: detail, shown: shown, viewport: viewport), initial: true) { _, request in
+            loadLiteMedia(request)
+        }
+    }
+
+    /// The resting (or animating) view with the gesture in progress applied: zoom around the
+    /// fingers first, then the pan.
+    private func liveTransform(base: CanvasViewTransform, viewport: CGSize) -> CanvasViewTransform {
+        var transform = base
+        if let pinch {
+            transform = transform.zoomed(by: pinch.magnification, anchor: pinch.anchor, viewport: viewport)
+        }
+        if dragCardID == nil {
+            transform = transform.translated(by: dragTranslation)
+        }
+        return transform
+    }
+
+    @ViewBuilder
+    private func cardsLayer(detail: WorkstationCanvasLayout.Detail, shown: CanvasViewTransform, viewport: CGSize) -> some View {
+        switch detail {
+        case .overview:
+            CanvasOverviewMarks(
+                entries: canvas.entries(in: shown.visibleCanvasRect(viewport: viewport, marginX: 30, marginY: 30)),
+                transform: shown,
+                viewport: viewport,
+                selectedID: canvas.selectedItemID
+            )
+            .allowsHitTesting(false)
+        case .lite:
+            CanvasLiteCards(
+                entries: canvas.entries(in: shown.visibleCanvasRect(viewport: viewport, marginX: 40, marginY: 40)),
+                transform: shown,
+                viewport: viewport,
+                selectedID: canvas.selectedItemID,
+                movingCard: dragCardID.map { CanvasMovingCard(id: $0, offset: dragTranslation) },
+                thumbnails: liteMedia.thumbnails,
+                snippets: liteMedia.snippets
+            )
+            .allowsHitTesting(false)
+        case .full:
+            fullCards(shown: shown, viewport: viewport)
+        }
+    }
+
+    /// Real cards, only those on screen (and a margin). They're laid out at the resting zoom and
+    /// moved as one layer while a gesture runs, so no card rebuilds until the gesture ends.
+    private func fullCards(shown: CanvasViewTransform, viewport: CGSize) -> some View {
+        let buildZoom = max(canvas.zoom, WorkstationCanvasLayout.fullCardZoom)
+        let visible = canvas.entries(in: shown.visibleCanvasRect(viewport: viewport, marginX: 120, marginY: 160))
+        let origin = shown.origin(in: viewport)
+        let pointer = canvas.tool == .pointer
+        let selectedID = canvas.selectedItemID
+        return ZStack(alignment: .topLeading) {
+            ForEach(visible) { entry in
+                WorkstationCanvasCard(
+                    item: entry.item,
+                    isSelected: entry.id == selectedID,
+                    pointerEnabled: pointer,
+                    zoom: buildZoom,
+                    canvas: canvas
+                )
+                .equatable()
+                .frame(
+                    width: max(1, WorkstationCanvasCard.cardWidth * buildZoom),
+                    height: max(1, WorkstationCanvasCard.cardHeight * buildZoom)
+                )
+                .position(x: entry.center.x * buildZoom, y: entry.center.y * buildZoom)
+            }
+        }
+        .frame(width: viewport.width, height: viewport.height, alignment: .topLeading)
+        .scaleEffect(shown.zoom / buildZoom, anchor: .topLeading)
+        .offset(x: origin.x, y: origin.y)
+        .allowsHitTesting(pointer)
+    }
+
+    // MARK: Gestures
+
+    /// Double tap opens a drawn card (as on a real card) or zooms in around the tap, and back out
+    /// when already in. One tap selects the card on top under the finger, or clears the selection.
+    private func tapGesture(viewport: CGSize) -> some Gesture {
+        SpatialTapGesture(count: 2)
+            .onEnded { value in
+                handleDoubleTap(at: value.location, viewport: viewport)
+            }
+            .exclusively(
+                before: SpatialTapGesture(count: 1)
+                    .onEnded { value in
+                        handleTap(at: value.location, viewport: viewport)
+                    }
+            )
+    }
+
+    private func handleTap(at location: CGPoint, viewport: CGSize) {
+        let shown = canvas.displayedTransform(at: Date())
+        let hit = canvas.item(at: location, viewport: viewport, transform: shown)
+        canvas.selectedItemID = hit?.id
+        if hit != nil, canvas.tool == .pointer,
+           WorkstationCanvasLayout.detail(zoom: shown.zoom, itemCount: canvas.items.count) == .lite {
+            Haptics.selection()
+        }
+    }
+
+    private func handleDoubleTap(at location: CGPoint, viewport: CGSize) {
+        let shown = canvas.displayedTransform(at: Date())
+        if canvas.tool == .pointer,
+           WorkstationCanvasLayout.detail(zoom: shown.zoom, itemCount: canvas.items.count) == .lite,
+           let hit = canvas.item(at: location, viewport: viewport, transform: shown) {
+            canvas.previewingItem = hit
+            return
+        }
+        canvas.doubleTapZoom(at: location, viewport: viewport)
+    }
+
+    /// Pans the canvas, or, on drawn cards with the pointer tool, moves the card under the finger.
+    /// A flick keeps gliding.
+    private func dragGesture(viewport: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 6)
+            .updating($dragTranslation) { value, state, _ in
+                state = value.translation
+            }
             .onChanged { value in
-                dragPanDelta = value.translation
+                guard dragStart != value.startLocation else { return }
+                dragStart = value.startLocation
+                canvas.interruptAnimation()
+                dragCardID = cardToMove(at: value.startLocation, viewport: viewport)
             }
             .onEnded { value in
-                pan.width += value.translation.width
-                pan.height += value.translation.height
-                dragPanDelta = .zero
-                saveViewport()
+                let movedCard = dragStart == value.startLocation ? dragCardID : cardToMove(at: value.startLocation, viewport: viewport)
+                dragStart = nil
+                dragCardID = nil
+                if let movedCard {
+                    let zoom = max(canvas.displayedTransform(at: Date()).zoom, WorkstationCanvasLayout.minZoom)
+                    canvas.moveCard(movedCard, by: CGSize(width: value.translation.width / zoom, height: value.translation.height / zoom))
+                } else {
+                    canvas.commitPan(
+                        translation: value.translation,
+                        predictedEndTranslation: value.predictedEndTranslation,
+                        viewport: viewport,
+                        liveMagnification: pinch?.magnification
+                    )
+                }
             }
     }
 
-    private var canvasPinchGesture: some Gesture {
-        MagnificationGesture()
-            .onChanged { scale in
-                zoom = min(max(baseZoom * scale, 0.01), 3.0)
+    private func cardToMove(at location: CGPoint, viewport: CGSize) -> String? {
+        guard canvas.tool == .pointer else { return nil }
+        let shown = canvas.displayedTransform(at: Date())
+        guard WorkstationCanvasLayout.detail(zoom: shown.zoom, itemCount: canvas.items.count) == .lite else { return nil }
+        return canvas.item(at: location, viewport: viewport, transform: shown)?.id
+    }
+
+    /// Pinch zooms around the point between the fingers.
+    private func pinchGesture(viewport: CGSize) -> some Gesture {
+        MagnifyGesture()
+            .updating($pinch) { value, state, _ in
+                state = BoardPinch(magnification: value.magnification, anchor: value.startLocation)
             }
-            .onEnded { _ in
-                baseZoom = zoom
-                saveViewport()
+            .onEnded { value in
+                canvas.commitPinch(magnification: value.magnification, anchor: value.startLocation, viewport: viewport)
             }
     }
 
-    private func zoomPill(viewport: CGSize, items: [WorkstationItem]) -> some View {
+    // MARK: Lite card pictures
+
+    private func liteRequest(detail: WorkstationCanvasLayout.Detail, shown: CanvasViewTransform, viewport: CGSize) -> LiteMediaRequest? {
+        guard detail == .lite,
+              let cells = CanvasSpatialIndex.cellRange(for: shown.visibleCanvasRect(viewport: viewport, marginX: 40, marginY: 40)) else { return nil }
+        let pixels = Int((WorkstationCanvasLayout.previewHeight * shown.zoom * max(displayScale, 2)).rounded(.up))
+        return LiteMediaRequest(cells: cells, revision: canvas.itemsRevision, pixels: ThumbnailPipeline.bucket(for: max(128, pixels)))
+    }
+
+    private func loadLiteMedia(_ request: LiteMediaRequest?) {
+        guard let request else {
+            liteMedia.clear()
+            return
+        }
+        let size = CanvasSpatialIndex.cellSize
+        let rect = CGRect(
+            x: CGFloat(request.cells.minX) * size,
+            y: CGFloat(request.cells.minY) * size,
+            width: CGFloat(request.cells.maxX - request.cells.minX + 1) * size,
+            height: CGFloat(request.cells.maxY - request.cells.minY + 1) * size
+        )
+        liteMedia.want(canvas.entries(in: rect).map(\.item), pixels: request.pixels, store: app.attachmentStore)
+    }
+
+    // MARK: Controls
+
+    private func controls(viewport: CGSize, shown: CanvasViewTransform) -> some View {
+        // Top controls: `Arrange` + `Center` on the left, `[ - | 100% | + ]` zoom pill on the right
+        VStack {
+            HStack(spacing: 8) {
+                if !canvas.items.isEmpty {
+                    HStack(spacing: 2) {
+                        Button {
+                            arrangeAllCards(in: viewport)
+                        } label: {
+                            Label("Arrange", systemImage: "square.grid.2x2")
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 11)
+                                .frame(minHeight: 38)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        Divider().frame(height: 16)
+
+                        Button {
+                            centerOnCards(in: viewport)
+                        } label: {
+                            Label("Center", systemImage: "scope")
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 11)
+                                .frame(minHeight: 38)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 4)
+                    .glassPanel(cornerRadius: 19, interactive: false)
+                }
+                Spacer()
+                zoomPill(viewport: viewport, shown: shown)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+
+            Spacer()
+
+            if let selectedItem = canvas.selectedItem {
+                selectionActionBar(for: selectedItem)
+                    .padding(.bottom, 6)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            bottomCanvasDock(viewport: viewport)
+                .padding(.bottom, 12)
+        }
+    }
+
+    private func arrangeAllCards(in viewport: CGSize) {
+        guard !canvas.items.isEmpty else { return }
+        canvas.arrange(viewport: viewport)
+        Haptics.selection()
+    }
+
+    private func centerOnCards(in viewport: CGSize) {
+        canvas.centerOnCards(viewport: viewport)
+        if !canvas.items.isEmpty { Haptics.selection() }
+    }
+
+    private func zoomPill(viewport: CGSize, shown: CanvasViewTransform) -> some View {
         HStack(spacing: 0) {
             Button {
-                stepZoom(direction: -1)
+                canvas.stepZoom(direction: -1, viewport: viewport)
+                Haptics.selection()
             } label: {
                 Image(systemName: "minus")
                     .font(.caption.weight(.bold))
@@ -391,15 +849,10 @@ struct WorkstationScreen: View {
             .accessibilityLabel("Zoom out")
 
             Button {
-                withAnimation(.snappy(duration: 0.25)) {
-                    zoom = 1.0
-                    baseZoom = 1.0
-                    pan = .zero
-                }
-                saveViewport()
+                canvas.resetZoom(viewport: viewport)
                 Haptics.selection()
             } label: {
-                Text("\(max(1, Int((zoom * 100).rounded())))%")
+                Text("\(max(1, Int((shown.zoom * 100).rounded())))%")
                     .font(.caption.weight(.bold).monospacedDigit())
                     .frame(minWidth: 50, minHeight: 38)
                     .contentShape(Rectangle())
@@ -408,7 +861,8 @@ struct WorkstationScreen: View {
             .accessibilityLabel("Reset zoom to 100%")
 
             Button {
-                stepZoom(direction: 1)
+                canvas.stepZoom(direction: 1, viewport: viewport)
+                Haptics.selection()
             } label: {
                 Image(systemName: "plus")
                     .font(.caption.weight(.bold))
@@ -422,122 +876,10 @@ struct WorkstationScreen: View {
         .glassPanel(cornerRadius: 19, interactive: false)
     }
 
-    private func stepZoom(direction: Int) {
-        let steps = Self.zoomSteps
-        let targetZoom: CGFloat
-        if direction < 0 {
-            targetZoom = steps.last(where: { $0 < zoom - 0.015 }) ?? steps[0]
-        } else {
-            targetZoom = steps.first(where: { $0 > zoom + 0.015 }) ?? steps[steps.count - 1]
-        }
-        withAnimation(.snappy(duration: 0.22)) {
-            zoom = targetZoom
-            baseZoom = targetZoom
-        }
-        saveViewport()
-        Haptics.selection()
-    }
-
-    /// Wide enough to stay roughly square. A hard cap of 8 turned a few hundred cards into a
-    /// single tall strip, which then had to be zoomed until every card was a speck.
-    private static func idealGridColumns(for count: Int) -> Int {
-        if count <= 1 { return 1 }
-        if count <= 4 { return 2 }
-        if count <= 9 { return 3 }
-        return Int(ceil(sqrt(Double(count))))
-    }
-
-    /// Real cards, including their text and pictures, stay up as long as a card is big enough to read.
-    /// Farther out, one drawing paints a miniature of each card (icon and name), not a blank bar.
-    private static func useOverview(zoom: CGFloat, itemCount: Int) -> Bool {
-        zoom < 0.18 && itemCount > 24
-    }
-
-    private static func cardFrame(position: CGPoint, zoom: CGFloat, pan: CGSize, viewport: CGSize) -> CGRect {
-        let w = WorkstationCanvasCard.cardWidth * zoom
-        let h = WorkstationCanvasCard.cardHeight * zoom
-        let cx = viewport.width * 0.5 + pan.width + position.x * zoom
-        let cy = viewport.height * 0.46 + pan.height + position.y * zoom
-        return CGRect(x: cx - w / 2, y: cy - h / 2, width: max(w, 1), height: max(h, 1))
-    }
-
-    private func arrangeAllCards(in viewport: CGSize, items: [WorkstationItem]) {
-        guard !items.isEmpty else { return }
-        positions.removeAll()
-        let cols = Self.idealGridColumns(for: items.count)
-        let spacingX: CGFloat = 232
-        let spacingY: CGFloat = 252
-        let originX = -CGFloat(cols - 1) * spacingX * 0.5
-        for (idx, item) in items.enumerated() {
-            let col = idx % cols
-            let row = idx / cols
-            positions[item.id] = CGPoint(
-                x: originX + CGFloat(col) * spacingX,
-                y: CGFloat(row) * spacingY - 60
-            )
-        }
-        savePositions()
-
-        var minX: CGFloat = .greatestFiniteMagnitude
-        var maxX: CGFloat = -.greatestFiniteMagnitude
-        var minY: CGFloat = .greatestFiniteMagnitude
-        var maxY: CGFloat = -.greatestFiniteMagnitude
-        for (idx, item) in items.enumerated() {
-            let p = position(for: item.id, index: idx, count: items.count)
-            minX = min(minX, p.x - 115)
-            maxX = max(maxX, p.x + 115)
-            minY = min(minY, p.y - 130)
-            maxY = max(maxY, p.y + 130)
-        }
-        let spanW = max(240, maxX - minX)
-        let spanH = max(260, maxY - minY)
-        let scaleX = (viewport.width - 36) / spanW
-        let scaleY = (viewport.height - 150) / spanH
-        let fitted = min(max(min(scaleX, scaleY), 0.04), 1.0)
-        let midX = (minX + maxX) * 0.5
-        let midY = (minY + maxY) * 0.5
-        withAnimation(.snappy(duration: 0.28)) {
-            zoom = fitted
-            baseZoom = fitted
-            pan = CGSize(width: -midX * fitted, height: -midY * fitted)
-        }
-        saveViewport()
-        Haptics.selection()
-    }
-
-    private func centerOnCards(items: [WorkstationItem]) {
-        guard !items.isEmpty else {
-            withAnimation(.snappy(duration: 0.25)) { pan = .zero }
-            saveViewport()
-            return
-        }
-        var minX: CGFloat = .greatestFiniteMagnitude
-        var maxX: CGFloat = -.greatestFiniteMagnitude
-        var minY: CGFloat = .greatestFiniteMagnitude
-        var maxY: CGFloat = -.greatestFiniteMagnitude
-        for (idx, item) in items.enumerated() {
-            let p = position(for: item.id, index: idx, count: items.count)
-            minX = min(minX, p.x)
-            maxX = max(maxX, p.x)
-            minY = min(minY, p.y)
-            maxY = max(maxY, p.y)
-        }
-        let midX = (minX + maxX) * 0.5
-        let midY = (minY + maxY) * 0.5
-        let comfortableZoom = min(max(zoom, 0.45), 1.25)
-        withAnimation(.snappy(duration: 0.25)) {
-            zoom = comfortableZoom
-            baseZoom = comfortableZoom
-            pan = CGSize(width: -midX * comfortableZoom, height: -midY * comfortableZoom)
-        }
-        saveViewport()
-        Haptics.selection()
-    }
-
     private func selectionActionBar(for item: WorkstationItem) -> some View {
         HStack(spacing: 6) {
             Button {
-                previewingItem = item
+                canvas.previewingItem = item
             } label: {
                 Label("Open", systemImage: "eye")
                     .padding(.horizontal, 8)
@@ -547,7 +889,7 @@ struct WorkstationScreen: View {
             .buttonStyle(.plain)
 
             Button {
-                addItemToChat(item)
+                actions.addToChat(item)
             } label: {
                 Label("Add to chat", systemImage: "plus.bubble")
                     .padding(.horizontal, 8)
@@ -558,7 +900,7 @@ struct WorkstationScreen: View {
 
             if item.attachment != nil {
                 Button {
-                    shareItem(item)
+                    actions.share(item)
                 } label: {
                     Label("Share", systemImage: "square.and.arrow.up")
                         .padding(.horizontal, 8)
@@ -570,7 +912,7 @@ struct WorkstationScreen: View {
 
             if item.isRemovableDraft {
                 Button(role: .destructive) {
-                    removeDraftItem(item)
+                    actions.remove(item)
                 } label: {
                     Image(systemName: "trash")
                         .foregroundStyle(.red)
@@ -586,20 +928,20 @@ struct WorkstationScreen: View {
         .glassPanel(cornerRadius: 20, interactive: false)
     }
 
-    private func bottomCanvasDock(viewport: CGSize, items: [WorkstationItem]) -> some View {
+    private func bottomCanvasDock(viewport: CGSize) -> some View {
         HStack(spacing: 6) {
-            dockButton(icon: "cursorarrow", active: tool == .pointer, label: "Select & move cards") {
-                tool = .pointer
+            dockButton(icon: "cursorarrow", active: canvas.tool == .pointer, label: "Select & move cards") {
+                canvas.tool = .pointer
                 Haptics.selection()
             }
-            dockButton(icon: "hand.raised", active: tool == .hand, label: "Pan canvas") {
-                tool = .hand
+            dockButton(icon: "hand.raised", active: canvas.tool == .hand, label: "Pan canvas") {
+                canvas.tool = .hand
                 Haptics.selection()
             }
             Divider().frame(height: 22).padding(.horizontal, 2)
             dockButton(icon: "plus", active: false, label: "Add any file") {
                 Haptics.selection()
-                pickFilesForWorkstation()
+                actions.pickFiles()
             }
             PhotosPicker(
                 selection: $photoItems,
@@ -616,9 +958,9 @@ struct WorkstationScreen: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Add photos")
 
-            if !items.isEmpty {
+            if !canvas.items.isEmpty {
                 dockButton(icon: "square.grid.2x2", active: false, label: "Arrange cards into grid") {
-                    arrangeAllCards(in: viewport, items: items)
+                    arrangeAllCards(in: viewport)
                 }
             }
         }
@@ -655,7 +997,7 @@ struct WorkstationScreen: View {
                 .frame(maxWidth: 290)
             HStack(spacing: 10) {
                 Button {
-                    pickFilesForWorkstation()
+                    actions.pickFiles()
                 } label: {
                     Label("Add files", systemImage: "doc.badge.plus")
                         .font(.footnote.weight(.semibold))
@@ -677,19 +1019,643 @@ struct WorkstationScreen: View {
         .padding(24)
         .glassPanel(cornerRadius: 24)
     }
+}
 
-    // MARK: - Arena-Style Expandable `Files` Folder Tree Tab
+// MARK: - Cards
 
-    private var filesWorkspace: some View {
+/// What a card looks like at a zoom: preview on top, badge, name and source below. The real
+/// cards draw it at the current zoom; the drawn (lite) cards draw it once at 100% and scale it.
+private struct WorkstationCardFace: View, Equatable {
+    let item: WorkstationItem
+    let zoom: CGFloat
+    let isSelected: Bool
+    let thumbnail: UIImage?
+    let snippet: String?
+    /// Live Mermaid diagrams, only on real cards zoomed in enough to read them.
+    let showsLiveDiagram: Bool
+    let showsShadow: Bool
+
+    @Environment(\.theme) private var theme
+
+    nonisolated static func == (lhs: WorkstationCardFace, rhs: WorkstationCardFace) -> Bool {
+        lhs.item.id == rhs.item.id
+            && lhs.item.revision == rhs.item.revision
+            && lhs.zoom == rhs.zoom
+            && lhs.isSelected == rhs.isSelected
+            && lhs.thumbnail === rhs.thumbnail
+            && lhs.snippet == rhs.snippet
+            && lhs.showsLiveDiagram == rhs.showsLiveDiagram
+            && lhs.showsShadow == rhs.showsShadow
+    }
+
+    private var renderedWidth: CGFloat { max(1, WorkstationCanvasLayout.cardWidth * zoom) }
+    private var renderedHeight: CGFloat { max(1, WorkstationCanvasLayout.cardHeight * zoom) }
+    private var renderedPreviewHeight: CGFloat { max(1, WorkstationCanvasLayout.previewHeight * zoom) }
+
+    private func scaled(_ value: CGFloat, floor: CGFloat = 1) -> CGFloat {
+        max(floor, value * zoom)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            previewArea
+                .frame(width: renderedWidth, height: renderedPreviewHeight)
+                .clipped()
+
+            HStack(spacing: scaled(7)) {
+                Text(item.badgeText)
+                    .font(.system(size: scaled(9), weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, scaled(6))
+                    .padding(.vertical, scaled(2.5))
+                    .background(item.badgeColor, in: RoundedRectangle(cornerRadius: scaled(5), style: .continuous))
+
+                VStack(alignment: .leading, spacing: scaled(1, floor: 0)) {
+                    Text(item.name)
+                        .font(.system(size: scaled(12), weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(item.subtitle)
+                        .font(.system(size: scaled(10)))
+                        .foregroundStyle(Theme.secondaryText)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, scaled(10))
+            .padding(.vertical, scaled(8))
+            .frame(width: renderedWidth, height: max(1, renderedHeight - renderedPreviewHeight), alignment: .leading)
+            .background(Theme.surface)
+        }
+        .frame(width: renderedWidth, height: renderedHeight)
+        .clipShape(RoundedRectangle(cornerRadius: scaled(16), style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: scaled(16), style: .continuous)
+                .strokeBorder(isSelected ? theme.accent : Theme.stroke, lineWidth: isSelected ? scaled(2.5) : max(0.5, zoom))
+        )
+        .shadow(color: showsShadow ? .black.opacity(isSelected ? 0.26 : 0.10) : .clear, radius: isSelected ? 10 : 4, x: 0, y: 3)
+    }
+
+    @ViewBuilder
+    private var previewArea: some View {
+        ZStack {
+            Theme.raised
+            if let thumbnail {
+                Image(uiImage: thumbnail)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFill()
+                    .frame(width: renderedWidth, height: renderedPreviewHeight)
+                if item.isVideo {
+                    Image(systemName: "play.circle.fill")
+                        .font(.system(size: scaled(30), weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.92))
+                        .shadow(color: .black.opacity(0.35), radius: scaled(4, floor: 0))
+                }
+            } else if let snippet {
+                let lowerName = item.name.lowercased()
+                if showsLiveDiagram, lowerName.hasSuffix(".mmd") || lowerName.hasSuffix(".mermaid") {
+                    MermaidBlockView(code: snippet, compactCardMode: true)
+                        .frame(width: renderedWidth, height: renderedPreviewHeight)
+                } else {
+                    snippetText(snippet)
+                }
+            } else if case .mermaid(let code) = item.kind {
+                if showsLiveDiagram {
+                    MermaidBlockView(code: code, compactCardMode: true)
+                        .frame(width: renderedWidth, height: renderedPreviewHeight)
+                } else {
+                    // Only the first few hundred characters fit on a card; laying out more is wasted.
+                    snippetText(String(code.prefix(1_200)))
+                }
+            } else {
+                VStack(spacing: scaled(8)) {
+                    Image(systemName: item.icon)
+                        .font(.system(size: scaled(34), weight: .semibold))
+                        .foregroundStyle(item.badgeColor)
+                    Text(item.badgeText)
+                        .font(.system(size: scaled(12), weight: .bold))
+                        .foregroundStyle(Theme.secondaryText)
+                }
+            }
+        }
+    }
+
+    private func snippetText(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: scaled(9.5), design: .monospaced))
+            .foregroundStyle(.primary.opacity(0.86))
+            .padding(scaled(10))
+            .frame(width: renderedWidth, height: renderedPreviewHeight, alignment: .topLeading)
+    }
+}
+
+/// A card you can touch: tap selects, double tap opens, drag moves (pointer tool). Compared by
+/// id, revision, selection and zoom, and its actions go through the model, so moving the canvas
+/// never rebuilds it.
+private struct WorkstationCanvasCard: View, Equatable {
+    let item: WorkstationItem
+    let isSelected: Bool
+    let pointerEnabled: Bool
+    let zoom: CGFloat
+    let canvas: WorkstationCanvasModel
+
+    @Environment(AppModel.self) private var app
+    @Environment(\.displayScale) private var displayScale
+    @State private var thumbnail: UIImage?
+    @State private var snippet: String?
+    @State private var liveDrag: CGSize = .zero
+
+    static let cardWidth: CGFloat = WorkstationCanvasLayout.cardWidth
+    static let cardHeight: CGFloat = WorkstationCanvasLayout.cardHeight
+
+    init(item: WorkstationItem, isSelected: Bool, pointerEnabled: Bool, zoom: CGFloat, canvas: WorkstationCanvasModel) {
+        self.item = item
+        self.isSelected = isSelected
+        self.pointerEnabled = pointerEnabled
+        self.zoom = zoom
+        self.canvas = canvas
+        // Show what's already decoded (this size or a smaller one) on the first frame.
+        _thumbnail = State(initialValue: Self.cachedThumbnail(for: item, pixels: Self.thumbnailPixels(zoom: zoom, scale: 3)))
+        _snippet = State(initialValue: WorkstationSnippetCache.snippet(for: item))
+    }
+
+    nonisolated static func == (lhs: WorkstationCanvasCard, rhs: WorkstationCanvasCard) -> Bool {
+        lhs.item.id == rhs.item.id
+            && lhs.item.revision == rhs.item.revision
+            && lhs.isSelected == rhs.isSelected
+            && lhs.pointerEnabled == rhs.pointerEnabled
+            && lhs.zoom == rhs.zoom
+    }
+
+    /// Pixels the photo needs on this screen, rounded up to a shared size. A fixed small
+    /// thumbnail stretched by zoom is what made pictures soft.
+    static func thumbnailPixels(zoom: CGFloat, scale: CGFloat) -> Int {
+        let pixels = Int((WorkstationCanvasLayout.previewHeight * zoom * max(scale, 2)).rounded(.up))
+        return pixels > 1_024 ? 1_600 : ThumbnailPipeline.bucket(for: max(128, pixels))
+    }
+
+    static func cachedThumbnail(for item: WorkstationItem, pixels: Int) -> UIImage? {
+        if case .stagedChange = item.kind {
+            return ThumbnailPipeline.shared.bestCachedImage(key: stagedKey(item), maxPixelSize: pixels)
+        }
+        guard let attachment = item.attachment else { return nil }
+        return ThumbnailPipeline.shared.bestCachedThumbnail(for: attachment, maxPixelSize: pixels)
+    }
+
+    static func stagedKey(_ item: WorkstationItem) -> String {
+        "staged-\(item.id)-\(item.revision)"
+    }
+
+    private var thumbnailPixelSize: Int {
+        Self.thumbnailPixels(zoom: zoom, scale: displayScale)
+    }
+
+    var body: some View {
+        WorkstationCardFace(
+            item: item,
+            zoom: zoom,
+            isSelected: isSelected,
+            thumbnail: thumbnail,
+            snippet: snippet,
+            showsLiveDiagram: zoom >= 0.85,
+            showsShadow: zoom >= 0.8
+        )
+        .equatable()
+        .offset(liveDrag)
+        .onTapGesture(count: 2) {
+            canvas.previewingItem = item
+        }
+        .onTapGesture(count: 1) {
+            canvas.selectedItemID = item.id
+            Haptics.selection()
+        }
+        .gesture(
+            DragGesture(minimumDistance: 6)
+                .onChanged { value in
+                    guard pointerEnabled else { return }
+                    liveDrag = value.translation
+                }
+                .onEnded { value in
+                    guard pointerEnabled else { return }
+                    let delta = value.translation
+                    liveDrag = .zero
+                    let scale = max(zoom, 0.01)
+                    canvas.moveCard(item.id, by: CGSize(width: delta.width / scale, height: delta.height / scale))
+                }
+        )
+        .task(id: "\(item.id)#\(item.revision)#\(thumbnailPixelSize)") {
+            await loadPreview(pixels: thumbnailPixelSize)
+        }
+    }
+
+    /// Loads off the main thread and stops when the card scrolls away.
+    private func loadPreview(pixels: Int) async {
+        if case .stagedChange(let path, let data, _, _) = item.kind {
+            if WorkstationItem.isImagePath(path) {
+                if let image = await ThumbnailPipeline.shared.thumbnail(data: data, key: Self.stagedKey(item), maxPixelSize: pixels), !Task.isCancelled {
+                    thumbnail = image
+                }
+            } else if snippet == nil, let text = await WorkstationSnippetCache.load(for: item, store: app.attachmentStore), !Task.isCancelled {
+                snippet = text
+            }
+            return
+        }
+        guard let att = item.attachment else { return }
+        switch item.kind {
+        case .image, .pdf:
+            if let image = await ThumbnailPipeline.shared.thumbnail(for: att, store: app.attachmentStore, maxPixelSize: pixels), !Task.isCancelled {
+                thumbnail = image
+            }
+        case .textOrCode:
+            if snippet == nil, let text = await WorkstationSnippetCache.load(for: item, store: app.attachmentStore), !Task.isCancelled {
+                snippet = text
+            }
+        default:
+            if item.isVideo, let image = await ThumbnailPipeline.shared.thumbnail(for: att, store: app.attachmentStore, maxPixelSize: pixels), !Task.isCancelled {
+                thumbnail = image
+            }
+        }
+    }
+}
+
+/// The first lines of text files, read once for both kinds of card.
+@MainActor
+enum WorkstationSnippetCache {
+    private static var snippets: [String: String] = [:]
+
+    private static func key(_ item: WorkstationItem) -> String {
+        "\(item.id)#\(item.revision)"
+    }
+
+    static func snippet(for item: WorkstationItem) -> String? {
+        snippets[key(item)]
+    }
+
+    static func load(for item: WorkstationItem, store: AttachmentStore) async -> String? {
+        if let cached = snippets[key(item)] { return cached }
+        var text: String?
+        switch item.kind {
+        case .stagedChange(let path, let data, _, _):
+            guard !WorkstationItem.isImagePath(path) else { return nil }
+            text = await Task.detached(priority: .utility) {
+                String(data: data, encoding: .utf8).map { String($0.prefix(280)) }
+            }.value
+        case .textOrCode:
+            guard let att = item.attachment else { return nil }
+            if let slice = (try? await store.readSlice(for: att, offsetBytes: 0, maxBytes: 4_096))?.data,
+               let str = AttachmentDataPreviewBody.readableText(from: slice, name: att.name) {
+                text = String(str.prefix(280))
+            }
+        default:
+            return nil
+        }
+        if let text {
+            if snippets.count > 4_000 { snippets.removeAll() }
+            snippets[key(item)] = text
+        }
+        return text
+    }
+}
+
+/// Pictures and snippets for the drawn (lite) cards in view, loaded a few at a time, cancelled
+/// when they leave, and handed over in batches so the drawing updates once per batch.
+@Observable
+@MainActor
+final class WorkstationLiteMedia {
+    private(set) var thumbnails: [String: UIImage] = [:]
+    private(set) var snippets: [String: String] = [:]
+
+    @ObservationIgnored private var loads: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var loadedPixels: [String: Int] = [:]
+    @ObservationIgnored private var pendingThumbnails: [String: UIImage] = [:]
+    @ObservationIgnored private var pendingSnippets: [String: String] = [:]
+    @ObservationIgnored private var flushScheduled = false
+
+    func want(_ items: [WorkstationItem], pixels: Int, store: AttachmentStore) {
+        let wanted = Set(items.map(\.id))
+        for (id, task) in loads where !wanted.contains(id) {
+            task.cancel()
+            loads[id] = nil
+        }
+        if thumbnails.count > wanted.count + 200 {
+            thumbnails = thumbnails.filter { wanted.contains($0.key) }
+            loadedPixels = loadedPixels.filter { wanted.contains($0.key) }
+        }
+        if snippets.count > 3_000 {
+            snippets = snippets.filter { wanted.contains($0.key) }
+        }
+        for item in items where loads[item.id] == nil {
+            if Self.wantsThumbnail(item), loadedPixels[item.id] != pixels {
+                loadThumbnail(item, pixels: pixels, store: store)
+            } else if Self.wantsSnippet(item), snippets[item.id] == nil {
+                loadSnippet(item, store: store)
+            }
+        }
+    }
+
+    func clear() {
+        for task in loads.values { task.cancel() }
+        loads = [:]
+        loadedPixels = [:]
+        pendingThumbnails = [:]
+        pendingSnippets = [:]
+        if !thumbnails.isEmpty { thumbnails = [:] }
+        if !snippets.isEmpty { snippets = [:] }
+    }
+
+    private static func wantsThumbnail(_ item: WorkstationItem) -> Bool {
+        switch item.kind {
+        case .image, .pdf: return item.attachment != nil
+        case .stagedChange(let path, _, _, _): return WorkstationItem.isImagePath(path)
+        default: return item.isVideo
+        }
+    }
+
+    private static func wantsSnippet(_ item: WorkstationItem) -> Bool {
+        switch item.kind {
+        case .textOrCode: return item.attachment != nil
+        case .stagedChange(let path, _, _, _): return !WorkstationItem.isImagePath(path)
+        default: return false
+        }
+    }
+
+    private func loadThumbnail(_ item: WorkstationItem, pixels: Int, store: AttachmentStore) {
+        let id = item.id
+        if let cached = WorkstationCanvasCard.cachedThumbnail(for: item, pixels: pixels) {
+            deliver(thumbnail: cached, for: id)
+            if ThumbnailPipeline.bucket(for: Int(max(cached.size.width, cached.size.height) * cached.scale)) >= pixels {
+                loadedPixels[id] = pixels
+                return
+            }
+        }
+        loads[id] = Task { [weak self] in
+            let image: UIImage?
+            if case .stagedChange(_, let data, _, _) = item.kind {
+                image = await ThumbnailPipeline.shared.thumbnail(data: data, key: WorkstationCanvasCard.stagedKey(item), maxPixelSize: pixels)
+            } else if let attachment = item.attachment {
+                image = await ThumbnailPipeline.shared.thumbnail(for: attachment, store: store, maxPixelSize: pixels)
+            } else {
+                image = nil
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.loads[id] = nil
+            self.loadedPixels[id] = pixels
+            if let image { self.deliver(thumbnail: image, for: id) }
+        }
+    }
+
+    private func loadSnippet(_ item: WorkstationItem, store: AttachmentStore) {
+        let id = item.id
+        if let cached = WorkstationSnippetCache.snippet(for: item) {
+            deliver(snippet: cached, for: id)
+            return
+        }
+        loads[id] = Task { [weak self] in
+            let text = await WorkstationSnippetCache.load(for: item, store: store)
+            guard let self, !Task.isCancelled else { return }
+            self.loads[id] = nil
+            if let text { self.deliver(snippet: text, for: id) }
+        }
+    }
+
+    private func deliver(thumbnail: UIImage, for id: String) {
+        pendingThumbnails[id] = thumbnail
+        scheduleFlush()
+    }
+
+    private func deliver(snippet: String, for id: String) {
+        pendingSnippets[id] = snippet
+        scheduleFlush()
+    }
+
+    private func scheduleFlush() {
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(50))
+            self?.flush()
+        }
+    }
+
+    private func flush() {
+        flushScheduled = false
+        if !pendingThumbnails.isEmpty {
+            thumbnails.merge(pendingThumbnails) { _, new in new }
+            pendingThumbnails = [:]
+        }
+        if !pendingSnippets.isEmpty {
+            snippets.merge(pendingSnippets) { _, new in new }
+            pendingSnippets = [:]
+        }
+    }
+}
+
+// MARK: - Drawn layers
+
+/// Cards between 18% and 45%: one drawing that paints each card in view exactly as a real card
+/// looks (it draws the same card face at 100%, scaled). Taps, double taps and drags reach the
+/// card under the finger through the board's spatial index.
+private struct CanvasLiteCards: View {
+    let entries: [CanvasCardEntry]
+    let transform: CanvasViewTransform
+    let viewport: CGSize
+    let selectedID: String?
+    let movingCard: CanvasMovingCard?
+    let thumbnails: [String: UIImage]
+    let snippets: [String: String]
+
+    var body: some View {
+        let zoom = transform.zoom
+        let origin = transform.origin(in: viewport)
+        let width = WorkstationCanvasLayout.cardWidth
+        let height = WorkstationCanvasLayout.cardHeight
+        Canvas { context, _ in
+            for entry in entries {
+                guard let face = context.resolveSymbol(id: entry.id) else { continue }
+                var x = origin.x + (entry.center.x - width / 2) * zoom
+                var y = origin.y + (entry.center.y - height / 2) * zoom
+                if let movingCard, movingCard.id == entry.id {
+                    x += movingCard.offset.width
+                    y += movingCard.offset.height
+                }
+                var card = context
+                card.translateBy(x: x, y: y)
+                card.scaleBy(x: zoom, y: zoom)
+                card.draw(face, at: .zero, anchor: .topLeading)
+            }
+        } symbols: {
+            ForEach(entries) { entry in
+                WorkstationCardFace(
+                    item: entry.item,
+                    zoom: 1,
+                    isSelected: entry.id == selectedID,
+                    thumbnail: thumbnails[entry.id],
+                    snippet: snippets[entry.id],
+                    showsLiveDiagram: false,
+                    showsShadow: false
+                )
+                .equatable()
+                .frame(width: width, height: height)
+                .tag(entry.id)
+            }
+        }
+        .frame(width: viewport.width, height: viewport.height)
+    }
+}
+
+private struct OverviewSymbol: Hashable {
+    let icon: String
+    let tint: WorkstationBadgeTint
+}
+
+/// Farther out (below 18%, with more than 24 cards), one drawing paints a miniature of each card
+/// in view (icon and name), not a blank bar. Icons are drawn once and reused.
+private struct CanvasOverviewMarks: View {
+    let entries: [CanvasCardEntry]
+    let transform: CanvasViewTransform
+    let viewport: CGSize
+    let selectedID: String?
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        let zoom = transform.zoom
+        let origin = transform.origin(in: viewport)
+        let isDark = colorScheme == .dark
+        let symbols = Self.symbols(for: entries)
+        Canvas { context, _ in
+            let cardW = max(4, WorkstationCanvasLayout.cardWidth * zoom)
+            let cardH = max(4, WorkstationCanvasLayout.cardHeight * zoom)
+            let fill = isDark ? Color(white: 0.16) : Color.white.opacity(0.96)
+            let ink = isDark ? Color.white.opacity(0.88) : Color.black.opacity(0.78)
+            var rects: [CGRect] = []
+            rects.reserveCapacity(entries.count)
+            var backgrounds = Path()
+            var tints: [WorkstationBadgeTint: Path] = [:]
+            for entry in entries {
+                let cx = origin.x + entry.center.x * zoom
+                let cy = origin.y + entry.center.y * zoom
+                let rect = CGRect(x: cx - cardW / 2, y: cy - cardH / 2, width: cardW, height: cardH)
+                rects.append(rect)
+                let radius = max(1, min(rect.width, rect.height) * 0.16)
+                backgrounds.addRoundedRect(in: rect, cornerSize: CGSize(width: radius, height: radius))
+                let preview = CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height * 0.70)
+                tints[entry.item.badgeTint, default: Path()].addRoundedRect(in: preview, cornerSize: CGSize(width: radius, height: radius))
+            }
+            context.fill(backgrounds, with: .color(fill))
+            for (tint, path) in tints {
+                context.fill(path, with: .color(tint.color.opacity(0.16)))
+            }
+            for (entry, rect) in zip(entries, rects) {
+                let preview = CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height * 0.70)
+                let iconSide = min(preview.width, preview.height) * 0.46
+                if iconSide >= 3, let icon = context.resolveSymbol(id: OverviewSymbol(icon: entry.item.icon, tint: entry.item.badgeTint)) {
+                    let scale = iconSide / max(icon.size.width, icon.size.height, 1)
+                    var drawn = context
+                    drawn.translateBy(x: preview.midX, y: preview.midY)
+                    drawn.scaleBy(x: scale, y: scale)
+                    drawn.draw(icon, at: .zero, anchor: .center)
+                }
+                if rect.height >= 18 {
+                    let title = context.resolve(
+                        Text(entry.item.name)
+                            .font(.system(size: min(11, max(6, rect.height * 0.16)), weight: .semibold))
+                            .foregroundColor(ink)
+                    )
+                    let titleRect = CGRect(
+                        x: rect.minX + 3,
+                        y: preview.maxY + 1,
+                        width: max(1, rect.width - 6),
+                        height: max(8, rect.maxY - preview.maxY - 2)
+                    )
+                    context.draw(title, in: titleRect)
+                }
+                if entry.id == selectedID {
+                    let radius = max(1, min(rect.width, rect.height) * 0.16)
+                    context.stroke(Path(roundedRect: rect, cornerRadius: radius), with: .color(entry.item.badgeColor), lineWidth: max(1, 1.5 * zoom))
+                }
+            }
+        } symbols: {
+            ForEach(symbols, id: \.self) { symbol in
+                Image(systemName: symbol.icon)
+                    .font(.system(size: 64, weight: .semibold))
+                    .foregroundStyle(symbol.tint.color)
+                    .tag(symbol)
+            }
+        }
+        .frame(width: viewport.width, height: viewport.height)
+    }
+
+    private static func symbols(for entries: [CanvasCardEntry]) -> [OverviewSymbol] {
+        var seen = Set<OverviewSymbol>()
+        var list: [OverviewSymbol] = []
+        for entry in entries {
+            let symbol = OverviewSymbol(icon: entry.item.icon, tint: entry.item.badgeTint)
+            if seen.insert(symbol).inserted { list.append(symbol) }
+        }
+        return list
+    }
+}
+
+private struct CanvasDotGrid: View {
+    let pan: CGSize
+    let zoom: CGFloat
+    let isDark: Bool
+
+    var body: some View {
+        Canvas { context, size in
+            let baseStep: CGFloat = zoom < 0.2 ? 64 : (zoom < 0.5 ? 36 : 24)
+            let step = max(14, baseStep * max(zoom, 0.25))
+            let startX = pan.width.truncatingRemainder(dividingBy: step)
+            let startY = pan.height.truncatingRemainder(dividingBy: step)
+            let dotColor = isDark ? Color.white.opacity(0.10) : Color.black.opacity(0.10)
+            var path = Path()
+            var x = startX
+            while x < size.width {
+                var y = startY
+                while y < size.height {
+                    path.addEllipse(in: CGRect(x: x - 1, y: y - 1, width: 2, height: 2))
+                    y += step
+                }
+                x += step
+            }
+            context.fill(path, with: .color(dotColor))
+        }
+    }
+}
+
+// MARK: - Arena-Style Expandable `Files` Folder Tree Tab
+
+private struct WorkstationFilesTab: View {
+    let canvas: WorkstationCanvasModel
+    @Binding var query: String
+    @Binding var expandedFolders: Set<String>
+    let repoLoading: Bool
+    let computerAvailable: Bool
+    let machineName: String
+    let computerLoading: Bool
+    let computerFileCount: Int
+    let onOpen: @MainActor (WorkstationItem) -> Void
+    let onAddToChat: @MainActor (WorkstationItem) -> Void
+    let onLoadComputer: @MainActor () -> Void
+
+    @Environment(\.theme) private var theme
+
+    private var stagedWorkstationItems: [WorkstationItem] { canvas.stagedItems }
+
+    var body: some View {
+        let listing = canvas.listing
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(Theme.secondaryText)
-                TextField("Search all files in Workstation…", text: $fileQuery)
+                TextField("Search all files in Workstation…", text: $query)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                if !fileQuery.isEmpty {
-                    Button { fileQuery = "" } label: {
+                if !query.isEmpty {
+                    Button { query = "" } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(Theme.secondaryText)
                     }
@@ -705,91 +1671,69 @@ struct WorkstationScreen: View {
 
             List {
                 if !stagedWorkstationItems.isEmpty {
-                    folderSection(
-                        id: "staged",
-                        title: "staged-changes",
-                        icon: "pencil.and.outline",
-                        items: filteredItems(stagedWorkstationItems)
-                    )
+                    folderSection(id: "staged", title: "staged-changes", icon: "pencil.and.outline", folder: listing.staged, query: listing.query)
                 }
-                folderSection(
-                    id: "uploads",
-                    title: "uploads",
-                    icon: "tray.and.arrow.up.fill",
-                    items: filteredItems(uploadItems)
-                )
-                folderSection(
-                    id: "generated",
-                    title: "generated-media",
-                    icon: "sparkles.rectangle.stack.fill",
-                    items: filteredItems(generatedItems)
-                )
-                if !diagramItems.isEmpty {
-                    folderSection(
-                        id: "diagrams",
-                        title: "diagrams",
-                        icon: "point.3.connected.trianglepath.dotted",
-                        items: filteredItems(diagramItems)
-                    )
+                folderSection(id: "uploads", title: "uploads", icon: "tray.and.arrow.up.fill", folder: listing.uploads, query: listing.query)
+                folderSection(id: "generated", title: "generated-media", icon: "sparkles.rectangle.stack.fill", folder: listing.generated, query: listing.query)
+                if !canvas.diagramItems.isEmpty {
+                    folderSection(id: "diagrams", title: "diagrams", icon: "point.3.connected.trianglepath.dotted", folder: listing.diagrams, query: listing.query)
                 }
-                if let repo = activeRepo {
+                if let repo = canvas.activeRepo {
                     Section {
-                        DisclosureGroup(isExpanded: bindingForFolder("repo")) {
-                            if repoLoading {
-                                HStack { ProgressView(); Text("Loading \(repo.ref.name)…").font(.footnote) }
-                            } else {
-                                let items = filteredItems(repoWorkstationItems)
-                                if items.isEmpty {
-                                    Text("No matching files on \(repo.branch).")
-                                        .font(.footnote)
-                                        .foregroundStyle(Theme.secondaryText)
-                                } else {
-                                    ForEach(items.prefix(250)) { item in
-                                        fileRow(item)
-                                    }
-                                }
-                            }
-                        } label: {
+                        folderToggle(id: "repo") {
                             folderHeaderLabel(
                                 title: repo.ref.name,
-                                subtitle: "\(repoEntries.filter(\.isFile).count) files · \(repo.branch)",
+                                subtitle: "\(canvas.repoItems.count) files · \(repo.branch)",
                                 icon: "chevron.left.forwardslash.chevron.right"
                             )
                         }
-                    }
-                }
-                if app.connectors.computerControl() != nil {
-                    Section {
-                        DisclosureGroup(isExpanded: bindingForFolder("computer")) {
-                            if computerLoading {
-                                HStack { ProgressView(); Text("Checking Linux computer…").font(.footnote) }
-                            } else if computerFiles.isEmpty {
-                                Button {
-                                    Task { await loadComputerFiles() }
-                                } label: {
-                                    Label("Load files from \(app.settings.chatComputerMachineName)", systemImage: "terminal")
-                                        .font(.footnote.weight(.semibold))
-                                }
+                        if expandedFolders.contains("repo") {
+                            if repoLoading {
+                                HStack { ProgressView(); Text("Loading \(repo.ref.name)…").font(.footnote) }
+                            } else if listing.repo.items.isEmpty {
+                                Text("No matching files on \(repo.branch).")
+                                    .font(.footnote)
+                                    .foregroundStyle(Theme.secondaryText)
                             } else {
-                                ForEach(filteredItems(computerWorkstationItems)) { item in
+                                // Every file, however many: the list only builds the rows on screen.
+                                ForEach(listing.repo.items) { item in
                                     fileRow(item)
                                 }
                             }
-                        } label: {
-                            HStack {
-                                folderHeaderLabel(
-                                    title: app.settings.chatComputerMachineName,
-                                    subtitle: computerFiles.isEmpty ? "Tap to inspect computer workspace" : "\(computerFiles.count) items",
-                                    icon: "desktopcomputer"
-                                )
-                                Spacer()
+                        }
+                    }
+                }
+                if computerAvailable {
+                    Section {
+                        folderToggle(id: "computer") {
+                            folderHeaderLabel(
+                                title: machineName,
+                                subtitle: computerFileCount == 0 ? "Tap to inspect computer workspace" : "\(computerFileCount) items",
+                                icon: "desktopcomputer"
+                            )
+                        } accessory: {
+                            Button {
+                                onLoadComputer()
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.caption.weight(.bold))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        if expandedFolders.contains("computer") {
+                            if computerLoading {
+                                HStack { ProgressView(); Text("Checking Linux computer…").font(.footnote) }
+                            } else if computerFileCount == 0 {
                                 Button {
-                                    Task { await loadComputerFiles() }
+                                    onLoadComputer()
                                 } label: {
-                                    Image(systemName: "arrow.clockwise")
-                                        .font(.caption.weight(.bold))
+                                    Label("Load files from \(machineName)", systemImage: "terminal")
+                                        .font(.footnote.weight(.semibold))
                                 }
-                                .buttonStyle(.plain)
+                            } else {
+                                ForEach(listing.computer.items) { item in
+                                    fileRow(item)
+                                }
                             }
                         }
                     }
@@ -798,32 +1742,77 @@ struct WorkstationScreen: View {
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
         }
+        .task(id: query) {
+            // Search once the typing pauses; clearing the field shows everything at once.
+            let pending = query
+            if !pending.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled else { return }
+            }
+            canvas.setFileQuery(pending)
+        }
     }
 
     @ViewBuilder
-    private func folderSection(id: String, title: String, icon: String, items: [WorkstationItem]) -> some View {
-        if !items.isEmpty || fileQuery.isEmpty {
+    private func folderSection(id: String, title: String, icon: String, folder: WorkstationFolder, query: String) -> some View {
+        if !folder.items.isEmpty || query.isEmpty {
             Section {
-                DisclosureGroup(isExpanded: bindingForFolder(id)) {
-                    if items.isEmpty {
+                folderToggle(id: id) {
+                    folderHeaderLabel(title: title, subtitle: folder.summary, icon: icon)
+                }
+                if expandedFolders.contains(id) {
+                    if folder.items.isEmpty {
                         Text("Empty")
                             .font(.footnote)
                             .foregroundStyle(Theme.secondaryText)
                     } else {
-                        ForEach(items) { item in
+                        ForEach(folder.items) { item in
                             fileRow(item)
                         }
                     }
-                } label: {
-                    let bytes = items.reduce(0) { $0 + $1.bytes }
-                    let sizeText = bytes > 0 ? " · \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))" : ""
-                    folderHeaderLabel(
-                        title: title,
-                        subtitle: "\(items.count) \(items.count == 1 ? "file" : "files")\(sizeText)",
-                        icon: icon
-                    )
                 }
             }
+        }
+    }
+
+    /// A folder's header row: tap to open or close it. Its files are the section's own rows, so
+    /// the list builds only the ones on screen even for a repo of thousands of files.
+    private func folderToggle<Title: View>(id: String, @ViewBuilder label: () -> Title) -> some View {
+        folderToggle(id: id, label: label) { EmptyView() }
+    }
+
+    private func folderToggle<Title: View, Accessory: View>(
+        id: String,
+        @ViewBuilder label: () -> Title,
+        @ViewBuilder accessory: () -> Accessory
+    ) -> some View {
+        let isOpen = expandedFolders.contains(id)
+        return HStack(spacing: 8) {
+            Button {
+                withAnimation(.snappy(duration: 0.22)) {
+                    toggleFolder(id)
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    label()
+                    Image(systemName: "chevron.right")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tint)
+                        .rotationEffect(.degrees(isOpen ? 90 : 0))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(isOpen ? "Expanded" : "Collapsed")
+            accessory()
+        }
+    }
+
+    private func toggleFolder(_ id: String) {
+        if expandedFolders.contains(id) {
+            expandedFolders.remove(id)
+        } else {
+            expandedFolders.insert(id)
         }
     }
 
@@ -845,7 +1834,7 @@ struct WorkstationScreen: View {
 
     private func fileRow(_ item: WorkstationItem) -> some View {
         Button {
-            previewingItem = item
+            onOpen(item)
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: item.icon)
@@ -867,7 +1856,7 @@ struct WorkstationScreen: View {
                 }
                 Spacer()
                 Button {
-                    addItemToChat(item)
+                    onAddToChat(item)
                 } label: {
                     Image(systemName: "plus.bubble")
                         .font(.caption.weight(.semibold))
@@ -881,20 +1870,17 @@ struct WorkstationScreen: View {
         }
         .buttonStyle(.plain)
     }
+}
 
-    private func bindingForFolder(_ id: String) -> Binding<Bool> {
-        Binding(
-            get: { expandedFolders.contains(id) },
-            set: { open in
-                if open { expandedFolders.insert(id) }
-                else { expandedFolders.remove(id) }
-            }
-        )
-    }
+// MARK: - Kiro-Style `Changes` / Reviews Tab
 
-    // MARK: - Kiro-Style `Changes` / Reviews Tab
+private struct WorkstationChangesTab: View {
+    let session: ChatSession?
 
-    private var changesWorkspace: some View {
+    @State private var diffScope = 0
+    @State private var diffText = "Loading changes…"
+
+    var body: some View {
         Group {
             if let session {
                 VStack(spacing: 0) {
@@ -948,767 +1934,9 @@ struct WorkstationScreen: View {
             }
         }
     }
-
-    // MARK: - Data Aggregation Across Attachments, Generated Media, Diagrams, Repo, & Computer
-
-    private var uploadItems: [WorkstationItem] {
-        var seen: Set<UUID> = []
-        var list: [WorkstationItem] = []
-
-        for att in localAddedAttachments where !seen.contains(att.id) {
-            seen.insert(att.id)
-            list.append(WorkstationItem.fromAttachment(att, source: "Draft upload", removableDraft: true))
-        }
-
-        if let session {
-            for att in session.workstationFiles where !seen.contains(att.id) {
-                seen.insert(att.id)
-                list.append(WorkstationItem.fromAttachment(att, source: "Workstation artifact", removableDraft: false))
-            }
-            for att in session.draftAttachments where !seen.contains(att.id) {
-                seen.insert(att.id)
-                list.append(WorkstationItem.fromAttachment(att, source: "Draft upload", removableDraft: true))
-            }
-            for msg in session.chat.messages {
-                if case .user(let u) = msg.body {
-                    for att in u.attachments where !seen.contains(att.id) {
-                        seen.insert(att.id)
-                        list.append(WorkstationItem.fromAttachment(att, source: "Chat upload", removableDraft: false))
-                    }
-                }
-            }
-        } else {
-            for att in app.home.attachments where !seen.contains(att.id) {
-                seen.insert(att.id)
-                list.append(WorkstationItem.fromAttachment(att, source: "Draft upload", removableDraft: true))
-            }
-        }
-        return list
-    }
-
-    private var generatedItems: [WorkstationItem] {
-        guard let session else { return [] }
-        var list: [WorkstationItem] = []
-        for msg in session.chat.messages {
-            guard let turn = msg.assistantTurn else { continue }
-            for step in turn.steps {
-                for img in step.generatedImages ?? [] {
-                    list.append(WorkstationItem.fromAttachment(img.attachment, source: img.isVideo ? "Made video" : (img.isFile ? "Sent file" : "Generated picture"), removableDraft: false))
-                }
-            }
-        }
-        return list
-    }
-
-    private var diagramItems: [WorkstationItem] {
-        guard let session else { return [] }
-        var list: [WorkstationItem] = []
-        var idx = 1
-        for msg in session.chat.messages {
-            guard let turn = msg.assistantTurn else { continue }
-            for step in turn.steps {
-                let blocks = Self.extractMermaidBlocks(from: step.text)
-                for code in blocks {
-                    list.append(WorkstationItem(
-                        id: "mermaid-\(step.id.uuidString)-\(idx)",
-                        name: "Diagram \(idx).mmd",
-                        subtitle: "Mermaid chart · \(code.count) chars",
-                        bytes: code.utf8.count,
-                        kind: .mermaid(code),
-                        attachment: nil,
-                        repoPath: nil,
-                        isRemovableDraft: false
-                    ))
-                    idx += 1
-                }
-            }
-        }
-        return list
-    }
-
-    private var stagedWorkstationItems: [WorkstationItem] {
-        stagedChanges.map { change in
-            let fileName = change.path.split(separator: "/").last.map(String.init) ?? change.path
-            switch change {
-            case .write(let path, let data, let existed):
-                return WorkstationItem(
-                    id: "staged:\(path)",
-                    name: fileName,
-                    subtitle: "\(existed ? "Edited" : "Created") · \(path)",
-                    bytes: data.count,
-                    kind: .stagedChange(path: path, data: data, isDelete: false, existed: existed),
-                    attachment: nil,
-                    repoPath: path,
-                    isRemovableDraft: false
-                )
-            case .delete(let path, let previous):
-                return WorkstationItem(
-                    id: "staged:\(path)",
-                    name: fileName,
-                    subtitle: "Deleted · \(path)",
-                    bytes: previous.count,
-                    kind: .stagedChange(path: path, data: previous, isDelete: true, existed: true),
-                    attachment: nil,
-                    repoPath: path,
-                    isRemovableDraft: false
-                )
-            }
-        }
-    }
-
-    private var repoWorkstationItems: [WorkstationItem] {
-        guard let repo = activeRepo else { return [] }
-        return repoEntries.filter(\.isFile).map { entry in
-            let fileName = entry.path.split(separator: "/").last.map(String.init) ?? entry.path
-            return WorkstationItem(
-                id: "repo:\(entry.path)",
-                name: fileName,
-                subtitle: "\(repo.ref.name)/\(entry.path)",
-                bytes: entry.size ?? 0,
-                kind: .repoFile(entry.path),
-                attachment: nil,
-                repoPath: entry.path,
-                isRemovableDraft: false
-            )
-        }
-    }
-
-    private var computerWorkstationItems: [WorkstationItem] {
-        computerFiles.map { path in
-            let fileName = path.split(separator: "/").last.map(String.init) ?? path
-            return WorkstationItem(
-                id: "computer:\(path)",
-                name: fileName,
-                subtitle: "\(app.settings.chatComputerMachineName):\(path)",
-                bytes: 0,
-                kind: .computerFile(path),
-                attachment: nil,
-                repoPath: nil,
-                isRemovableDraft: false
-            )
-        }
-    }
-
-    /// Everything in this workstation, on the canvas. Off-screen cards are not built; files are not dropped to make it faster.
-    private var canvasItems: [WorkstationItem] {
-        var seen = Set<String>()
-        return allItems.filter { seen.insert($0.id).inserted }
-    }
-
-    private var allItems: [WorkstationItem] {
-        stagedWorkstationItems + uploadItems + generatedItems + diagramItems + repoWorkstationItems + computerWorkstationItems
-    }
-
-    private var exportableAttachments: [AttachmentReference] {
-        (uploadItems + generatedItems).compactMap(\.attachment)
-    }
-
-    private var formattedTotalBytes: String {
-        let total = allItems.reduce(0) { $0 + $1.bytes }
-        return ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file)
-    }
-
-    private var pendingChangesCount: Int {
-        if !stagedChanges.isEmpty { return stagedChanges.count }
-        guard let session else { return 0 }
-        if let receipt = session.chat.saveReceipts?.last, receipt.resolution == nil, receipt.undoneAt == nil {
-            return 1
-        }
-        return 0
-    }
-
-    private func filteredItems(_ source: [WorkstationItem]) -> [WorkstationItem] {
-        let q = fileQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return source }
-        return source.filter {
-            $0.name.localizedCaseInsensitiveContains(q) || $0.subtitle.localizedCaseInsensitiveContains(q)
-        }
-    }
-
-    private static func extractMermaidBlocks(from markdown: String) -> [String] {
-        guard markdown.contains("```mermaid") || markdown.contains("```mmd") else { return [] }
-        var results: [String] = []
-        let lines = markdown.components(separatedBy: .newlines)
-        var inside = false
-        var current: [String] = []
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces).lowercased()
-            if !inside && (trimmed == "```mermaid" || trimmed == "```mmd") {
-                inside = true
-                current = []
-            } else if inside && trimmed == "```" {
-                inside = false
-                let joined = current.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-                if !joined.isEmpty { results.append(joined) }
-            } else if inside {
-                current.append(line)
-            }
-        }
-        return results
-    }
-
-    // MARK: - Positions & Actions
-
-    private func position(for id: String, index: Int, count: Int) -> CGPoint {
-        if let saved = positions[id] { return saved }
-        let cols = Self.idealGridColumns(for: max(1, count))
-        let col = index % cols
-        let row = index / cols
-        let spacingX: CGFloat = 236
-        let spacingY: CGFloat = 258
-        let originX = -CGFloat(cols - 1) * spacingX * 0.5
-        return CGPoint(x: originX + CGFloat(col) * spacingX, y: CGFloat(row) * spacingY - 90)
-    }
-
-    private func loadSavedPositions() {
-        if let vp = UserDefaults.standard.array(forKey: "\(storageKey).viewport") as? [Double], vp.count == 3 {
-            let savedZoom = min(max(CGFloat(vp[0]), 0.01), 3.0)
-            zoom = savedZoom
-            baseZoom = savedZoom
-            pan = CGSize(width: vp[1], height: vp[2])
-        }
-        guard let raw = UserDefaults.standard.dictionary(forKey: storageKey) as? [String: [Double]] else { return }
-        var loaded: [String: CGPoint] = [:]
-        for (k, pair) in raw where pair.count == 2 {
-            loaded[k] = CGPoint(x: pair[0], y: pair[1])
-        }
-        positions = loaded
-    }
-
-    private func saveViewport() {
-        UserDefaults.standard.set([Double(zoom), Double(pan.width), Double(pan.height)], forKey: "\(storageKey).viewport")
-    }
-
-    private func savePositions() {
-        var encoded: [String: [Double]] = [:]
-        for (k, pt) in positions {
-            encoded[k] = [Double(pt.x), Double(pt.y)]
-        }
-        UserDefaults.standard.set(encoded, forKey: storageKey)
-    }
-
-    private func addItemToChat(_ item: WorkstationItem) {
-        if let att = item.attachment {
-            switch target {
-            case .home:
-                if !app.home.attachments.contains(where: { $0.id == att.id }) {
-                    app.home.attachments.append(att)
-                }
-            case .chat(let id):
-                if let s = app.library.session(id), !s.draftAttachments.contains(where: { $0.id == att.id }) {
-                    s.draftAttachments.append(att)
-                }
-            }
-            Haptics.selection()
-            dismiss()
-            return
-        }
-        if let path = item.repoPath, let repo = activeRepo {
-            app.reference(repo: repo.ref, commit: repoCommit ?? repo.branch, path: path, in: target)
-            Haptics.selection()
-            dismiss()
-            return
-        }
-        if case .computerFile(let path) = item.kind {
-            let note = "Inspect `\(path)` on `\(app.settings.chatComputerMachineName)`"
-            switch target {
-            case .home: app.home.text = app.home.text.isEmpty ? note : "\(app.home.text)\n\(note)"
-            case .chat(let id):
-                if let s = app.library.session(id) {
-                    s.draft = s.draft.isEmpty ? note : "\(s.draft)\n\(note)"
-                }
-            }
-            Haptics.selection()
-            dismiss()
-        }
-    }
-
-    private func removeDraftItem(_ item: WorkstationItem) {
-        guard let att = item.attachment else { return }
-        localAddedAttachments.removeAll { $0.id == att.id }
-        switch target {
-        case .home:
-            app.home.attachments.removeAll { $0.id == att.id }
-        case .chat(let id):
-            app.library.session(id)?.draftAttachments.removeAll { $0.id == att.id }
-        }
-        if selectedItemID == item.id { selectedItemID = nil }
-        Haptics.selection()
-    }
-
-    private func shareItem(_ item: WorkstationItem) {
-        guard let att = item.attachment else { return }
-        Task {
-            if let url = await ShareableAttachmentURL.prepare(attachment: att, store: app.attachmentStore) {
-                SharePresenter.present(items: [url])
-            }
-        }
-    }
-
-    private func exportAllLocalAttachments() {
-        let items = exportableAttachments
-        guard !items.isEmpty else { return }
-        Task {
-            var urls: [URL] = []
-            for att in items.prefix(30) {
-                if let url = await ShareableAttachmentURL.prepare(attachment: att, store: app.attachmentStore) {
-                    urls.append(url)
-                }
-            }
-            if !urls.isEmpty {
-                SharePresenter.present(items: urls)
-            }
-        }
-    }
-
-    private func pickFilesForWorkstation() {
-        AttachmentFilePicker.shared.present(
-            onPick: { files in
-                Task {
-                    var failures: [String] = []
-                    for picked in files {
-                        do {
-                            let imported = try await AttachmentImporter.importFileURL(picked.url, name: picked.name, store: app.attachmentStore)
-                            appendDraftAttachment(imported)
-                        } catch let error as AttachmentImporter.Failure {
-                            failures.append("\(picked.name): \(error.localizedDescription)")
-                        } catch {
-                            failures.append("Couldn't add \(picked.name).")
-                        }
-                    }
-                    if !failures.isEmpty {
-                        importError = failures.joined(separator: "\n")
-                    }
-                }
-            },
-            onFailure: { importError = $0 }
-        )
-    }
-
-    private func importPickedPhotos(_ picked: [PhotosPickerItem]) {
-        Task {
-            var idx = uploadItems.filter { $0.attachment?.kind == .image }.count + 1
-            for item in picked {
-                if let imported = try? await AttachmentImporter.importPhoto(item, baseName: picked.count > 1 ? "Photo \(idx)" : nil, store: app.attachmentStore) {
-                    appendDraftAttachment(imported)
-                    idx += 1
-                }
-            }
-        }
-    }
-
-    private func appendDraftAttachment(_ attachment: AttachmentReference) {
-        if !localAddedAttachments.contains(where: { $0.id == attachment.id }) {
-            localAddedAttachments.append(attachment)
-        }
-        switch target {
-        case .home:
-            if !app.home.attachments.contains(where: { $0.id == attachment.id }) {
-                app.home.attachments.append(attachment)
-            }
-        case .chat(let id):
-            if let s = app.library.session(id), !s.draftAttachments.contains(where: { $0.id == attachment.id }) {
-                s.draftAttachments.append(attachment)
-            }
-        }
-        Haptics.selection()
-    }
-
-    private func loadRepoTreeIfNeeded() async {
-        guard let repo = activeRepo, let github = app.repoClient(for: repo.ref) else {
-            repoEntries = []
-            repoCommit = nil
-            return
-        }
-        repoLoading = true
-        defer { repoLoading = false }
-        do {
-            let commit = try await github.resolveCommit(repo.ref, ref: repo.branch)
-            let ws = RepoWorkspace(repo: repo.ref, branch: repo.branch, commit: commit, github: github, store: app.snapshots)
-            let tree = try await ws.tree().entries
-            repoCommit = commit
-            repoEntries = tree
-        } catch {
-            repoEntries = []
-        }
-    }
-
-    private func loadComputerFiles() async {
-        guard let control = app.connectors.computerControl(), !computerLoading else { return }
-        computerLoading = true
-        defer { computerLoading = false }
-        if let output = try? await control.run("find ~ -maxdepth 3 -not -path '*/.*' -type f 2>/dev/null | head -n 120") {
-            computerFiles = output
-                .components(separatedBy: .newlines)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-        }
-    }
 }
 
-// MARK: - Workstation Item Model & Universal Visual Canvas Card
-
-struct WorkstationItem: Identifiable, Hashable {
-    enum ItemKind: Hashable {
-        case image
-        case pdf
-        case textOrCode
-        case archiveOrBinary(String)
-        case mermaid(String)
-        case stagedChange(path: String, data: Data, isDelete: Bool, existed: Bool)
-        case repoFile(String)
-        case computerFile(String)
-    }
-
-    let id: String
-    let name: String
-    let subtitle: String
-    let bytes: Int
-    let kind: ItemKind
-    let attachment: AttachmentReference?
-    let repoPath: String?
-    let isRemovableDraft: Bool
-
-    static func fromAttachment(_ att: AttachmentReference, source: String, removableDraft: Bool) -> WorkstationItem {
-        let ext = (att.name as NSString).pathExtension.lowercased()
-        let itemKind: ItemKind
-        if att.kind == .image {
-            itemKind = .image
-        } else if att.kind == .pdf || ext == "pdf" {
-            itemKind = .pdf
-        } else if att.kind == .text || ["md", "txt", "json", "swift", "py", "js", "ts", "yml", "yaml", "html", "css", "sh", "ips", "csv", "log", "xml"].contains(ext) {
-            itemKind = .textOrCode
-        } else {
-            itemKind = .archiveOrBinary(ext.isEmpty ? "FILE" : ext.uppercased())
-        }
-        let sizeStr = ByteCountFormatter.string(fromByteCount: Int64(att.bytes), countStyle: .file)
-        return WorkstationItem(
-            id: "att:\(att.id.uuidString)",
-            name: att.name,
-            subtitle: "\(source) · \(sizeStr)",
-            bytes: att.bytes,
-            kind: itemKind,
-            attachment: att,
-            repoPath: nil,
-            isRemovableDraft: removableDraft
-        )
-    }
-
-    var icon: String {
-        switch kind {
-        case .image: return "photo.fill"
-        case .pdf: return "doc.richtext.fill"
-        case .textOrCode: return "doc.text.fill"
-        case .archiveOrBinary(let ext):
-            if ["ZIP", "IPA", "TAR", "GZ"].contains(ext) { return "doc.zipper" }
-            if ["P12", "CER", "MOBILEPROVISION"].contains(ext) { return "key.fill" }
-            if ["DOCX", "XLSX", "PPTX"].contains(ext) { return "doc.viewfinder" }
-            return "shippingbox.fill"
-        case .mermaid: return "point.3.connected.trianglepath.dotted"
-        case .stagedChange(_, _, let isDelete, let existed):
-            return isDelete ? "trash.fill" : (existed ? "pencil.line" : "doc.badge.plus")
-        case .repoFile: return "chevron.left.forwardslash.chevron.right"
-        case .computerFile: return "terminal.fill"
-        }
-    }
-
-    var badgeText: String {
-        if case .stagedChange(_, _, let isDelete, let existed) = kind {
-            return isDelete ? "DEL" : (existed ? "EDIT" : "NEW")
-        }
-        let ext = (name as NSString).pathExtension.uppercased()
-        if !ext.isEmpty { return ext }
-        switch kind {
-        case .image: return "IMG"
-        case .pdf: return "PDF"
-        case .textOrCode: return "TXT"
-        case .archiveOrBinary(let label): return label
-        case .mermaid: return "CHART"
-        case .stagedChange: return "EDIT"
-        case .repoFile: return "REPO"
-        case .computerFile: return "VM"
-        }
-    }
-
-    var badgeColor: Color {
-        switch kind {
-        case .image: return .blue
-        case .pdf: return .red
-        case .textOrCode: return .mint
-        case .archiveOrBinary: return .orange
-        case .mermaid: return .purple
-        case .stagedChange(_, _, let isDelete, let existed):
-            return isDelete ? .red : (existed ? .orange : .green)
-        case .repoFile: return .indigo
-        case .computerFile: return .teal
-        }
-    }
-}
-
-private struct WorkstationCanvasCard: View {
-    let item: WorkstationItem
-    let isSelected: Bool
-    let pointerEnabled: Bool
-    let zoom: CGFloat
-    var showsPreview: Bool = true
-    var onSelect: () -> Void
-    var onDoubleTap: () -> Void
-    var onMove: (CGSize) -> Void
-    var onMoveEnd: () -> Void
-
-    @Environment(AppModel.self) private var app
-    @Environment(\.theme) private var theme
-    @Environment(\.displayScale) private var displayScale
-    @State private var thumbnail: UIImage?
-    @State private var snippet: String?
-    @State private var liveDrag: CGSize = .zero
-
-    static let cardWidth: CGFloat = 208
-    static let cardHeight: CGFloat = 196
-    private let previewHeight: CGFloat = 152
-
-    private var renderedWidth: CGFloat { max(1, Self.cardWidth * zoom) }
-    private var renderedHeight: CGFloat { max(1, Self.cardHeight * zoom) }
-    private var renderedPreviewHeight: CGFloat { max(1, previewHeight * zoom) }
-
-    /// Pixels the photo needs on this screen. A fixed small thumbnail stretched by zoom is what made pictures soft.
-    private var thumbnailPixelSize: Int {
-        let pixels = previewHeight * zoom * max(displayScale, 2)
-        return min(1600, max(160, Int(pixels.rounded(.up))))
-    }
-
-    private func scaled(_ value: CGFloat, floor: CGFloat = 1) -> CGFloat {
-        max(floor, value * zoom)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            previewArea
-                .frame(width: renderedWidth, height: renderedPreviewHeight)
-                .clipped()
-
-            HStack(spacing: scaled(7)) {
-                Text(item.badgeText)
-                    .font(.system(size: scaled(9), weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, scaled(6))
-                    .padding(.vertical, scaled(2.5))
-                    .background(item.badgeColor, in: RoundedRectangle(cornerRadius: scaled(5), style: .continuous))
-
-                VStack(alignment: .leading, spacing: scaled(1, floor: 0)) {
-                    Text(item.name)
-                        .font(.system(size: scaled(12), weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text(item.subtitle)
-                        .font(.system(size: scaled(10)))
-                        .foregroundStyle(Theme.secondaryText)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, scaled(10))
-            .padding(.vertical, scaled(8))
-            .frame(width: renderedWidth, height: max(1, renderedHeight - renderedPreviewHeight), alignment: .leading)
-            .background(Theme.surface)
-        }
-        .frame(width: renderedWidth, height: renderedHeight)
-        .clipShape(RoundedRectangle(cornerRadius: scaled(16), style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: scaled(16), style: .continuous)
-                .strokeBorder(isSelected ? theme.accent : Theme.stroke, lineWidth: isSelected ? scaled(2.5) : max(0.5, zoom))
-        )
-        .shadow(color: zoom >= 0.8 ? .black.opacity(isSelected ? 0.26 : 0.10) : .clear, radius: isSelected ? 10 : 4, x: 0, y: 3)
-        .offset(liveDrag)
-        .onTapGesture(count: 2, perform: onDoubleTap)
-        .onTapGesture(count: 1, perform: onSelect)
-        .gesture(
-            DragGesture(minimumDistance: 6)
-                .onChanged { value in
-                    guard pointerEnabled else { return }
-                    liveDrag = value.translation
-                }
-                .onEnded { value in
-                    guard pointerEnabled else { return }
-                    let delta = value.translation
-                    liveDrag = .zero
-                    onMove(delta)
-                    onMoveEnd()
-                }
-        )
-        .task(id: showsPreview ? "\(item.id)#\(thumbnailPixelSize / 180)" : "") {
-            guard showsPreview else {
-                thumbnail = nil
-                snippet = nil
-                return
-            }
-            let pixels = thumbnailPixelSize
-            if case .stagedChange(let path, let data, _, _) = item.kind {
-                let lower = path.lowercased()
-                if [".png", ".jpg", ".jpeg", ".gif", ".webp"].contains(where: { lower.hasSuffix($0) }) {
-                    thumbnail = ImageDownsampler.image(from: data, maxPixelSize: pixels)
-                } else if let str = String(data: data, encoding: .utf8) {
-                    snippet = String(str.prefix(280))
-                }
-                return
-            }
-            guard let att = item.attachment else { return }
-            switch item.kind {
-            case .image, .pdf:
-                thumbnail = await ImageDownsampler.attachmentThumbnail(att, store: app.attachmentStore, maxPixelSize: pixels)
-            case .textOrCode:
-                if let slice = (try? await app.attachmentStore.readSlice(for: att, offsetBytes: 0, maxBytes: 4_096))?.data,
-                   let str = AttachmentDataPreviewBody.readableText(from: slice, name: att.name) {
-                    snippet = String(str.prefix(280))
-                }
-            default:
-                break
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var previewArea: some View {
-        ZStack {
-            Theme.raised
-            if showsPreview, let thumbnail {
-                Image(uiImage: thumbnail)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFill()
-                    .frame(width: renderedWidth, height: renderedPreviewHeight)
-            } else if showsPreview, let snippet {
-                let lowerName = item.name.lowercased()
-                if zoom >= 0.85, lowerName.hasSuffix(".mmd") || lowerName.hasSuffix(".mermaid") {
-                    MermaidBlockView(code: snippet, compactCardMode: true)
-                        .frame(width: renderedWidth, height: renderedPreviewHeight)
-                } else {
-                    Text(snippet)
-                        .font(.system(size: scaled(9.5), design: .monospaced))
-                        .foregroundStyle(.primary.opacity(0.86))
-                        .padding(scaled(10))
-                        .frame(width: renderedWidth, height: renderedPreviewHeight, alignment: .topLeading)
-                }
-            } else if showsPreview, case .mermaid(let code) = item.kind {
-                if zoom >= 0.85 {
-                    MermaidBlockView(code: code, compactCardMode: true)
-                        .frame(width: renderedWidth, height: renderedPreviewHeight)
-                } else {
-                    Text(code)
-                        .font(.system(size: scaled(9.5), design: .monospaced))
-                        .foregroundStyle(.primary.opacity(0.86))
-                        .padding(scaled(10))
-                        .frame(width: renderedWidth, height: renderedPreviewHeight, alignment: .topLeading)
-                }
-            } else {
-                VStack(spacing: scaled(8)) {
-                    Image(systemName: item.icon)
-                        .font(.system(size: scaled(34), weight: .semibold))
-                        .foregroundStyle(item.badgeColor)
-                    Text(item.badgeText)
-                        .font(.system(size: scaled(12), weight: .bold))
-                        .foregroundStyle(Theme.secondaryText)
-                }
-            }
-        }
-    }
-}
-
-private struct CanvasOverviewMarks: View {
-    let items: [WorkstationItem]
-    let zoom: CGFloat
-    let pan: CGSize
-    let viewport: CGSize
-    let selectedID: String?
-    let position: (String, Int) -> CGPoint
-
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        Canvas { context, size in
-            let cardW = max(4, WorkstationCanvasCard.cardWidth * zoom)
-            let cardH = max(4, WorkstationCanvasCard.cardHeight * zoom)
-            let bounds = CGRect(origin: .zero, size: size).insetBy(dx: -30, dy: -30)
-            let isDark = colorScheme == .dark
-            let fill = isDark ? Color(white: 0.16) : Color.white.opacity(0.96)
-            let ink = isDark ? Color.white.opacity(0.88) : Color.black.opacity(0.78)
-            for (index, item) in items.enumerated() {
-                let pos = position(item.id, index)
-                let cx = size.width * 0.5 + pan.width + pos.x * zoom
-                let cy = size.height * 0.46 + pan.height + pos.y * zoom
-                let rect = CGRect(x: cx - cardW / 2, y: cy - cardH / 2, width: cardW, height: cardH)
-                guard rect.intersects(bounds) else { continue }
-                let radius = min(rect.width, rect.height) * 0.16
-                let path = Path(roundedRect: rect, cornerRadius: max(1, radius))
-                context.fill(path, with: .color(fill))
-                let preview = CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height * 0.70)
-                let tint = Path(roundedRect: preview, cornerRadius: max(1, radius))
-                context.fill(tint, with: .color(item.badgeColor.opacity(0.16)))
-                let iconSide = min(preview.width, preview.height) * 0.46
-                if iconSide >= 3 {
-                    let iconRect = CGRect(
-                        x: preview.midX - iconSide / 2,
-                        y: preview.midY - iconSide / 2,
-                        width: iconSide,
-                        height: iconSide
-                    )
-                    let icon = context.resolve(
-                        Text(Image(systemName: item.icon))
-                            .font(.system(size: iconSide, weight: .semibold))
-                            .foregroundColor(item.badgeColor)
-                    )
-                    context.draw(icon, in: iconRect)
-                }
-                if rect.height >= 18 {
-                    let title = context.resolve(
-                        Text(item.name)
-                            .font(.system(size: min(11, max(6, rect.height * 0.16)), weight: .semibold))
-                            .foregroundColor(ink)
-                    )
-                    let titleRect = CGRect(
-                        x: rect.minX + 3,
-                        y: preview.maxY + 1,
-                        width: max(1, rect.width - 6),
-                        height: max(8, rect.maxY - preview.maxY - 2)
-                    )
-                    context.draw(title, in: titleRect)
-                }
-                if item.id == selectedID {
-                    context.stroke(path, with: .color(item.badgeColor), lineWidth: max(1, 1.5 * zoom))
-                }
-            }
-        }
-        .frame(width: viewport.width, height: viewport.height)
-    }
-}
-
-private struct CanvasDotGrid: View {
-    let pan: CGSize
-    let zoom: CGFloat
-    let isDark: Bool
-
-    var body: some View {
-        Canvas { context, size in
-            let baseStep: CGFloat = zoom < 0.2 ? 64 : (zoom < 0.5 ? 36 : 24)
-            let step = max(14, baseStep * max(zoom, 0.25))
-            let startX = pan.width.truncatingRemainder(dividingBy: step)
-            let startY = pan.height.truncatingRemainder(dividingBy: step)
-            let dotColor = isDark ? Color.white.opacity(0.10) : Color.black.opacity(0.10)
-            var path = Path()
-            var x = startX
-            while x < size.width {
-                var y = startY
-                while y < size.height {
-                    path.addEllipse(in: CGRect(x: x - 1, y: y - 1, width: 2, height: 2))
-                    y += step
-                }
-                x += step
-            }
-            context.fill(path, with: .color(dotColor))
-        }
-    }
-}
+// MARK: - Preview sheet
 
 private struct WorkstationItemPreviewSheet: View {
     let item: WorkstationItem
@@ -1815,7 +2043,7 @@ private struct WorkstationItemPreviewSheet: View {
                FileManager.default.fileExists(atPath: resolvedURL.path) {
                 attachmentFileURL = resolvedURL
                 if att.kind == .image {
-                    attachmentImage = await ImageDownsampler.attachmentThumbnail(att, store: app.attachmentStore, maxPixelSize: 2_400)
+                    attachmentImage = await ThumbnailPipeline.shared.thumbnail(for: att, store: app.attachmentStore, maxPixelSize: 2_400)
                 } else if att.kind != .pdf && !att.name.lowercased().hasSuffix(".pdf") {
                     attachmentData = (try? await app.attachmentStore.readSlice(for: att, offsetBytes: 0, maxBytes: 256_000))?.data
                 }
@@ -1823,9 +2051,8 @@ private struct WorkstationItemPreviewSheet: View {
             return
         }
         if case .stagedChange(let path, let data, _, _) = item.kind {
-            let lower = path.lowercased()
-            if [".png", ".jpg", ".jpeg", ".gif", ".webp"].contains(where: { lower.hasSuffix($0) }) {
-                repoImage = ImageDownsampler.image(from: data, maxPixelSize: 2_048)
+            if WorkstationItem.isImagePath(path) {
+                repoImage = await ThumbnailPipeline.shared.thumbnail(data: data, key: "staged-full-\(item.id)-\(item.revision)", maxPixelSize: 2_048)
             } else {
                 repoText = String(data: data, encoding: .utf8) ?? "Binary staged file (\(ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file)))."
             }
@@ -1835,13 +2062,12 @@ private struct WorkstationItemPreviewSheet: View {
             do {
                 let commit = if let repoCommit { repoCommit } else { try await github.resolveCommit(repo.ref, ref: repo.branch) }
                 let ws = RepoWorkspace(repo: repo.ref, branch: repo.branch, commit: commit, github: github, store: app.snapshots)
-                let lower = path.lowercased()
                 switch try await ws.readFile(path) {
                 case .text(let value, _):
                     repoText = value
-                case .binary where [".png", ".jpg", ".jpeg", ".gif", ".webp"].contains(where: { lower.hasSuffix($0) }):
+                case .binary where WorkstationItem.isImagePath(path):
                     let data = try await github.fileContents(repo.ref, path: path, ref: commit)
-                    repoImage = ImageDownsampler.image(from: data, maxPixelSize: 2_048)
+                    repoImage = await ThumbnailPipeline.shared.thumbnail(data: data, key: "repo-\(commit)-\(path)", maxPixelSize: 2_048)
                 case .binary:
                     repoText = "Binary file (\(item.subtitle))."
                 case .tooLarge:

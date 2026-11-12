@@ -19,6 +19,8 @@ struct TurnActions {
 }
 
 /// One message. Equatable, so while a reply streams in only the reply being written redraws.
+/// The comparison looks at ids, counts, statuses and text lengths (MessageRowDiff), not at every
+/// attachment and every tool's output.
 struct MessageRow: View, Equatable {
     var message: ChatMessage
     var isLatest: Bool
@@ -26,7 +28,7 @@ struct MessageRow: View, Equatable {
     var actions: TurnActions
 
     nonisolated static func == (lhs: MessageRow, rhs: MessageRow) -> Bool {
-        lhs.message == rhs.message && lhs.isLatest == rhs.isLatest
+        lhs.isLatest == rhs.isLatest && MessageRowDiff.same(lhs.message, rhs.message)
     }
 
     var body: some View {
@@ -90,8 +92,8 @@ struct UserBubble: View {
         return false
     }
 
-    private var previewText: String {
-        guard isLongText else { return message.text }
+    private func previewText(isLong: Bool) -> String {
+        guard isLong else { return message.text }
         let prefix = String(message.text.prefix(Self.previewCharacterLimit))
         let lines = prefix.split(separator: "\n", omittingEmptySubsequences: false)
         if lines.count > Self.previewLineLimit {
@@ -100,25 +102,33 @@ struct UserBubble: View {
         return prefix.count < message.text.count ? prefix + "…" : prefix
     }
 
-    private var imageAttachments: [AttachmentReference] {
-        message.attachments.filter { $0.kind == .image }
-    }
-
-    private var otherAttachments: [AttachmentReference] {
-        message.attachments.filter { $0.kind != .image }
+    /// Pictures and other files, in one pass over the attachments (a message can have thousands).
+    private static func split(_ attachments: [AttachmentReference]) -> (images: [AttachmentReference], others: [AttachmentReference]) {
+        var images: [AttachmentReference] = []
+        var others: [AttachmentReference] = []
+        for attachment in attachments {
+            if attachment.kind == .image {
+                images.append(attachment)
+            } else {
+                others.append(attachment)
+            }
+        }
+        return (images, others)
     }
 
     var body: some View {
+        let attachments = Self.split(message.attachments)
+        let isLong = isLongText
         VStack(alignment: .trailing, spacing: 8) {
-            if !imageAttachments.isEmpty {
+            if !attachments.images.isEmpty {
                 HStack {
                     Spacer(minLength: 40)
-                    GrokPhotoStackView(images: imageAttachments)
+                    GrokPhotoStackView(images: attachments.images)
                 }
             }
 
-            if !otherAttachments.isEmpty {
-                CollapsibleUserAttachmentGroup(attachments: otherAttachments)
+            if !attachments.others.isEmpty {
+                CollapsibleUserAttachmentGroup(attachments: attachments.others)
             }
 
             if !message.text.isEmpty {
@@ -136,10 +146,10 @@ struct UserBubble: View {
                         .accessibilityLabel(isStarred ? "Remove memory" : "Save as memory")
                     }
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(previewText)
+                        Text(previewText(isLong: isLong))
                             .font(.body)
                             .textSelection(.enabled)
-                        if isLongText {
+                        if isLong {
                             Button { showingFullText = true } label: {
                                 HStack(spacing: 5) {
                                     Image(systemName: "doc.text.magnifyingglass")
@@ -164,7 +174,7 @@ struct UserBubble: View {
                                 Label(isStarred ? "Remove memory" : "Save as memory", systemImage: isStarred ? "star.slash" : "star")
                             }
                         }
-                        if isLongText {
+                        if isLong {
                             Button { showingFullText = true } label: { Label("Show full message", systemImage: "doc.text.magnifyingglass") }
                         }
                         if message.text.count <= 20_000 {
@@ -849,6 +859,8 @@ private struct ActivityTimelineRow: View {
 private struct CollapsibleUserAttachmentGroup: View {
     let attachments: [AttachmentReference]
     @State private var expanded = false
+    /// The file whose preview is open: one sheet for the whole group, not one per file.
+    @State private var previewing: AttachmentReference?
     @Environment(\.theme) private var theme
 
     var body: some View {
@@ -876,12 +888,26 @@ private struct CollapsibleUserAttachmentGroup: View {
                 }
                 .buttonStyle(.plain)
             }
-            if attachments.count <= 4 || expanded {
+            if attachments.count <= 4 {
                 HStack {
                     Spacer(minLength: 40)
                     FlowLayout(spacing: 6, lineSpacing: 6) {
                         ForEach(attachments) { attachment in
-                            ChatFileAttachmentPill(attachment: attachment)
+                            pill(attachment)
+                        }
+                    }
+                }
+            } else if expanded {
+                HStack {
+                    Spacer(minLength: 40)
+                    // Every file, laid out lazily: only the pills scrolled into view are built.
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 150, maximum: 280), spacing: 6, alignment: .leading)],
+                        alignment: .leading,
+                        spacing: 6
+                    ) {
+                        ForEach(attachments) { attachment in
+                            pill(attachment)
                         }
                     }
                 }
@@ -890,11 +916,20 @@ private struct CollapsibleUserAttachmentGroup: View {
                     Spacer(minLength: 40)
                     FlowLayout(spacing: 6, lineSpacing: 6) {
                         ForEach(attachments.prefix(3)) { attachment in
-                            ChatFileAttachmentPill(attachment: attachment)
+                            pill(attachment)
                         }
                     }
                 }
             }
+        }
+        .sheet(item: $previewing) { attachment in
+            AttachmentQuickPreviewSheet(attachment: attachment)
+        }
+    }
+
+    private func pill(_ attachment: AttachmentReference) -> some View {
+        ChatFileAttachmentPill(attachment: attachment) {
+            previewing = attachment
         }
     }
 }
@@ -936,6 +971,15 @@ struct GeneratedImageCard: View {
     @State private var image: UIImage?
     @State private var failed = false
 
+    private static let pixels = 1_280
+
+    init(result: GeneratedImageResult) {
+        self.result = result
+        // A picture already decoded shows on the first frame, with no "Opening picture…" flash
+        // when the chat scrolls back to it.
+        _image = State(initialValue: ThumbnailPipeline.shared.cachedThumbnail(for: result.attachment, maxPixelSize: Self.pixels))
+    }
+
     var body: some View {
         Group {
             if let image {
@@ -963,19 +1007,12 @@ struct GeneratedImageCard: View {
             }
         }
         .task(id: result.id) {
-            let key = "gen-\(result.id.uuidString)"
-            if let cached = ImageDownsampler.cachedImage(key: key, maxPixelSize: 1_280) {
-                image = cached
-                return
-            }
-            do {
-                let data = try await app.attachmentStore.data(for: result.attachment)
-                guard let decoded = ImageDownsampler.image(from: data, maxPixelSize: 1_280, cacheKey: key) else {
-                    failed = true
-                    return
-                }
+            // Decoded off the main thread by the shared thumbnail pipeline; cancelled if the
+            // card scrolls away first.
+            if let decoded = await ThumbnailPipeline.shared.thumbnail(for: result.attachment, store: app.attachmentStore, maxPixelSize: Self.pixels) {
                 image = decoded
-            } catch {
+                failed = false
+            } else if !Task.isCancelled {
                 failed = true
             }
         }
