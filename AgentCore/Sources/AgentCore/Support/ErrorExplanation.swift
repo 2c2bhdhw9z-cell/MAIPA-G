@@ -110,3 +110,19 @@ public enum ErrorExplainer {
         )
     }
 }
+
+/// One of the AI's tools failed the same way twice in a reply, so the AI had to work around it.
+/// Kept in the diagnostics so the tool itself gets fixed.
+public struct RepeatedToolFailure: Error, Sendable, CustomStringConvertible {
+    public let tool: String
+    public let message: String
+
+    public init(tool: String, message: String) {
+        self.tool = tool
+        self.message = message
+    }
+
+    public var description: String {
+        "The tool \(tool) failed twice in a row with the same input, so the AI was told to get the same result another way. Its error: \(String(message.prefix(600)))"
+    }
+}

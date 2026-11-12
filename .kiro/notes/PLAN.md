@@ -354,6 +354,17 @@ Found from the chats in MAIPA-G-data and fixed:
 - A runner that dies says why, from the last lines of its log (the first SDK 58 reply ended with
   only "the runner stopped").
 
+## Sixth follow-up of 12 November 2026: find another way, like Kiro
+Owner: "aren't you able to fix commands if a command doesn't work, like do it another way or write
+your own command to do the same exact thing… can mine do that? I'm trying to get everything as
+close to how you function." Then "Yes" to the proposal. Built:
+- The prompt tells the AI to get the same result another way when a tool or command fails (another
+  command or tool, smaller pieces, its own script on the computer), to do a broken MAIPA-G tool's job
+  by hand, and to ask only when there's truly no other way, saying what it tried.
+- The second identical failure carries a note telling the AI exactly that, and a third identical
+  try isn't run (it was the fourth). In the SDK 58 chat the same broken sync ran four times.
+- Each such repeat goes into the diagnostics ("tool X failed twice"), so the tool gets fixed.
+
 ## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
 He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,
 ask_user, generate_image) and Kiro's (read_file, list_directory, file_search, grep_search, code,

@@ -341,3 +341,38 @@ extension Build174Tests {
         #expect(notice?.contains("maipa-g-runner-exit 132") == true)
     }
 }
+
+/// Owner, 12 November 2026: "aren't you able to fix commands if a command doesn't work… do it another way".
+@Suite("Finding another way when a tool fails")
+struct AnotherWayTests {
+    struct AlwaysFails: AgentTool {
+        let name = "sync_staged_to_computer"
+        var spec: ToolSpec { ToolSpec(name: name, description: "x", parameters: ["type": "object", "properties": [:]]) }
+        func runningSummary(for arguments: JSONValue) -> String { "Syncing…" }
+        func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+            throw ToolInputError("Argument list too long")
+        }
+    }
+
+    @Test("The prompt says to get the same result another way, by hand if an app tool is broken")
+    func promptSaysFindAnotherWay() {
+        let prompt = SystemPrompt.make(userLogin: nil, repo: nil)
+        #expect(prompt.contains("get the same result another way"))
+        #expect(prompt.contains("do its job by hand with commands"))
+    }
+
+    @Test("The second identical failure tells the AI to find another way, and a third identical try isn't run")
+    func secondFailureNudgesAndThirdIsBlocked() async throws {
+        func attempt(_ id: String) -> ScriptedTransport.Reply {
+            .events([AgentLoopTests.toolCall(id: id, name: "sync_staged_to_computer", arguments: "{}"), AgentLoopTests.toolsDone])
+        }
+        let transport = ScriptedTransport([attempt("c1"), attempt("c2"), attempt("c3"), .events([AgentLoopTests.text("Done another way."), AgentLoopTests.done])])
+        let (turn, _) = await AgentLoopTests.runToEnd(transport, chat: AgentLoopTests.newChat("sync it"), route: AgentLoopTests.route(), tools: [AlwaysFails()])
+        let calls = turn?.steps.flatMap(\.toolCalls) ?? []
+        #expect(calls.count == 3)
+        #expect(calls.first?.result?.contains("[MAIPA-G]") == false)
+        #expect(calls.dropFirst().first?.result?.contains("get the same result another way") == true)
+        #expect(calls.last?.summary == "Stopped a repeated failing tool call")
+        #expect(turn?.status == .done)
+    }
+}

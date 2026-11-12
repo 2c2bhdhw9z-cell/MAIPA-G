@@ -1168,15 +1168,15 @@ private struct Runner {
             guard call.result == nil else { continue }
             let repeatedFailures = turn.steps.prefix(stepIndex).flatMap(\.toolCalls).filter { prev in
                 guard prev.name == call.name && prev.arguments == call.arguments && prev.status == .failed else { return false }
-                let msg = (prev.result ?? "").lowercased()
-                let isTransient = msg.contains("rate limit") || msg.contains("timed out") || msg.contains("temporarily")
-                return !isTransient
+                return !Self.isTransientFailure(prev.result ?? "")
             }.count
-            if repeatedFailures >= 3 {
+            // Twice the same way is enough: the second failure already told the AI to find another
+            // way, so a third identical try isn't run.
+            if repeatedFailures >= 2 {
                 fail(
                     stepIndex,
                     callIndex,
-                    message: "This exact tool call already failed three times. Change the approach or ask the person what to do next.",
+                    message: Self.thirdFailureMessage,
                     summary: "Stopped a repeated failing tool call"
                 )
                 continue
@@ -1457,8 +1457,29 @@ private struct Runner {
             } else {
                 message = ErrorExplainer.explain(error).message
             }
-            fail(stepIndex, callIndex, message: "Error: \(message)", summary: "\(base) · didn't work", detail: message)
+            // The second identical failure: tell the AI plainly to find another way now, rather
+            // than leaving it to try a third time (owner, 12 November 2026: "aren't you able to do
+            // it another way… write your own command to do the same exact thing"). It's noted in
+            // the diagnostics too, so a broken MAIPA-G tool gets fixed at the source.
+            let record = turn.steps[stepIndex].toolCalls[callIndex]
+            let repeats = Self.isTransientFailure(message) ? 0 : turn.steps.flatMap(\.toolCalls).filter {
+                $0.id != record.id && $0.name == record.name && $0.arguments == record.arguments && $0.status == .failed
+            }.count
+            if repeats >= 1 {
+                ErrorExplainer.recorder(RepeatedToolFailure(tool: record.name, message: message), area: "AgentLoop", operation: "tool \(record.name) failed twice")
+            }
+            let nudge = repeats >= 1 ? Self.secondFailureNudge : ""
+            fail(stepIndex, callIndex, message: "Error: \(message)" + nudge, summary: "\(base) · didn't work", detail: message)
         }
+    }
+
+    static let secondFailureNudge = "\n\n[MAIPA-G] This exact call has now failed twice with the same error, so running it again won't help (a third try is blocked). Work out why from the error, then get the same result another way: a different command or tool, smaller pieces, or your own script on the computer with run_command. If it's one of MAIPA-G's own tools that is broken, do its job by hand. Only ask the person if there's truly no other way, and say what you tried."
+
+    static let thirdFailureMessage = "This exact tool call already failed twice the same way, so MAIPA-G didn't run it a third time. Get the same result another way (a different command or tool, smaller pieces, or your own script on the computer). Ask the person only if there's truly no other way, and say what you tried."
+
+    static func isTransientFailure(_ message: String) -> Bool {
+        let lowered = message.lowercased()
+        return lowered.contains("rate limit") || lowered.contains("timed out") || lowered.contains("temporarily")
     }
 
     mutating func fail(_ stepIndex: Int, _ callIndex: Int, message: String, summary: String, detail: String? = nil) {
