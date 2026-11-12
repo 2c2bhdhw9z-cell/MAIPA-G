@@ -22,10 +22,6 @@ enum AppSheet: Identifiable, Hashable {
     case agents
     case agentDetail(String)
     case agentEditor(String?)
-    case workflows
-    case workflowDetail(String)
-    case workflowEditor(String?)
-    case workflowMaker
     case memories
     case recentlyDeleted
     case unreadableFiles
@@ -57,10 +53,6 @@ enum AppSheet: Identifiable, Hashable {
         case .agents: return "agents"
         case .agentDetail(let id): return "agent-detail-\(id)"
         case .agentEditor(let id): return "agent-editor-\(id ?? "new")"
-        case .workflows: return "workflows"
-        case .workflowDetail(let id): return "workflow-detail-\(id)"
-        case .workflowEditor(let id): return "workflow-editor-\(id ?? "new")"
-        case .workflowMaker: return "workflow-maker"
         case .memories: return "memories"
         case .recentlyDeleted: return "recently-deleted"
         case .unreadableFiles: return "unreadable-files"
@@ -675,15 +667,6 @@ final class AppModel {
         case "agent-editor":
             library.preview(summaries: summaries, open: nil)
             sheet = .agentEditor("coder")
-        case "workflows":
-            library.preview(summaries: summaries, open: nil)
-            sheet = .workflows
-        case "workflow-editor":
-            library.preview(summaries: summaries, open: nil)
-            sheet = .workflowEditor("full-feature")
-        case "workflow-maker":
-            library.preview(summaries: summaries, open: nil)
-            sheet = .workflowMaker
         case "memories", "menu-memories":
             library.preview(summaries: summaries, open: nil)
             if scene == "memories" { sheet = .memories } else { isMenuOpen = true }

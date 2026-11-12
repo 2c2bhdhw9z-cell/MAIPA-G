@@ -111,6 +111,8 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
     /// The reply running on the chat computer right now (its run folder there), so a phone that
     /// was closed picks the same run up again instead of starting the reply over.
     public var computerRunID: String?
+    /// Kiro's Autonomous switch for this chat: it works to the end on its own, on the computer.
+    public var autonomous: Bool?
 
     /// `repo` first, then the others, without duplicates.
     public var allRepos: [ChatRepo] {
@@ -160,6 +162,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         self.acceptedChanges = nil
         self.checkpoints = nil
         self.computerRunID = nil
+        self.autonomous = nil
     }
 
     enum CodingKeys: String, CodingKey {
@@ -168,7 +171,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         case compactedSummary, compactedThroughMessageID
         case previousCompactedSummary, previousCompactedThroughMessageID
         case queuedFollowUps, activeWorkflowRuns, mode, additionalRepos, kiroSpec
-        case kiroSpecKind, permissionMode, acceptedChanges, checkpoints, computerRunID
+        case kiroSpecKind, permissionMode, acceptedChanges, checkpoints, computerRunID, autonomous
     }
 
     public init(from decoder: Decoder) throws {
@@ -203,6 +206,7 @@ public struct Chat: Codable, Sendable, Identifiable, Hashable {
         acceptedChanges = try c.decodeIfPresent([String].self, forKey: .acceptedChanges)
         checkpoints = (try? c.decodeIfPresent([ChatCheckpoint].self, forKey: .checkpoints)) ?? nil
         computerRunID = try? c.decodeIfPresent(String.self, forKey: .computerRunID)
+        autonomous = try? c.decodeIfPresent(Bool.self, forKey: .autonomous)
     }
 
     /// Everything the chat has cost so far, in dollars, as OpenRouter reported it.
@@ -748,6 +752,8 @@ public struct SubagentRunItem: Codable, Sendable, Hashable, Identifiable {
     public var liveThought: String?
     public var output: String
     public var cost: Double
+    /// One sentence for the person on what this sub-agent is doing (Kiro's `explanation`).
+    public var explanation: String?
 
     public init(
         id: String,
@@ -761,7 +767,8 @@ public struct SubagentRunItem: Codable, Sendable, Hashable, Identifiable {
         toolSummaries: [String] = [],
         liveThought: String? = nil,
         output: String = "",
-        cost: Double = 0
+        cost: Double = 0,
+        explanation: String? = nil
     ) {
         self.id = id
         self.agentID = agentID
@@ -775,6 +782,7 @@ public struct SubagentRunItem: Codable, Sendable, Hashable, Identifiable {
         self.liveThought = liveThought
         self.output = output
         self.cost = cost
+        self.explanation = explanation
     }
 
     /// Resolves per-sub-agent items from `call.subagents` when present, or reconstructs them from
@@ -794,6 +802,16 @@ public struct SubagentRunItem: Codable, Sendable, Hashable, Identifiable {
                 copy.status = fallbackTerminalStatus(for: call)
                 return copy
             }
+        }
+        if call.name == InvokeSubAgentTool.toolName {
+            let arguments = call.parsedArguments
+            let agentID = arguments["name"]?.stringValue ?? "sub-agent"
+            let status: Status = call.status == .failed ? .failed : (call.status == .done ? .completed : .running)
+            return [SubagentRunItem(
+                id: "\(call.id)-sub-1", agentID: agentID, name: BuiltInAgents.named(agentID)?.name ?? agentID,
+                task: arguments["prompt"]?.stringValue ?? "", status: status, output: call.result ?? "",
+                explanation: arguments["explanation"]?.stringValue
+            )]
         }
         guard call.name == "launch_helpers",
               let helpers = call.parsedArguments["helpers"]?.arrayValue,

@@ -63,7 +63,7 @@ public struct AgentDefinition: Codable, Sendable, Hashable, Identifiable {
     ]
 
     public func permits(tool name: String) -> Bool {
-        if name == "launch_helpers" { return maximumHelpers > 0 }
+        if SubagentTools.isSubagentTool(name) { return maximumHelpers > 0 }
         let matchesAllowed: Bool = {
             if allowedTools.contains("*") || allowedTools.contains(name) { return true }
             if allowedTools.contains("mcp_*") && name.hasPrefix("mcp_") { return true }

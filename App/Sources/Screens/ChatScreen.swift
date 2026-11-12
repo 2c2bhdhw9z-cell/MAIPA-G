@@ -29,16 +29,6 @@ struct ChatScreen: View {
                 let messages = session.chat.messages
                 LazyVStack(alignment: .leading, spacing: 20) {
                     messageRows(messages)
-                    if !session.activeWorkflowRuns.isEmpty {
-                        ActiveWorkflowsInlineCard(
-                            runs: session.activeWorkflowRuns,
-                            onPause: { session.pauseWorkflowRun($0) },
-                            onResume: { id, ans in session.resumeWorkflowRun(id, answer: ans) },
-                            onStop: { session.stopWorkflowRun($0) },
-                            onRetry: { session.retryWorkflowRun($0) },
-                            onOpenWorkstation: { app.sheet = .workstation(.chat(session.id), .workflows) }
-                        )
-                    }
                     Color.clear
                         .frame(height: 10)
                         .id(bottomID)

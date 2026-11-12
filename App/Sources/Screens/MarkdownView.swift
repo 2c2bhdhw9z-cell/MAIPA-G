@@ -117,13 +117,13 @@ struct MarkdownBlockView: View, Equatable {
     var body: some View {
         switch block {
         case .paragraph(let text):
-            Text(InlineStyler.attributed(text, accent: theme.accent))
+            InlineStyler.text(text, accent: theme.accent)
                 .font(.body)
                 .lineSpacing(3)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
         case .heading(let level, let text):
-            Text(InlineStyler.attributed(text, accent: theme.accent))
+            InlineStyler.text(text, accent: theme.accent)
                 .font(headingFont(level))
                 .padding(.top, level <= 2 ? 6 : 2)
                 .textSelection(.enabled)
@@ -193,6 +193,30 @@ struct MarkdownBlockView: View, Equatable {
 }
 
 enum InlineStyler {
+    /// The paragraph as one Text, with the GitHub or GitLab mark in front of each link there
+    /// (owner, 11 November 2026, circling those marks in another app and on Kiro's repo chips).
+    static func text(_ text: InlineText, accent: Color) -> Text {
+        var pieces: [Text] = []
+        var pending = InlineText(runs: [])
+        var previousLink: URL?
+        for run in text.runs {
+            if let link = run.link, link != previousLink, let host = CodeHostLink(link) {
+                if !pending.runs.isEmpty {
+                    pieces.append(Text(attributed(pending, accent: accent)))
+                    pending.runs.removeAll()
+                }
+                pieces.append(Text(Image(host == .github ? "LinkGitHub" : "LinkGitLab")).baselineOffset(-2))
+                pieces.append(Text("\u{2009}"))
+            }
+            pending.runs.append(run)
+            previousLink = run.link
+        }
+        if !pending.runs.isEmpty { pieces.append(Text(attributed(pending, accent: accent))) }
+        guard var result = pieces.first else { return Text("") }
+        for piece in pieces.dropFirst() { result = Text("\(result)\(piece)") }
+        return result
+    }
+
     /// One paragraph's runs as styled text: bold, italics, struck-out, code, and tappable links.
     static func attributed(_ text: InlineText, accent: Color) -> AttributedString {
         var result = AttributedString()
@@ -305,7 +329,7 @@ struct TableView: View {
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
                 GridRow {
                     ForEach(Array(table.header.enumerated()), id: \.offset) { index, cell in
-                        Text(InlineStyler.attributed(cell, accent: theme.accent))
+                        InlineStyler.text(cell, accent: theme.accent)
                             .font(.subheadline.weight(.semibold))
                             .gridColumnAlignment(alignment(index))
                     }
@@ -314,7 +338,7 @@ struct TableView: View {
                 ForEach(Array(table.rows.enumerated()), id: \.offset) { _, row in
                     GridRow {
                         ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
-                            Text(InlineStyler.attributed(cell, accent: theme.accent))
+                            InlineStyler.text(cell, accent: theme.accent)
                                 .font(.subheadline)
                                 .textSelection(.enabled)
                         }

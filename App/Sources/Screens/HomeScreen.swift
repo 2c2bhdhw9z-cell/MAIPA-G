@@ -63,17 +63,6 @@ struct HomeScreen: View {
                 MenuButton()
                 Spacer()
                 HStack(spacing: 4) {
-                    if app.jobs.activeCount > 0 {
-                        Button { app.jobs.show() } label: {
-                            Label("\(app.jobs.activeCount) working", systemImage: "gearshape.2")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(theme.accent)
-                                .padding(.horizontal, 10)
-                                .frame(minHeight: 40)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
                     Button {
                         app.sheet = .workstation(.home)
                     } label: {

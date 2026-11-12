@@ -131,23 +131,27 @@ struct SideMenu: View {
         } label: {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(chat.title)
-                        .font(.subheadline.weight(isOpen ? .semibold : .regular))
-                        .lineLimit(1)
-                    HStack(spacing: 4) {
-                        if let repo = chat.repoName {
-                            Image(systemName: "chevron.left.forwardslash.chevron.right")
-                            Text(repo.split(separator: "/").last.map(String.init) ?? repo).lineLimit(1)
-                            Text("·")
+                    HStack(spacing: 5) {
+                        if chat.isAutonomous {
+                            Image(systemName: "bolt.fill")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(theme.accent)
+                                .accessibilityLabel("Autonomous")
                         }
-                        Text(chat.updatedAt.friendlyAgo)
+                        Text(chat.title)
+                            .font(.subheadline.weight(isOpen ? .semibold : .regular))
+                            .lineLimit(1)
                     }
-                    .font(.caption)
-                    .foregroundStyle(Theme.secondaryText)
+                    Text(statusLine(chat, isWorking: isWorking))
+                        .font(.caption)
+                        .foregroundStyle(statusColor(chat, isWorking: isWorking))
+                        .lineLimit(1)
                 }
                 Spacer(minLength: 4)
-                if isWorking {
+                if isWorking || (chat.activity == .working && chat.runsOnComputer) {
                     ProgressView().controlSize(.small)
+                } else if chat.activity == .needsYou {
+                    Circle().fill(theme.accent).frame(width: 8, height: 8).accessibilityLabel("Needs you")
                 }
             }
             .padding(.vertical, 2)
@@ -165,6 +169,34 @@ struct SideMenu: View {
         .contextMenu {
             Button { rename(chat) } label: { Label("Rename", systemImage: "pencil") }
             Button(role: .destructive) { delete(chat) } label: { Label("Delete", systemImage: "trash") }
+        }
+    }
+
+    /// Kiro-style status under each chat: what it's doing, or whether it needs you, finished or
+    /// failed, then the repo and when.
+    private func statusLine(_ chat: ChatSummary, isWorking: Bool) -> String {
+        let repo = chat.repoName.map { $0.split(separator: "/").last.map(String.init) ?? $0 }
+        let when = chat.updatedAt.friendlyAgo
+        let state: String
+        if isWorking || (chat.activity == .working && chat.runsOnComputer) {
+            state = chat.activityLine.isEmpty ? "Working…" : "Working · \(chat.activityLine)"
+            return state
+        }
+        switch chat.activity {
+        case .needsYou: state = "Needs you"
+        case .failed: state = "Failed"
+        case .stopped, .working: state = "Stopped"
+        case .done, .idle: state = ""
+        }
+        return [state, repo, when].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
+    private func statusColor(_ chat: ChatSummary, isWorking: Bool) -> Color {
+        if isWorking || (chat.activity == .working && chat.runsOnComputer) { return theme.accent }
+        switch chat.activity {
+        case .needsYou: return theme.accent
+        case .failed: return Theme.danger
+        default: return Theme.secondaryText
         }
     }
 

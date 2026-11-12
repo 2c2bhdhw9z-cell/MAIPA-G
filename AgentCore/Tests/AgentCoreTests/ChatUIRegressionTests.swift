@@ -54,7 +54,7 @@ struct ChatUIRegressionTests {
         let workstation = try source("App/Sources/Screens/WorkstationScreen.swift")
         #expect(workstation.contains("tab = initialTab"))
         #expect(compact(workstation).contains("case.changes:changesWorkspace"))
-        let changes = compact(try section(workstation, from: "private var changesWorkspace", to: "private var workflowsWorkspace"))
+        let changes = compact(try section(workstation, from: "private var changesWorkspace", to: "// MARK: - Data Aggregation"))
         for (title, action) in [("Add it", "addLastSave"), ("Throw away", "throwAwayLastSave"), ("Undo", "undoLastSave")] {
             let role = title == "Throw away" ? ",role:.destructive" : ""
             let expected = "Button(\"\(title)\"\(role)){Task{awaitsession.\(action)()}}"
@@ -72,7 +72,6 @@ struct ChatUIRegressionTests {
             ("Screens/ChatScreen.swift", "modelID: session.chat.model.storedValue,"),
             ("Screens/Composer.swift", "AIModelIcon(modelID: modelID,"),
             ("Screens/Pickers.swift", "AIModelIcon(modelID: model.id,"),
-            ("Screens/WorkstationScreen.swift", "AIModelIcon(modelID: run.checkpoint.defaultModelID ?? ModelChoice.autoID,"),
             ("Design/AIModelIcon.swift", "AIModelBrand(modelID: modelID)")
         ]
         for (path, expected) in wiring {

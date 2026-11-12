@@ -407,25 +407,7 @@ public struct GenerateImageTool: AgentTool {
         )
     }
 
-    enum Retry { case model, provider }
-
-    /// Whether another picture model may succeed where this one failed, and whether to skip the
-    /// rest of that provider. Nil for a request no model can take (a refused prompt, a bad picture).
-    static func tryAnother(_ error: Error) -> Retry? {
-        if let api = error as? OpenRouterAPIError {
-            if api.kind == .outOfCredits || api.kind == .spendingCapReached || api.kind == .invalidKey { return .provider }
-            if api.isTemporary { return (Int(api.code) ?? api.httpStatus) >= 500 ? .provider : .model }
-            if api.kind == .noModelAvailable || api.kind == .appRestricted { return .model }
-            return nil
-        }
-        if error is ImageInputNotSupported { return .model }
-        if let http = error as? HTTPError {
-            if http.isOffline { return nil }
-            if case .transport = http { return .model }
-            if let status = http.statusCode, status >= 500 || status == 429 { return .provider }
-        }
-        return nil
-    }
+    static func tryAnother(_ error: Error) -> MediaFallback.Retry? { MediaFallback.tryAnother(error) }
 
     /// One more try after a short wait when the service said it's down for a moment.
     static func retryingOnce<T: Sendable>(_ work: @Sendable () async throws -> T) async throws -> T {
@@ -439,5 +421,29 @@ public struct GenerateImageTool: AgentTool {
             try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
             return try await work()
         }
+    }
+}
+
+/// When a picture or video model fails, whether another one may work.
+public enum MediaFallback {
+    public enum Retry: Sendable { case model, provider }
+
+    /// Whether another picture or video model may succeed where this one failed, and whether to skip the
+    /// rest of that provider. Nil for a request no model can take (a refused prompt, a bad picture).
+    public static func tryAnother(_ error: Error) -> Retry? {
+        if let api = error as? OpenRouterAPIError {
+            if api.code == "video_unsupported" { return .provider }
+            if api.kind == .outOfCredits || api.kind == .spendingCapReached || api.kind == .invalidKey { return .provider }
+            if api.isTemporary { return (Int(api.code) ?? api.httpStatus) >= 500 ? .provider : .model }
+            if api.kind == .noModelAvailable || api.kind == .appRestricted { return .model }
+            return nil
+        }
+        if error is ImageInputNotSupported { return .model }
+        if let http = error as? HTTPError {
+            if http.isOffline { return nil }
+            if case .transport = http { return .model }
+            if let status = http.statusCode, status >= 500 || status == 429 { return .provider }
+        }
+        return nil
     }
 }

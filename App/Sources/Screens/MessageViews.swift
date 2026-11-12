@@ -343,7 +343,7 @@ struct AssistantTurnView: View {
         }
 
         func appendToolSegmentOrBuffer(_ call: ToolCallRecord, isLastStep: Bool) {
-            if call.name == "launch_helpers", !SubagentRunItem.resolvedItems(for: call).isEmpty {
+            if SubagentTools.isSubagentTool(call.name), !SubagentRunItem.resolvedItems(for: call).isEmpty {
                 flushBuffer(isActive: false)
                 output.append(.subagents(call))
             } else {
@@ -377,7 +377,7 @@ struct AssistantTurnView: View {
                 }
             }
             if index == turn.steps.count - 1 {
-                let active = turn.status == .running && (!hasVisibleContent || step.toolCalls.contains(where: { $0.status == .running && $0.name != "launch_helpers" }))
+                let active = turn.status == .running && (!hasVisibleContent || step.toolCalls.contains(where: { $0.status == .running && !SubagentTools.isSubagentTool($0.name) }))
                 flushBuffer(isActive: active)
             }
         }
@@ -740,7 +740,7 @@ struct ActivityTimelineCard: View {
 
     private var headerIcon: String {
         if hasFailure { return "exclamationmark.triangle" }
-        if toolItems.contains(where: { $0.name == "launch_helpers" }) { return "person.2.wave.2" }
+        if toolItems.contains(where: { SubagentTools.isSubagentTool($0.name) }) { return "person.2.wave.2" }
         if isActive { return "sparkles" }
         if !thoughtSteps.isEmpty && !toolItems.isEmpty { return "sparkles" }
         if !toolItems.isEmpty { return "wrench.and.screwdriver" }
@@ -823,7 +823,7 @@ private struct ActivityTimelineRow: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             case .tool(let call):
-                if call.name == "launch_helpers", !SubagentRunItem.resolvedItems(for: call).isEmpty {
+                if SubagentTools.isSubagentTool(call.name), !SubagentRunItem.resolvedItems(for: call).isEmpty {
                     SubagentCardsGroupView(call: call, modelName: { $0 })
                 } else {
                     ToolLine(call: call, wasRecovered: wasRecovered)
@@ -1234,7 +1234,7 @@ struct ToolLine: View {
         case "read_attachment": return "paperclip"
         case "add_memory", "edit_memory": return "brain"
         case "generate_image": return "paintbrush"
-        case "launch_helpers": return "person.2.wave.2"
+        case "launch_helpers", "invoke_sub_agent": return "person.2.wave.2"
         case "create_custom_agent": return "person.badge.plus"
         case "run_workflow", "save_workflow_definition", "inspect_workflow", "update_workflow": return "point.3.connected.trianglepath.dotted"
         case "live_status": return "waveform.path.ecg"
@@ -1372,267 +1372,6 @@ struct SpendCheckCard: View {
     }
 }
 
-/// Kiro-style inline `ACTIVE WORKFLOWS` tree card rendered inside chat when workflows run, pause, or complete.
-struct ActiveWorkflowsInlineCard: View {
-    let runs: [ActiveWorkflowRunSnapshot]
-    var onPause: (String) -> Void
-    var onResume: (String, String?) -> Void
-    var onStop: (String) -> Void
-    var onRetry: (String) -> Void
-    var onOpenWorkstation: () -> Void
-
-    @State private var collapsed = false
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Button {
-                    withAnimation(.snappy(duration: 0.2)) { collapsed.toggle() }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "point.3.connected.trianglepath.dotted")
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(theme.accent)
-                        Text("ACTIVE WORKFLOWS")
-                            .font(.caption.weight(.bold))
-                            .tracking(0.6)
-                            .foregroundStyle(Theme.secondaryText)
-                        Text("\(runs.count)")
-                            .font(.caption2.weight(.bold).monospacedDigit())
-                            .foregroundStyle(theme.accent)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(theme.accent.opacity(0.14), in: Capsule())
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(Theme.secondaryText)
-                            .rotationEffect(.degrees(collapsed ? 0 : 90))
-                    }
-                }
-                .buttonStyle(.plain)
-
-                Spacer(minLength: 8)
-
-                Button(action: onOpenWorkstation) {
-                    HStack(spacing: 4) {
-                        Text("Details")
-                        Image(systemName: "arrow.up.right")
-                            .font(.system(size: 9, weight: .bold))
-                    }
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(theme.accent)
-                }
-                .buttonStyle(.plain)
-            }
-
-            if !collapsed {
-                ForEach(runs) { run in
-                    workflowRunSection(run)
-                }
-            }
-        }
-        .padding(12)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Theme.stroke))
-    }
-
-    @ViewBuilder
-    private func workflowRunSection(_ run: ActiveWorkflowRunSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                statusBadge(for: run)
-                Text(run.definition.name)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-                if run.checkpoint.cumulativeCost > 0 {
-                    Text(run.checkpoint.cumulativeCost.dollars)
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(Theme.secondaryText)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 5) {
-                ForEach(run.definition.steps) { node in
-                    workflowNodeRow(node, checkpoint: run.checkpoint, depth: 0)
-                }
-            }
-
-            if let latestMsg = run.checkpoint.sentMessages.last {
-                HStack(alignment: .top, spacing: 6) {
-                    Image(systemName: "bubble.left.fill")
-                        .font(.caption2)
-                        .foregroundStyle(theme.accent)
-                    Text("\(latestMsg.title): \(latestMsg.message)")
-                        .font(.caption)
-                        .foregroundStyle(Theme.secondaryText)
-                        .lineLimit(2)
-                }
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.raised.opacity(0.65), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            }
-
-            if let question = run.checkpoint.pendingQuestion {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(question.text)
-                        .font(.caption.weight(.medium))
-                    HStack(spacing: 8) {
-                        ForEach(question.options, id: \.self) { opt in
-                            Button(opt) {
-                                onResume(run.id, opt)
-                            }
-                            .font(.caption.weight(.semibold))
-                            .buttonStyle(.borderedProminent)
-                            .buttonBorderShape(.capsule)
-                        }
-                    }
-                }
-                .padding(8)
-                .background(theme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            }
-
-            if let err = run.errorMessage, !err.isEmpty, !run.isRunning {
-                Text(err)
-                    .font(.caption)
-                    .foregroundStyle(err.contains("app restart") ? Theme.secondaryText : Theme.danger)
-                    .lineLimit(3)
-            }
-
-            HStack(spacing: 8) {
-                if run.isRunning {
-                    Button { onPause(run.id) } label: {
-                        Label("Pause", systemImage: "pause.fill")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.capsule)
-
-                    Button(role: .destructive) { onStop(run.id) } label: {
-                        Label("Stop", systemImage: "stop.fill")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.capsule)
-                } else if run.checkpoint.pendingQuestion != nil || run.checkpoint.isPausedByUser {
-                    Button { onResume(run.id, "Resume") } label: {
-                        Label("Resume", systemImage: "play.fill")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .buttonBorderShape(.capsule)
-
-                    Button(role: .destructive) { onStop(run.id) } label: {
-                        Label("Stop", systemImage: "stop.fill")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.capsule)
-                } else if run.errorMessage != nil || run.checkpoint.isCancelled {
-                    Button { onRetry(run.id) } label: {
-                        Label("Retry", systemImage: "arrow.clockwise")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.capsule)
-                }
-            }
-        }
-        .padding(10)
-        .background(Theme.raised.opacity(0.45), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
-    private func workflowNodeRow(_ node: WorkflowNode, checkpoint: WorkflowCheckpoint, depth: Int) -> AnyView {
-        let status = checkpoint.statuses[node.id] ?? .pending
-        let iter = checkpoint.repeatIterations[node.id]
-        return AnyView(
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    if depth > 0 {
-                        Spacer().frame(width: CGFloat(depth * 14))
-                    }
-                    nodeStatusIcon(status)
-                    Text(node.title)
-                        .font(.caption.weight(status == .running ? .semibold : .regular))
-                        .foregroundStyle(status == .running ? .primary : Theme.secondaryText)
-                        .lineLimit(1)
-                    if node.kind != .agent {
-                        Text(node.kind.rawValue)
-                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(Theme.secondaryText)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Theme.surface, in: Capsule())
-                    }
-                    if let iter {
-                        Text("×\(iter)")
-                            .font(.caption2.weight(.bold).monospacedDigit())
-                            .foregroundStyle(theme.accent)
-                    }
-                    if let model = node.modelID {
-                        Text(AIProviderModelID.rawModelID(model).split(separator: "/").last.map(String.init) ?? model)
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(Theme.secondaryText)
-                            .lineLimit(1)
-                    }
-                }
-                if !node.children.isEmpty {
-                    ForEach(node.children) { child in
-                        workflowNodeRow(child, checkpoint: checkpoint, depth: depth + 1)
-                    }
-                }
-            }
-        )
-    }
-
-    @ViewBuilder
-    private func nodeStatusIcon(_ status: WorkflowNodeStatus) -> some View {
-        switch status {
-        case .pending:
-            Image(systemName: "circle")
-                .font(.system(size: 10))
-                .foregroundStyle(Theme.secondaryText.opacity(0.5))
-        case .running:
-            ProgressView().controlSize(.mini)
-        case .waiting:
-            Image(systemName: "pause.circle.fill")
-                .font(.system(size: 11))
-                .foregroundStyle(.orange)
-        case .completed:
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 11))
-                .foregroundStyle(.green)
-        case .failed:
-            Image(systemName: "xmark.circle.fill")
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.danger)
-        case .cancelled:
-            Image(systemName: "stop.circle.fill")
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.secondaryText)
-        }
-    }
-
-    @ViewBuilder
-    private func statusBadge(for run: ActiveWorkflowRunSnapshot) -> some View {
-        let (label, color): (String, Color) = {
-            if run.isRunning { return ("Running", theme.accent) }
-            if run.checkpoint.isCancelled { return ("Stopped", Theme.secondaryText) }
-            if run.checkpoint.pendingQuestion != nil || run.checkpoint.isPausedByUser { return ("Paused", .orange) }
-            if let err = run.errorMessage, err.contains("app restart") { return ("Stopped", Theme.secondaryText) }
-            if run.errorMessage != nil { return ("Failed", Theme.danger) }
-            return ("Done", .green)
-        }()
-        Text(label)
-            .font(.caption2.weight(.bold))
-            .foregroundStyle(color)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2)
-            .background(color.opacity(0.14), in: Capsule())
-    }
-}
-
 /// Kiro-style first-class Sub-Agent Cards rendered directly in chat whenever `launch_helpers` runs.
 /// Every sub-agent card is individually tappable from millisecond zero — while running, after
 /// finishing, or if stopped — expanding to show its exact Task, live file/tool actions, and report.
@@ -1662,6 +1401,20 @@ struct SubagentCardsGroupView: View {
     }
 
     var body: some View {
+        if call.name == InvokeSubAgentTool.toolName {
+            // Kiro's way: each sub-agent is its own card in the conversation, with no group box.
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(items) { item in
+                    SubagentItemCard(item: item, displayTitle: item.name, modelName: modelName)
+                }
+            }
+        } else {
+            batchBody
+        }
+    }
+
+    /// The old `launch_helpers` batch, as saved chats have it.
+    private var batchBody: some View {
         VStack(alignment: .leading, spacing: 8) {
             if !items.isEmpty {
                 Button {
@@ -2073,15 +1826,17 @@ private struct SubagentItemCard: View {
     }
 
     private var subtitleText: String {
+        let explanation = item.explanation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if item.status == .running {
             if let latest = item.latestActivity, !latest.isEmpty, latest != "Starting…" {
                 return latest
             }
-            return firstLinePreview(of: item.task, fallback: "Starting sub-agent…")
+            return explanation.isEmpty ? firstLinePreview(of: item.task, fallback: "Starting sub-agent…") : explanation
         }
         if item.status == .failed, !cleanedOutput.isEmpty {
             return firstLinePreview(of: cleanedOutput, fallback: "Failed")
         }
+        if !explanation.isEmpty { return explanation }
         return firstLinePreview(of: item.task, fallback: item.status == .cancelled ? "Stopped" : "Completed")
     }
 

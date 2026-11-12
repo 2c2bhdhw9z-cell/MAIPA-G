@@ -216,7 +216,7 @@ public struct VMTurnRunner: Sendable {
 
 
         ## Where this reply runs
-        This reply runs on the person's own Linux computer (`\(machine)`), not on the phone. It keeps going when the app is closed. `run_command` and `computer_task` run right here in a real shell. The phone's own features (the Workstation, making pictures with picture models, helpers and workflows\(hasConnectors ? "" : ", connectors")) aren't available in this reply; if the task needs one, say so.
+        This reply runs on the person's own Linux computer (`\(machine)`), not on the phone. It keeps going when the app is closed. `run_command` and `computer_task` run right here in a real shell. Sub-agents (`invoke_sub_agent`) and memories work here. The phone's own features (the Workstation, making pictures and videos with picture models\(hasConnectors ? "" : ", connectors")) aren't available in this reply; if the task needs one, say so.
         """
     }
 
@@ -368,6 +368,29 @@ public struct VMTurnRunner: Sendable {
         let ai = await makeAI(secrets: secrets)
         let catalogue = ai.catalogue, hasOpenRouter = ai.hasOpenRouter
         let thinking = request.route.effort ?? .default
+        // Sub-agents work here too, Kiro's way: `invoke_sub_agent`, each in its own context with
+        // the tools its role allows (they didn't exist on the computer at all before).
+        if request.allowTools {
+            let repoContext = request.repo.map {
+                SystemPrompt.RepoContext(ref: $0.repo.ref, branch: $0.workingBranch, commit: $0.commit, isPrivate: $0.repo.isPrivate, summary: nil)
+            }
+            let note = Self.promptNote(machine: machine, hasConnectors: !sessions.isEmpty)
+            let reportTools = tools.filter { !AgentDefinition.mutatingTools.contains($0.name) && $0.name != "add_memory" && $0.name != "edit_memory" }
+            let subAgents = SubAgentSetup(
+                chatModel: request.chat.model, thinking: thinking, primaryModelID: request.route.model, primaryIsFree: request.route.isFree,
+                account: AccountState(), catalogue: catalogue, openRouterAvailable: hasOpenRouter, client: ai.client,
+                changeTools: tools, reportTools: reportTools,
+                prompt: { definition, context in
+                    SystemPrompt.make(userLogin: nil, repo: repoContext, agent: definition, workflowContext: context) + note
+                }
+            )
+            let definitions = SubAgentSetup.definitions(excluding: ["introspect", "custom-agent-creator"])
+            let coordinator = AgentHelperCoordinator(
+                lead: SubAgentSetup.lead, definitions: definitions, context: request.lastUserMessage,
+                spendLimit: request.spendLimit, steering: nil, runner: subAgents.runner()
+            )
+            tools.append(InvokeSubAgentTool(lead: SubAgentSetup.lead, definitions: definitions, coordinator: coordinator))
+        }
         let environment = AgentEnvironment(
             openRouter: ai.client,
             freeRoute: { ModelRouter.route(choice: .free, difficulty: .normal, thinking: thinking, account: AccountState(), catalogue: catalogue, openRouterAvailable: hasOpenRouter) },

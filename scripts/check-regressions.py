@@ -166,7 +166,7 @@ def check_oct31_build76_kiro_arena_all_providers() -> None:
         failures.append("OCT31-14: ModelRouter still contains hardcoded 300K / 0.75x artificial context caps")
 
     chat_session = (ROOT / "App/Sources/Model/ChatSession.swift").read_text()
-    for required in ("performStructuredCompaction", "restoreFullMemory", "queuedSteering", "LaunchHelpersTool("):
+    for required in ("performStructuredCompaction", "restoreFullMemory", "queuedSteering", "InvokeSubAgentTool("):
         if required not in chat_session:
             failures.append(f"OCT31-15: ChatSession is missing {required}")
     if "18_000" in chat_session:

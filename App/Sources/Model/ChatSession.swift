@@ -18,7 +18,15 @@ final class ChatSession: Identifiable {
     var draft = "" { didSet { scheduleDraftSave() } }
     var draftAttachments: [AttachmentReference] = [] { didSet { scheduleDraftSave() } }
     var webEnabled = true
-    var autonomous = false
+    /// Kiro's Autonomous switch, kept with the chat so the chat list can show it.
+    var autonomous: Bool {
+        get { chat.autonomous ?? false }
+        set {
+            guard newValue != (chat.autonomous ?? false) else { return }
+            chat.autonomous = newValue ? true : nil
+            saveSoon()
+        }
+    }
     /// Kiro-style mid-turn delivery mode (remembered per chat session, defaults to non-stopping `Steer`).
     var busySendMode: BusySendMode = .steer
     struct PendingSteer: Identifiable, Hashable, Sendable {
@@ -396,7 +404,7 @@ final class ChatSession: Identifiable {
                         subs[sIdx].latestActivity = "Stopped"
                     }
                     record.subagents = subs
-                } else if record.name == "launch_helpers" {
+                } else if SubagentTools.isSubagentTool(record.name) {
                     record.subagents = SubagentRunItem.resolvedItems(for: record).map { item in
                         var copy = item
                         if copy.status == .running {
@@ -407,7 +415,7 @@ final class ChatSession: Identifiable {
                     }
                 }
                 if record.result == nil || hasRunningSubagents {
-                    if record.name == "launch_helpers" {
+                    if SubagentTools.isSubagentTool(record.name) {
                         let actionsDone = (record.subagents ?? []).reduce(0) { $0 + $1.toolCallCount }
                         let progressNote = actionsDone > 0 ? " after \(actionsDone) actions of partial progress" : ""
                         record.result = "Paused when the app closed\(progressNote) (not a tool failure). Sub-agent launching works normally — launch sub-agents in parallel to continue."
@@ -1394,17 +1402,6 @@ final class ChatSession: Identifiable {
             )
             return
         }
-        // The chat decides, like Kiro: only a message that is clearly asking for multi-step work
-        // starts a workflow, and only when the Workflows switch is on. There is deliberately no
-        // extra spending confirmation here — a workflow is sub-agents running longer, so it starts
-        // the way they do, and the ordinary spend limit and stop-and-ask setting still apply.
-        // A failed start falls through to answering normally rather than leaving the chat empty.
-        // It runs here in the chat (executeChatWorkflow), so the Workflows switch alone is enough
-        // and its progress and result show in this chat. Autonomous only governs Autonomous jobs.
-        let routedWorkflow: WorkflowDefinition? = (resumeNote == nil && effectiveMode == .vibe && chat.repo != nil)
-            ? app.jobs.routedWorkflow(request: lastMessage, repo: chat.repo)
-            : nil
-        var inChatWorkflowContext: (agents: [AgentDefinition], tools: [any AgentTool], repo: SystemPrompt.RepoContext?)?
         let changeAuthorization = ChangeAuthorization(request: lastMessage)
         let allAttachments = chat.messages.flatMap { message -> [AttachmentReference] in
             if case .user(let user) = message.body { return user.attachments }
@@ -1618,7 +1615,7 @@ final class ChatSession: Identifiable {
             }
         }
         let prewarmRepo = repoContext
-        let prewarmAutonomous = autonomous && app.settings.autonomousEnabled
+        let prewarmAutonomous = autonomous
         let computerNote: String? = await setupStep(setupDeadline, fallback: nil, label: "starting the computer") {
             await self.prepareComputer(app: app, repo: prewarmRepo, lastUserMessage: lastMessage, isAutonomous: prewarmAutonomous)
         }
@@ -1847,7 +1844,7 @@ final class ChatSession: Identifiable {
                 && (!hasImageInput || model.acceptsImages)
                 && (!route.isFree || model.isFree)
         }.prefix(ChatCompletionRequest.maxModels - 1).map(\.id)
-        let isAutonomousTurn = autonomous && app.settings.autonomousEnabled
+        let isAutonomousTurn = autonomous
         let userChoice = chat.model
         let accountState = app.openRouter.accountState
         let userLogin = app.github.login
@@ -1871,271 +1868,27 @@ final class ChatSession: Identifiable {
 
         let turnSteering = SteeringInbox()
         if app.openRouter.supportsTools(chat.model) {
-            let builtInHelpers = BuiltInAgents.kiroSubagents + BuiltInAgents.all.filter {
-                ["planner", "designer", "design-checker", "design-reviewer", "code-checker", "second-opinion", "review-combiner", "investigator"].contains($0.id)
-            }
-            var seenHelperIDs = Set<String>()
-            var builtHelpers: [AgentDefinition] = []
-            for candidate in builtInHelpers + repoLocalAgents + app.automations.customAgents.map(\.definition) {
-                if seenHelperIDs.insert(candidate.id).inserted {
-                    builtHelpers.append(candidate)
+            // Sub-agents the way Kiro does them (owner, 11 November 2026: "sub agents look nothing
+            // like how you do subagents"): `invoke_sub_agent`, one sub-agent per call and several at
+            // once, Kiro's own plus the repo's and the person's. Each shows as its own card.
+            let definitions = SubAgentSetup.definitions(extra: repoLocalAgents + app.automations.customAgents.map(\.definition))
+            let repoContextSnapshot = repoContext
+            var reportTools: [any AgentTool] = readOnlyHelperTools
+            reportTools.append(createCustomAgentTool)
+            let subAgents = SubAgentSetup(
+                chatModel: userChoice, thinking: thinking, primaryModelID: route.model, primaryIsFree: route.isFree,
+                account: accountState, catalogue: catalogue, openRouterAvailable: hasOpenRouter, client: aiClient,
+                changeTools: tools, reportTools: reportTools,
+                prompt: { definition, context in
+                    SystemPrompt.make(userLogin: userLogin, repo: repoContextSnapshot, agent: definition, workflowContext: context, connectedRepositories: connectedRepoNames)
                 }
-            }
-            let helperDefinitions = builtHelpers
-            if let baseLead = BuiltInAgents.named("coder"), !helperDefinitions.isEmpty {
-                var lead = baseLead
-                lead.maximumHelpers = max(lead.maximumHelpers, 16)
-                let inspectWorkflowTool = InspectWorkflowTool { [weak self, weak app] query in
-                    await MainActor.run {
-                        guard let self else { return "Chat closed." }
-                        return self.inspectWorkflowsReport(query: query, app: app)
-                    }
-                }
-                var extraHelperTools: [any AgentTool] = readOnlyHelperTools
-                extraHelperTools.append(inspectWorkflowTool)
-                extraHelperTools.append(createCustomAgentTool)
-                let helperToolsSnapshot = extraHelperTools
-                var allHelperTools: [any AgentTool] = tools
-                allHelperTools.append(inspectWorkflowTool)
-                let fullToolsSnapshot = allHelperTools
-                let repoContextSnapshot = repoContext
-                let primaryModelID = route.model
-                let coordinator = AgentHelperCoordinator(
-                    lead: lead,
-                    definitions: helperDefinitions,
-                    context: lastMessage,
-                    spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil,
-                    steering: turnSteering
-                ) { invocation in
-                    var helperChoice = userChoice
-                    if let explicitModel = invocation.preferredModelID, !explicitModel.isEmpty, explicitModel != ModelChoice.freeID {
-                        helperChoice = .model(explicitModel)
-                    } else if invocation.definition.modelPolicy == .differentFromPrimary {
-                        if let alt = catalogue.values.first(where: { (hasOpenRouter || AIProviderModelID.decode($0.id) != nil) && $0.id != primaryModelID && $0.isChatModel && $0.supportsTools && (!route.isFree || $0.isFree) }) {
-                            helperChoice = .model(alt.id)
-                        }
-                    }
-                    let helperThinking = invocation.preferredEffort ?? thinking
-                    let helperRoute = ModelRouter.route(
-                        choice: helperChoice,
-                        difficulty: invocation.definition.difficulty,
-                        thinking: helperThinking,
-                        account: accountState,
-                        catalogue: catalogue,
-                        requiresImageInput: false,
-                        openRouterAvailable: hasOpenRouter
-                    )
-                    var helperChat = Chat(model: helperChoice, thinking: helperThinking)
-                    helperChat.messages.append(.user(invocation.task))
-                    helperChat.messages.append(ChatMessage(body: .assistant(AssistantTurn())))
-                    let helperPrompt = SystemPrompt.make(
-                        userLogin: userLogin,
-                        repo: repoContextSnapshot,
-                        agent: invocation.definition,
-                        workflowContext: invocation.context,
-                        connectedRepositories: connectedRepoNames
-                    )
-                    let basePool = invocation.definition.behavior == .changesAllowed ? fullToolsSnapshot : helperToolsSnapshot
-                    let allowedPool = basePool.filter { invocation.definition.permits(tool: $0.name) }
-                    let helperInput = AgentTurnInput(
-                        chat: helperChat,
-                        route: helperRoute,
-                        systemPrompt: helperPrompt,
-                        tools: allowedPool,
-                        allowTools: true,
-                        maxSteps: 400,
-                        spendLimit: invocation.spendLimit,
-                        requiresInitialSpendApproval: false,
-                        agent: invocation.definition,
-                        allowAskUser: false,
-                        autoApprove: true
-                    )
-                    let helperEnv = AgentEnvironment(
-                        openRouter: aiClient,
-                        freeRoute: {
-                            ModelRouter.route(choice: .free, difficulty: .normal, thinking: .default, account: AccountState(), catalogue: catalogue, openRouterAvailable: hasOpenRouter)
-                        },
-                        onOutOfCredits: {}
-                    )
-                    invocation.onLiveProgress?(AgentLiveProgress(
-                        model: helperRoute.model,
-                        toolCallCount: 0,
-                        latestActivity: "Starting…"
-                    ))
-                    let helperRun = AgentLoop.start(helperInput, environment: helperEnv)
-                    var finalTurn: AssistantTurn?
-                    var lastLiveSignature = ""
-                    do {
-                        for await event in helperRun.events {
-                            try Task.checkCancellation()
-                            if case .updated(let updated, _) = event {
-                                finalTurn = updated
-                                let calls = updated.steps.flatMap(\.toolCalls)
-                                let completedCalls = calls.filter { $0.status == .done || $0.status == .failed }.count
-                                let summaries = calls.map(\.summary)
-                                let runningToolSummary = calls.last(where: { $0.status == .running })?.summary
-                                let latestReasoning = updated.steps.reversed().compactMap { $0.reasoning.isEmpty ? nil : $0.reasoning }.first
-                                let liveThought = latestReasoning.map { String($0.suffix(900)) }
-                                let partialOutput = updated.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n")
-                                let latestNotice = updated.notices.last
-                                let actionSuffix = completedCalls > 0 ? " (\(completedCalls) done)" : ""
-                                let latestActivity: String = {
-                                    if let runningToolSummary, !runningToolSummary.isEmpty { return runningToolSummary }
-                                    if let latestNotice, latestNotice.localizedCaseInsensitiveContains("retry") || latestNotice.localizedCaseInsensitiveContains("wait") {
-                                        return latestNotice
-                                    }
-                                    if !partialOutput.isEmpty { return "Writing findings…\(actionSuffix)" }
-                                    if liveThought != nil { return "Thinking…\(actionSuffix)" }
-                                    return summaries.last ?? "Working…"
-                                }()
-                                let signature = "\(calls.count)|\(completedCalls)|\(latestActivity)|\(partialOutput.count)|\(latestReasoning?.count ?? 0)|\(latestNotice ?? "")"
-                                if signature != lastLiveSignature {
-                                    lastLiveSignature = signature
-                                    invocation.onLiveProgress?(AgentLiveProgress(
-                                        model: updated.modelsUsed.last ?? helperRoute.model,
-                                        toolCallCount: calls.count,
-                                        latestActivity: latestActivity,
-                                        toolSummaries: summaries,
-                                        liveThought: liveThought,
-                                        partialOutput: partialOutput
-                                    ))
-                                }
-                            }
-                        }
-                    } catch is CancellationError {
-                        helperRun.cancel()
-                        let calls = finalTurn?.steps.flatMap(\.toolCalls) ?? []
-                        let partial = finalTurn?.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n") ?? ""
-                        return AgentExecutionResult(
-                            output: partial.isEmpty ? "cancelled" : partial,
-                            model: finalTurn?.modelsUsed.last ?? helperRoute.model,
-                            cost: finalTurn?.usage.cost ?? 0,
-                            toolCallCount: calls.count,
-                            toolSummaries: calls.map(\.summary),
-                            status: "cancelled"
-                        )
-                    }
-                    if Task.isCancelled {
-                        helperRun.cancel()
-                        let calls = finalTurn?.steps.flatMap(\.toolCalls) ?? []
-                        let partial = finalTurn?.steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n") ?? ""
-                        return AgentExecutionResult(
-                            output: partial.isEmpty ? "cancelled" : partial,
-                            model: finalTurn?.modelsUsed.last ?? helperRoute.model,
-                            cost: finalTurn?.usage.cost ?? 0,
-                            toolCallCount: calls.count,
-                            toolSummaries: calls.map(\.summary),
-                            status: "cancelled"
-                        )
-                    }
-                    let allCalls = finalTurn?.steps.flatMap(\.toolCalls) ?? []
-                    let joinedText = finalTurn?.steps.map(\.text)
-                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                        .filter { !$0.isEmpty }
-                        .joined(separator: "\n\n") ?? ""
-                    let fallbackReasoning = finalTurn?.steps.reversed()
-                        .map { $0.reasoning.trimmingCharacters(in: .whitespacesAndNewlines) }
-                        .first(where: { !$0.isEmpty })
-                    let cost = finalTurn?.usage.cost ?? 0
-                    let modelUsed = finalTurn?.modelsUsed.last ?? helperRoute.model
-                    if finalTurn?.status == .failed {
-                        let failureMessage = finalTurn?.failure?.message ?? "Sub-agent failed."
-                        let outputText = joinedText.isEmpty ? failureMessage : "\(joinedText)\n\nError: \(failureMessage)"
-                        return AgentExecutionResult(
-                            output: outputText,
-                            model: modelUsed,
-                            cost: cost,
-                            toolCallCount: allCalls.count,
-                            toolSummaries: allCalls.map(\.summary),
-                            status: "failed"
-                        )
-                    }
-                    if finalTurn?.status == .stopped, finalTurn?.failure?.kind != .stepLimit {
-                        return AgentExecutionResult(
-                            output: joinedText.isEmpty ? "cancelled" : joinedText,
-                            model: modelUsed,
-                            cost: cost,
-                            toolCallCount: allCalls.count,
-                            toolSummaries: allCalls.map(\.summary),
-                            status: "cancelled"
-                        )
-                    }
-                    let finalText: String
-                    if !joinedText.isEmpty {
-                        finalText = joinedText
-                    } else if let fallbackReasoning {
-                        finalText = fallbackReasoning
-                    } else {
-                        let word = allCalls.count == 1 ? "action" : "actions"
-                        finalText = "Completed \(allCalls.count) \(word)."
-                    }
-                    if let pending = finalTurn?.pendingQuestions?.questions.questions.first {
-                        // Only reachable for a turn that genuinely can ask. Reported as stopped
-                        // rather than failed: nothing is broken and nothing ran — it is waiting.
-                        return AgentExecutionResult(
-                            output: "This sub-agent stopped because it needs a person's approval to continue: \(pending.text)",
-                            model: modelUsed,
-                            cost: cost,
-                            pendingQuestion: AgentExecutionQuestion(text: pending.text, options: pending.options),
-                            toolCallCount: allCalls.count,
-                            toolSummaries: allCalls.map(\.summary),
-                            status: "stopped"
-                        )
-                    }
-                    return AgentExecutionResult(
-                        output: finalText,
-                        model: modelUsed,
-                        goalOutcome: AgentGoalOutcome.parse(finalText),
-                        cost: cost,
-                        toolCallCount: allCalls.count,
-                        toolSummaries: allCalls.map(\.summary),
-                        status: "completed"
-                    )
-                }
-                tools.append(LaunchHelpersTool(lead: lead, definitions: helperDefinitions, coordinator: coordinator))
-
-                let knownAgentIDsProvider: @Sendable () async -> Set<String> = { [weak app] in
-                    let custom = await MainActor.run { app?.automations.agents.map(\.id) ?? [] }
-                    return Set(helperDefinitions.map(\.id) + BuiltInAgents.allIncludingKiroSubagents.map(\.id) + custom)
-                }
-                let workflowToolsSnapshot = tools + [inspectWorkflowTool]
-                tools.append(SaveWorkflowDefinitionTool(knownAgentIDs: knownAgentIDsProvider) { [weak app] draft in
-                    guard let app else { return draft }
-                    let saved = await app.automations.saveWorkflow(WorkflowRecord(definition: draft))
-                    return await MainActor.run { saved?.definition ?? draft }
-                })
-                // Workflows off means nothing can start a workflow from anywhere, the chat included.
-                if app.settings.workflowsEnabled {
-                inChatWorkflowContext = (helperDefinitions, workflowToolsSnapshot, repoContextSnapshot)
-                tools.append(RunWorkflowTool(
-                    resolveWorkflow: { [weak app] id in
-                        await MainActor.run {
-                            app?.automations.workflows.first(where: { $0.id == id || $0.name.caseInsensitiveCompare(id) == .orderedSame })
-                        }
-                    },
-                    knownAgentIDs: knownAgentIDsProvider,
-                    executeHandler: { [weak self] definition, prompt, progress in
-                        guard let self else {
-                            return ActiveWorkflowRunSnapshot(id: definition.id, definition: definition, checkpoint: WorkflowCheckpoint(workflowID: definition.id, request: prompt), isRunning: false)
-                        }
-                        return await self.executeChatWorkflow(
-                            definition: definition,
-                            prompt: prompt,
-                            defaultModelID: route.model,
-                            allAgents: helperDefinitions,
-                            toolPool: workflowToolsSnapshot,
-                            repoContext: repoContextSnapshot,
-                            progress: progress
-                        )
-                    }
-                ))
-                }
-                tools.append(inspectWorkflowTool)
-                tools.append(UpdateWorkflowTool { [weak self] runID, replacementSteps in
-                    guard let self else { throw ToolInputError("Chat is no longer open.") }
-                    return try await self.replaceRemainingWorkflowSteps(runID: runID, steps: replacementSteps)
-                })
-            }
+            )
+            let coordinator = AgentHelperCoordinator(
+                lead: SubAgentSetup.lead, definitions: definitions, context: lastMessage,
+                spendLimit: app.settings.spendLimitOn ? app.settings.spendLimit : nil,
+                steering: turnSteering, runner: subAgents.runner()
+            )
+            tools.append(InvokeSubAgentTool(lead: SubAgentSetup.lead, definitions: definitions, coordinator: coordinator))
         }
 
         await readBalanceBefore(modelID: route.model, app: app, deadline: setupDeadline)
@@ -2151,10 +1904,6 @@ final class ChatSession: Identifiable {
         }
         // Stop pressed while getting ready: there is no run to cancel yet, so honour it here.
         if userStoppedExplicitly { return }
-        if let workflow = routedWorkflow, let context = inChatWorkflowContext {
-            await runRoutedWorkflow(workflow, request: lastMessage, defaultModelID: route.model, agents: context.agents, toolPool: context.tools, repoContext: context.repo)
-            return
-        }
         let routeModelInfo = catalogue[route.model]
         let activeModelSummary = SystemPrompt.ActiveModelSummary(
             modelName: app.openRouter.displayName(forModelID: route.model),

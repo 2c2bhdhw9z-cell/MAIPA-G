@@ -95,9 +95,15 @@ public struct VideoModelInfo: Codable, Sendable, Hashable, Identifiable {
     static let preference = ["veo-3.1", "veo", "kling", "seedance-2.5", "seedance", "sora-2", "hailuo", "wan", "runway", "heygen"]
 
     public static func best(among models: [VideoModelInfo], fromPicture: Bool) -> VideoModelInfo? {
+        ranked(among: models, fromPicture: fromPicture).first
+    }
+
+    /// Best first. When one can't be used (no credit on that provider, a service that's down),
+    /// the next is tried.
+    public static func ranked(among models: [VideoModelInfo], fromPicture: Bool) -> [VideoModelInfo] {
         let pool = fromPicture ? models.filter(\.takesFirstFrame) : models
         func rank(_ model: VideoModelInfo) -> Int { preference.firstIndex { model.id.lowercased().contains($0) } ?? preference.count }
-        return (pool.isEmpty ? models : pool).min { a, b in
+        return (pool.isEmpty ? models : pool).sorted { a, b in
             let ra = rank(a), rb = rank(b)
             if ra != rb { return ra < rb }
             return (a.pricePerSecond ?? 1) < (b.pricePerSecond ?? 1)
@@ -125,6 +131,12 @@ public extension OpenRouterClient {
         firstFrame: ImageInput?, pollEvery: TimeInterval = 10, giveUpAfter: TimeInterval = 900,
         progress: @escaping @Sendable (String) -> Void = { _ in }
     ) async throws -> GeneratedVideo {
+        if let gateway = providerEndpoint(for: model) {
+            return try await AIProviderGateway.generateVideo(
+                prompt: prompt, rawModelID: gateway.rawModelID, duration: duration, aspectRatio: aspectRatio, firstFrame: firstFrame,
+                endpoint: gateway.endpoint, transport: transport, pollEvery: pollEvery, giveUpAfter: giveUpAfter, progress: progress
+            )
+        }
         var fields: [String: JSONValue] = ["model": .string(model), "prompt": .string(prompt)]
         if let duration { fields["duration"] = .number(Double(duration)) }
         if let resolution { fields["resolution"] = .string(resolution) }
@@ -210,7 +222,7 @@ public struct ListMediaModelsTool: AgentTool {
         }
         if kind != "pictures" {
             let videos = await videoModels()
-            lines.append(videos.isEmpty ? "Video models: none available (videos need an OpenRouter account)." : "Video models (\(videos.count)):")
+            lines.append(videos.isEmpty ? "Video models: none available (connect OpenRouter with credit, or OneProvider)." : "Video models (\(videos.count)):")
             for video in videos.sorted(by: { $0.name < $1.name }) {
                 var notes: [String] = []
                 if let price = video.pricePerSecond { notes.append("about $\(String(format: "%.2f", price)) a second") }
@@ -259,20 +271,23 @@ public struct GenerateVideoTool: AgentTool {
     public func runningSummary(for arguments: JSONValue) -> String { "Making a video…" }
 
     func resolve(_ arguments: JSONValue) async throws -> VideoModelInfo {
+        guard let first = try await candidates(arguments).first else { throw ToolInputError("No video models are available.") }
+        return first
+    }
+
+    /// The model the person named, or every usable one, best first.
+    func candidates(_ arguments: JSONValue) async throws -> [VideoModelInfo] {
         let all = await models()
-        guard !all.isEmpty else { throw ToolInputError("No video models are available. Videos need an OpenRouter account with credit.") }
+        guard !all.isEmpty else { throw ToolInputError("No video models are available. Connect OpenRouter (with credit) or OneProvider for videos.") }
         if let wanted = arguments.optionalString("model"), !wanted.isEmpty {
             let squeezed = wanted.lowercased().filter { $0.isLetter || $0.isNumber }
             if let match = all.first(where: { $0.id.lowercased() == wanted.lowercased() })
                 ?? all.first(where: { $0.id.lowercased().filter { $0.isLetter || $0.isNumber }.contains(squeezed) || $0.name.lowercased().filter { $0.isLetter || $0.isNumber }.contains(squeezed) }) {
-                return match
+                return [match]
             }
             throw ToolInputError("There's no video model called \(wanted). Available: \(all.map(\.id).joined(separator: ", ")).")
         }
-        guard let best = VideoModelInfo.best(among: all, fromPicture: arguments.optionalString("first_frame") != nil) else {
-            throw ToolInputError("No video models are available.")
-        }
-        return best
+        return VideoModelInfo.ranked(among: all, fromPicture: arguments.optionalString("first_frame") != nil)
     }
 
     static func seconds(_ arguments: JSONValue, model: VideoModelInfo) -> Int? {
@@ -295,7 +310,7 @@ public struct GenerateVideoTool: AgentTool {
 
     public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let prompt = try arguments.requiredString("prompt")
-        let model = try await resolve(arguments)
+        let choices = try await candidates(arguments)
         var firstFrame: ImageInput?
         if let name = arguments.optionalString("first_frame") {
             guard let picture = availableImages.first(where: { $0.name == name }) else {
@@ -303,11 +318,35 @@ public struct GenerateVideoTool: AgentTool {
             }
             firstFrame = ImageInput(name: picture.name, mimeType: picture.mimeType, data: try await store.data(for: picture))
         }
-        let video = try await client.generateVideo(
-            prompt: prompt, model: model.id, duration: Self.seconds(arguments, model: model),
-            resolution: arguments.optionalString("resolution"), aspectRatio: arguments.optionalString("aspect_ratio"),
-            firstFrame: firstFrame, progress: progress
-        )
+        // No credit on one provider (OpenRouter at $0.06), or a service that's down or has no
+        // video address: the next model is tried, on another provider first.
+        var made: (video: GeneratedVideo, model: VideoModelInfo)?
+        var skippedProviders = Set<String>()
+        var lastError: Error?
+        var tried: [String] = []
+        for candidate in choices {
+            if tried.count >= 4 { break }
+            let provider = AIProviderModelID.providerID(candidate.id)
+            if skippedProviders.contains(provider) { continue }
+            do {
+                let video = try await client.generateVideo(
+                    prompt: prompt, model: candidate.id, duration: Self.seconds(arguments, model: candidate),
+                    resolution: arguments.optionalString("resolution"), aspectRatio: arguments.optionalString("aspect_ratio"),
+                    firstFrame: firstFrame, progress: progress
+                )
+                made = (video, candidate)
+                break
+            } catch {
+                if error is CancellationError || Task.isCancelled { throw error }
+                guard choices.count > 1, let reason = MediaFallback.tryAnother(error) else { throw error }
+                lastError = error
+                tried.append(candidate.name)
+                if reason == .provider { skippedProviders.insert(provider) }
+                progress("\(candidate.name) couldn't make it, trying another…")
+            }
+        }
+        guard let made else { throw lastError ?? ToolInputError("No video model could make it.") }
+        let video = made.video, model = made.model
         progress("Saved (\(Self.estimate(arguments, model: model)))")
         let ext = video.mimeType.contains("webm") ? "webm" : (video.mimeType.contains("quicktime") ? "mov" : "mp4")
         let id = UUID()
@@ -315,7 +354,8 @@ public struct GenerateVideoTool: AgentTool {
         let result = GeneratedImageResult(attachment: reference, prompt: prompt, model: model.id, aspectRatio: arguments.optionalString("aspect_ratio") ?? "", quality: arguments.optionalString("resolution") ?? "", cost: video.cost)
         try await store.saveGeneratedMetadata(result)
         return ToolOutput(
-            forModel: "Made a video with \(model.name) and saved it with the chat as \(reference.name)." + (firstFrame.map { " It starts from \($0.name)." } ?? ""),
+            forModel: "Made a video with \(model.name) and saved it with the chat as \(reference.name)." + (firstFrame.map { " It starts from \($0.name)." } ?? "")
+                + (tried.isEmpty ? "" : " (\(tried.joined(separator: ", ")) couldn't, so \(model.name) made it.)"),
             summary: "Made a video",
             detail: video.cost.map { "Cost: $\(String(format: "%.4f", $0))" },
             generatedImages: [result],
@@ -335,11 +375,13 @@ public actor VideoCatalogue {
     public static let shared = VideoCatalogue()
     private var cached: (models: [VideoModelInfo], at: Date)?
 
+    /// OpenRouter's video models, then the ones the connected gateways offer (OneProvider's Kling).
     public func models(using client: OpenRouterClient) async -> [VideoModelInfo] {
-        if let cached, Date().timeIntervalSince(cached.at) < 3_600, !cached.models.isEmpty { return cached.models }
+        let gateways = client.extraProviders.flatMap(AIProviderGateway.videoModels(for:))
+        if let cached, Date().timeIntervalSince(cached.at) < 3_600, !cached.models.isEmpty { return cached.models + gateways }
         let fresh = (try? await client.videoModels()) ?? []
         if !fresh.isEmpty { cached = (fresh, Date()) }
-        return fresh.isEmpty ? (cached?.models ?? []) : fresh
+        return (fresh.isEmpty ? (cached?.models ?? []) : fresh) + gateways
     }
 }
 

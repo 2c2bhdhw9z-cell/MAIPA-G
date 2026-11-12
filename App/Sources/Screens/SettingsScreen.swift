@@ -1,6 +1,10 @@
 import AgentCore
 import SwiftUI
 
+/// Settings, cleaned right down (owner, 11 November 2026: "I meant actually cleaned the fuck up").
+/// Six rows and a switch: Accounts, AI, Computer, Memories, Appearance, Notifications and About.
+/// Things the AI decides from what the person says (how changes are saved, workflows, which
+/// websites a preview may reach) and machine details are not settings any more.
 struct SettingsScreen: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
@@ -49,30 +53,28 @@ struct SettingsScreen: View {
                 }
 
                 Section {
-                    page("GitHub & GitLab", icon: "chevron.left.forwardslash.chevron.right", tint: Color(white: 0.2), value: app.github.login ?? (app.gitlab.isConnected ? "GitLab" : "Not connected")) { accounts }
-                    page("AI providers", icon: "sparkles", tint: .purple, value: aiSummary) { aiProvidersSection }
-                    page("Computer for chats", icon: "desktopcomputer", tint: .blue, value: draft.chatComputerOff ? "Off" : draft.chatComputerMachineName) { chatComputer }
+                    page("Accounts", icon: "person.crop.circle.fill", tint: Color(white: 0.25), value: accountsSummary) { accounts }
+                    page("AI", icon: "sparkles", tint: .purple, value: aiSummary) { aiPage }
+                    page("Computer", icon: "desktopcomputer", tint: .blue, value: computerSummary) { computer }
                 }
 
                 Section {
                     page("Memories", icon: "brain.head.profile", tint: .pink, value: draft.memoriesOn ? "On" : "Off") { memories }
-                    page("Spending limit", icon: "dollarsign", tint: .green, value: draft.spendLimitOn ? draft.spendLimit.dollars : "Off") { money }
-                    page("Notifications", icon: "bell.badge.fill", tint: .red, value: draft.notificationsOn ? "On" : "Off") { notifications }
-                    page("Look", icon: "paintbrush.fill", tint: .orange, value: draft.appearance.label) { look }
-                }
-
-                Section {
-                    page("Features", icon: "square.stack.3d.up.fill", tint: .indigo, value: featuresSummary) { features }
-                    page("Website previews", icon: "safari.fill", tint: .teal, value: previewHostCount == 0 ? "No outside sites" : "\(previewHostCount) allowed") { previewHosts }
-                    page("Saving & backup", icon: "icloud.fill", tint: .cyan, value: saveStatus, valueTint: app.sync.isEverythingBackedUp ? nil : .orange) { saving }
-                    NavigationLink { HealthCheckScreen(embedded: true) } label: {
-                        SettingsRowLabel(title: "Check everything", icon: "checkmark.shield.fill", tint: .mint)
+                    page("Appearance", icon: "paintbrush.fill", tint: .orange, value: draft.appearance.label) { appearance }
+                    Toggle(isOn: $draft.notificationsOn) {
+                        SettingsRowLabel(title: "Notifications", icon: "bell.badge.fill", tint: .red)
                     }
                 }
 
                 Section {
-                    page("About MAIPA-G", icon: "info.circle.fill", tint: .gray, value: "Build \(app.updates.currentBuild)") {
+                    page("About", icon: "info.circle.fill", tint: .gray, value: saveStatus, valueTint: app.sync.isEverythingBackedUp ? nil : .orange) {
                         about
+                        backup
+                        Section {
+                            NavigationLink { HealthCheckScreen(embedded: true) } label: {
+                                Label("Check everything", systemImage: "checkmark.shield")
+                            }
+                        }
                         technical
                     }
                 }
@@ -95,7 +97,6 @@ struct SettingsScreen: View {
             }
             .onChange(of: draft) { _, edited in
                 guard loaded else { return }
-                let disabledAutonomous = app.settings.autonomousEnabled && !edited.autonomousEnabled
                 app.updateSettings { settings in
                     settings.appearance = edited.appearance
                     settings.accent = edited.accent
@@ -103,22 +104,9 @@ struct SettingsScreen: View {
                     settings.spendLimitOn = edited.spendLimitOn
                     settings.spendLimit = edited.spendLimit
                     settings.notificationsOn = edited.notificationsOn
-                    settings.directSaveRepos = edited.directSaveRepos
-                    settings.saveStraightToBranchEverywhere = edited.saveStraightToBranchEverywhere
-                    settings.workflowPolicy = edited.workflowPolicy
-                    settings.workflowsEnabled = edited.workflowsEnabled
-                    settings.specsEnabled = edited.specsEnabled
-                    settings.autonomousEnabled = edited.autonomousEnabled
                     settings.memoriesOn = edited.memoriesOn
                     settings.chatComputerServer = edited.chatComputerServer
                     settings.chatComputerOff = edited.chatComputerOff
-                    settings.chatComputerMachine = edited.chatComputerMachine
-                    settings.chatComputerHourlyCost = edited.chatComputerHourlyCost
-                    settings.previewAllowedHosts = edited.previewAllowedHosts
-                }
-                if disabledAutonomous {
-                    app.home.autonomous = false
-                    Task { await app.jobs.cleanupAllAutonomousSecrets() }
                 }
             }
             .task {
@@ -163,14 +151,14 @@ struct SettingsScreen: View {
 
     // MARK: The main page
 
-    /// The app, its build and whether everything is saved, at the top like an account card.
+    /// The app, the account and whether everything is saved, at the top like an account card.
     private var header: some View {
         Section {
             HStack(spacing: 14) {
                 Spark(size: 46)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("MAIPA-G").font(.title3.weight(.semibold))
-                    Text(app.github.login.map { "\($0) · \(saveStatus)" } ?? saveStatus)
+                    Text(app.github.login.map { "\($0) · Build \(app.updates.currentBuild)" } ?? "Build \(app.updates.currentBuild)")
                         .font(.footnote)
                         .foregroundStyle(Theme.secondaryText)
                         .lineLimit(1)
@@ -180,7 +168,7 @@ struct SettingsScreen: View {
         }
     }
 
-    /// One row on the main page that opens its own page of settings.
+    /// One row on the main page that opens its own page.
     private func page<Content: View>(_ title: String, icon: String, tint: Color, value: String? = nil, valueTint: Color? = nil, @ViewBuilder content: @escaping () -> Content) -> some View {
         NavigationLink {
             Form { content() }
@@ -192,250 +180,225 @@ struct SettingsScreen: View {
         }
     }
 
+    private var accountsSummary: String {
+        if let login = app.github.login { return login }
+        if app.gitlab.isConnected { return "GitLab" }
+        return "Not connected"
+    }
+
     private var aiSummary: String {
         guard app.openRouter.isSignedIn else { return "Not connected" }
-        if let balance = app.openRouter.balance { return balance.dollars }
         let connected = app.openRouter.externalProviders.filter(\.isEnabled).count + (app.openRouter.hasOpenRouterKey ? 1 : 0)
-        return connected == 1 ? "1 connected" : "\(connected) connected"
+        return connected == 1 ? "1 provider" : "\(connected) providers"
     }
 
-    private var featuresSummary: String {
-        let on = [draft.workflowsEnabled ? "Workflows" : nil, draft.autonomousEnabled ? "Autonomous" : nil].compactMap { $0 }
-        return on.isEmpty ? "Off" : on.joined(separator: ", ")
+    private var computerSummary: String {
+        if draft.chatComputerOff { return "Off" }
+        if let server = draft.chatComputerServer, let connector = computerConnectors.first(where: { $0.serverID == server }) {
+            return connector.displayName
+        }
+        return computerConnectors.isEmpty ? "None" : "Automatic"
     }
-
-    private var previewHostCount: Int { draft.previewAllowedHosts.values.reduce(0) { $0 + $1.count } }
 
     // MARK: Accounts
 
-    /// GitHub in one place: connect, pick which repos MAIPA-G can use, and save-straight-to-branch
-    /// for each repo, all on this screen.
     private var accounts: some View {
-        Section {
-            if app.github.isConnected {
-                VStack(alignment: .leading, spacing: 4) {
-                    Label("GitHub: \(app.github.login ?? "connected")", systemImage: "link")
-                    if let credentials = app.github.credentials {
-                        Text("Changes show up as \(credentials.botName)").font(.footnote).foregroundStyle(Theme.secondaryText)
-                    }
-                }
-                if let url = app.github.installationSettingsURL {
-                    Button("Choose which repos MAIPA-G can use") { openURL(url) }
-                }
-                if app.github.needsSignInAgain {
-                    Button("Sign in to GitHub again") {
-                        Task { await app.github.reauthorize() }
-                    }
-                }
-                if app.github.repos.isEmpty {
-                    Text("Your repos appear here after GitHub connects.")
-                        .foregroundStyle(Theme.secondaryText)
-                }
-                if !app.github.repos.isEmpty {
-                    Toggle(isOn: Binding(
-                        get: { draft.saveStraightToBranchEverywhere ?? false },
-                        set: { draft.saveStraightToBranchEverywhere = $0; draft.directSaveRepos = [:] }
-                    )) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text("Every repo")
-                            Text("Save straight to branch, no pull requests. Telling the AI in a chat sets this too.").font(.caption).foregroundStyle(Theme.secondaryText)
-                        }
-                    }
-                }
-                ForEach(app.github.repos) { repo in
-                    Toggle(isOn: Binding(
-                        get: { draft.directSaveRepos[repo.ref.settingsKey] ?? draft.saveStraightToBranchEverywhere ?? false },
-                        set: { draft.directSaveRepos[repo.ref.settingsKey] = $0 }
-                    )) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(repo.fullName).lineLimit(1)
-                            Text("Save straight to branch").font(.caption).foregroundStyle(Theme.secondaryText)
-                        }
-                    }
-                }
-                Button("Disconnect GitHub", role: .destructive) { confirmDisconnect = true }
-            } else {
-                Button {
-                    app.sheet = .connectGitHub
-                } label: {
-                    Label(app.github.phase == .needsInstall ? "Finish connecting GitHub" : "Connect GitHub", systemImage: "link")
-                }
-            }
-            gitLabRows
-        } footer: {
-            if app.github.isConnected || app.gitlab.isConnected {
-                Text("A repo with Save straight to branch off uses a side branch and a pull request (a merge request on GitLab). A repo's own rules always win.")
-            }
-        }
-    }
-
-    /// GitLab, in the same section: gitlab.com or your own server, with a personal access token
-    /// kept in the Keychain.
-    @ViewBuilder private var gitLabRows: some View {
-        if app.gitlab.isConnected {
-            Label("GitLab: \(app.gitlab.login ?? "connected") on \(app.gitlab.host)", systemImage: "link")
-            if let error = app.gitlab.reposError {
-                Text(error).font(.footnote).foregroundStyle(Theme.danger)
-            }
-            ForEach(app.gitlab.repos) { repo in
-                Toggle(isOn: Binding(
-                    get: { draft.directSaveRepos[repo.ref.settingsKey] ?? false },
-                    set: { draft.directSaveRepos[repo.ref.settingsKey] = $0 }
-                )) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(repo.fullName).lineLimit(1)
-                        Text("GitLab · Save straight to branch").font(.caption).foregroundStyle(Theme.secondaryText)
-                    }
-                }
-            }
-            Button("Disconnect GitLab", role: .destructive) { confirmDisconnectGitLab = true }
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Connect GitLab").font(.headline)
-                TextField("gitlab.com or https://your-server", text: $gitlabHost)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .keyboardType(.URL)
-                SecureField("Personal access token (api scope)", text: $gitlabToken)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                HStack {
-                    Button(app.gitlab.isConnecting ? "Connecting…" : "Connect GitLab") {
-                        Task {
-                            if await app.gitlab.connect(host: gitlabHost, token: gitlabToken) { gitlabToken = "" }
-                        }
-                    }
-                    .disabled(app.gitlab.isConnecting || gitlabToken.trimmingCharacters(in: .whitespaces).isEmpty)
-                    Spacer()
-                    Button("Make a token") {
-                        let host = GitLabClient.normalizedHost(gitlabHost) ?? GitLabClient.defaultHost
-                        if let url = URL(string: "https://\(host)/-/user_settings/personal_access_tokens?name=MAIPA-G&scopes=api") { openURL(url) }
-                    }
-                    .font(.footnote)
-                }
-                .buttonStyle(.borderless)
-                if let error = app.gitlab.lastError {
-                    Text(error).font(.footnote).foregroundStyle(Theme.danger)
-                }
-            }
-        }
-    }
-
-    private var aiProvidersSection: some View {
-        Section {
-            // 1. OpenRouter
-            if app.openRouter.hasOpenRouterKey {
-                HStack(spacing: 12) {
-                    AIProviderIcon(assetName: "ProviderOpenRouter", fallbackTitle: "OR", size: 28)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("OpenRouter: signed in").font(.subheadline.weight(.semibold))
-                        if let info = app.openRouter.keyInfo {
-                            Text(moneyLine(info)).font(.footnote).foregroundStyle(Theme.secondaryText)
-                        }
-                    }
-                }
-                Button("Add credit on OpenRouter") { openURL(OpenRouterClient.creditsURL) }
-                Button("Sign out of OpenRouter", role: .destructive) { app.openRouter.signOut() }
-            } else {
-                Button {
-                    app.sheet = .signInOpenRouter
-                } label: {
+        Group {
+            Section {
+                if app.github.isConnected {
                     HStack(spacing: 12) {
-                        AIProviderIcon(assetName: "ProviderOpenRouter", fallbackTitle: "OR", size: 28)
+                        Image("IntegrationGitHub").resizable().scaledToFit().frame(width: 26, height: 26)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("OpenRouter").font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
-                            Text("One-tap sign-in + free AIs").font(.caption).foregroundStyle(Theme.secondaryText)
-                        }
-                        Spacer()
-                        Text("Sign in").font(.caption.weight(.semibold)).foregroundStyle(theme.accent)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-
-            // 2. Built-in Gateways: OneProvider, SayGM, TeamoRouter, OmniRoute
-            ForEach(AIProviderPreset.builtIn) { preset in
-                let saved = app.openRouter.endpoint(for: preset.id)
-                let count = app.openRouter.externalModelCounts[preset.id]
-                let bal = app.openRouter.externalBalances[preset.id]
-                let err = app.openRouter.externalErrors[preset.id]
-                Button {
-                    providerConnectSheet = AIProviderConnectSheet(mode: .preset(preset))
-                } label: {
-                    HStack(spacing: 12) {
-                        AIProviderIcon(assetName: preset.assetName, fallbackTitle: preset.name, size: 28)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(preset.name)
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(.primary)
-                            if let err {
-                                Text(err).font(.caption).foregroundStyle(Theme.danger).lineLimit(1)
-                            } else if let saved {
-                                let countPart = count.map { " · \($0) models" } ?? ""
-                                let balPart = bal.map { " · \($0.dollars)" } ?? ""
-                                Text(saved.isEnabled ? "Connected\(countPart)\(balPart)" : "Paused")
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(saved.isEnabled ? .green : Theme.secondaryText)
-                            } else {
-                                Text(preset.subtitle)
-                                    .font(.caption)
-                                    .foregroundStyle(Theme.secondaryText)
-                                    .lineLimit(1)
+                            Text(app.github.login ?? "GitHub").font(.body.weight(.semibold))
+                            if let credentials = app.github.credentials {
+                                Text("Changes show up as \(credentials.botName)").font(.footnote).foregroundStyle(Theme.secondaryText)
                             }
                         }
-                        Spacer()
-                        Text(saved == nil ? "Connect" : "Edit")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(saved?.isReady == true ? .green : theme.accent)
                     }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-
-            // 3. Any user-added Custom AI Providers
-            ForEach(app.openRouter.externalProviders.filter { AIProviderPreset.matching($0.id) == nil }) { custom in
-                let count = app.openRouter.externalModelCounts[custom.id]
-                let bal = app.openRouter.externalBalances[custom.id]
-                Button {
-                    providerConnectSheet = AIProviderConnectSheet(mode: .existing(custom))
-                } label: {
-                    HStack(spacing: 12) {
-                        AIProviderIcon(assetName: nil, fallbackTitle: custom.name, size: 28)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(custom.name).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
-                            let countPart = count.map { " · \($0) models" } ?? ""
-                            let balPart = bal.map { " · \($0.dollars)" } ?? ""
-                            Text(custom.isEnabled ? "Connected\(countPart)\(balPart)" : "Paused")
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(custom.isEnabled ? .green : Theme.secondaryText)
+                    if app.github.needsSignInAgain {
+                        Button("Sign in to GitHub again") {
+                            Task { await app.github.reauthorize() }
                         }
-                        Spacer()
-                        Text("Edit").font(.caption.weight(.semibold)).foregroundStyle(theme.accent)
                     }
-                    .contentShape(Rectangle())
+                    if let url = app.github.installationSettingsURL {
+                        Button("Choose which repos MAIPA-G can use") { openURL(url) }
+                    }
+                    Button("Disconnect GitHub", role: .destructive) { confirmDisconnect = true }
+                } else {
+                    Button {
+                        app.sheet = .connectGitHub
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image("IntegrationGitHub").resizable().scaledToFit().frame(width: 26, height: 26)
+                            Text(app.github.phase == .needsInstall ? "Finish connecting GitHub" : "Connect GitHub")
+                        }
+                    }
                 }
-                .buttonStyle(.plain)
+            } header: {
+                Text("GitHub")
+            } footer: {
+                Text("To change how your work is saved, just tell the AI in a chat (\"no pull requests\", \"use branches\"). A repo's own rules always win.")
             }
 
-            Button {
-                providerConnectSheet = AIProviderConnectSheet(mode: .customNew)
-            } label: {
-                Label("Add custom AI provider…", systemImage: "plus.circle")
-            }
-
-            if app.openRouter.isSignedIn {
-                Button {
-                    Task { await app.openRouter.loadModels(force: true) }
-                } label: {
-                    Label(app.openRouter.isLoadingModels ? "Refreshing models…" : "Refresh all AI models", systemImage: "arrow.clockwise")
+            Section {
+                if app.gitlab.isConnected {
+                    HStack(spacing: 12) {
+                        Image("IntegrationGitLab").resizable().scaledToFit().frame(width: 26, height: 26)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(app.gitlab.login ?? "GitLab").font(.body.weight(.semibold))
+                            Text(app.gitlab.host).font(.footnote).foregroundStyle(Theme.secondaryText)
+                        }
+                    }
+                    if let error = app.gitlab.reposError {
+                        Text(error).font(.footnote).foregroundStyle(Theme.danger)
+                    }
+                    Button("Disconnect GitLab", role: .destructive) { confirmDisconnectGitLab = true }
+                } else {
+                    NavigationLink {
+                        Form { gitLabConnect }
+                            .navigationTitle("Connect GitLab")
+                            .navigationBarTitleDisplayMode(.inline)
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image("IntegrationGitLab").resizable().scaledToFit().frame(width: 26, height: 26)
+                            Text("Connect GitLab")
+                        }
+                    }
                 }
-                .disabled(app.openRouter.isLoadingModels)
+            } header: {
+                Text("GitLab")
+            }
+        }
+    }
+
+    /// gitlab.com or your own server, with a personal access token kept in the Keychain.
+    private var gitLabConnect: some View {
+        Section {
+            TextField("gitlab.com or https://your-server", text: $gitlabHost)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+            SecureField("Personal access token (api scope)", text: $gitlabToken)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Button(app.gitlab.isConnecting ? "Connecting…" : "Connect") {
+                Task {
+                    if await app.gitlab.connect(host: gitlabHost, token: gitlabToken) { gitlabToken = "" }
+                }
+            }
+            .disabled(app.gitlab.isConnecting || gitlabToken.trimmingCharacters(in: .whitespaces).isEmpty)
+            if let error = app.gitlab.lastError {
+                Text(error).font(.footnote).foregroundStyle(Theme.danger)
             }
         } footer: {
-            Text("Connect OpenRouter, OneProvider, SayGM, TeamoRouter, OmniRoute, or any compatible /v1 gateway. All connected models appear together in the AI selector.")
+            Button("Make a token on GitLab") {
+                let host = GitLabClient.normalizedHost(gitlabHost) ?? GitLabClient.defaultHost
+                if let url = URL(string: "https://\(host)/-/user_settings/personal_access_tokens?name=MAIPA-G&scopes=api") { openURL(url) }
+            }
+            .font(.footnote)
         }
+    }
+
+    // MARK: AI
+
+    private var aiPage: some View {
+        Group {
+            Section {
+                if app.openRouter.hasOpenRouterKey {
+                    NavigationLink {
+                        openRouterPage
+                    } label: {
+                        providerRow(assetName: "ProviderOpenRouter", name: "OpenRouter", value: app.openRouter.balance?.dollars ?? "Signed in", valueTint: Theme.secondaryText)
+                    }
+                } else {
+                    Button { app.sheet = .signInOpenRouter } label: {
+                        providerRow(assetName: "ProviderOpenRouter", name: "OpenRouter", value: "Sign in", valueTint: theme.accent)
+                    }
+                    .buttonStyle(.plain)
+                }
+                ForEach(AIProviderPreset.builtIn) { preset in
+                    let saved = app.openRouter.endpoint(for: preset.id)
+                    Button {
+                        providerConnectSheet = AIProviderConnectSheet(mode: .preset(preset))
+                    } label: {
+                        providerRow(assetName: preset.assetName, name: preset.name, value: providerValue(saved: saved, id: preset.id), valueTint: providerTint(saved: saved, id: preset.id))
+                    }
+                    .buttonStyle(.plain)
+                }
+                ForEach(app.openRouter.externalProviders.filter { AIProviderPreset.matching($0.id) == nil }) { custom in
+                    Button {
+                        providerConnectSheet = AIProviderConnectSheet(mode: .existing(custom))
+                    } label: {
+                        providerRow(assetName: nil, name: custom.name, value: providerValue(saved: custom, id: custom.id), valueTint: providerTint(saved: custom, id: custom.id))
+                    }
+                    .buttonStyle(.plain)
+                }
+                Button {
+                    providerConnectSheet = AIProviderConnectSheet(mode: .customNew)
+                } label: {
+                    Label("Add another provider", systemImage: "plus.circle")
+                }
+            } header: {
+                Text("Providers")
+            } footer: {
+                Text("Every connected provider's models show together when you pick an AI.")
+            }
+
+            Section {
+                Toggle("Stop and ask when a reply has cost…", isOn: $draft.spendLimitOn)
+                if draft.spendLimitOn {
+                    Stepper(value: $draft.spendLimit, in: 0.25...50, step: 0.25) {
+                        Text(draft.spendLimit.dollars).font(.body.monospacedDigit())
+                    }
+                }
+            } header: {
+                Text("Spending")
+            }
+        }
+    }
+
+    private var openRouterPage: some View {
+        Form {
+            Section {
+                if let info = app.openRouter.keyInfo {
+                    Text(moneyLine(info)).font(.footnote).foregroundStyle(Theme.secondaryText)
+                }
+                Button("Add credit on OpenRouter") { openURL(OpenRouterClient.creditsURL) }
+            }
+            Section {
+                Button("Sign out of OpenRouter", role: .destructive) { app.openRouter.signOut() }
+            }
+        }
+        .navigationTitle("OpenRouter")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func providerRow(assetName: String?, name: String, value: String, valueTint: Color) -> some View {
+        HStack(spacing: 12) {
+            AIProviderIcon(assetName: assetName, fallbackTitle: name, size: 28)
+            Text(name).foregroundStyle(.primary)
+            Spacer(minLength: 8)
+            Text(value)
+                .font(.subheadline.monospacedDigit())
+                .foregroundStyle(valueTint)
+                .lineLimit(1)
+        }
+        .contentShape(Rectangle())
+    }
+
+    /// One short word or amount for a provider: its balance, Connect, Paused or Problem.
+    private func providerValue(saved: AIProviderEndpoint?, id: String) -> String {
+        guard let saved else { return "Connect" }
+        if !saved.isEnabled { return "Paused" }
+        if app.openRouter.externalErrors[id] != nil { return "Problem" }
+        if let balance = app.openRouter.externalBalances[id] { return balance.dollars }
+        return "On"
+    }
+
+    private func providerTint(saved: AIProviderEndpoint?, id: String) -> Color {
+        guard let saved else { return theme.accent }
+        if app.openRouter.externalErrors[id] != nil { return Theme.danger }
+        return saved.isEnabled ? Theme.secondaryText : Theme.secondaryText.opacity(0.6)
     }
 
     private func moneyLine(_ info: OpenRouterKeyInfo) -> String {
@@ -447,120 +410,15 @@ struct SettingsScreen: View {
         return parts.isEmpty ? "Ready" : parts.joined(separator: ", ")
     }
 
-    // MARK: Look
+    // MARK: Computer
 
-    private var look: some View {
-        Section {
-            Picker("Appearance", selection: $draft.appearance) {
-                ForEach(Appearance.allCases) { Text($0.label).tag($0) }
-            }
-            .pickerStyle(.segmented)
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Color")
-                HStack(spacing: 12) {
-                    ForEach(AccentChoice.allCases) { choice in
-                        let (accent, partner) = Palette.colors(for: choice)
-                        Button {
-                            draft.accent = choice
-                            Haptics.selection()
-                        } label: {
-                            Circle()
-                                .fill(LinearGradient(colors: [accent, partner], startPoint: .topLeading, endPoint: .bottomTrailing))
-                                .frame(width: 34, height: 34)
-                                .overlay {
-                                    if draft.accent == choice {
-                                        Circle().strokeBorder(.primary, lineWidth: 2.5).padding(-4)
-                                    }
-                                }
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(choice.label)
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-
-            Toggle("Spark moves", isOn: $draft.effects.sparkMoves)
-            Toggle("Glow behind the home screen", isOn: $draft.effects.backgroundGlow)
-            Toggle("Shimmer while thinking", isOn: $draft.effects.thinkingShimmer)
-            Toggle("Messages slide in", isOn: $draft.effects.messagesSlideIn)
-        } footer: {
-            if theme.reduceMotion {
-                Text("Reduce Motion is on in your iPhone's settings, so nothing moves.")
-            }
-        }
-    }
-
-    // MARK: Autonomous
-
-    /// One switch each for Workflows, Specs and Autonomous jobs, all off to start with, so the app
-    /// behaves like a plain chat with a repo until one is turned on.
-    private var features: some View {
-        Section {
-            Toggle(isOn: $draft.workflowsEnabled) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Workflows")
-                    Text("Off: nothing starts a workflow, and the chat answers plainly.").font(.caption).foregroundStyle(Theme.secondaryText)
-                }
-            }
-            Toggle(isOn: $draft.autonomousEnabled) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Autonomous jobs")
-                    Text("Off: no repo jobs run, and Jobs shows only what already ran.").font(.caption).foregroundStyle(Theme.secondaryText)
-                }
-            }
-        } footer: {
-            Text("Both start off. Spec is always in the chat's mode picker, like Kiro. Workflows cost more than sub-agents: each step is a full AI call that re-sends the chat.")
-        }
-    }
-
-    // MARK: Computer for chats
-
-    /// The choices in "Computer for chats". A connector is picked by its serverID.
+    /// The choices in Computer. A connector is picked by its serverID.
     private enum ComputerChoice: Hashable {
         case automatic, off
         case connector(String)
     }
 
-    /// Every outside host a website preview may reach, by repo, each removable. Previews reach
-    /// nothing outside the phone until a host is added from that repo's preview.
-    private var previewHosts: some View {
-        Section {
-            let repos = draft.previewAllowedHosts.filter { !$0.value.isEmpty }.keys.sorted()
-            if repos.isEmpty {
-                Text("None. Website previews can't reach any outside host.")
-                    .foregroundStyle(Theme.secondaryText)
-            }
-            ForEach(repos, id: \.self) { repo in
-                ForEach((draft.previewAllowedHosts[repo] ?? []).sorted(), id: \.self) { host in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(host).font(.body.monospaced())
-                        Text(repo).font(.caption).foregroundStyle(Theme.secondaryText)
-                    }
-                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        Button("Remove", role: .destructive) { removePreviewHost(host, from: repo) }
-                            .tint(Theme.danger)
-                    }
-                    .contextMenu {
-                        Button("Remove", role: .destructive) { removePreviewHost(host, from: repo) }
-                    }
-                    .accessibilityAction(named: "Remove") { removePreviewHost(host, from: repo) }
-                }
-            }
-        } header: {
-            Text("Outside sites previews may reach")
-        } footer: {
-            Text("Add a host from a repo's preview with the network button. Swipe a host to remove it; the preview loses access the next time it opens.")
-        }
-    }
-
-    private func removePreviewHost(_ host: String, from repo: String) {
-        draft.previewAllowedHosts[repo]?.remove(host)
-        if draft.previewAllowedHosts[repo]?.isEmpty == true { draft.previewAllowedHosts[repo] = nil }
-    }
-
-    private var chatComputer: some View {
+    private var computer: some View {
         Section {
             Picker("Computer", selection: computerChoice) {
                 Text("Automatic").tag(ComputerChoice.automatic)
@@ -572,38 +430,10 @@ struct SettingsScreen: View {
                     Text("Removed connector").tag(ComputerChoice.connector(removed))
                 }
             }
-            if !draft.chatComputerOff {
-                LabeledContent("Approximate cost per hour") {
-                    HStack(spacing: 2) {
-                        Text("$")
-                            .foregroundStyle(Theme.secondaryText)
-                        TextField("0.10", value: $draft.chatComputerHourlyCost, format: .number.precision(.fractionLength(2...3)))
-                            .multilineTextAlignment(.trailing)
-                            .keyboardType(.decimalPad)
-                            .fixedSize()
-                        Text("/hr")
-                            .foregroundStyle(Theme.secondaryText)
-                    }
-                    .monospacedDigit()
-                }
-                LabeledContent("Machine name") {
-                    TextField(AppSettings.defaultChatComputerMachine, text: $draft.chatComputerMachine)
-                        .multilineTextAlignment(.trailing)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .onChange(of: draft.chatComputerMachine) { _, typed in
-                            let clean = AppSettings.machineNameCharacters(typed)
-                            if clean != typed { draft.chatComputerMachine = clean }
-                        }
-                }
-                if !draft.chatComputerMachineName.hasPrefix("mcp-") {
-                    Text("Sprites' default sign-in only allows names that start with mcp-.")
-                        .font(.footnote)
-                        .foregroundStyle(Theme.secondaryText)
-                }
-            }
         } footer: {
-            Text("The AI uses this computer by itself whenever a job needs commands. Connect Sprites or another computer service in Connectors first.")
+            Text(computerConnectors.isEmpty
+                 ? "Connect Sprites (or another computer) in Connectors, and the AI runs commands, builds and previews on it by itself."
+                 : "The AI runs commands, builds and previews on it by itself, and replies keep going there when you close the app.")
         }
     }
 
@@ -629,8 +459,7 @@ struct SettingsScreen: View {
         )
     }
 
-    /// Connectors that can actually run commands (Sprites and the like), one per server. A
-    /// connector such as Hugging Face only answers questions, so it isn't a computer.
+    /// Connectors that can actually run commands (Sprites and the like), one per server.
     private var computerConnectors: [ConnectorConfiguration] {
         var seen = Set<String>()
         return app.connectors.connected.filter { $0.kind == .remote && app.connectors.canRunCommands($0) && seen.insert($0.serverID).inserted }
@@ -644,130 +473,70 @@ struct SettingsScreen: View {
         return serverID
     }
 
+    // MARK: Memories
+
     private var memories: some View {
         Section {
             Toggle("Use memories in new chats", isOn: $draft.memoriesOn)
-            NavigationLink("Edit memories") { MemoriesScreen(embedded: true) }
+            NavigationLink("See and edit memories") { MemoriesScreen(embedded: true) }
         } footer: {
-            Text("Each memory also has its own switch. Memories start empty.")
+            Text("The AI saves what you tell it to remember, and your corrections, by itself.")
         }
     }
 
-    // MARK: Money
+    // MARK: Appearance
 
-    private var money: some View {
+    private var appearance: some View {
         Section {
-            Toggle("Stop and ask when a job has cost…", isOn: $draft.spendLimitOn)
-            if draft.spendLimitOn {
-                Stepper(value: $draft.spendLimit, in: 0.25...50, step: 0.25) {
-                    Text(draft.spendLimit.dollars).font(.body.monospacedDigit())
+            Picker("Appearance", selection: $draft.appearance) {
+                ForEach(Appearance.allCases) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+
+            HStack(spacing: 12) {
+                ForEach(AccentChoice.allCases) { choice in
+                    let (accent, partner) = Palette.colors(for: choice)
+                    Button {
+                        draft.accent = choice
+                        Haptics.selection()
+                    } label: {
+                        Circle()
+                            .fill(LinearGradient(colors: [accent, partner], startPoint: .topLeading, endPoint: .bottomTrailing))
+                            .frame(width: 34, height: 34)
+                            .overlay {
+                                if draft.accent == choice {
+                                    Circle().strokeBorder(.primary, lineWidth: 2.5).padding(-4)
+                                }
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(choice.label)
                 }
             }
+            .padding(.vertical, 6)
+
+            Toggle("Motion", isOn: motion)
         } footer: {
-            Text("When a reply costs this much, MAIPA-G pauses and asks before spending more.")
+            if theme.reduceMotion {
+                Text("Reduce Motion is on in your iPhone's settings, so nothing moves.")
+            }
         }
     }
 
-    private var notifications: some View {
-        Section {
-            Toggle("Tell me when work finishes or needs me", isOn: $draft.notificationsOn)
-        } footer: {
-            Text("MAIPA-G only sends a notification when work finishes or needs an answer.")
-        }
+    /// One switch for the moving touches: the spark, the glow, the shimmer and sliding messages.
+    private var motion: Binding<Bool> {
+        Binding(
+            get: { draft.effects.sparkMoves || draft.effects.backgroundGlow || draft.effects.thinkingShimmer || draft.effects.messagesSlideIn },
+            set: { on in
+                draft.effects.sparkMoves = on
+                draft.effects.backgroundGlow = on
+                draft.effects.thinkingShimmer = on
+                draft.effects.messagesSlideIn = on
+            }
+        )
     }
 
-    // MARK: Saving
-
-    private var saving: some View {
-        Section {
-            HStack {
-                Text("Chats and settings")
-                Spacer()
-                Text(saveStatus).foregroundStyle(Theme.secondaryText)
-            }
-            if let billing = app.github.actionsBilling {
-                HStack {
-                    Text("Private Actions minutes")
-                    Spacer()
-                    Text("\(billing.includedMinutesRemaining) of \(Int(billing.includedMinutes)) left")
-                        .foregroundStyle(billing.isLow ? .orange : Theme.secondaryText)
-                }
-                if billing.paidAmount > 0 {
-                    Text(String(format: "GitHub is charging $%.2f this month for minutes beyond the allowance.", billing.paidAmount))
-                        .font(.footnote).foregroundStyle(.orange)
-                } else if billing.includedMinutesRemaining < 200 {
-                    Text("GitHub’s included private-repo minutes are running low. Autonomous jobs in private repos stop or start costing money when they run out.").font(.footnote).foregroundStyle(.orange)
-                }
-            } else if let error = app.github.actionsBillingError {
-                Text("Actions minutes: \(error)").font(.footnote).foregroundStyle(Theme.secondaryText)
-            }
-            if case .failed(let message) = app.sync.status {
-                Text(message).font(.footnote).foregroundStyle(Theme.danger)
-            }
-            ForEach(app.sync.fileProblems, id: \.self) { problem in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(problem.path).font(.footnote.monospaced())
-                    Text("\(problem.stage.rawValue.capitalized): \(problem.message)")
-                        .font(.caption)
-                        .foregroundStyle(Theme.danger)
-                }
-            }
-            if let error = app.jobs.lastError, error.contains("secret cleanup") || error.contains("Autonomous secrets") {
-                Text(error).font(.footnote).foregroundStyle(Theme.danger)
-                Button("Retry Autonomous cleanup") { Task { await app.jobs.retryPendingSecretCleanup() } }
-            }
-            if app.github.isConnected {
-                Button("Find repos with old Autonomous secrets") { Task { await app.jobs.migrateAutonomousLedger() } }
-            }
-            if app.github.isConnected {
-                Button("Save now") { Task { await app.sync.syncNow() } }
-                    .disabled(app.sync.status == .saving)
-            }
-            if let url = app.sync.repoURL {
-                Button("Open MAIPA-G-data on GitHub") { openURL(url) }
-            }
-            NavigationLink("Recently Deleted") { RecentlyDeletedScreen(embedded: true) }
-            NavigationLink("Unreadable files") { UnreadableFilesScreen(embedded: true) }
-            Button(exporting ? "Preparing export…" : "Export everything to Files") {
-                Task { await exportEverything() }
-            }
-            .disabled(exporting)
-            if let exportMessage { Text(exportMessage).font(.footnote).foregroundStyle(Theme.secondaryText) }
-        } footer: {
-            Text(app.sync.isEverythingBackedUp
-                 ? "Everything is in your private MAIPA-G-data repo. Install updates over this app."
-                 : "Some data is still only on this phone. Don’t delete the app; tap Save now and install updates over it.")
-        }
-    }
-
-    private func exportEverything() async {
-        guard !exporting else { return }
-        exporting = true
-        exportMessage = nil
-        let source = app.paths.data
-        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("MAIPA-G-export-\(UUID().uuidString).zip")
-        do {
-            try await Task.detached {
-                try DataExport.makeArchive(dataDirectory: source, destination: destination)
-            }.value
-            exportURL = destination
-            movingExport = true
-        } catch {
-            exportMessage = "Export failed: \(error.localizedDescription)"
-        }
-        exporting = false
-    }
-
-    private var saveStatus: String {
-        switch app.sync.status {
-        case .off: return "On this phone only"
-        case .idle: return app.sync.lastSaved.map { "Saved \($0.friendlyAgo)" } ?? "Saved"
-        case .saving: return "Saving…"
-        case .failed: return "Not saved yet"
-        }
-    }
-
-    // MARK: About
+    // MARK: About and backup
 
     private var about: some View {
         Section("MAIPA-G") {
@@ -803,6 +572,63 @@ struct SettingsScreen: View {
         }
     }
 
+    private var backup: some View {
+        Section {
+            HStack {
+                Text("Chats and settings")
+                Spacer()
+                Text(saveStatus).foregroundStyle(app.sync.isEverythingBackedUp ? Theme.secondaryText : .orange)
+            }
+            if case .failed(let message) = app.sync.status {
+                Text(message).font(.footnote).foregroundStyle(Theme.danger)
+            }
+            if app.github.isConnected {
+                Button("Save now") { Task { await app.sync.syncNow() } }
+                    .disabled(app.sync.status == .saving)
+            }
+            NavigationLink("Recently Deleted") { RecentlyDeletedScreen(embedded: true) }
+            Button(exporting ? "Preparing export…" : "Export everything to Files") {
+                Task { await exportEverything() }
+            }
+            .disabled(exporting)
+            if let exportMessage { Text(exportMessage).font(.footnote).foregroundStyle(Theme.secondaryText) }
+        } header: {
+            Text("Backup")
+        } footer: {
+            Text(app.sync.isEverythingBackedUp
+                 ? "Everything is in your private MAIPA-G-data repo. Install updates over this app."
+                 : "Some data is still only on this phone. Don’t delete the app; tap Save now and install updates over it.")
+        }
+    }
+
+    private func exportEverything() async {
+        guard !exporting else { return }
+        exporting = true
+        exportMessage = nil
+        let source = app.paths.data
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("MAIPA-G-export-\(UUID().uuidString).zip")
+        do {
+            try await Task.detached {
+                try DataExport.makeArchive(dataDirectory: source, destination: destination)
+            }.value
+            exportURL = destination
+            movingExport = true
+        } catch {
+            exportMessage = "Export failed: \(error.localizedDescription)"
+        }
+        exporting = false
+    }
+
+    private var saveStatus: String {
+        switch app.sync.status {
+        case .off: return "On this phone only"
+        case .idle: return app.sync.lastSaved.map { "Saved \($0.friendlyAgo)" } ?? "Saved"
+        case .saving: return "Saving…"
+        case .failed: return "Not saved yet"
+        }
+    }
+
+    /// Everything a person never needs day to day, folded away.
     private var technical: some View {
         Section {
             DisclosureGroup("Technical details") {
@@ -814,6 +640,13 @@ struct SettingsScreen: View {
                 detail("iPhone's own AI", OnDeviceAI.status)
                 detail("Repo copies", copiesSize.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "…")
                 detail("Free iPhone storage", freeSpace.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "…")
+                if let billing = app.github.actionsBilling {
+                    detail("Private Actions minutes", "\(billing.includedMinutesRemaining) of \(Int(billing.includedMinutes)) left")
+                    if billing.paidAmount > 0 {
+                        Text(String(format: "GitHub is charging $%.2f this month for minutes beyond the allowance.", billing.paidAmount))
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                }
                 if let freeSpace, freeSpace < 2 * 1024 * 1024 * 1024 {
                     Text("Storage is low. Clear repo copies before opening another large repository.")
                         .font(.caption).foregroundStyle(.orange)
@@ -823,6 +656,28 @@ struct SettingsScreen: View {
                         Text("Background task")
                         Text(failure).font(.caption).foregroundStyle(Theme.danger)
                     }
+                }
+                ForEach(app.sync.fileProblems, id: \.self) { problem in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(problem.path).font(.footnote.monospaced())
+                        Text("\(problem.stage.rawValue.capitalized): \(problem.message)")
+                            .font(.caption)
+                            .foregroundStyle(Theme.danger)
+                    }
+                }
+                if let error = app.jobs.lastError, error.contains("secret cleanup") || error.contains("Autonomous secrets") {
+                    Text(error).font(.caption).foregroundStyle(Theme.danger)
+                    Button("Retry Autonomous cleanup") { Task { await app.jobs.retryPendingSecretCleanup() } }
+                }
+                if let url = app.sync.repoURL {
+                    Button("Open MAIPA-G-data on GitHub") { openURL(url) }
+                }
+                NavigationLink("Unreadable files") { UnreadableFilesScreen(embedded: true) }
+                if app.openRouter.isSignedIn {
+                    Button(app.openRouter.isLoadingModels ? "Refreshing models…" : "Refresh all AI models") {
+                        Task { await app.openRouter.loadModels(force: true) }
+                    }
+                    .disabled(app.openRouter.isLoadingModels)
                 }
                 Button("Clear repo copies") {
                     Task {
@@ -846,8 +701,6 @@ struct SettingsScreen: View {
         }
     }
 }
-
-
 
 /// A rounded, colored icon tile like the iPhone's own Settings.
 struct SettingsIcon: View {

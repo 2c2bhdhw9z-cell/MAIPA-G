@@ -33,6 +33,8 @@ extension View {
 /// A small capsule button, like the AI and repo pickers under the message box.
 struct Chip: View {
     var title: String
+    /// A logo from the asset catalogue (the GitHub mark on a repo), before the symbol.
+    var assetImage: String? = nil
     var systemImage: String?
     var showsChevron = false
     var tint: Color?
@@ -41,6 +43,12 @@ struct Chip: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 5) {
+                if let assetImage {
+                    Image(assetImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 15, height: 15)
+                }
                 if let systemImage {
                     Image(systemName: systemImage)
                         .font(.footnote.weight(.semibold))

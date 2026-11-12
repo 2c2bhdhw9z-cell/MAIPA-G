@@ -12,6 +12,14 @@ struct ChatSummary: Identifiable, Hashable, Sendable {
     var preview: String
     var firstMessage: String
     var groupID: UUID?
+    /// Where the chat's work is, for the list, the way Kiro shows each session's status.
+    enum Activity: Hashable, Sendable { case idle, working, needsYou, done, failed, stopped }
+    var activity: Activity
+    /// What it's doing right now (the running step), or the start of the last reply.
+    var activityLine: String
+    var isAutonomous: Bool
+    /// A reply is running on the computer, so it's working even with the app closed.
+    var runsOnComputer: Bool
 
     init(_ chat: Chat) {
         id = chat.id
@@ -22,6 +30,20 @@ struct ChatSummary: Identifiable, Hashable, Sendable {
         preview = chat.preview
         firstMessage = chat.firstUserText ?? ""
         groupID = chat.groupID
+        isAutonomous = chat.autonomous ?? false
+        runsOnComputer = chat.computerRunID != nil
+        let turn = chat.lastAssistantTurn
+        switch turn?.status {
+        case .running?: activity = .working
+        case .waitingForUser?: activity = .needsYou
+        case .failed?: activity = .failed
+        case .stopped?: activity = .stopped
+        case .done?: activity = .done
+        case nil: activity = .idle
+        }
+        let running = turn?.steps.last?.toolCalls.last { $0.status == .running }?.summary
+        let firstLine = chat.preview.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        activityLine = (activity == .working ? running : nil) ?? firstLine
     }
 
     func matches(_ query: String) -> Bool {

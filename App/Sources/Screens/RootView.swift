@@ -144,23 +144,6 @@ struct SheetContent: View {
                     template: id.flatMap { value in app.automations.agents.first { $0.id == value } }
                 )
             }
-        case .workflows: WorkflowsScreen()
-        case .workflowDetail(let id):
-            NavigationStack {
-                if let workflow = app.automations.workflows.first(where: { $0.id == id }) {
-                    WorkflowDetailScreen(workflow: workflow, standalone: true)
-                } else {
-                    ContentUnavailableView("Workflow not found", systemImage: "list.number")
-                }
-            }
-        case .workflowEditor(let id):
-            NavigationStack {
-                WorkflowEditorScreen(
-                    record: id.flatMap { value in app.automations.customWorkflows.first { $0.definition.id == value } },
-                    template: id.flatMap { value in app.automations.workflows.first { $0.id == value } }
-                )
-            }
-        case .workflowMaker: NavigationStack { WorkflowMakerScreen() }
         case .memories: MemoriesScreen()
         case .recentlyDeleted: RecentlyDeletedScreen()
         case .unreadableFiles: UnreadableFilesScreen()

@@ -208,7 +208,7 @@ public enum Transcript {
     }
 
     static func toolResultText(for call: ToolCallRecord, turnIsCurrent: Bool, isOlderTurn: Bool = false, age: ToolResultAge? = nil) -> String {
-        if call.name == "launch_helpers",
+        if SubagentTools.isSubagentTool(call.name),
            (call.result == nil || call.result == "Interrupted when the app closed.") {
             let actionsDone = (call.subagents ?? []).reduce(0) { $0 + $1.toolCallCount }
             let progressNote = actionsDone > 0 ? " after \(actionsDone) actions of partial progress" : ""

@@ -146,7 +146,8 @@ final class JobCoordinator {
             _ = try await store.create(job)
             await reloadAndSync()
             selectedJobID = job.id
-            app.sheet = .jobs
+            // No Jobs screen pops up (owner, 11 November 2026: Kiro doesn't do jobs like this);
+            // the work shows where it was started.
             if installed {
                 do { try await dispatch(job) }
                 catch let error as ComputerJobError { await failToStart(job.id, error.message); return job }

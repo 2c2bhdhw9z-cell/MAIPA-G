@@ -688,7 +688,7 @@ struct TurnSourceItem: Identifiable, Hashable {
 
         let excludedLocalTools: Set<String> = [
             "search_code", "read_file", "list_files", "create_file", "edit_file", "delete_file",
-            "save_changes", "run_shell", "read_attachment", "generate_image", "launch_helpers"
+            "save_changes", "run_shell", "read_attachment", "generate_image", "launch_helpers", "invoke_sub_agent"
         ]
 
         for step in turn.steps {

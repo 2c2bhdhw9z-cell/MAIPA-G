@@ -177,7 +177,11 @@ enum MarkdownConverter {
     private static func collect(_ markup: Markup, style: InlineRun.Style, link: URL?, into runs: inout [InlineRun]) {
         switch markup {
         case let text as Text:
-            runs.append(InlineRun(text: text.string, style: style, link: link))
+            if link == nil {
+                runs.append(contentsOf: autolinked(text.string, style: style))
+            } else {
+                runs.append(InlineRun(text: text.string, style: style, link: link))
+            }
         case let code as InlineCode:
             runs.append(InlineRun(text: code.code, style: style.union(.code), link: link))
         case is SoftBreak, is LineBreak:
@@ -210,6 +214,33 @@ enum MarkdownConverter {
     }
 
     /// Joins neighbouring runs with the same look, so the app builds fewer text pieces.
+    /// A bare `https://…` address in the text becomes a link, as it would in a chat app. Trailing
+    /// punctuation stays text.
+    static func autolinked(_ text: String, style: InlineRun.Style) -> [InlineRun] {
+        guard text.contains("https://") || text.contains("http://") else { return [InlineRun(text: text, style: style)] }
+        var runs: [InlineRun] = []
+        var rest = Substring(text)
+        while let start = rest.range(of: "https://") ?? rest.range(of: "http://") {
+            if start.lowerBound > rest.startIndex { runs.append(InlineRun(text: String(rest[..<start.lowerBound]), style: style)) }
+            var end = rest[start.lowerBound...].firstIndex { $0.isWhitespace || "<>\"'`".contains($0) } ?? rest.endIndex
+            while end > start.upperBound, ".,;:!?)]}*_".contains(rest[rest.index(before: end)]) {
+                let previous = rest.index(before: end)
+                // Keep a closing bracket that has its opening one inside the address.
+                if rest[previous] == ")", rest[start.lowerBound..<previous].contains("(") { break }
+                end = previous
+            }
+            let address = String(rest[start.lowerBound..<end])
+            if end > start.upperBound, let url = URL(string: address), url.host != nil {
+                runs.append(InlineRun(text: address, style: style, link: url))
+            } else {
+                runs.append(InlineRun(text: address, style: style))
+            }
+            rest = rest[end...]
+        }
+        if !rest.isEmpty { runs.append(InlineRun(text: String(rest), style: style)) }
+        return runs
+    }
+
     private static func merged(_ runs: [InlineRun]) -> [InlineRun] {
         var result: [InlineRun] = []
         for run in runs where !run.text.isEmpty {
@@ -220,5 +251,18 @@ enum MarkdownConverter {
             }
         }
         return result
+    }
+}
+
+/// Links to code hosts, shown in replies with the host's mark in front (owner, 11 November 2026,
+/// circling the GitHub marks on links in another app and on Kiro's repo chips).
+public enum CodeHostLink: Sendable, Equatable {
+    case github, gitlab
+
+    public init?(_ url: URL) {
+        guard url.scheme == "https", let host = url.host?.lowercased() else { return nil }
+        if host == "github.com" || host == "www.github.com" || host == "gist.github.com" { self = .github }
+        else if host == "gitlab.com" || host == "www.gitlab.com" { self = .gitlab }
+        else { return nil }
     }
 }

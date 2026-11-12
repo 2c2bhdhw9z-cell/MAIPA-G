@@ -240,8 +240,11 @@ struct Composer: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
+                    // Kiro's Autonomous switch, right under the message box: on, the chat works to
+                    // the end by itself on the computer.
+                    AutonomousSwitch(isOn: $autonomous)
                     if let repo {
-                        Chip(title: repo.ref.name + (extraRepoCount > 0 ? " +\(extraRepoCount)" : ""), systemImage: repo.isPrivate ? "lock" : "chevron.left.forwardslash.chevron.right", showsChevron: true, action: onPickRepo)
+                        Chip(title: repo.ref.name + (extraRepoCount > 0 ? " +\(extraRepoCount)" : ""), assetImage: repo.ref.isGitLab ? "IntegrationGitLab" : "IntegrationGitHub", systemImage: repo.isPrivate ? "lock" : nil, showsChevron: true, action: onPickRepo)
                         Chip(title: repo.branch, systemImage: "arrow.triangle.branch", showsChevron: true, action: onPickBranch)
                         Button(action: onClearRepo) {
                             Image(systemName: "xmark")
@@ -254,10 +257,7 @@ struct Composer: View {
                         .buttonStyle(.plain)
                         .accessibilityLabel("No repo")
                     } else {
-                        Chip(title: isGitHubConnected ? "Add a repo" : "Connect GitHub", systemImage: isGitHubConnected ? "plus" : "link", action: onPickRepo)
-                    }
-                    if autonomous {
-                        Chip(title: "Autonomous", systemImage: "bolt.fill", tint: theme.accent) { autonomous = false }
+                        Chip(title: isGitHubConnected ? "Add a repo" : "Connect GitHub", assetImage: "IntegrationGitHub", systemImage: isGitHubConnected ? "plus" : nil, action: onPickRepo)
                     }
                     if let groupName {
                         Chip(title: groupName, systemImage: "folder.fill", showsChevron: true, tint: theme.accent, action: onPickGroup)
@@ -484,7 +484,7 @@ struct Composer: View {
                 .background(Theme.raised.opacity(0.95), in: Circle())
                 .overlay(Circle().strokeBorder(Theme.stroke))
                 .overlay(alignment: .topTrailing) {
-                    if autonomous || !webEnabled || groupName != nil {
+                    if !webEnabled || groupName != nil {
                         Circle().fill(theme.accent).frame(width: 7, height: 7)
                     }
                 }
@@ -514,16 +514,6 @@ struct Composer: View {
                     webEnabled.toggle()
                     Haptics.selection()
                 }
-                plusPopoverRow(
-                    "Autonomous",
-                    icon: autonomous ? "bolt.fill" : "bolt",
-                    trailing: !app.settings.autonomousEnabled ? "Enable in Settings" : (autonomous ? "On" : "Off"),
-                    highlightTrailing: autonomous,
-                    disabled: !app.settings.autonomousEnabled
-                ) {
-                    autonomous.toggle()
-                    Haptics.selection()
-                }
                 plusPopoverRow("Group", icon: "folder.badge.plus", trailing: groupName ?? "None") {
                     showingPlusMenu = false
                     onPickGroup()
@@ -546,7 +536,7 @@ struct Composer: View {
                     }
                 }
 
-                if repo != nil || !app.jobs.jobs.isEmpty {
+                if repo != nil {
                     Divider().padding(.vertical, 3)
                 }
 
@@ -560,12 +550,6 @@ struct Composer: View {
                     plusPopoverRow("Web preview", icon: "safari") {
                         showingPlusMenu = false
                         onPreview()
-                    }
-                }
-                if !app.jobs.jobs.isEmpty {
-                    plusPopoverRow("Jobs", icon: "gearshape.2", trailing: app.jobs.activeCount > 0 ? "\(app.jobs.activeCount) working" : nil) {
-                        showingPlusMenu = false
-                        app.jobs.show()
                     }
                 }
             }
@@ -885,5 +869,44 @@ struct ArenaComposerAttachmentChip: View {
             if ["p12", "cer", "mobileprovision"].contains(ext) { return "key.fill" }
             return "doc"
         }
+    }
+}
+
+/// Kiro's Autonomous switch under the message box (owner, 11 November 2026: jobs the way Kiro
+/// does them). On, the chat works to the end by itself on the computer and shows as Autonomous
+/// in the chat list.
+struct AutonomousSwitch: View {
+    @Binding var isOn: Bool
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        Button {
+            isOn.toggle()
+            Haptics.selection()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: isOn ? "bolt.fill" : "bolt")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(isOn ? theme.accent : Color.primary)
+                Text("Autonomous")
+                    .font(.footnote.weight(.medium))
+                    .lineLimit(1)
+                Capsule()
+                    .fill(isOn ? theme.accent : Theme.secondaryText.opacity(0.35))
+                    .frame(width: 26, height: 15)
+                    .overlay(alignment: isOn ? .trailing : .leading) {
+                        Circle().fill(Color.white).frame(width: 11, height: 11).padding(2)
+                    }
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
+            .background(Theme.raised.opacity(0.9), in: Capsule())
+            .overlay(Capsule().strokeBorder(isOn ? theme.accent.opacity(0.5) : Theme.stroke))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .animation(.snappy(duration: 0.18), value: isOn)
+        .accessibilityLabel("Autonomous")
+        .accessibilityValue(isOn ? "On" : "Off")
     }
 }

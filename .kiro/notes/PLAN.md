@@ -1,6 +1,6 @@
 # MAIPA-G plan
 
-**Status (11 November 2026, evening): Build 174 fixes the owner's build 173 reports (pictures failing on a down gateway, memories never saved, "Lost contact with your computer", commands stuck for 15 minutes). The redesign in "Fourth follow-up" below (Settings, Workflows, Jobs, sub-agents) is a proposal waiting for his OK and answers; nothing of it is built.**
+**Status (12 November 2026, early morning Eastern): Build 175 had the picture, memory, lost-contact and stuck-command fixes. The owner OK'd items 1–4 below ("1-4 yes") and the circled GitHub marks; this batch builds them plus videos through OneProvider. Checked on Linux and on a temporary tag before it goes to main.**
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
 saving works (Settings and the side menu showed "Saved just now", and the 173 MB Continuum .ipa is
@@ -259,7 +259,7 @@ Not done (owner: "No appetize shit for now"): a real iPhone simulator preview (V
 
 ## Fourth follow-up of 11 November 2026 (owner, after testing build 173)
 
-### Fixed in build 174 (found from his chats and diagnostics in MAIPA-G-data)
+### Fixed in build 175 (found from his chats and diagnostics in MAIPA-G-data)
 - **Picture edits failing ("The service is temporarily unable… retry shortly", 7 times).** The picture
   model MAIPA-G picked was on TeamoRouter, whose `/images/edits` kept answering HTTP 500, and nothing
   retried or tried another model. Now `generate_image` tries once more after a short wait, then the
@@ -286,7 +286,7 @@ Not done (owner: "No appetize shit for now"): a real iPhone simulator preview (V
   Linux: 25 s before, 0.1 s after). Exit codes on the computer were also always 0, so a failed build
   looked fine to the AI; they come through now.
 
-### Proposed, waiting for his OK (not built)
+### OK'd by him ("1-4 yes"), built in the next batch
 1. **Settings, really cleaned up.** Main page: Accounts (GitHub, GitLab), AI (providers and
    spending), Computer, Memories, Appearance, About (build, updates, backup, Check everything).
    Gone: the per-repo "Save straight to branch" list (the AI sets it when told, and repo rules
@@ -304,11 +304,32 @@ Not done (owner: "No appetize shit for now"): a real iPhone simulator preview (V
    its name, what it was asked, live progress, and its report, collapsible. They also work in
    replies on the computer (they don't exist there now).
 
-### Questions for him
-1. OK to build 1–4 as written?
-2. "I want these" with the last two screenshots: which ones? From Kiro: the chat's elapsed time and
-   credits, the Recap button, Add to group, several repos per chat, the Autonomous switch. From the
-   other app: the file card (in since build 170) and GitHub link chips with icons in replies.
+### His answers
+1. "1-4 yes."
+2. "These. Literally circled": the same thing in both screenshots, the GitHub mark. On Kiro it's on
+   the repo chips under the message box; in the other app it's in front of GitHub links in replies.
+
+### Built in this batch
+- Settings: Accounts, AI, Computer, Memories, Appearance, a Notifications switch, About (version,
+  updates, backup, Check everything, technical details folded away). Gone: per-repo saving
+  switches, the inline GitLab form, the computer's cost and machine name, Features, the preview
+  host list, the four motion switches (one Motion switch now) and the long provider lines.
+- Workflows: the library, its editor, the Workstation tab, the chat card, the workflow tools and the
+  auto-routing are gone. The prompt says to plan the work itself and use sub-agents.
+- Jobs: an Autonomous switch under the message box, kept with the chat. The chat list shows each
+  chat's status like Kiro's sessions (Working with what it's doing, Needs you, Failed, Stopped) and
+  a bolt for autonomous chats. The Jobs pill, the + menu's Jobs row and the Jobs sheet popping up are
+  gone; Autonomous no longer needs turning on in Settings.
+- Sub-agents: `invoke_sub_agent` (name, prompt, explanation), one per call and several at once, with
+  Kiro's context-gatherer, general-task-execution and semantic-reviewer plus repo and custom agents.
+  Each is its own card in the chat with its explanation. They now work in replies on the computer.
+- GitHub marks: on the repo chip under the message box, and in front of GitHub (and GitLab) links in
+  replies. Bare https addresses in replies are tappable links now.
+- Videos (his message: "OpenRouter reported no remaining credits… OneProvider and TeamoRouter are
+  connected, but this video tool still doesn't expose a route through them"): OneProvider's Kling
+  3.0 and 3.0 Turbo are offered, and a video falls back from OpenRouter to them. OneProvider
+  doesn't document its video address, so MAIPA-G tries OpenAI's /videos and then
+  /video/generations and says plainly if neither exists. TeamoRouter lists no video models.
 
 ## Tools MAIPA-G must have (owner, 29 October 2026, 4:30 PM)
 He listed Arena's agent tools (bash, write_file, web_search, read_file, fetch_page, list_files,

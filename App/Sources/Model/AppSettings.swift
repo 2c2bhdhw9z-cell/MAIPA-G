@@ -121,9 +121,9 @@ struct AppSettings: Codable, Equatable, Sendable {
     var workflowsEnabled = false
     /// Specs off hides Spec from the mode picker and makes the chat plan inline instead.
     var specsEnabled = false
-    /// Global Autonomous switch. Turning it off removes MAIPA-G-managed Actions secrets.
-    /// Off to start with, so the app behaves like a plain chat with a repo until it is turned on.
-    var autonomousEnabled = false
+    /// Always on now: Autonomous is a switch on each chat, the way Kiro has it (owner, 11 November
+    /// 2026: "I don't think you do jobs like this"), not a feature to turn on in Settings first.
+    var autonomousEnabled = true
     /// Master switch for adding enabled memories to newly started chats.
     var memoriesOn = true
     /// The connector (its serverID) that gives chats a Linux computer to run commands on. Nil is
@@ -155,7 +155,7 @@ struct AppSettings: Codable, Equatable, Sendable {
         workflowPolicy = (try? c.decodeIfPresent(WorkflowPolicy.self, forKey: .workflowPolicy)) ?? .bigJobs
         workflowsEnabled = try c.decodeIfPresent(Bool.self, forKey: .workflowsEnabled) ?? false
         specsEnabled = try c.decodeIfPresent(Bool.self, forKey: .specsEnabled) ?? false
-        autonomousEnabled = try c.decodeIfPresent(Bool.self, forKey: .autonomousEnabled) ?? false
+        autonomousEnabled = true
         memoriesOn = try c.decodeIfPresent(Bool.self, forKey: .memoriesOn) ?? true
         chatComputerServer = try? c.decodeIfPresent(String.self, forKey: .chatComputerServer)
         chatComputerOff = (try? c.decodeIfPresent(Bool.self, forKey: .chatComputerOff)) ?? false

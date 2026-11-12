@@ -422,7 +422,7 @@ public enum AgentLoop {
 
     /// Tools that run other agents. Each of their agents' own model calls and tools has its own
     /// limits, so a wall-clock limit on the whole tool would only cut off healthy long work.
-    static let toolTimeLimitExempt: Set<String> = ["launch_helpers", "run_workflow"]
+    static let toolTimeLimitExempt: Set<String> = ["launch_helpers", "invoke_sub_agent", "run_workflow"]
 
     /// Runs `work`, but returns as soon as the task is stopped or `seconds` pass (0 means no time
     /// limit), even when the work itself ignores cancellation: it is cancelled and left to wind
@@ -784,7 +784,7 @@ private struct Runner {
                         subs[idx].latestActivity = "Stopped"
                     }
                     record.subagents = subs
-                } else if record.name == "launch_helpers" {
+                } else if SubagentTools.isSubagentTool(record.name) {
                     record.subagents = SubagentRunItem.resolvedItems(for: record).map { item in
                         var copy = item
                         if copy.status == .running {
@@ -794,7 +794,7 @@ private struct Runner {
                         return copy
                     }
                 }
-                if isGracefulStop, record.name == "launch_helpers", record.result == nil {
+                if isGracefulStop, SubagentTools.isSubagentTool(record.name), record.result == nil {
                     let actionsDone = (record.subagents ?? []).reduce(0) { $0 + $1.toolCallCount }
                     let progressNote = actionsDone > 0 ? " after \(actionsDone) actions of partial progress" : ""
                     record.result = "Paused/stopped before completion\(progressNote) (not a tool failure). Sub-agent launching works normally — launch sub-agents in parallel when continuing."
