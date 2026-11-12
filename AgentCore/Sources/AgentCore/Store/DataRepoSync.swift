@@ -339,11 +339,13 @@ public actor DataRepoSync {
             if running == marker { running = nil }
             monitor.setFilesLeft(nil)
         }
+        // Decided once, so a retry after a branch race doesn't hold a chat that was due to go.
+        let holding = holdBack(held)
         var attempt = 0
         while true {
             attempt += 1
             do {
-                return try await syncOnce(holding: held)
+                return try await syncOnce(holding: holding)
             } catch let error as GitHubAPIError where Self.isRefConflict(error) && attempt < 4 {
                 // The branch moved while we were working: someone else saved. Start over after brief backoff.
                 try? await Task.sleep(nanoseconds: UInt64(attempt) * 120_000_000)
@@ -574,7 +576,7 @@ public actor DataRepoSync {
         return safe
     }
 
-    private func syncOnce(holding requested: Set<String>) async throws -> Report {
+    private func syncOnce(holding held: Set<String>) async throws -> Report {
         guard let repo = state.repo, let branch = state.branch else { throw Failure.notSetUp }
         var report = Report()
         activity.touch()
@@ -602,7 +604,6 @@ public actor DataRepoSync {
             for (path, sha) in base where remote[path] == nil { remote[path] = sha }
             report.remoteListingIncomplete = true
         }
-        let held = holdBack(requested)
         let scan = localFiles(remote: remote)
         let local = scan.files
         report.problems.append(contentsOf: scan.problems)
