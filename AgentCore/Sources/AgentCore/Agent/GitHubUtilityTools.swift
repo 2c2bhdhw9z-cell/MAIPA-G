@@ -61,7 +61,19 @@ public struct LiveStatusTool: AgentTool {
     public let snapshot: @Sendable () async -> String
     public let name = "introspect"
     public init(snapshot: @escaping @Sendable () async -> String) { self.snapshot = snapshot }
-    public var spec: ToolSpec { ToolSpec(name: name, description: "Read MAIPA-G's current connection, saving, computer, and Autonomous job status without exposing secrets.", parameters: ["type": "object", "properties": [:]]) }
+    public var spec: ToolSpec {
+        ToolSpec(
+            name: name,
+            description: """
+            Read MAIPA-G's own live status: the active AI model, its provider and limits, credit balances, the GitHub or GitLab \
+            account, repo, branch and commit, connected connectors, the person's computer, how changes are being saved, and \
+            Autonomous job progress. Secrets are never included. Call it whenever the person asks about MAIPA-G itself or about \
+            what it is connected to, instead of guessing. It takes no arguments. Don't use it for facts about the repo's code \
+            (use search_code and read_file) or the outside world (use web_search).
+            """,
+            parameters: ["type": "object", "properties": [:]]
+        )
+    }
     public func runningSummary(for arguments: JSONValue) -> String { "Checking MAIPA-G status…" }
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let value = SensitiveDataRedactor().redact(await snapshot())

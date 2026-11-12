@@ -93,11 +93,13 @@ enum TextFileCodec {
     /// Encodes replacement text with the original encoding, BOM, per-line endings and
     /// final-newline behavior. The replacement may use any common line ending; it is normalized
     /// before the original file's endings are reapplied.
-    static func encode(_ replacement: String, preserving original: Document) -> Data {
+    /// `finalNewline` overrides whether the result ends with a line break (an append ends the
+    /// way the appended text does); by default it follows the original file.
+    static func encode(_ replacement: String, preserving original: Document, finalNewline: Bool? = nil) -> Data {
         var replacementLines = lines(in: replacement)
         let originalHasFinalNewline = original.lines.last?.ending != nil
         let replacementIsEmpty = replacementLines.count == 1 && replacementLines[0].text.isEmpty && replacementLines[0].ending == nil
-        let keepFinalNewline = originalHasFinalNewline && !replacementIsEmpty
+        let keepFinalNewline = finalNewline ?? (originalHasFinalNewline && !replacementIsEmpty)
         let endings = preservedEndings(
             from: original.lines,
             for: replacementLines.map(\.text),

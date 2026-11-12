@@ -4,28 +4,34 @@ import Testing
 
 @Suite("Tool result payload limit")
 struct ToolResultLimitTests {
-    @Test func capIncludesNoticeAndPreservesSmallResults() {
-        for count in [0, 19_999, 20_000, 20_001, 200_000] {
+    static let limit = Transcript.maxToolResultCharacters
+
+    @Test func capIncludesMarkerAndPreservesSmallResults() {
+        #expect(Self.limit == 30_000)
+        for count in [0, 29_999, 30_000, 30_001, 300_000] {
             let text = String(repeating: "x", count: count)
             let capped = Transcript.cappedToolResult(text)
-            #expect(capped.count == min(count, 20_000))
-            if count <= 20_000 {
+            #expect(capped.count <= min(count, Self.limit) && capped.count >= min(count, Self.limit) - 1)
+            if count <= Self.limit {
                 #expect(capped == text)
             } else {
-                #expect(capped.hasSuffix(Transcript.toolResultTruncationNotice))
+                // The start and the end are kept, with the cut in the middle.
+                #expect(capped.hasPrefix("xxxx") && capped.hasSuffix("xxxx"))
+                #expect(capped.contains("characters cut from the middle"))
             }
             #expect(Transcript.cappedToolResult(capped) == capped)
         }
     }
 
-    @Test func capPreservesUnicodeCharacters() {
+    @Test func capPreservesUnicodeCharacters() throws {
         let character = "👩🏽‍💻"
-        let text = String(repeating: character, count: 20_001)
+        let text = String(repeating: character, count: Self.limit + 1)
         let capped = Transcript.cappedToolResult(text)
-        #expect(capped.count == 20_000)
-        #expect(capped.hasSuffix(Transcript.toolResultTruncationNotice))
-        #expect(capped.dropLast(Transcript.toolResultTruncationNotice.count)
-            .allSatisfy { String($0) == character })
+        #expect(capped.count <= Self.limit && capped.count >= Self.limit - 1)
+        let marker = try #require(capped.range(of: "\n\n[... "))
+        let end = try #require(capped.range(of: " ...]\n\n"))
+        #expect(capped[..<marker.lowerBound].allSatisfy { String($0) == character })
+        #expect(capped[end.upperBound...].allSatisfy { String($0) == character })
     }
 
     @Test func replayCapsCurrentRecentAndOlderResultsIncludingJSONEscaping() throws {
@@ -36,7 +42,7 @@ struct ToolResultLimitTests {
             call.result = text
             for (current, older) in [(true, false), (false, false), (false, true)] {
                 let output = Transcript.toolResultText(for: call, turnIsCurrent: current, isOlderTurn: older)
-                #expect(output.count <= 20_000)
+                #expect(output.count <= Self.limit)
                 let jsonStart = try #require(output.firstIndex(of: "{"))
                 let envelope = try #require(JSONValue.parse(String(output[jsonStart...])))
                 #expect(envelope["kind"]?.stringValue == "untrusted_tool_data")
@@ -51,7 +57,7 @@ struct ToolResultLimitTests {
         var call = ToolCallRecord(id: "unknown", name: String(repeating: "x", count: 30_000), arguments: "{}", summary: "Unknown tool")
         call.result = "Unknown tool"
         let output = Transcript.toolResultText(for: call, turnIsCurrent: true)
-        #expect(output.count <= 20_000)
+        #expect(output.count <= Self.limit)
         let jsonStart = try #require(output.firstIndex(of: "{"))
         #expect(JSONValue.parse(String(output[jsonStart...])) != nil)
     }
@@ -83,7 +89,7 @@ struct ToolResultLimitTests {
         let results = messages.filter { $0.role == .tool }
         #expect(results.count == 2)
         #expect(results.map(\.toolCallID) == ["history", "current"])
-        #expect(results.allSatisfy { ($0.content?.count ?? 0) <= 20_000 })
+        #expect(results.allSatisfy { ($0.content?.count ?? 0) <= Self.limit })
     }
 
     @Test func liveSuccessAndErrorsAreCappedBeforeNextRequest() async throws {
@@ -105,7 +111,10 @@ struct ToolResultLimitTests {
             let finished = try #require(turn)
             #expect(finished.status == .done)
             let call = try #require(finished.steps.first?.toolCalls.first)
-            #expect(call.result?.count == 20_000)
+            // Cut so that it fits whole in its envelope, JSON escaping included, before the next request.
+            let stored = try #require(call.result)
+            #expect(stored.count <= Self.limit)
+            #expect(Transcript.wrapToolResult(stored, tool: "large_result").count <= Self.limit)
             #expect(call.status == (throwsError ? .failed : .done))
             #expect(call.detail == text)
             #expect(transport.requestCount == 2)
@@ -113,8 +122,8 @@ struct ToolResultLimitTests {
             let result = try #require(sent.first { $0["role"]?.stringValue == "tool" })
             #expect(result["tool_call_id"]?.stringValue == "large")
             let content = try #require(result["content"]?.stringValue)
-            #expect(content.count <= 20_000)
-            #expect(content.contains("Truncated:"))
+            #expect(content.count <= Self.limit)
+            #expect(content.contains("characters cut from the middle"))
         }
     }
 }

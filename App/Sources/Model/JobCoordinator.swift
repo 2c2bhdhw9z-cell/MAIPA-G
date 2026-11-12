@@ -255,6 +255,7 @@ final class JobCoordinator {
             let specRepoTools: [any AgentTool] = [
                 ListFilesTool(workspace: repoWorkspace, changes: readChanges),
                 SearchCodeTool(workspace: repoWorkspace, changes: readChanges),
+                FileSearchTool(workspace: repoWorkspace, changes: readChanges),
                 ReadFileTool(workspace: repoWorkspace, changes: readChanges),
                 ReadRepoFileTool(github: github),
                 LoadRepoRulesTool(documents: rules.documents),

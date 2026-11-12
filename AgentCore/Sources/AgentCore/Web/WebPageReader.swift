@@ -25,6 +25,10 @@ public struct WebPage: Sendable, Hashable {
     public var url: URL
     public var title: String?
     public var text: String
+    /// Characters of readable text the page had before the reader's own limit, and whether
+    /// `text` stops short of them.
+    public var totalCharacters: Int = 0
+    public var wasCut: Bool = false
 }
 
 public struct WebPageReader: Sendable {
@@ -55,11 +59,14 @@ public struct WebPageReader: Sendable {
             || type.contains("markdown")
         guard isReadableType else { throw WebPageError.unsupportedType(type) }
         let raw = String(decoding: response.body, as: UTF8.self)
-        if type.contains("html") {
-            return WebPage(url: finalURL, title: Self.firstMatch(#"<title[^>]*>(.*?)</title>"#, in: raw).map(Self.clean), text: Self.readableText(raw))
-        }
-        return WebPage(url: finalURL, title: nil, text: String(raw.prefix(200_000)))
+        let full = type.contains("html") ? Self.readableText(raw, limit: nil) : raw
+        let text = String(full.prefix(Self.maxTextCharacters))
+        let title = type.contains("html") ? Self.firstMatch(#"<title[^>]*>(.*?)</title>"#, in: raw).map(Self.clean) : nil
+        return WebPage(url: finalURL, title: title, text: text, totalCharacters: full.count, wasCut: full.count > text.count)
     }
+
+    /// Most characters of a page's text kept in one read.
+    public static let maxTextCharacters = 200_000
 
     fileprivate static let headers = [
         "Accept": "text/markdown,text/html,text/plain,application/json,application/xml,application/xhtml+xml;q=0.9,*/*;q=0.5",
@@ -74,7 +81,7 @@ public struct WebPageReader: Sendable {
         return true
     }
 
-    static func readableText(_ html: String) -> String {
+    static func readableText(_ html: String, limit: Int? = 200_000) -> String {
         var text = html
         for pattern in [
             #"(?is)<!--.*?-->"#,
@@ -101,7 +108,8 @@ public struct WebPageReader: Sendable {
             }
             return line
         }
-        return String(lines.joined(separator: "\n").prefix(200_000))
+        let joined = lines.joined(separator: "\n")
+        return limit.map { String(joined.prefix($0)) } ?? joined
     }
 
     static func clean(_ text: String) -> String {

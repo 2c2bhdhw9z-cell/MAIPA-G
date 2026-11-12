@@ -17,6 +17,9 @@ public enum ProcessFailure: Error, Sendable, Equatable {
 }
 
 public enum BoundedProcess {
+    /// The longest any command may run: 30 minutes, like Kiro's commands.
+    public static let maxTimeout: TimeInterval = 1_800
+
     public static func run(
         executable: String,
         arguments: [String],
@@ -84,7 +87,7 @@ public enum BoundedProcess {
             try process.run()
         }
         let maxOnDiskBytes = UInt64(max(outputLimit * 2, 32_000_000))
-        let deadline = Date().addingTimeInterval(max(1, min(timeout, 900)))
+        let deadline = Date().addingTimeInterval(max(1, min(timeout, Self.maxTimeout)))
         var exceededDiskCap = false
         while process.isRunning && Date() < deadline && !Task.isCancelled {
             let outSize = (try? manager.attributesOfItem(atPath: outputURL.path)[.size] as? UInt64) ?? 0
@@ -246,7 +249,7 @@ public struct ProcessTool: AgentTool {
             "type": "object",
             "properties": [
                 "command": ["type": "string"],
-                "timeout_seconds": ["type": "integer", "minimum": 1, "maximum": 900],
+                "timeout_seconds": ["type": "integer", "minimum": 1, "maximum": 1800],
                 "background": ["type": "boolean", "description": "Keep a long command running and return a task id."],
                 "operation": ["type": "string", "enum": ["run", "status", "stop"]],
                 "task_id": ["type": "string"],

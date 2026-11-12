@@ -160,7 +160,11 @@ public struct VMTurnRunner: Sendable {
             attachmentData: request.attachmentData, fallbackModels: request.fallbackModels, requiresInitialSpendApproval: false,
             steering: steering, resumeNote: request.resumeNote, autoApprove: true
         )
-        let run = AgentLoop.start(input, environment: setup.environment)
+        // Tool output too long for the AI is kept whole in ~/.maipa-g/outputs/<callID>.txt, for this
+        // reply and its sub-agents, and the AI reads the cut part with read_file.
+        let run = ToolOutputArchive.$saver.withValue(DirectoryToolOutputSaver.computer(home: home)) {
+            AgentLoop.start(input, environment: setup.environment)
+        }
         for text in request.earlySteering { await run.steer(text) }
 
         // Steer and Stop arrive as files from the phone.
@@ -283,8 +287,9 @@ public struct VMTurnRunner: Sendable {
             let savingChoice = SavingStyleChoice()
             tools.append(SetSavingStyleTool(choice: savingChoice, repoName: repo.repo.ref.fullName))
             tools += [
-                ListFilesTool(workspace: workspace, changes: staged),
+                ListFilesTool(workspace: workspace, changes: staged, computer: control, computerPath: "repos/\(repo.repo.ref.owner)/\(repo.repo.ref.name)"),
                 SearchCodeTool(workspace: workspace, changes: staged),
+                FileSearchTool(workspace: workspace, changes: staged),
                 ReadFileTool(workspace: workspace, changes: staged),
                 ReadRepoFileTool(github: github),
                 LoadRepoRulesTool(documents: rules.documents),
@@ -324,6 +329,8 @@ public struct VMTurnRunner: Sendable {
         }
         tools.append(RunCommandTool(control: control, homePath: homePath))
         tools.append(ComputerTaskTool(control: control, homePath: homePath))
+        tools.append(CodeTool(control: control, homePath: homePath))
+        tools.append(UpdateSessionInformationTool())
         // Files and pictures made here are kept in the run's folder; the phone copies them into
         // the chat as each state arrives (VMMedia), so they show the same as on the phone.
         let media = AttachmentStore(dataDirectory: folder.appendingPathComponent(VMMedia.folder, isDirectory: true))
@@ -392,7 +399,7 @@ public struct VMTurnRunner: Sendable {
                 lead: SubAgentSetup.lead, definitions: definitions, context: request.lastUserMessage,
                 spendLimit: request.spendLimit, steering: steering, runner: subAgents.runner()
             )
-            tools.append(InvokeSubAgentTool(lead: SubAgentSetup.lead, definitions: definitions, coordinator: coordinator))
+            tools.append(InvokeSubAgentTool(lead: SubAgentSetup.lead, definitions: definitions, coordinator: coordinator, contextTools: tools))
         }
         let environment = AgentEnvironment(
             openRouter: ai.client,

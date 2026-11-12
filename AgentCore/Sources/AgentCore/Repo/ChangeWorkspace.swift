@@ -253,18 +253,39 @@ public actor ChangeWorkspace {
         return GitTree(sha: baseTree.sha, entries: sorted, truncated: baseTree.truncated)
     }
 
-    public func create(path rawPath: String, text: String, buildSetupApproved: Bool = false) async throws {
+    /// Stages a new file. An existing file is an error unless `overwrite` is true, which replaces
+    /// the whole file (a text file keeps its encoding and line endings; any other file becomes
+    /// this UTF-8 text).
+    public func create(path rawPath: String, text: String, buildSetupApproved: Bool = false, overwrite: Bool = false) async throws {
         let path = try Self.safe(rawPath)
         if Self.isBuildSetup(path), !buildSetupApproved { throw ChangeWorkspaceError.buildSetupApprovalRequired(path) }
+        let data = Data(text.utf8)
         switch try await readDecoded(path) {
         case .missing:
-            let data = Data(text.utf8)
             guard TextFileCodec.decode(data) != nil else { throw ChangeWorkspaceError.notText(path) }
             let existedInBase: Bool
             if case .missing = try await readBase(path) { existedInBase = false }
             else { existedInBase = true }
             changes[path] = .write(path: path, data: data, existed: existedInBase)
-        default: throw ChangeWorkspaceError.alreadyExists(path)
+        case .folder:
+            throw ToolInputError("\(path) is a folder, so a file can't be created there.")
+        case .text where overwrite:
+            try await edit(path: path, text: text, buildSetupApproved: buildSetupApproved)
+        case .binary, .tooLarge, .symlink:
+            guard overwrite else { throw ChangeWorkspaceError.alreadyExists(path) }
+            guard TextFileCodec.decode(data) != nil else { throw ChangeWorkspaceError.notText(path) }
+            changes[path] = .write(path: path, data: data, existed: existedInBase(path))
+        case .text:
+            throw ChangeWorkspaceError.alreadyExists(path)
+        }
+    }
+
+    /// Whether the file is in the repo at the base commit, as far as staged changes know.
+    private func existedInBase(_ path: String) -> Bool {
+        switch changes[path] {
+        case .write(_, _, let existed)?: return existed
+        case .delete?: return true
+        case nil: return true
         }
     }
 
@@ -296,7 +317,7 @@ public actor ChangeWorkspace {
         newText rawNew: String,
         replaceAll: Bool = false,
         buildSetupApproved: Bool = false
-    ) async throws -> (count: Int, diffPreview: String) {
+    ) async throws -> (count: Int, diffPreview: String, whitespaceTolerantLines: ClosedRange<Int>?) {
         let path = try Self.safe(rawPath)
         if Self.isBuildSetup(path), !buildSetupApproved { throw ChangeWorkspaceError.buildSetupApprovalRequired(path) }
         let document: TextFileCodec.Document
@@ -322,6 +343,7 @@ public actor ChangeWorkspace {
 
         let updatedText: String
         let replacedCount: Int
+        var tolerantLines: ClosedRange<Int>?
 
         if !exactRanges.isEmpty {
             if exactRanges.count > 1 && !replaceAll {
@@ -337,8 +359,10 @@ public actor ChangeWorkspace {
                 replacedCount = 1
             }
         } else if let fuzzy = Self.fuzzyUniqueLineReplacement(source: normalizedSource, oldText: oldNorm, newText: newNorm) {
-            updatedText = fuzzy
+            // Only leading/trailing spaces and tabs differed: still one place, and the caller says so.
+            updatedText = fuzzy.text
             replacedCount = 1
+            tolerantLines = fuzzy.lines
         } else {
             throw ToolInputError("\"old_text\" was not found in \(path). Call read_file on \(path) first to get the exact current lines.")
         }
@@ -353,7 +377,7 @@ public actor ChangeWorkspace {
         guard TextFileCodec.decode(data) != nil else { throw ChangeWorkspaceError.notText(path) }
         changes[path] = .write(path: path, data: data, existed: existedInBase)
         let preview = UnifiedDiffBuilder.filePatch(oldPath: "a/\(path)", newPath: "b/\(path)", oldText: normalizedSource, newText: updatedText) ?? "Updated \(path)"
-        return (replacedCount, String(preview.prefix(12_000)))
+        return (replacedCount, String(preview.prefix(12_000)), tolerantLines)
     }
 
     /// Appends UTF-8 text to the end of an existing (or optionally newly created) file without requiring a full-file rewrite.
@@ -373,8 +397,12 @@ public actor ChangeWorkspace {
             } else {
                 existedInBase = true
             }
-            let combined = document.text + text
-            let data = TextFileCodec.encode(combined, preserving: document)
+            // Like Kiro: the new text starts on its own line when the file didn't end with one.
+            let separator = Self.appendSeparator(existing: document.text)
+            let combined = document.text + separator + text
+            // The file now ends the way the appended text does.
+            let endsWithNewline = text.isEmpty ? nil : (text.hasSuffix("\n") || text.hasSuffix("\r"))
+            let data = TextFileCodec.encode(combined, preserving: document, finalNewline: endsWithNewline)
             guard TextFileCodec.decode(data) != nil else { throw ChangeWorkspaceError.notText(path) }
             changes[path] = .write(path: path, data: data, existed: existedInBase)
             return false
@@ -387,7 +415,29 @@ public actor ChangeWorkspace {
         }
     }
 
-    private static func fuzzyUniqueLineReplacement(source: String, oldText: String, newText: String) -> String? {
+    /// Whether a file is at this path (staged changes included).
+    public func exists(_ rawPath: String) async -> Bool {
+        guard let path = try? Self.safe(rawPath), let read = try? await readDecoded(path) else { return false }
+        switch read {
+        case .missing, .folder: return false
+        default: return true
+        }
+    }
+
+    /// Whether append_file will put a line break before the appended text.
+    public func needsLineBreakBeforeAppend(_ rawPath: String) async -> Bool {
+        guard let path = try? Self.safe(rawPath), case .text(let document, _)? = try? await readDecoded(path) else { return false }
+        return !Self.appendSeparator(existing: document.text).isEmpty
+    }
+
+    /// "\n" when `existing` has text but doesn't end with a line break, else nothing.
+    static func appendSeparator(existing: String) -> String {
+        !existing.isEmpty && !existing.hasSuffix("\n") ? "\n" : ""
+    }
+
+    /// Replaces the one place where `oldText`'s lines match ignoring leading/trailing spaces and
+    /// tabs. Returns the new text and the 1-based lines of the file that were replaced.
+    private static func fuzzyUniqueLineReplacement(source: String, oldText: String, newText: String) -> (text: String, lines: ClosedRange<Int>)? {
         let srcLines = source.components(separatedBy: "\n")
         let oldLines = oldText.components(separatedBy: "\n")
         guard !oldLines.isEmpty, oldLines.count <= srcLines.count else { return nil }
@@ -414,7 +464,7 @@ public actor ChangeWorkspace {
         var resultLines = Array(srcLines[0..<idx])
         resultLines.append(contentsOf: newText.components(separatedBy: "\n"))
         resultLines.append(contentsOf: srcLines[(idx + oldLines.count)...])
-        return resultLines.joined(separator: "\n")
+        return (resultLines.joined(separator: "\n"), (idx + 1)...(idx + oldLines.count))
     }
 
     public func delete(path rawPath: String, approved: Bool = false) async throws {
@@ -425,7 +475,11 @@ public actor ChangeWorkspace {
         switch try await readDecoded(path) {
         case .text(let document, _): previous = document.data
         case .missing: throw ChangeWorkspaceError.missing(path)
-        default: throw ChangeWorkspaceError.notText(path)
+        case .folder: throw ToolInputError("\(path) is a folder. Delete the files inside it one by one.")
+        case .binary, .tooLarge, .symlink:
+            // Pictures, archives, large files and links are deleted the same way; their bytes are
+            // kept (when they can be fetched) only to show and undo the change.
+            previous = (try? await readRawBytes(path, maxBytes: 64 * 1024 * 1024)) ?? Data()
         }
         changes[path] = .delete(path: path, previous: previous)
     }
@@ -713,7 +767,7 @@ public enum ChangeWorkspaceError: Error, Sendable, Equatable, CustomStringConver
         switch self {
         case .unsafePath(let path): return "Unsafe path: \(path)"
         case .missing(let path): return "There is no file \(path)."
-        case .alreadyExists(let path): return "\(path) already exists. Use edit_file."
+        case .alreadyExists(let path): return "\(path) already exists. To replace the whole file, call create_file again with overwrite: true; to change part of it, use edit_file."
         case .notText(let path): return "\(path) is not an editable text file."
         case .deletionApprovalRequired(let path): return "Deleting \(path) needs the person's approval."
         case .buildSetupApprovalRequired(let path): return "Changing build setup in \(path) needs the person's approval."

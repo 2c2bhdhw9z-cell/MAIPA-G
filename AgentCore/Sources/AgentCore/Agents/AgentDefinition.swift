@@ -56,7 +56,7 @@ public struct AgentDefinition: Codable, Sendable, Hashable, Identifiable {
 
     public static let mutatingTools: Set<String> = [
         "create_file", "edit_file", "append_file", "delete_file", "save_changes", "undo_changes",
-        "run_shell", "run_command", "computer_task", "sync_staged_to_computer",
+        "run_shell", "run_command", "computer_task", "sync_staged_to_computer", "code",
         "write_workstation_file", "create_custom_agent", "save_workflow_definition", "run_workflow", "update_workflow",
         "dispatch_workflow", "create_pull_request", "merge_pull_request", "close_pull_request",
         "reply_to_review_comment", "submit_pull_request_review", "create_repository",

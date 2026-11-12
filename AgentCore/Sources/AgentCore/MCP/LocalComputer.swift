@@ -10,7 +10,10 @@ extension ComputerControl {
         let tool = ConnectorToolDefinition(
             serverID: "local", serverName: "This computer", originalName: "exec",
             description: "Run a command on this computer.",
-            inputSchema: ["type": "object", "properties": ["cmd": ["type": "array", "items": ["type": "string"]]], "required": ["cmd"]]
+            inputSchema: ["type": "object", "properties": [
+                "cmd": ["type": "array", "items": ["type": "string"]],
+                "timeout_seconds": ["type": "integer", "description": "Stop the command after this many seconds (default 900, at most 1800)."],
+            ], "required": ["cmd"]]
         )
         let childEnvironment = localEnvironment(home: home, from: environment)
         return ComputerControl(tools: [tool], machine: machine, commandSizeLimit: nil) { _, arguments in
@@ -39,15 +42,18 @@ extension ComputerControl {
                 script = ""
             }
             defer { if !scriptFile.isEmpty { try? FileManager.default.removeItem(atPath: scriptFile) } }
+            // The AI's run_command sets its own limit (2 minutes unless it asks for more, up to 30);
+            // MAIPA-G's own commands keep 15 minutes.
+            let timeout = min(max(arguments["timeout_seconds"]?.intValue ?? 900, 1), Int(BoundedProcess.maxTimeout))
             let result = try await BoundedProcess.run(
                 executable: "/bin/bash", arguments: ["-c", runWithoutInheritedFiles, "bash", script, exitFile.path, scriptFile], directory: home,
-                environment: childEnvironment, replacingEnvironment: true, timeout: 900, outputLimit: 400_000
+                environment: childEnvironment, replacingEnvironment: true, timeout: TimeInterval(timeout), outputLimit: 400_000
             )
             let recorded = (try? String(contentsOf: exitFile, encoding: .utf8)).flatMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
             let exitCode = result.timedOut ? result.exitCode : (recorded ?? result.exitCode)
             var text = result.stdout
             if !result.stderr.isEmpty { text += (text.isEmpty ? "" : "\n") + result.stderr }
-            if result.timedOut { text += "\n(the command ran out of time after 15 minutes)" }
+            if result.timedOut { text += "\n(the command ran out of time after \(spokenDuration(seconds: timeout)))" }
             if exitCode != 0 { text += "\n(exit code \(exitCode))" }
             // Like a terminal: a failing command still shows its whole output. Callers that need
             // to know it worked look for their own marker line.

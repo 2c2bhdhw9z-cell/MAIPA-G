@@ -1429,7 +1429,7 @@ private struct Runner {
             if let subagents = output.subagents {
                 record.subagents = subagents
             }
-            record.result = Self.capped(output.forModel)
+            record.result = Self.capped(output.forModel, callID: record.id, tool: record.name)
             record.finishedAt = Date()
             if output.billedCost > 0 { record.billedCost = output.billedCost }
             if let preview = output.livePreview { record.livePreview = preview }
@@ -1484,7 +1484,8 @@ private struct Runner {
 
     mutating func fail(_ stepIndex: Int, _ callIndex: Int, message: String, summary: String, detail: String? = nil) {
         turn.steps[stepIndex].toolCalls[callIndex].status = .failed
-        turn.steps[stepIndex].toolCalls[callIndex].result = Self.capped(message)
+        let call = turn.steps[stepIndex].toolCalls[callIndex]
+        turn.steps[stepIndex].toolCalls[callIndex].result = Self.capped(message, callID: call.id, tool: call.name)
         turn.steps[stepIndex].toolCalls[callIndex].summary = summary
         turn.steps[stepIndex].toolCalls[callIndex].detail = detail ?? message
         turn.steps[stepIndex].toolCalls[callIndex].finishedAt = Date()
@@ -1492,6 +1493,16 @@ private struct Runner {
 
     static func capped(_ text: String) -> String {
         Transcript.cappedToolResult(text)
+    }
+
+    /// A tool's own result. When it's too long for the AI, the start and the end stay with a marker
+    /// in the middle, and the whole text is saved (ToolOutputArchive) where the marker says, so the
+    /// AI can read the cut part with read_file offset/limit.
+    static func capped(_ text: String, callID: String, tool: String) -> String {
+        Transcript.fittedToolResult(text, tool: tool) {
+            guard let saver = ToolOutputArchive.current, let path = saver.save(text, callID: callID, tool: tool) else { return nil }
+            return (path, saver.readHint)
+        }
     }
 
     // MARK: Errors in words

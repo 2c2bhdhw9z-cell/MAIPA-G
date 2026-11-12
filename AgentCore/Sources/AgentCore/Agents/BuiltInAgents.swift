@@ -2,7 +2,7 @@ import Foundation
 
 public enum BuiltInAgents {
     public static let inspectToolNames = [
-        "list_files", "search_code", "read_file", "read_repo_file", "read_other_repo_file",
+        "list_files", "search_code", "file_search", "read_file", "read_repo_file", "read_other_repo_file",
         "load_repo_rules", "load_spec", "inspect_workspace", "read_attachment",
         "list_workstation_files", "read_workstation_file",
         "web_search", "read_web_page", "introspect", "inspect_workflow", "ask_user",
@@ -10,10 +10,10 @@ public enum BuiltInAgents {
     public static let generalExecutionToolNames = inspectToolNames + [
         "create_file", "edit_file", "append_file", "delete_file", "save_changes",
         "write_workstation_file", "run_command", "run_shell", "computer_task", "sync_staged_to_computer",
-        "mcp_*",
+        "code", "mcp_*",
     ]
 
-    private static let inspect = ["list_files", "search_code", "read_file", "read_repo_file", "inspect_workspace", "read_attachment", "web_search", "read_web_page", "ask_user"]
+    private static let inspect = ["list_files", "search_code", "file_search", "read_file", "read_repo_file", "inspect_workspace", "read_attachment", "web_search", "read_web_page", "ask_user"]
     private static let change = inspect + ["create_file", "edit_file", "append_file", "delete_file", "save_changes", "run_shell", "run_command"]
     private static let review = inspect + ["read_pull_request", "read_pull_request_comments", "read_checks", "read_workflow_logs"]
     private static let build = change + ["list_workflows", "dispatch_workflow", "read_checks", "read_workflow_logs", "list_artifacts", "inspect_ipa", "read_releases"]

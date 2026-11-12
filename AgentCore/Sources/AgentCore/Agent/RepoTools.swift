@@ -316,12 +316,18 @@ enum Format {
 public struct ListFilesTool: AgentTool {
     public let workspace: RepoWorkspace
     public let changes: ChangeWorkspace?
+    /// The person's computer and the repo's checkout there (relative to its $HOME), for
+    /// `on_computer`: the real folder, with files that exist only there.
+    public let computer: ComputerControl?
+    public let computerPath: String?
     public let name = "list_files"
     static let maxLines = 2_000
 
-    public init(workspace: RepoWorkspace, changes: ChangeWorkspace? = nil) {
+    public init(workspace: RepoWorkspace, changes: ChangeWorkspace? = nil, computer: ComputerControl? = nil, computerPath: String? = nil) {
         self.workspace = workspace
         self.changes = changes
+        self.computer = computer
+        self.computerPath = computerPath
     }
 
     public var spec: ToolSpec {
@@ -330,7 +336,9 @@ public struct ListFilesTool: AgentTool {
             description: """
             List the files and folders in the repository. Give a folder to look inside it (leave empty or "." \
             for the repository root), and a depth to see deeper. Give a pattern (like "*.swift" or "src/**/*.ts") \
-            to find files by name anywhere. Set count_lines to true to count exact line totals across matching text files in one step.
+            to find files by name anywhere. Set count_lines to true to count exact line totals across matching text files in one step. \
+            It lists the repo at this chat's commit plus staged changes; set on_computer to true to list the real checkout on the \
+            person's computer instead (with build output and other files that exist only there; path may then also be an absolute folder).
             """,
             parameters: [
                 "type": "object",
@@ -339,6 +347,8 @@ public struct ListFilesTool: AgentTool {
                     "depth": ["type": "integer", "minimum": 1, "maximum": 12, "description": "How many folder levels to show. Default 3."],
                     "pattern": ["type": "string", "description": "Optional file-name pattern, such as \"*.swift\" or \"App/**/*.swift\"."],
                     "count_lines": ["type": "boolean", "description": "When true, counts exact lines in every matching text file and reports per-file + total line counts."],
+                    "on_computer": ["type": "boolean", "description": "List the checkout on the person's computer instead of the repo copy. Default false."],
+                    "where": ["type": "string", "enum": ["repo", "computer"], "description": "Same as on_computer: \"computer\" lists the computer's checkout."],
                 ],
             ]
         )
@@ -355,6 +365,9 @@ public struct ListFilesTool: AgentTool {
     }
 
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        if arguments.optionalBool("on_computer") == true || arguments.optionalString("where")?.lowercased() == "computer" {
+            return try await listOnComputer(arguments)
+        }
         let folder = RepoWorkspace.normalize(arguments.optionalString("path") ?? "")
         let depth = min(max(arguments.optionalInt("depth") ?? 3, 1), 12)
         let shouldCountLines = arguments.optionalBool("count_lines") ?? false
@@ -500,6 +513,11 @@ public struct ReadFileTool: AgentTool {
     static let maxLines = 4_000
     static let maxCharacters = 250_000
     static let maxLineLength = 4_000
+    /// Most characters one read returns, JSON escaping included, so the result always fits the
+    /// AI's tool-result limit whole and its footer (line counts, where to read on) is never cut.
+    static var characterBudget: Int { min(maxCharacters, Transcript.maxToolResultCharacters - 2_000) }
+    /// Files over the 2 MB the repo copy keeps are fetched whole up to this size and read in ranges.
+    static let maxRangedBytes = 25 * 1024 * 1024
 
     public init(workspace: RepoWorkspace, changes: ChangeWorkspace? = nil) {
         self.workspace = workspace
@@ -510,15 +528,23 @@ public struct ReadFileTool: AgentTool {
         ToolSpec(
             name: name,
             description: """
-            Read a text file from the repository, with line numbers. Long files come back in parts: \
-            use start_line and end_line to read a part, or to keep reading.
+            Read one file from the repository, with line numbers on the left (1-based). Use it to look at code or \
+            text before you explain or change it; read several files in parallel when you need them. \
+            Long files come back in parts: pass offset (0-based line) and limit (number of lines), or start_line and \
+            end_line (1-based, inclusive), and the footer always says which lines you got and where to read on. \
+            One read returns up to 1,500 lines (4,000 with an explicit range) and about 28,000 characters. \
+            Files over 2 MB are read in ranges the same way. PNG/JPEG/GIF/WebP pictures come back as images for AIs that can see. \
+            It also reads full tool outputs saved under ~/.maipa-g/outputs/ when a result was cut in the middle. \
+            Don't use it to find a file (use file_search or list_files) or to look through many files (use search_code).
             """,
             parameters: [
                 "type": "object",
                 "properties": [
-                    "path": ["type": "string", "description": "Path from the top of the repository, like \"App/Sources/Main.swift\"."],
-                    "start_line": ["type": "integer", "minimum": 1, "description": "First line to read. Default 1."],
-                    "end_line": ["type": "integer", "minimum": 1, "description": "Last line to read."],
+                    "path": ["type": "string", "description": "Path from the top of the repository, like \"App/Sources/Main.swift\", or a saved output path like \"~/.maipa-g/outputs/call_1.txt\"."],
+                    "offset": ["type": "integer", "minimum": 0, "description": "Line to start from, 0-based (offset 0 is line 1). Default 0."],
+                    "limit": ["type": "integer", "minimum": 1, "description": "How many lines to read from offset. Default: up to 1,500."],
+                    "start_line": ["type": "integer", "minimum": 1, "description": "First line to read, 1-based. Same as offset + 1; wins over offset when both are given."],
+                    "end_line": ["type": "integer", "minimum": 1, "description": "Last line to read, 1-based and inclusive. Wins over limit when both are given."],
                 ],
                 "required": ["path"],
             ]
@@ -530,7 +556,14 @@ public struct ReadFileTool: AgentTool {
     }
 
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
-        let path = RepoWorkspace.normalize(try arguments.requiredString("path"))
+        let rawPath = try arguments.requiredString("path").trimmingCharacters(in: .whitespacesAndNewlines)
+        if let saver = ToolOutputArchive.current, let saved = saver.savedText(at: rawPath) {
+            return try Self.render(path: rawPath, text: saved, bytes: saved.utf8.count, arguments: arguments, note: "saved tool output")
+        }
+        if Self.looksLikeSavedOutput(rawPath) {
+            throw ToolInputError("The saved output \(rawPath) isn't here any more (or was saved on another device). Run the tool again, on a smaller part if you can.")
+        }
+        let path = RepoWorkspace.normalize(rawPath)
         let readResult: FileRead
         if let changes {
             do {
@@ -543,7 +576,7 @@ public struct ReadFileTool: AgentTool {
         }
         switch readResult {
         case .missing(let suggestions):
-            throw ToolInputError("There is no file \(path)." + (suggestions.isEmpty ? " Use list_files or search_code to find it." : " Did you mean: " + suggestions.joined(separator: ", ") + "?"))
+            throw ToolInputError("There is no file \(path)." + (suggestions.isEmpty ? " Use file_search, list_files or search_code to find it." : " Did you mean: " + suggestions.joined(separator: ", ") + "?"))
         case .folder:
             throw ToolInputError("\(path.isEmpty ? "That" : path) is a folder. Use list_files to see what is in it.")
         case .binary(let bytes):
@@ -559,48 +592,85 @@ public struct ReadFileTool: AgentTool {
             }
             return ToolOutput(forModel: "\(path) is a binary file (\(Format.bytes(bytes))), such as a picture or an archive. It can't be shown as text.", summary: "Looked at \(path) · not text")
         case .tooLarge(let bytes):
-            return ToolOutput(forModel: "\(path) is too large to read (\(Format.bytes(bytes))). Use search_code to find the part you need.", summary: "Looked at \(path) · too large")
+            // The repo copy doesn't keep files over 2 MB, so the file is fetched whole and read in
+            // ranges like any other.
+            if bytes <= Self.maxRangedBytes,
+               let raw = try? await (changes != nil ? changes!.readRawBytes(path, maxBytes: Self.maxRangedBytes) : workspace.readRawBytes(path, maxBytes: Self.maxRangedBytes)) {
+                guard let document = TextFileCodec.decode(raw) else {
+                    return ToolOutput(forModel: "\(path) is a binary file (\(Format.bytes(raw.count))). It can't be shown as text.", summary: "Looked at \(path) · not text")
+                }
+                return try Self.render(path: path, text: document.text, bytes: raw.count, arguments: arguments, note: "large file: read it in ranges with offset and limit")
+            }
+            return ToolOutput(
+                forModel: "\(path) is \(Format.bytes(bytes)), too large to fetch here. Read it in ranges on the computer instead, for example run_command with `sed -n '1,400p' \(path)` (then '401,800p' and so on), or `grep -n` for the part you need.",
+                summary: "Looked at \(path) · too large"
+            )
         case .symlink(let target):
             return ToolOutput(forModel: "\(path) is a link to \(target).", summary: "Looked at \(path) · a link")
         case .text(let text, let bytes):
-            var lines: [Substring] = text.split(separator: "\n", omittingEmptySubsequences: false)
-            if lines.last == "" { lines.removeLast() }
-            let total = lines.count
-            if total == 0 {
-                return ToolOutput(forModel: "\(path) is empty.", summary: "Read \(path) · empty")
-            }
-            let start = min(max(arguments.optionalInt("start_line") ?? 1, 1), total)
-            let explicitEnd = arguments.optionalInt("end_line")
-            let requestedEnd = explicitEnd.map { max($0, start) } ?? total
-            let lineWindow = explicitEnd != nil ? Self.maxLines : Self.defaultLines
-            var end = min(requestedEnd, total, start + lineWindow - 1)
-            var body: [String] = []
-            var characters = 0
-            for number in start...end {
-                var line = String(lines[number - 1])
-                if line.hasSuffix("\r") { line.removeLast() }
-                if line.count > Self.maxLineLength { line = String(line.prefix(Self.maxLineLength)) + "…" }
-                let numbered = String(repeating: " ", count: max(0, 6 - String(number).count)) + "\(number)\t" + line
-                if characters + numbered.count > Self.maxCharacters, !body.isEmpty {
-                    end = number - 1
-                    break
-                }
-                characters += numbered.count + 1
-                body.append(numbered)
-            }
-            let isWhole = start == 1 && end == total
-            var header = "\(path) (\(Format.bytes(bytes)), \(total) lines)"
-            if !isWhole { header += ", showing lines \(start)-\(end)" }
-            var output = header + "\n" + body.joined(separator: "\n")
-            if end < total, end < requestedEnd || arguments.optionalInt("end_line") == nil {
-                output += "\n(\(total - end) more lines. Read on with start_line \(end + 1).)"
-            }
-            return ToolOutput(
-                forModel: output,
-                summary: isWhole ? "Read \(path)" : "Read \(path) · lines \(start)–\(end)",
-                detail: body.prefix(40).joined(separator: "\n")
-            )
+            return try Self.render(path: path, text: text, bytes: bytes, arguments: arguments)
         }
+    }
+
+    static func looksLikeSavedOutput(_ path: String) -> Bool {
+        ["~/.maipa-g/outputs/", ".maipa-g/outputs/", "$HOME/.maipa-g/outputs/"].contains { path.hasPrefix($0) }
+    }
+
+    /// The lines asked for, numbered, within the line and character limits, with a header and a
+    /// footer that always say which lines these are and how to read on.
+    static func render(path: String, text: String, bytes: Int, arguments: JSONValue, note: String? = nil) throws -> ToolOutput {
+        var lines: [Substring] = text.split(separator: "\n", omittingEmptySubsequences: false)
+        if lines.last == "" { lines.removeLast() }
+        let total = lines.count
+        if total == 0 {
+            return ToolOutput(forModel: "\(path) is empty.", summary: "Read \(path) · empty")
+        }
+        let explicitStart = arguments.optionalInt("start_line") ?? arguments.optionalInt("offset").map { max($0, 0) + 1 }
+        let requestedStart = max(explicitStart ?? 1, 1)
+        guard requestedStart <= total else {
+            throw ToolInputError("\(path) has \(total) line\(total == 1 ? "" : "s"), so there is nothing at line \(requestedStart). Read from offset \(max(0, total - 200)) (start_line \(max(1, total - 199))) to see the end of the file.")
+        }
+        let start = requestedStart
+        let explicitEnd = arguments.optionalInt("end_line") ?? arguments.optionalInt("limit").map { start + max($0, 1) - 1 }
+        let requestedEnd = explicitEnd.map { max($0, start) } ?? total
+        let lineWindow = explicitEnd != nil ? maxLines : defaultLines
+        var end = min(requestedEnd, total, start + lineWindow - 1)
+        var header = "\(path) (\(Format.bytes(bytes)), \(total) lines\(note.map { "; \($0)" } ?? ""))"
+        // Room for the header and the footer, so neither is ever cut off.
+        let budget = characterBudget - Transcript.escapedLength(header) - 400
+        var body: [String] = []
+        var characters = 0
+        var stoppedForSize = false
+        for number in start...end {
+            var line = String(lines[number - 1])
+            if line.hasSuffix("\r") { line.removeLast() }
+            if line.count > maxLineLength { line = String(line.prefix(maxLineLength)) + "… [truncated: line too long, \(line.count) characters]" }
+            let numbered = String(repeating: " ", count: max(0, 6 - String(number).count)) + "\(number)\t" + line
+            let cost = Transcript.escapedLength(numbered) + 2
+            if characters + cost > budget, !body.isEmpty {
+                end = number - 1
+                stoppedForSize = true
+                break
+            }
+            characters += cost
+            body.append(numbered)
+        }
+        let isWhole = start == 1 && end == total
+        if !isWhole { header += ", showing lines \(start)-\(end)" }
+        var output = header + "\n" + body.joined(separator: "\n")
+        if !isWhole {
+            var footer = "\n(Lines \(start)-\(end) of \(total).)"
+            if end < total {
+                let why = stoppedForSize ? " Stopped here to stay within the size of one read." : ""
+                footer = "\n(Lines \(start)-\(end) of \(total).\(why) \(total - end) more lines. Read on with offset \(end) (start_line \(end + 1)).)"
+            }
+            output += footer
+        }
+        return ToolOutput(
+            forModel: output,
+            summary: isWhole ? "Read \(path)" : "Read \(path) · lines \(start)–\(end)",
+            detail: body.prefix(40).joined(separator: "\n")
+        )
     }
 }
 
@@ -610,6 +680,9 @@ public struct SearchCodeTool: AgentTool {
     public let workspace: RepoWorkspace
     public let changes: ChangeWorkspace?
     public let name = "search_code"
+    static let defaultResults = 100
+    static let defaultPerFile = 20
+    static let defaultContext = 2
 
     public init(workspace: RepoWorkspace, changes: ChangeWorkspace? = nil) {
         self.workspace = workspace
@@ -620,18 +693,26 @@ public struct SearchCodeTool: AgentTool {
         ToolSpec(
             name: name,
             description: """
-            Search every text file in the repository for some text, or for a regular expression, and get \
-            each matching line with its file and line number. Narrow it with path_glob, like "*.swift" or \
-            "docs/**".
+            Search the text of every file in the repository for a word, a phrase or a regular expression, like grep. \
+            Use it to find where something is defined or used before reading the file. Each match comes back with its \
+            file, its line number (the same numbers read_file uses), its indentation, and context_lines lines before and \
+            after it (default 2). Narrow it with path_glob (only these files, like "*.swift" or "docs/**") and exclude_glob \
+            (leave these out, like "node_modules" or "*.min.js"). Returns up to max_results matching lines (default 100) and \
+            max_per_file per file (default 20); very long lines end with "[truncated: line too long]". Staged edits are \
+            searched too. Pictures, archives and files over 2 MB aren't searched. Don't use it to find a file by its name \
+            (use file_search) or to read a whole file (use read_file).
             """,
             parameters: [
                 "type": "object",
                 "properties": [
-                    "query": ["type": "string", "description": "The text to find (or the regular expression, if regex is true)."],
-                    "regex": ["type": "boolean", "description": "Treat query as a regular expression. Default false."],
+                    "query": ["type": "string", "description": "The text to find, or the regular expression when regex is true."],
+                    "regex": ["type": "boolean", "description": "Treat query as a regular expression (ICU syntax; ^ and $ match at line ends). Default false."],
                     "case_sensitive": ["type": "boolean", "description": "Match upper and lower case exactly. Default false."],
-                    "path_glob": ["type": "string", "description": "Only search files whose path matches this pattern."],
-                    "max_results": ["type": "integer", "minimum": 1, "maximum": 500, "description": "Most matching lines to return. Default 120."],
+                    "path_glob": ["type": "string", "description": "Only search files whose path matches this pattern, like \"*.swift\" or \"App/**/*.swift\"."],
+                    "exclude_glob": ["type": "string", "description": "Leave out files, or whole folders, whose path matches this pattern, like \"node_modules\", \"*.min.js\" or \"{build,dist}\"."],
+                    "context_lines": ["type": "integer", "minimum": 0, "maximum": 10, "description": "Lines to show before and after each match. Default 2; 0 for matching lines only."],
+                    "max_results": ["type": "integer", "minimum": 1, "maximum": 500, "description": "Most matching lines to return in all. Default 100."],
+                    "max_per_file": ["type": "integer", "minimum": 1, "maximum": 500, "description": "Most matching lines to return from one file. Default 20."],
                 ],
                 "required": ["query"],
             ]
@@ -648,7 +729,10 @@ public struct SearchCodeTool: AgentTool {
             isRegex: arguments.optionalBool("regex") ?? false,
             caseSensitive: arguments.optionalBool("case_sensitive") ?? false,
             pathGlob: arguments.optionalString("path_glob"),
-            maxResults: min(max(arguments.optionalInt("max_results") ?? 120, 1), 500)
+            maxResults: min(max(arguments.optionalInt("max_results") ?? Self.defaultResults, 1), 500),
+            maxPerFile: min(max(arguments.optionalInt("max_per_file") ?? Self.defaultPerFile, 1), 500),
+            contextLines: min(max(arguments.optionalInt("context_lines") ?? Self.defaultContext, 0), 10),
+            excludeGlob: arguments.optionalString("exclude_glob")
         )
         let activeWorkspace = changes?.base ?? workspace
         let copy = try await activeWorkspace.localCopy { update in
@@ -669,26 +753,188 @@ public struct SearchCodeTool: AgentTool {
         guard !result.matches.isEmpty else {
             var text = "No matches for \(query.pattern) in \(result.filesSearched) files"
             if let glob = query.pathGlob { text += " matching \(glob)" }
+            if let exclude = query.excludeGlob { text += " (leaving out \(exclude))" }
             text += "."
             if result.filesSkipped > 0 { text += " (\(result.filesSkipped) files are pictures, archives or too large to search.)" }
             return ToolOutput(forModel: text, summary: "Searched for \(described) · no matches")
         }
-        var lines = ["\(result.matches.count)\(result.truncated ? "+" : "") matching lines in \(result.filesMatched) file\(result.filesMatched == 1 ? "" : "s") for \(query.pattern)\(query.isRegex ? " (regex)" : ""):"]
-        var currentPath = ""
-        for match in result.matches {
-            if match.path != currentPath {
-                currentPath = match.path
-                lines.append(match.path)
-            }
-            lines.append("  \(match.line): \(match.text)")
-        }
-        if result.truncated {
-            lines.append("(There are more matches. Narrow the search with path_glob or a more exact query.)")
-        }
+        let lines = Self.render(result, query: query)
         return ToolOutput(
             forModel: lines.joined(separator: "\n"),
             summary: "Searched for \(described) · \(result.matches.count)\(result.truncated ? "+" : "") match\(result.matches.count == 1 && !result.truncated ? "" : "es")",
             detail: lines.dropFirst().prefix(60).joined(separator: "\n")
+        )
+    }
+
+    /// Grouped by file like ripgrep: `12: text` for a matching line, `11- text` for context, and
+    /// `--` between parts of a file that aren't next to each other.
+    static func render(_ result: SearchResult, query: SearchQuery) -> [String] {
+        var lines = ["\(result.matches.count)\(result.truncated ? "+" : "") matching lines in \(result.filesMatched) file\(result.filesMatched == 1 ? "" : "s") for \(query.pattern)\(query.isRegex ? " (regex)" : ""):"]
+        var order: [String] = []
+        var byPath: [String: [SearchMatch]] = [:]
+        for match in result.matches {
+            if byPath[match.path] == nil { order.append(match.path) }
+            byPath[match.path, default: []].append(match)
+        }
+        for path in order {
+            lines.append(path)
+            var shown: [Int: (text: String, isMatch: Bool)] = [:]
+            for match in byPath[path] ?? [] {
+                for context in match.contextBefore + match.contextAfter where shown[context.line] == nil {
+                    shown[context.line] = (context.text, false)
+                }
+                shown[match.line] = (match.text, true)
+            }
+            var previous: Int?
+            for number in shown.keys.sorted() {
+                if let previous, number != previous + 1, query.contextLines > 0 { lines.append("  --") }
+                let entry = shown[number]!
+                lines.append("  \(number)\(entry.isMatch ? ":" : "-") \(entry.text)")
+                previous = number
+            }
+        }
+        if result.truncated {
+            lines.append("(There are more matches. Narrow the search with path_glob, exclude_glob or a more exact query, or raise max_results / max_per_file.)")
+        }
+        return lines
+    }
+}
+
+// MARK: - file_search
+
+/// Finds files by part of their path, like Kiro's file_search: a substring anywhere in the path,
+/// `^` to anchor it at the start and `$` at the end, and close (fuzzy) matches when nothing
+/// contains it exactly.
+public enum FileSearch {
+    public struct Match: Sendable, Hashable {
+        public var path: String
+        public var isClose: Bool
+    }
+
+    public static func rank(_ rawQuery: String, in paths: [String], exclude: Glob? = nil, limit: Int = 10) -> (matches: [Match], total: Int) {
+        var query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let anchoredStart = query.hasPrefix("^")
+        if anchoredStart { query.removeFirst() }
+        let anchoredEnd = query.hasSuffix("$")
+        if anchoredEnd { query.removeLast() }
+        while anchoredStart, query.hasPrefix("/") || query.hasPrefix("./") { query.removeFirst(query.hasPrefix("./") ? 2 : 1) }
+        let needle = query.lowercased()
+        guard !needle.isEmpty else { return ([], 0) }
+        let candidates = paths.filter { path in !(exclude.map { CodeSearch.isExcluded(path, by: $0) } ?? false) }
+
+        var exact: [(path: String, score: Int)] = []
+        for path in candidates {
+            let lower = path.lowercased()
+            if anchoredStart && !lower.hasPrefix(needle) { continue }
+            if anchoredEnd && !lower.hasSuffix(needle) { continue }
+            guard anchoredStart || anchoredEnd || lower.contains(needle) else { continue }
+            let name = lower.split(separator: "/").last.map(String.init) ?? lower
+            var score = 1_000
+            if name == needle { score += 600 }
+            else if name.hasPrefix(needle) { score += 400 }
+            else if name.contains(needle) { score += 250 }
+            score -= min(lower.count, 300)
+            exact.append((path, score))
+        }
+        exact.sort { $0.score != $1.score ? $0.score > $1.score : $0.path < $1.path }
+        var matches = exact.prefix(limit).map { Match(path: $0.path, isClose: false) }
+        var total = exact.count
+        if matches.count < limit, !anchoredStart, !anchoredEnd {
+            let taken = Set(exact.map(\.path))
+            var close: [(path: String, score: Int)] = []
+            for path in candidates where !taken.contains(path) {
+                if let score = fuzzyScore(needle, path.lowercased()) { close.append((path, score)) }
+            }
+            close.sort { $0.score != $1.score ? $0.score > $1.score : $0.path < $1.path }
+            total += close.count
+            matches += close.prefix(limit - matches.count).map { Match(path: $0.path, isClose: true) }
+        }
+        return (matches, total)
+    }
+
+    /// The characters of `needle` in order somewhere in `path`, scored higher when they are close
+    /// together and in the file name. Nil when they aren't all there.
+    static func fuzzyScore(_ needle: String, _ path: String) -> Int? {
+        let characters = Array(path)
+        let nameStart = (characters.lastIndex(of: "/") ?? -1) + 1
+        var position = 0
+        var score = 0
+        var lastMatch = -1
+        for wanted in needle where !wanted.isWhitespace {
+            guard let found = characters[position...].firstIndex(of: wanted) else { return nil }
+            if lastMatch >= 0 { score -= min(found - lastMatch - 1, 20) }
+            if found >= nameStart { score += 3 }
+            lastMatch = found
+            position = found + 1
+        }
+        return score - min(characters.count, 300) / 10
+    }
+}
+
+public struct FileSearchTool: AgentTool {
+    public let workspace: RepoWorkspace
+    public let changes: ChangeWorkspace?
+    public let name = "file_search"
+    static let maxResults = 10
+
+    public init(workspace: RepoWorkspace, changes: ChangeWorkspace? = nil) {
+        self.workspace = workspace
+        self.changes = changes
+    }
+
+    public var spec: ToolSpec {
+        ToolSpec(
+            name: name,
+            description: """
+            Find files in the repository by part of their path, when you know some of the name but not where it is. \
+            Matches the text anywhere in the path, ignoring case; start the query with ^ to match the start of the path \
+            ("^App/Sources") and end it with $ to match the end ("View.swift$"). When nothing contains the text exactly, \
+            close (fuzzy) matches are shown and marked. Leave files out with exclude (a pattern like "node_modules" or "*.test.ts"). \
+            Returns at most 10 paths, best first, with the total count. Staged new files are included. \
+            Don't use it to search inside files (use search_code) or to see a folder (use list_files).
+            """,
+            parameters: [
+                "type": "object",
+                "properties": [
+                    "query": ["type": "string", "description": "Part of the file path, like \"ChatSession\" or \"^App/\" or \".swift$\"."],
+                    "exclude": ["type": "string", "description": "Leave out files, or whole folders, whose path matches this pattern."],
+                ],
+                "required": ["query"],
+            ]
+        )
+    }
+
+    public func runningSummary(for arguments: JSONValue) -> String {
+        "Looking for files named \(Format.quote(arguments.optionalString("query") ?? ""))…"
+    }
+
+    public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        let query = try arguments.requiredString("query")
+        let trimmed = query.trimmingCharacters(in: CharacterSet(charactersIn: "^$ \n\t"))
+        guard !trimmed.isEmpty else { throw ToolInputError("Give part of a file path in `query`, like \"Session\" or \"^App/\".") }
+        let exclude = arguments.optionalString("exclude")
+        let tree = if let changes { try await changes.mergedTree() } else { try await workspace.tree() }
+        let files = tree.entries.filter(\.isFile)
+        let sizes = Dictionary(files.map { ($0.path, $0.size ?? 0) }, uniquingKeysWith: { first, _ in first })
+        let ranked = FileSearch.rank(query, in: files.map(\.path), exclude: exclude.map { Glob($0) }, limit: Self.maxResults)
+        let described = Format.quote(query, limit: 60)
+        guard !ranked.matches.isEmpty else {
+            return ToolOutput(
+                forModel: "No file path matches \(query) among \(files.count) files\(exclude.map { " (leaving out \($0))" } ?? ""). Try a shorter part of the name, or list_files with a pattern.",
+                summary: "Looked for \(described) · none found"
+            )
+        }
+        var lines = ["Files matching \(query) (\(ranked.matches.count) of \(ranked.total)):"]
+        for match in ranked.matches {
+            lines.append("\(match.path)  \(Format.bytes(sizes[match.path] ?? 0))\(match.isClose ? "  (close match)" : "")")
+        }
+        if ranked.total > ranked.matches.count {
+            lines.append("(Showing \(ranked.matches.count) of \(ranked.total). Make the query more exact, anchor it with ^ or $, or use list_files with a pattern to see them all.)")
+        }
+        return ToolOutput(
+            forModel: lines.joined(separator: "\n"),
+            summary: "Found \(ranked.total) file\(ranked.total == 1 ? "" : "s") for \(described)",
+            detail: lines.dropFirst().joined(separator: "\n")
         )
     }
 }
@@ -780,5 +1026,91 @@ enum BinaryImageInspector {
             }
             return nil
         }
+    }
+}
+
+// MARK: - list_files on the computer
+
+extension ListFilesTool {
+    static let computerEntryLimit = 20_000
+
+    /// The real folder on the person's computer: a tree to `depth` levels, or every file matching
+    /// `pattern` (tracked and untracked files git doesn't ignore, when it is a git checkout).
+    func listOnComputer(_ arguments: JSONValue) async throws -> ToolOutput {
+        guard let computer else {
+            throw ToolInputError("list_files can't reach the computer in this chat. Use run_command with `ls -la` or `find . -maxdepth 2` instead.")
+        }
+        let raw = arguments.optionalString("path") ?? ""
+        let folder: (expression: String, display: String)
+        if raw.hasPrefix("/") {
+            folder = (ComputerControl.shellQuote(raw), raw)
+        } else if raw == "~" || raw.hasPrefix("~/") {
+            let rest = RepoWorkspace.normalize(String(raw.dropFirst()))
+            folder = (rest.isEmpty ? "\"$HOME\"" : "\"$HOME\"/" + ComputerControl.shellQuote(rest), rest.isEmpty ? "~" : "~/\(rest)")
+        } else {
+            let inside = RepoWorkspace.normalize(raw)
+            let base = computerPath.map { RepoWorkspace.normalize($0) } ?? ""
+            let relative = [base, inside].filter { !$0.isEmpty }.joined(separator: "/")
+            folder = (relative.isEmpty ? "\"$HOME\"" : "\"$HOME\"/" + ComputerControl.shellQuote(relative), relative.isEmpty ? "~" : "~/\(relative)")
+        }
+        guard !folder.display.contains("\n") else { throw ToolInputError("path must be one folder, without line breaks.") }
+        let depth = min(max(arguments.optionalInt("depth") ?? 3, 1), 12)
+        let pattern = arguments.optionalString("pattern")
+        let missing = "maipa-g-no-such-folder"
+        let listing: String
+        if pattern != nil {
+            listing = """
+            if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git ls-files -co --exclude-standard 2>/dev/null; \
+            else find . -name .git -prune -o -type f -print 2>/dev/null | sed 's|^\\./||'; fi | head -n 200000
+            """
+        } else {
+            listing = """
+            find . -mindepth 1 -maxdepth \(depth) -name .git -prune -o -type d -print 2>/dev/null | sed 's|^\\./||; s|$|/|' | head -n \(Self.computerEntryLimit); \
+            find . -mindepth 1 -maxdepth \(depth) -name .git -prune -o ! -type d -print 2>/dev/null | sed 's|^\\./||' | head -n \(Self.computerEntryLimit)
+            """
+        }
+        let script = "if [ -d \(folder.expression) ]; then cd \(folder.expression) || exit 0; else echo \(missing); exit 0; fi; \(listing)"
+        let output = ComputerControl.plainOutput(try await computer.run(script, timeout: 120))
+        var entries = output.split(whereSeparator: \.isNewline).map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("(exit code") }
+        if entries.contains(missing) {
+            throw ToolInputError("There is no folder \(folder.display) on \(computer.machine). List a folder above it, or use run_command with ls.")
+        }
+        if let pattern {
+            let glob = Glob(pattern)
+            let matches = entries.filter { glob.matches($0) }.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            var lines = ["Files matching \(pattern) in \(folder.display) on \(computer.machine) (\(matches.count)):"]
+            lines += matches.prefix(Self.maxLines)
+            if matches.count > Self.maxLines { lines.append("…and \(matches.count - Self.maxLines) more. Use a narrower pattern or folder.") }
+            if matches.isEmpty { lines.append("(none)") }
+            return ToolOutput(forModel: lines.joined(separator: "\n"), summary: "Looked for \(Format.quote(pattern)) on the computer · \(matches.count) found", detail: lines.dropFirst().prefix(60).joined(separator: "\n"))
+        }
+        entries = Array(Set(entries))
+        let folders = Set(entries.filter { $0.hasSuffix("/") }.map { String($0.dropLast()) })
+        var children: [String: [(name: String, path: String, isFolder: Bool)]] = [:]
+        for entry in entries {
+            let isFolder = entry.hasSuffix("/")
+            let path = isFolder ? String(entry.dropLast()) : entry
+            let parts = path.split(separator: "/")
+            guard let name = parts.last else { continue }
+            let parent = parts.dropLast().joined(separator: "/")
+            children[parent, default: []].append((String(name), path, isFolder || folders.contains(path)))
+        }
+        var lines = ["\(folder.display) on \(computer.machine) (\(entries.count) entries to depth \(depth); .git not shown):"]
+        var truncated = false
+        func walk(_ parent: String, level: Int) {
+            let items = (children[parent] ?? []).sorted { a, b in
+                if a.isFolder != b.isFolder { return a.isFolder }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            }
+            for item in items {
+                if lines.count >= Self.maxLines { truncated = true; return }
+                lines.append(String(repeating: "  ", count: level) + item.name + (item.isFolder ? "/" : ""))
+                if item.isFolder { walk(item.path, level: level + 1) }
+            }
+        }
+        walk("", level: 0)
+        if entries.isEmpty { lines.append("(empty)") }
+        if truncated || entries.count >= Self.computerEntryLimit { lines.append("…list cut short. Look inside one folder at a time, or use a pattern.") }
+        return ToolOutput(forModel: lines.joined(separator: "\n"), summary: "Looked in \(folder.display) on the computer", detail: lines.prefix(80).joined(separator: "\n"))
     }
 }
