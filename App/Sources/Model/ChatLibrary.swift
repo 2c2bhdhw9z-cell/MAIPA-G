@@ -242,10 +242,19 @@ final class ChatLibrary {
             return
         }
         upsert(chat)
-        // Local disk is saved immediately; while a turn is actively streaming, debounce remote GitHub
-        // commits so MAIPA-G-data isn't hammered every 4 seconds (and doesn't hold Saving… continuously).
+        // Local disk is saved immediately. While a turn is streaming, the chat itself isn't sent to
+        // GitHub (`streamingChatPaths` holds it back from each pass); the save at the end of the
+        // turn sends it once. Saves still come every 25 seconds meanwhile, so everything else
+        // (pictures and files the reply makes) keeps going up.
         let isActivelyStreaming = sessions[chat.id]?.isRunning == true
         app?.sync.request(after: isActivelyStreaming ? 25 : 3.5)
+    }
+
+    /// Chats whose reply is still streaming. A backup pass leaves them until the reply ends, so a
+    /// long reply is sent once instead of every few seconds (a reply running very long is still
+    /// saved every 10 minutes).
+    var streamingChatPaths: Set<String> {
+        Set(sessions.values.filter(\.isRunning).map { ChatStore.relativePath(for: $0.id) })
     }
 
     private func upsert(_ chat: Chat) {

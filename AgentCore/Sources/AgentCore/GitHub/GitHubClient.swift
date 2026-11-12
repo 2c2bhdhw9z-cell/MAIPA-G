@@ -6,14 +6,19 @@ public struct GitHubAPIError: Error, Sendable, Hashable, CustomStringConvertible
     public var message: String
     /// When the hourly request allowance comes back, if that is what ran out.
     public var rateLimitResetsAt: Date?
+    /// The earliest moment GitHub said to send the request again: its `retry-after` seconds
+    /// (a secondary limit, such as too much content created too quickly), or else the hourly
+    /// reset when `x-ratelimit-remaining` is 0. GitHub asks that nothing is retried before then.
+    public var retryAt: Date?
 
-    public init(status: Int, message: String, rateLimitResetsAt: Date? = nil) {
+    public init(status: Int, message: String, rateLimitResetsAt: Date? = nil, retryAt: Date? = nil) {
         self.status = status
         self.message = message
         self.rateLimitResetsAt = rateLimitResetsAt
+        self.retryAt = retryAt ?? rateLimitResetsAt
     }
 
-    init(response: HTTPResponse) {
+    init(response: HTTPResponse, now: Date = Date()) {
         let json = JSONValue.parse(response.body)
         var message = json?["message"]?.stringValue ?? response.text
         if let errors = json?["errors"]?.arrayValue, !errors.isEmpty {
@@ -21,16 +26,48 @@ public struct GitHubAPIError: Error, Sendable, Hashable, CustomStringConvertible
             if !details.isEmpty { message += " (" + details.joined(separator: "; ") + ")" }
         }
         var resetsAt: Date?
-        if response.header("x-ratelimit-remaining") == "0", let reset = response.header("x-ratelimit-reset").flatMap(Double.init) {
+        if response.header("x-ratelimit-remaining")?.trimmingCharacters(in: .whitespaces) == "0",
+           let reset = response.header("x-ratelimit-reset").flatMap({ Double($0.trimmingCharacters(in: .whitespaces)) }) {
             resetsAt = Date(timeIntervalSince1970: reset)
         }
-        self.init(status: response.status, message: message.isEmpty ? "HTTP \(response.status)" : message, rateLimitResetsAt: resetsAt)
+        var retryAt = resetsAt
+        if let seconds = response.header("retry-after").flatMap({ TimeInterval($0.trimmingCharacters(in: .whitespaces)) }), seconds >= 0 {
+            let afterWait = now.addingTimeInterval(seconds)
+            retryAt = max(afterWait, resetsAt ?? afterWait)
+        }
+        self.init(status: response.status, message: message.isEmpty ? "HTTP \(response.status)" : message, rateLimitResetsAt: resetsAt, retryAt: retryAt)
     }
 
     public var isNotFound: Bool { status == 404 }
     public var isUnauthorized: Bool { status == 401 }
-    public var isRateLimited: Bool { rateLimitResetsAt != nil || ((status == 403 || status == 429) && message.lowercased().contains("rate limit")) }
+    public var isRateLimited: Bool {
+        if rateLimitResetsAt != nil { return true }
+        guard status == 403 || status == 429 else { return false }
+        return retryAt != nil || message.lowercased().contains("rate limit")
+    }
     public var description: String { "GitHub \(status): \(message)" }
+}
+
+/// Spaces out requests that create or change things on GitHub. GitHub's REST guidance asks for at
+/// least a second between POST, PATCH, PUT and DELETE requests, and refuses content created faster
+/// than about 80 a minute (its secondary rate limit). Waiting turns are handed out in order, so
+/// uploads running side by side still start a second apart.
+public actor WritePacer {
+    public let spacing: TimeInterval
+    private var nextTurn: TimeInterval = 0
+
+    public init(spacing: TimeInterval) {
+        self.spacing = max(spacing, 0)
+    }
+
+    public func waitForTurn() async throws {
+        guard spacing > 0 else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let turn = max(now, nextTurn)
+        nextTurn = turn + spacing
+        let wait = turn - now
+        if wait > 0 { try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
+    }
 }
 
 /// Supplies the two kinds of GitHub token MAIPA-G uses.
@@ -63,6 +100,11 @@ public struct GitHubClient: Sendable {
     private let tokens: (any GitHubTokenProvider)?
     /// Answers for GitLab projects (repos whose `RepoRef.host` is set), when GitLab is connected.
     public var gitLab: GitLabClient?
+    /// Touched whenever GitHub answers and while a request's body is going out, so whoever waits
+    /// on this client (the backup's watchdog) sees real progress instead of guessing.
+    public var activity: ActivityClock?
+    /// When set, every request that writes waits for its turn here first.
+    public var writePacer: WritePacer?
 
     public init(transport: any HTTPTransport, tokens: (any GitHubTokenProvider)?) {
         self.transport = transport
@@ -114,12 +156,22 @@ public struct GitHubClient: Sendable {
     /// not a sign-out.
     func sendAuthorized(_ auth: Auth, accept: String, _ make: ([String: String]) async throws -> HTTPResponse) async throws -> HTTPResponse {
         let response = try await make(try await headers(auth, accept: accept))
+        activity?.touch()
         guard response.status == 401, case .installation = auth, let tokens else { return response }
         await tokens.forgetInstallationToken()
-        return try await make(try await headers(auth, accept: accept))
+        let retried = try await make(try await headers(auth, accept: accept))
+        activity?.touch()
+        return retried
     }
 
-    /// Sends a request. Reads are retried on temporary failures; writes are sent once.
+    /// Touches `activity` as a request body goes out.
+    var bodyProgress: (@Sendable (Int64) -> Void)? {
+        guard let clock = activity else { return nil }
+        return { _ in clock.touch() }
+    }
+
+    /// Sends a request. Reads are retried on temporary failures; writes are sent once (the few
+    /// that are safe to repeat retry through `sendRepeatable`).
     public func send(
         _ method: String,
         _ path: String,
@@ -133,11 +185,14 @@ public struct GitHubClient: Sendable {
         let url = url(path, query: query)
         let isRead = method == "GET" || method == "HEAD"
         let encodedBody = try body.map { try JSONCoding.encoder().encode($0) }
+        let pacer = isRead ? nil : writePacer
+        let progress = encodedBody == nil ? nil : bodyProgress
         let response = try await withRetries(isRead ? .standard : .none, retryAfter: defaultRetryDelay) {
+            try await pacer?.waitForTurn()
             let response = try await sendAuthorized(auth, accept: accept) { base in
                 var headers = base
                 if encodedBody != nil { headers["Content-Type"] = "application/json" }
-                return try await transport.send(HTTPRequest(method: method, url: url, headers: headers, body: encodedBody, idleTimeout: 60, followsRedirects: followsRedirects))
+                return try await transport.send(HTTPRequest(method: method, url: url, headers: headers, body: encodedBody, idleTimeout: 60, followsRedirects: followsRedirects, uploadProgress: progress))
             }
             if isRead, [502, 503, 504].contains(response.status) {
                 throw HTTPError.status(code: response.status, body: response.text, headers: response.headers)
@@ -379,26 +434,56 @@ public struct GitHubClient: Sendable {
     /// connection, a busy GitHub or a short rate limit is retried instead of failing the file.
     public func createBlob(_ repo: RepoRef, contents: Data) async throws -> String {
         let body: JSONValue = ["content": .string(contents.base64EncodedString()), "encoding": "base64"]
-        return try await withRetries(Self.idempotentWrite, retryAfter: Self.writeRetryDelay) { [self] in
-            let response = try await send("POST", Self.path(repo, "/git/blobs"), body: body)
-            guard let sha = JSONValue.parse(response.body)?["sha"]?.stringValue else { throw GitHubAPIError(status: response.status, message: "GitHub didn't return the saved file's id") }
-            return sha
+        let response = try await sendRepeatable("POST", Self.path(repo, "/git/blobs"), body: body)
+        guard let sha = response.flatMap({ JSONValue.parse($0.body)?["sha"]?.stringValue }) else {
+            throw GitHubAPIError(status: response?.status ?? 0, message: "GitHub didn't return the saved file's id")
         }
+        return sha
     }
 
     static let idempotentWrite = RetryPolicy(maxAttempts: 4, baseDelay: 2, maxDelay: 60)
 
+    /// The longest wait GitHub may ask for that a write sits out before trying again itself.
+    /// Anything longer is handed back, so the save can stop, keep what it has, and come back.
+    static let longestWriteWait: TimeInterval = 20
+
     /// Waits worth taking for a write that is safe to repeat.
     static func writeRetryDelay(_ error: Error) -> TimeInterval? {
         if let github = error as? GitHubAPIError {
-            if let reset = github.rateLimitResetsAt {
-                let wait = reset.timeIntervalSinceNow
-                return wait <= 60 ? max(wait, 1) : nil
+            if let retryAt = github.retryAt {
+                // GitHub said when: never sooner (its rate-limit rules), and not at all if that is long.
+                let wait = retryAt.timeIntervalSinceNow
+                return wait <= longestWriteWait ? max(wait, 1) : nil
             }
-            if github.isRateLimited { return 30 }
+            // A rate limit with no time given: GitHub asks for at least a minute's pause, which
+            // the save takes between passes rather than inside one.
+            if github.isRateLimited { return nil }
             return github.status == 429 || (500...504).contains(github.status) ? 0 : nil
         }
         return defaultRetryDelay(error)
+    }
+
+    /// Sends a write that is safe to send twice: a blob or tree (both named by their content), a
+    /// commit (a spare copy is never referenced) or a branch move to a given commit. A dropped
+    /// connection (-1005), a timeout, a busy GitHub or a short rate limit is tried again.
+    /// When a repeat is refused as a conflict (409/422) and `landed` confirms the earlier try got
+    /// through before its answer was lost, that is success and nil is returned.
+    func sendRepeatable(_ method: String, _ path: String, body: JSONValue, landed: (@Sendable () async throws -> Bool)? = nil) async throws -> HTTPResponse? {
+        var attempt = 1
+        while true {
+            do {
+                return try await send(method, path, body: body)
+            } catch let error as GitHubAPIError where attempt > 1 && (error.status == 409 || error.status == 422) {
+                if let landed, try await landed() { return nil }
+                throw error
+            } catch {
+                if error is CancellationError || Task.isCancelled { throw error }
+                guard attempt < Self.idempotentWrite.maxAttempts, let suggested = Self.writeRetryDelay(error) else { throw error }
+                let wait = Self.idempotentWrite.delay(forAttempt: attempt, suggested: suggested > 0 ? suggested : nil)
+                try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                attempt += 1
+            }
+        }
     }
 
     // MARK: Big files, kept as private release assets
@@ -460,11 +545,13 @@ public struct GitHubClient: Sendable {
         components.percentEncodedPath = Self.path(repo, "/releases/\(releaseID)/assets")
         components.queryItems = [URLQueryItem(name: "name", value: name)]
         guard let url = components.url else { throw GitHubAPIError(status: 0, message: "Bad upload address") }
+        let progress = bodyProgress
         return try await withRetries(Self.idempotentWrite, retryAfter: Self.writeRetryDelay) { [self] in
+            try await writePacer?.waitForTurn()
             let response = try await sendAuthorized(.installation, accept: "application/vnd.github+json") { base in
                 var headers = base
                 headers["Content-Type"] = "application/octet-stream"
-                return try await transport.upload(HTTPRequest(method: "POST", url: url, headers: headers, idleTimeout: 300, followsRedirects: false), fromFile: file)
+                return try await transport.upload(HTTPRequest(method: "POST", url: url, headers: headers, idleTimeout: 300, followsRedirects: false, uploadProgress: progress), fromFile: file)
             }
             if response.status == 422, let existing = try await releaseAssets(repo, releaseID: releaseID).first(where: { $0.name == name }) {
                 // Only a finished earlier upload counts. A cut-off one is removed so the next
@@ -498,7 +585,11 @@ public struct GitHubClient: Sendable {
         guard let location = response.header("location"), let url = URL(string: location), url.scheme == "https" else {
             throw GitHubAPIError(status: response.status, message: "GitHub didn't say where the saved file is")
         }
-        let stored = try await transport.download(HTTPRequest(url: url, idleTimeout: 120), to: destination)
+        let clock = activity
+        var progress: (@Sendable (Int64) -> Void)?
+        if let clock { progress = { _ in clock.touch() } }
+        let stored = try await transport.download(HTTPRequest(url: url, idleTimeout: 120), to: destination, progress: progress)
+        clock?.touch()
         guard stored.isSuccess else { throw GitHubAPIError(status: stored.status, message: "GitHub's file storage answered HTTP \(stored.status)") }
     }
 
@@ -526,22 +617,36 @@ public struct GitHubClient: Sendable {
             }),
         ]
         if let base { body["base_tree"] = .string(base) }
-        let response = try await send("POST", Self.path(repo, "/git/trees"), body: .object(body))
-        guard let sha = JSONValue.parse(response.body)?["sha"]?.stringValue else { throw GitHubAPIError(status: response.status, message: "No tree id") }
+        // The same base and changes always make the same tree, so a lost answer is safe to repeat.
+        let response = try await sendRepeatable("POST", Self.path(repo, "/git/trees"), body: .object(body))
+        guard let sha = response.flatMap({ JSONValue.parse($0.body)?["sha"]?.stringValue }) else { throw GitHubAPIError(status: response?.status ?? 0, message: "No tree id") }
         return sha
     }
 
     public func createCommit(_ repo: RepoRef, message: String, tree: String, parents: [String]) async throws -> String {
         let body: JSONValue = ["message": .string(message), "tree": .string(tree), "parents": .array(parents.map(JSONValue.string))]
-        let response = try await send("POST", Self.path(repo, "/git/commits"), body: body)
-        guard let sha = JSONValue.parse(response.body)?["sha"]?.stringValue else { throw GitHubAPIError(status: response.status, message: "No commit id") }
+        // Repeating it at worst leaves a spare commit nothing points at; only the branch move counts.
+        let response = try await sendRepeatable("POST", Self.path(repo, "/git/commits"), body: body)
+        guard let sha = response.flatMap({ JSONValue.parse($0.body)?["sha"]?.stringValue }) else { throw GitHubAPIError(status: response?.status ?? 0, message: "No commit id") }
         return sha
     }
 
     /// Moves a branch to a new commit. Fails with 422 when someone else moved it first, so a save
-    /// can never overwrite changes it has not seen.
+    /// can never overwrite changes it has not seen. Moving it to the same commit again is
+    /// harmless, so a dropped connection is retried; a retry refused because the first try had
+    /// already moved the branch there counts as done.
     public func updateBranch(_ repo: RepoRef, branch: String, to sha: String) async throws {
-        _ = try await send("PATCH", Self.path(repo, "/git/refs/heads/\(Self.escapePath(branch))"), body: ["sha": .string(sha), "force": false])
+        _ = try await sendRepeatable("PATCH", Self.path(repo, "/git/refs/heads/\(Self.escapePath(branch))"), body: ["sha": .string(sha), "force": false]) { [self] in
+            try await branchHead(repo, branch: branch) == sha
+        }
+    }
+
+    /// Starts a branch at `sha` in a repo whose branch doesn't exist yet (an empty one). A retry
+    /// refused because the first try already made it there counts as done.
+    public func createBranchRef(_ repo: RepoRef, branch: String, at sha: String) async throws {
+        _ = try await sendRepeatable("POST", Self.path(repo, "/git/refs"), body: ["ref": .string("refs/heads/\(branch)"), "sha": .string(sha)]) { [self] in
+            try await branchHead(repo, branch: branch) == sha
+        }
     }
 
     public func createBranch(_ repo: RepoRef, branch: String, from sha: String) async throws {
