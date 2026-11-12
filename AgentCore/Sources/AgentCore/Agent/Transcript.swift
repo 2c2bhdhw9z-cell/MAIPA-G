@@ -244,7 +244,7 @@ public enum Transcript {
                 for step in turn.steps {
                     if let steered = step.steeredMessages, !steered.isEmpty {
                         let notes = steered.joined(separator: "\n\n")
-                        result.append(.user("Live steering from the user while you were working — incorporate this into your approach and answer:\n\(notes)"))
+                        result.append(.syntheticUser("Live steering from the user while you were working — incorporate this into your approach and answer:\n\(notes)"))
                     }
                     let calls = step.toolCalls
                     let text = step.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -275,7 +275,7 @@ public enum Transcript {
                             let encoded = "data:\(mime);base64,\(img.data.base64EncodedString())"
                             imgParts.append(["type": "image_url", "image_url": ["url": .string(encoded)]])
                         }
-                        result.append(APIMessage(role: .user, content: nil, contentParts: imgParts))
+                        result.append(APIMessage(role: .user, content: nil, contentParts: imgParts, isSynthetic: true))
                     }
                 }
             }
@@ -356,23 +356,50 @@ public enum Transcript {
         messages.reduce(0) { $0 + messageTokens($1) }
     }
 
+    /// The most one request's messages may take on the wire: 9 MB (9,000,000 bytes), kept under the
+    /// upload limits of the gateways in front of the AI providers with room for the tool list and
+    /// the rest of the request. Measured as encoded JSON (`messageWireBytes` counts the escaping),
+    /// so a request that fits here still fits once it is encoded.
     public static let defaultMaxPayloadBytes = 9_000_000
 
+    /// Bytes `text` takes as a JSON string once encoded. Quotes, backslashes and control characters
+    /// grow when escaped (a newline becomes `\n`, a quote `\"`), so code and JSON-heavy tool output
+    /// (a tool result is itself a JSON envelope, escaped again) is well over its plain length.
+    /// Non-ASCII stays as UTF-8 and slashes aren't escaped (`JSONCoding.encoder`).
+    static func jsonEscapedBytes(_ text: String) -> Int {
+        var bytes = 0
+        for byte in text.utf8 {
+            switch byte {
+            case 0x22, 0x5C, 0x08, 0x09, 0x0A, 0x0C, 0x0D: bytes += 2
+            case 0x00..<0x20: bytes += 6
+            default: bytes += 1
+            }
+        }
+        return bytes
+    }
+
     public static func messageWireBytes(_ message: APIMessage) -> Int {
-        var bytes = (message.content?.utf8.count ?? 0) + 48
+        // `{"content":…,"role":"assistant"}`; "null" when there is no text.
+        var bytes = (message.content.map(jsonEscapedBytes) ?? 4) + 48
         for part in message.contentParts ?? [] {
+            // Data URLs are base64: nothing in them is escaped.
             if part["type"]?.stringValue == "image_url", let u = part["image_url"]?["url"]?.stringValue {
                 bytes += u.utf8.count + 48
             } else if part["type"]?.stringValue == "file", let d = part["file"]?["file_data"]?.stringValue {
-                bytes += d.utf8.count + 64
+                bytes += d.utf8.count + 64 + jsonEscapedBytes(part["file"]?["filename"]?.stringValue ?? "")
             } else {
                 part.jsonString().utf8.count.with { bytes += $0 + 16 }
             }
         }
-        if let calls = message.toolCalls {
+        if let calls = message.toolCalls, !calls.isEmpty {
+            bytes += 16
             for call in calls {
-                bytes += call.function.name.utf8.count + call.function.arguments.utf8.count + 64
+                bytes += jsonEscapedBytes(call.id) + jsonEscapedBytes(call.function.name) + jsonEscapedBytes(call.function.arguments) + 72
             }
+        }
+        if let id = message.toolCallID { bytes += jsonEscapedBytes(id) + 20 }
+        if let details = message.reasoningDetails, !details.isEmpty {
+            bytes += 24 + details.reduce(0) { $0 + $1.jsonString().utf8.count + 1 }
         }
         return bytes
     }
@@ -391,12 +418,15 @@ public enum Transcript {
     ) -> (messages: [APIMessage], trimmed: Bool) {
         var messages = messages
         var changed = false
-        let protectedFrom = messages.lastIndex { $0.role == .user } ?? messages.count
+        // The person's latest message and everything after it stay. MAIPA-G's own user-role
+        // messages (live steering, sub-agent reports, nudges) don't count: one at the end used to
+        // leave the person's real message, and its attachments, unprotected.
+        let protectedFrom = messages.lastIndex(where: \.isRealUser) ?? messages.lastIndex { $0.role == .user } ?? messages.count
         var wireCache = messages.map(messageWireBytes)
         var totalWire = wireCache.reduce(256, +)
 
-        // 1. Keep HTTP upload under Cloudflare / gateway limits (~7.5 MB) by stripping base64
-        // images/PDFs from older user turns first while preserving all text and the latest turn's attachments.
+        // 1. Keep HTTP upload under the gateway limit (`defaultMaxPayloadBytes`, 9 MB) by stripping
+        // base64 images/PDFs from older user turns first while preserving all text and the latest turn's attachments.
         if totalWire > maxPayloadBytes {
             for index in messages.indices where index < protectedFrom && messages[index].role == .user {
                 guard let parts = messages[index].contentParts, !parts.isEmpty else { continue }
@@ -437,11 +467,15 @@ public enum Transcript {
             }
         }
 
-        // If the latest user message alone still exceeds `maxPayloadBytes` (including a single >9 MB PDF/image),
+        // If the latest turn alone still exceeds `maxPayloadBytes` (including a single >9 MB PDF/image),
         // keep as many inline attachments as fit inside the byte ceiling and note omitted ones cleanly so `read_attachment` can inspect them.
-        if totalWire > maxPayloadBytes,
-           let lastUser = messages.lastIndex(where: { $0.role == .user }),
-           let parts = messages[lastUser].contentParts, !parts.isEmpty {
+        // Pictures MAIPA-G added in this turn (images a tool read) give way first, newest first;
+        // the person's own attachments last.
+        let addedByMAIPAG = messages.indices.filter { $0 >= protectedFrom && messages[$0].role == .user && messages[$0].isSynthetic }
+        let sentByPerson = messages.indices.filter { $0 >= protectedFrom && messages[$0].role == .user && !messages[$0].isSynthetic }
+        let latestCandidates: [Int] = Array(addedByMAIPAG.reversed()) + Array(sentByPerson.reversed())
+        for lastUser in latestCandidates {
+            guard totalWire > maxPayloadBytes, let parts = messages[lastUser].contentParts, !parts.isEmpty else { continue }
             let baseBytesWithoutLatest = totalWire - wireCache[lastUser]
             let budgetForLatest = max(512_000, maxPayloadBytes - baseBytesWithoutLatest)
             var used = 0
@@ -467,7 +501,10 @@ public enum Transcript {
             }
             if !omittedNames.isEmpty {
                 let namesSummary = omittedNames.joined(separator: ", ")
-                kept.append(["type": "text", "text": .string("[\(omittedNames.count) large attached file\(omittedNames.count == 1 ? "" : "s") (\(namesSummary)) omitted from raw inline upload to avoid HTTP 413 Payload Too Large — use read_attachment to inspect local file contents.]")])
+                let note = messages[lastUser].isSynthetic
+                    ? "[\(omittedNames.count) image\(omittedNames.count == 1 ? "" : "s") a tool read left out of this request to avoid HTTP 413 Payload Too Large — read fewer at a time if you need to see them.]"
+                    : "[\(omittedNames.count) large attached file\(omittedNames.count == 1 ? "" : "s") (\(namesSummary)) omitted from raw inline upload to avoid HTTP 413 Payload Too Large — use read_attachment to inspect local file contents.]"
+                kept.append(["type": "text", "text": .string(note)])
                 messages[lastUser].contentParts = kept
                 let updatedWire = messageWireBytes(messages[lastUser])
                 totalWire += updatedWire - wireCache[lastUser]
@@ -489,14 +526,17 @@ public enum Transcript {
             }
             if totalTokens <= budget { return (messages, changed) }
         }
-        // Then drop whole exchanges from the front: a user message and everything up to the next
-        // one. The latest exchange always stays.
+        // Then drop whole exchanges from the front: a message the person sent and everything up to
+        // the next one. The latest exchange always stays. MAIPA-G's own user-role messages aren't
+        // exchange boundaries: cutting at one would split a reply from its tool results, or drop
+        // the person's latest message.
         var dropped = false
+        let boundary: (APIMessage) -> Bool = messages.contains(where: \.isRealUser) ? { $0.isRealUser } : { $0.role == .user }
         while totalTokens > budget {
-            guard let firstUser = messages.firstIndex(where: { $0.role == .user }),
-                  let lastUser = messages.lastIndex(where: { $0.role == .user }),
+            guard let firstUser = messages.firstIndex(where: boundary),
+                  let lastUser = messages.lastIndex(where: boundary),
                   firstUser < lastUser,
-                  let nextUser = messages[(firstUser + 1)...].firstIndex(where: { $0.role == .user })
+                  let nextUser = messages[(firstUser + 1)...].firstIndex(where: boundary)
             else { break }
             let removedTokens = tokenCache[firstUser..<nextUser].reduce(0, +)
             messages.removeSubrange(firstUser..<nextUser)

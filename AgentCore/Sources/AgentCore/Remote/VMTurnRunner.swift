@@ -52,13 +52,27 @@ public actor HandedOverTokens: GitHubTokenProvider {
 }
 
 /// Writes the runner's state after each step: `state/<n>.json.gz`, then `seq` names it. Files are
-/// renamed into place, so the phone never reads half a file; the last few stay for a phone that is
-/// part way through reading one.
+/// renamed into place, so the phone never reads half a file. The phone reads a big state in
+/// several pieces, one command each, so an older state stays until it has been replaced for
+/// `keepFor` seconds: deleting all but the last 4 straight away (while text streamed in, a few
+/// states a second) took the file away from a phone part way through reading it, and the reply
+/// never moved on from "Thinking…". The newest few always stay; `maxKept` bounds the disk used.
 public actor VMStateWriter {
     private let folder: URL
+    private let keepFor: TimeInterval
+    private let maxKept: Int
     private(set) var seq = 0
+    /// When each kept state (and staged version) was replaced by a newer one.
+    private var replacedAt: [Int: Date] = [:]
+    private var stagedReplacedAt: [Int: Date] = [:]
+    static let alwaysKept = 4
+    static let alwaysKeptStaged = 3
 
-    public init(folder: URL) { self.folder = folder }
+    public init(folder: URL, keepFor: TimeInterval = 120, maxKept: Int = 400) {
+        self.folder = folder
+        self.keepFor = keepFor
+        self.maxKept = max(maxKept, Self.alwaysKept)
+    }
 
     @discardableResult
     public func write(_ make: (Int) -> VMTurnState) throws -> Int {
@@ -69,7 +83,8 @@ public actor VMStateWriter {
         let target = states.appendingPathComponent("\(seq).json.gz")
         try VMCoding.pack(state).write(to: target, options: .atomic)
         try Data("\(seq)\n".utf8).write(to: folder.appendingPathComponent("seq"), options: .atomic)
-        if seq > 4 { try? FileManager.default.removeItem(at: states.appendingPathComponent("\(seq - 4).json.gz")) }
+        if seq > 1 { replacedAt[seq - 1] = Date() }
+        replacedAt = Self.prune(replacedAt, newest: seq, alwaysKept: Self.alwaysKept, keepFor: keepFor, maxKept: maxKept, in: states)
         return seq
     }
 
@@ -82,8 +97,23 @@ public actor VMStateWriter {
         let directory = folder.appendingPathComponent("staged", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try VMCoding.pack(files).write(to: directory.appendingPathComponent("\(stagedVersion).json.gz"), options: .atomic)
-        if stagedVersion > 3 { try? FileManager.default.removeItem(at: directory.appendingPathComponent("\(stagedVersion - 3).json.gz")) }
+        if stagedVersion > 1 { stagedReplacedAt[stagedVersion - 1] = Date() }
+        stagedReplacedAt = Self.prune(stagedReplacedAt, newest: stagedVersion, alwaysKept: Self.alwaysKeptStaged, keepFor: keepFor, maxKept: maxKept, in: directory)
         return stagedVersion
+    }
+
+    /// Deletes the files that are both outside the newest `alwaysKept` and replaced more than
+    /// `keepFor` ago, and the oldest past `maxKept` whatever their age. Returns what is still kept.
+    static func prune(_ replaced: [Int: Date], newest: Int, alwaysKept: Int, keepFor: TimeInterval, maxKept: Int, in directory: URL, now: Date = Date()) -> [Int: Date] {
+        var kept = replaced
+        for (number, at) in replaced where number <= newest - alwaysKept {
+            let tooMany = number <= newest - maxKept
+            if tooMany || now.timeIntervalSince(at) >= keepFor {
+                try? FileManager.default.removeItem(at: directory.appendingPathComponent("\(number).json.gz"))
+                kept.removeValue(forKey: number)
+            }
+        }
+        return kept
     }
 }
 
@@ -167,8 +197,9 @@ public struct VMTurnRunner: Sendable {
         }
         for text in request.earlySteering { await run.steer(text) }
 
-        // Steer and Stop arrive as files from the phone.
-        let pump = Task {
+        // Steer and Stop arrive as files from the phone. The pump hands back the steer files it
+        // took, so the ones that arrive after its last look are still read (below).
+        let pump = Task { () -> Set<String> in
             var taken = Set<String>()
             while !Task.isCancelled {
                 for steer in VMRunFiles.steers(in: folder, after: taken) {
@@ -176,9 +207,10 @@ public struct VMTurnRunner: Sendable {
                     await run.steer(steer.text)
                     await StateBox.shared.setSteersTaken(taken.count)
                 }
-                if VMRunFiles.stopRequested(in: folder) { run.cancel(); return }
+                if VMRunFiles.stopRequested(in: folder) { run.cancel(); return taken }
                 try? await Task.sleep(nanoseconds: 700_000_000)
             }
+            return taken
         }
         defer { pump.cancel() }
 
@@ -205,17 +237,33 @@ public struct VMTurnRunner: Sendable {
             _ = try? await writer.write { VMTurnState(id: request.id, seq: $0, phase: .running, turn: snapshot, stagedVersion: current, receipts: receipts, steersTaken: taken, memories: memories) }
         }
         pump.cancel()
-        if turn.status == .running { turn.status = .stopped }
-        let unconsumed = await run.drainUnconsumedSteering()
+        // The pump is waited for, so a steer it was handing over as the reply ended is in the
+        // inbox before that is read.
+        let takenFiles = await pump.value
+        if turn.status == .running {
+            turn.status = .stopped
+            AgentLoop.settleRunningTools(in: &turn)
+        }
+        // Steering the AI never saw goes back to the phone, which sends it as the next message:
+        // what was in the inbox, then steer files that arrived after the pump's last look (they
+        // used to be left in the folder and lost).
+        let lateFiles = VMRunFiles.steers(in: folder, after: takenFiles)
+        let unconsumed = Self.unconsumedSteering(inbox: await run.drainUnconsumedSteering(), lateFiles: lateFiles.map(\.text))
+        let taken = takenFiles.count + lateFiles.count
         staged = await setup.stagedFiles()
         let receipts = await setup.newReceipts()
-        let taken = await StateBox.shared.steersTaken
         let memories = await setup.changedMemories()
         let final = turn
         let finalVersion = version
         try await writer.write { VMTurnState(id: request.id, seq: $0, phase: .finished, turn: final, staged: staged, stagedVersion: finalVersion, receipts: receipts, steersTaken: taken, unconsumedSteering: unconsumed, memories: memories) }
         await setup.close()
         logger.progress("MAIPA-G finished reply \(request.id): \(final.status.rawValue).")
+    }
+
+    /// Steering the AI didn't see, oldest first: the inbox (taken from files, in order), then the
+    /// files that came after the last look. Nothing is dropped.
+    static func unconsumedSteering(inbox: [String], lateFiles: [String]) -> [String] {
+        (inbox + lateFiles).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
     }
 
     static func promptNote(machine: String, hasConnectors: Bool) -> String {
@@ -270,9 +318,13 @@ public struct VMTurnRunner: Sendable {
         var homePath: String?
         var hookRunner: HookedTool.CommandRunner?
         var hooks: [RepoHook] = []
+        // One holder for the handed-over token, shared by everything here that uses GitHub. A
+        // fresh token is read from its file and the file deleted, so with two holders only one
+        // got it and the other went on with the old token (and the two raced on the file).
+        let handedOver = secrets.githubToken.flatMap { $0.isEmpty ? nil : HandedOverTokens(token: $0, refreshFile: folder.appendingPathComponent("token-refresh.json.gz")) }
         if let repo = request.repo {
-            guard let token = secrets.githubToken, !token.isEmpty else { throw ToolInputError("GitHub isn't connected for this reply.") }
-            let github = GitHubClient(transport: transport, tokens: HandedOverTokens(token: token, refreshFile: folder.appendingPathComponent("token-refresh.json.gz")))
+            guard let token = secrets.githubToken, !token.isEmpty, let handedOver else { throw ToolInputError("GitHub isn't connected for this reply.") }
+            let github = GitHubClient(transport: transport, tokens: handedOver)
             let store = SnapshotStore(root: home.appendingPathComponent(".maipa-g/snapshots", isDirectory: true))
             let workspace = RepoWorkspace(repo: repo.repo.ref, branch: repo.workingBranch, commit: repo.commit, github: github, store: store)
             let staged = ChangeWorkspace(base: workspace)
@@ -334,7 +386,7 @@ public struct VMTurnRunner: Sendable {
         // Files and pictures made here are kept in the run's folder; the phone copies them into
         // the chat as each state arrives (VMMedia), so they show the same as on the phone.
         let media = AttachmentStore(dataDirectory: folder.appendingPathComponent(VMMedia.folder, isDirectory: true))
-        let fileGitHub = secrets.githubToken.flatMap { $0.isEmpty ? nil : GitHubClient(transport: transport, tokens: HandedOverTokens(token: $0, refreshFile: folder.appendingPathComponent("token-refresh.json.gz"))) }
+        let fileGitHub = handedOver.map { GitHubClient(transport: transport, tokens: $0) }
         tools.append(SendFileTool(github: fileGitHub, transport: transport, computer: control, store: media))
         // Memories work here as on the phone: the AI saves what the person wants remembered, and
         // each state carries the new ones back to the phone's Memories.

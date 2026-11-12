@@ -267,7 +267,7 @@ public struct SubAgentSetup: Sendable {
             chat.messages.append(.user(invocation.task))
             chat.messages.append(ChatMessage(body: .assistant(AssistantTurn())))
             let pool = invocation.definition.behavior == .changesAllowed ? setup.changeTools : setup.reportTools
-            let input = AgentTurnInput(
+            var input = AgentTurnInput(
                 chat: chat, route: route, systemPrompt: setup.prompt(invocation.definition, invocation.context),
                 tools: pool.filter { invocation.definition.permits(tool: $0.name) && !SubagentTools.isSubagentTool($0.name) },
                 allowTools: true, maxSteps: 400, spendLimit: invocation.spendLimit, requiresInitialSpendApproval: false,
@@ -279,6 +279,11 @@ public struct SubAgentSetup: Sendable {
                 freeRoute: { ModelRouter.route(choice: .free, difficulty: .normal, thinking: .default, account: AccountState(), catalogue: catalogue, openRouterAvailable: available) },
                 onOutOfCredits: {}
             )
+            // The allowance this sub-agent shares with the ones running alongside it: each is
+            // stopped once all of them together reach it, not only when it alone does. Carrying on
+            // after a failure (below) keeps the same entry, so nothing is counted twice.
+            input.sharedSpend = invocation.sharedSpend
+            input.sharedSpendMember = invocation.sharedSpendMember
             invocation.onLiveProgress?(AgentLiveProgress(model: route.model, toolCallCount: 0, latestActivity: "Starting…"))
             var run = AgentLoop.start(input, environment: environment)
             var finalTurn: AssistantTurn?
@@ -358,6 +363,18 @@ public struct SubAgentSetup: Sendable {
             }
             if finalTurn?.status == .stopped, finalTurn?.failure?.kind != .stepLimit {
                 return AgentExecutionResult(output: text.isEmpty ? "cancelled" : text, model: model, cost: cost, toolCallCount: calls.count, toolSummaries: calls.map(\.summary), status: "cancelled")
+            }
+            // Stopped by the spend check before it finished: say so, rather than "completed",
+            // so neither the person nor the main AI takes a half-done report as the whole answer.
+            if finalTurn?.status == .waitingForUser, let spent = finalTurn?.spendCheck {
+                let limit = invocation.sharedSpend?.limit ?? invocation.spendLimit
+                let limitText = limit.map { String(format: " of $%.2f", $0) } ?? ""
+                let whose = invocation.sharedSpend != nil ? "the sub-agents' spending limit" : "its spending limit"
+                let note = "Stopped at \(whose)\(limitText) before it finished (this sub-agent spent $\(String(format: "%.4f", spent))). This report is incomplete."
+                return AgentExecutionResult(
+                    output: text.isEmpty ? note : "\(text)\n\n\(note)", model: model, cost: cost, needsSpendingApproval: true,
+                    toolCallCount: calls.count, toolSummaries: calls.map(\.summary), status: AgentExecutionResult.stoppedForBudgetStatus
+                )
             }
             let finalText = !text.isEmpty ? text : (reasoning ?? "Completed \(calls.count) \(calls.count == 1 ? "action" : "actions").")
             if let pending = finalTurn?.pendingQuestions?.questions.questions.first {

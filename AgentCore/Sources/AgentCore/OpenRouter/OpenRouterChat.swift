@@ -15,18 +15,28 @@ public struct APIMessage: Encodable, Sendable, Hashable {
     /// The model's own thinking blocks, returned exactly as received. Models such as Claude need
     /// them back while a tool-using answer is still in progress, or they lose their train of thought.
     public var reasoningDetails: [JSONValue]?
+    /// A user-role message MAIPA-G wrote itself (live steering, a sub-agent report, a nudge, images
+    /// a tool read), not one the person sent. Never sent: `Transcript.fit` uses it to find the
+    /// person's real latest message.
+    public var isSynthetic: Bool
 
-    public init(role: Role, content: String?, contentParts: [JSONValue]? = nil, toolCalls: [APIToolCall]? = nil, toolCallID: String? = nil, reasoningDetails: [JSONValue]? = nil) {
+    public init(role: Role, content: String?, contentParts: [JSONValue]? = nil, toolCalls: [APIToolCall]? = nil, toolCallID: String? = nil, reasoningDetails: [JSONValue]? = nil, isSynthetic: Bool = false) {
         self.role = role
         self.content = content
         self.contentParts = contentParts
         self.toolCalls = toolCalls
         self.toolCallID = toolCallID
         self.reasoningDetails = reasoningDetails
+        self.isSynthetic = isSynthetic
     }
 
     public static func system(_ text: String) -> APIMessage { APIMessage(role: .system, content: text) }
     public static func user(_ text: String) -> APIMessage { APIMessage(role: .user, content: text) }
+    /// A user-role message written by MAIPA-G rather than the person.
+    public static func syntheticUser(_ text: String) -> APIMessage { APIMessage(role: .user, content: text, isSynthetic: true) }
+
+    /// A message the person sent (not one MAIPA-G added in the user role).
+    public var isRealUser: Bool { role == .user && !isSynthetic }
     public static func tool(id: String, _ text: String) -> APIMessage { APIMessage(role: .tool, content: text, toolCallID: id) }
 
     enum CodingKeys: String, CodingKey {

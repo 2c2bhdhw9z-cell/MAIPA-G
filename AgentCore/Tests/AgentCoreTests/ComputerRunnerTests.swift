@@ -204,7 +204,9 @@ struct ComputerRunnerTests {
     func stateWriterNumbersAndPrunes() async throws {
         let folder = try Self.temporaryHome()
         defer { try? FileManager.default.removeItem(at: folder) }
-        let writer = VMStateWriter(folder: folder)
+        // No grace period here: older states go as soon as they are past the newest four
+        // (EngineReliabilityTests covers the grace period a reading phone gets).
+        let writer = VMStateWriter(folder: folder, keepFor: 0)
         for _ in 1...7 {
             try await writer.write { VMTurnState(id: "turn-x", seq: $0, phase: .running, turn: AssistantTurn()) }
         }
@@ -346,7 +348,8 @@ struct ComputerRunnerTests {
         try await vm.start(id: id, mode: .turn, revision: revision, request: Data("{}".utf8), secrets: VMSecrets(openRouterKey: nil, githubToken: nil))
         try await Task.sleep(nanoseconds: 300_000_000)
         #expect(try await vm.poll(id: id, after: 0).runnerAlive)
-        try await vm.stop(id: id)
+        // Short waits so the test is quick; the real ones are 20 and 5 seconds.
+        try await vm.stop(id: id, graceSeconds: 1, termSeconds: 1)
         #expect(try await vm.poll(id: id, after: 0).runnerAlive == false)
     }
 
