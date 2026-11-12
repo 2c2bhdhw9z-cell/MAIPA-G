@@ -4,6 +4,7 @@ import SwiftUI
 struct HealthCheckScreen: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
     /// Pushed inside Settings: no stack of its own and no Done button (Back returns to Settings).
     var embedded = false
     @State private var items: [Item] = []
@@ -12,8 +13,9 @@ struct HealthCheckScreen: View {
     @State private var toolsInstalling = false
 
     private struct Item: Identifiable {
-        enum State { case good, warning, failed }
-        enum Action { case github, openRouter, save, connector(UUID), computer, replaceComputer, setupTools, jobs }
+        /// notSetUp: nothing to check yet (not a failure), such as Actions with no GitHub repo.
+        enum State { case good, warning, failed, notSetUp }
+        enum Action { case github, openRouter, save, connector(UUID), computer, replaceComputer, setupTools, jobs, openPage(URL, label: String) }
         let id: String
         var title: String
         var detail: String
@@ -36,7 +38,7 @@ struct HealthCheckScreen: View {
                             Text(item.title).font(.body.weight(.medium))
                             Text(item.detail).font(.footnote).foregroundStyle(Theme.secondaryText)
                             if let next = item.nextStep {
-                                Text(next).font(.footnote).foregroundStyle(item.state == .failed ? Theme.danger : .orange)
+                                Text(next).font(.footnote).foregroundStyle(nextStepColor(item.state))
                             }
                             if let action = item.action {
                                 Button(Self.label(for: action)) { fix(action) }.font(.footnote.weight(.semibold))
@@ -241,29 +243,7 @@ struct HealthCheckScreen: View {
         }
 
         await app.jobs.refresh()
-        var actionsError = app.jobs.lastError
-        var probed: [String] = []
-        if actionsError == nil, let github = app.github.client {
-            // With no jobs yet, Actions is still checked against the data repo or the open repo.
-            var repos = Array(Set(app.jobs.jobs.compactMap(\.targetRepo))).sorted { $0.fullName < $1.fullName }
-            if repos.isEmpty { repos = [app.sync.repo, app.repo(for: .home)?.ref].compactMap { $0 } }
-            for repo in repos.prefix(5) {
-                do { _ = try await github.workflowRuns(repo, limit: 1); probed.append(repo.fullName) }
-                catch { actionsError = ErrorExplainer.explain(error).message; break }
-            }
-            if repos.isEmpty, actionsError == nil {
-                actionsError = "There is no repo to check Actions against yet."
-            }
-        } else if actionsError == nil {
-            actionsError = "GitHub isn't connected, so Actions can't be checked."
-        }
-        items.append(Item(
-            id: "actions", title: "GitHub Actions",
-            detail: actionsError ?? "Actions answered for \(probed.joined(separator: ", ")) and job status refreshed.",
-            nextStep: actionsError == nil ? nil : "Open Jobs, fix the shown GitHub error, and retry.",
-            state: actionsError == nil ? .good : .failed,
-            action: actionsError == nil ? nil : .jobs
-        ))
+        await appendActionsItem()
         running = false
     }
 
@@ -277,13 +257,59 @@ struct HealthCheckScreen: View {
         case .replaceComputer: confirmReplace = true
         case .setupTools: Task { await setupTools() }
         case .jobs: app.jobs.show()
+        case .openPage(let url, _): openURL(url)
         }
+    }
+
+    /// GitHub Actions, checked live now (not from an older job error). It only builds previews
+    /// these days, as jobs run on the chat computer, so with no GitHub repo to check it against it
+    /// is "not set up yet" rather than failed.
+    private func appendActionsItem() async {
+        let title = "GitHub Actions"
+        guard app.github.isConnected, let github = app.github.client else {
+            items.append(Item(id: "actions", title: title, detail: "Not set up: GitHub isn't connected.", nextStep: "Connect GitHub to use it.", state: .notSetUp, action: .github))
+            return
+        }
+        // The repos jobs used, or else the data repo and the home screen's repo.
+        var repos = Array(Set(app.jobs.jobs.compactMap(\.targetRepo))).sorted { $0.fullName < $1.fullName }
+        if repos.isEmpty { repos = [app.sync.repo, app.repo(for: .home)?.ref].compactMap { $0 } }
+        repos = repos.filter { !$0.isGitLab }
+        guard !repos.isEmpty else {
+            items.append(Item(id: "actions", title: title, detail: "Not set up yet: there's no GitHub repo to check it against. It's checked once a chat or job uses one.", state: .notSetUp))
+            return
+        }
+        var answered: [String] = []
+        for repo in repos.prefix(5) {
+            do {
+                _ = try await github.workflowRuns(repo, limit: 1)
+                answered.append(repo.fullName)
+            } catch {
+                // The fix is MAIPA-G's access to that repo on GitHub, not the Jobs screen.
+                let action: Item.Action
+                if let access = app.github.installationSettingsURL {
+                    action = .openPage(access, label: "Check MAIPA-G's access on GitHub")
+                } else if let page = URL(string: "https://github.com/\(repo.fullName)/actions") {
+                    action = .openPage(page, label: "Open Actions on GitHub")
+                } else {
+                    action = .github
+                }
+                items.append(Item(
+                    id: "actions", title: title,
+                    detail: "\(repo.fullName): \(ErrorExplainer.explain(error).message)",
+                    nextStep: "MAIPA-G's GitHub App needs access to \(repo.fullName) and its Actions. Check that on GitHub, then Check again.",
+                    state: .failed, action: action
+                ))
+                return
+            }
+        }
+        items.append(Item(id: "actions", title: title, detail: "Actions answered for \(answered.joined(separator: ", ")) and job status refreshed.", state: .good))
     }
 
     private static func label(for action: Item.Action) -> String {
         switch action {
         case .setupTools: "Set up tools"
         case .replaceComputer: "Replace machine"
+        case .openPage(_, let label): label
         default: "Fix"
         }
     }
@@ -299,10 +325,14 @@ struct HealthCheckScreen: View {
     }
 
     private func icon(_ state: Item.State) -> String {
-        switch state { case .good: "checkmark.circle.fill"; case .warning: "exclamationmark.circle.fill"; case .failed: "xmark.circle.fill" }
+        switch state { case .good: "checkmark.circle.fill"; case .warning: "exclamationmark.circle.fill"; case .failed: "xmark.circle.fill"; case .notSetUp: "minus.circle.fill" }
     }
 
     private func color(_ state: Item.State) -> Color {
-        switch state { case .good: .green; case .warning: .orange; case .failed: Theme.danger }
+        switch state { case .good: .green; case .warning: .orange; case .failed: Theme.danger; case .notSetUp: Theme.secondaryText }
+    }
+
+    private func nextStepColor(_ state: Item.State) -> Color {
+        switch state { case .failed: Theme.danger; case .notSetUp: Theme.secondaryText; case .good, .warning: .orange }
     }
 }

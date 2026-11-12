@@ -82,9 +82,12 @@ final class ChatLibrary {
         }
     }
 
+    /// Reads every chat. Replies that were still running when the app closed get their session
+    /// here but only carry on in `resumeRunning()`, once connectors and the model list are ready.
     func load() async {
         let chats = await store.loadAll()
         var loadedSummaries = chats.map(ChatSummary.init)
+        var interrupted: [UUID] = []
         for index in chats.indices where chats[index].lastAssistantTurn?.status == .running {
             let chat = chats[index]
             let session = ChatSession(
@@ -92,18 +95,60 @@ final class ChatLibrary {
                 app: app,
                 draft: await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: chat.id.uuidString.lowercased()))
             )
-            session.resumeFromRelaunchIfSafe()
             session.settleInterruptedWorkflowRunsOnLaunch()
             sessions[chat.id] = session
+            interrupted.append(chat.id)
             loadedSummaries[index] = ChatSummary(session.chat)
         }
+        runningAtLaunch = interrupted
         summaries = loadedSummaries.sorted { $0.updatedAt > $1.updatedAt }
         isLoaded = true
+    }
+
+    /// Chats `load()` found with a reply still running, waiting for `resumeRunning()`.
+    @ObservationIgnored private var runningAtLaunch: [UUID] = []
+
+    /// Carries on the replies that were still running when the app closed (one that just crashed
+    /// the app is settled instead; see ChatSession.resumeFromRelaunchIfSafe). The app calls this
+    /// once at launch, after connectors and the model list have loaded, so a resumed reply never
+    /// starts without them.
+    func resumeRunning() async {
+        let ids = runningAtLaunch
+        runningAtLaunch = []
+        for id in ids {
+            if let session = sessions[id] {
+                session.resumeFromRelaunchIfSafe()
+                continue
+            }
+            // Its session was let go while connectors and models loaded (another chat was opened):
+            // read it again, as long as it is still running on disk.
+            guard let chat = await store.load(id), chat.lastAssistantTurn?.status == .running else { continue }
+            let draft = await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: id.uuidString.lowercased()))
+            // Opened again while it was being read.
+            if let opened = sessions[id] {
+                opened.resumeFromRelaunchIfSafe()
+                continue
+            }
+            let session = ChatSession(chat: chat, app: app, draft: draft)
+            sessions[id] = session
+            session.resumeFromRelaunchIfSafe()
+        }
     }
 
     /// After a save brought chats from GitHub: refreshes the list, and any open chat that isn't busy
     /// while preserving unsaved staged repository changes, active workflows, and Composer drafts.
     func reloadFromDisk() async {
+        /// A chat that came from GitHub still marked running is never run again here: it may be
+        /// running on another device, or be a stale copy. A reply running on the chat computer is
+        /// followed (that only reads its state); any other is settled, and Retry or Keep going
+        /// carries it on when the person wants.
+        func adoptSyncedRunningTurn(_ session: ChatSession) {
+            if session.hasComputerRun {
+                session.resumeFromRelaunchIfSafe()
+            } else {
+                session.settleInterruptedTurnOnLaunch()
+            }
+        }
         let chats = await store.loadAll()
         var resolvedChats = chats
         for index in resolvedChats.indices {
@@ -123,7 +168,7 @@ final class ChatLibrary {
                         let savedDraft = await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: chat.id.uuidString.lowercased()))
                         let mergedDraft = existingDraft.isEmpty ? savedDraft : existingDraft
                         let fresh = ChatSession(chat: chat, app: app, draft: mergedDraft)
-                        fresh.resumeFromRelaunchIfSafe()
+                        adoptSyncedRunningTurn(fresh)
                         fresh.workstationFiles = session.workstationFiles
                         fresh.activeWorkflowRuns = session.activeWorkflowRuns
                         sessions[chat.id] = fresh
@@ -136,18 +181,41 @@ final class ChatLibrary {
             } else if chat.lastAssistantTurn?.status == .running {
                 let savedDraft = await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: chat.id.uuidString.lowercased()))
                 let settled = ChatSession(chat: chat, app: app, draft: savedDraft)
-                settled.resumeFromRelaunchIfSafe()
+                adoptSyncedRunningTurn(settled)
                 sessions[chat.id] = settled
                 resolvedChats[index] = settled.chat
             }
         }
-        summaries = resolvedChats.map(ChatSummary.init).sorted { $0.updatedAt > $1.updatedAt }
+        summaries = resolvedChats.map { listSummary($0) }.sorted { $0.updatedAt > $1.updatedAt }
         let ids = Set(chats.map(\.id))
         if let open = openSession, !ids.contains(open.id), !open.isRunning, !open.hasActiveWorkflowRuns, !open.chat.messages.isEmpty {
             let hasUnsaved = await open.hasUnsavedStagedWork()
             if !hasUnsaved {
                 openSession = nil
             }
+        }
+    }
+
+    /// The chat's row in the side menu. While a reply runs here, the row keeps the place the
+    /// reply's start gave it (ChatSession.listedAtWhileRunning), so it doesn't jump about with every
+    /// saved part of the reply; it moves again when the reply ends. The chat's own updatedAt still
+    /// changes as the reply saves, which saving to GitHub and the Workstation's live files rely on.
+    private func listSummary(_ chat: Chat) -> ChatSummary {
+        var summary = ChatSummary(chat)
+        if let listed = sessions[chat.id]?.listedAtWhileRunning { summary.updatedAt = listed }
+        return summary
+    }
+
+    /// Chats with a reply running in this app right now. Observable, unlike `sessions`, so the side
+    /// menu's status changes the moment a reply starts or ends.
+    private(set) var runningChatIDs: Set<UUID> = []
+
+    /// Called by a session whenever its reply starts or ends.
+    func sessionRunningChanged(_ id: UUID, isRunning: Bool) {
+        if isRunning {
+            runningChatIDs.insert(id)
+        } else {
+            runningChatIDs.remove(id)
         }
     }
 
@@ -195,12 +263,6 @@ final class ChatLibrary {
         }
     }
 
-    func suspendAllForBackground() {
-        for session in sessions.values where session.isRunning {
-            session.suspendForBackgroundIfNeeded()
-        }
-    }
-
     func resumePausedChats() {
         for session in sessions.values {
             session.resumeInterruptedTurn()
@@ -238,9 +300,13 @@ final class ChatLibrary {
         guard !PreviewScenes.isActive else { return }
         do {
             try await store.save(chat)
+            unsavedChats[chat.id] = nil
         } catch {
+            // Recorded in diagnostics, and tried again with the next save.
+            noteFailedSave(chat, error)
             return
         }
+        await retryUnsavedChats()
         upsert(chat)
         // Local disk is saved immediately; while a turn is actively streaming, debounce remote GitHub
         // commits so MAIPA-G-data isn't hammered every 4 seconds (and doesn't hold Saving… continuously).
@@ -250,13 +316,40 @@ final class ChatLibrary {
 
     private func upsert(_ chat: Chat) {
         guard !chat.messages.isEmpty else { return }
-        let summary = ChatSummary(chat)
+        let summary = listSummary(chat)
         if let index = summaries.firstIndex(where: { $0.id == chat.id }) {
             summaries[index] = summary
         } else {
             summaries.append(summary)
         }
         summaries.sort { $0.updatedAt > $1.updatedAt }
+    }
+
+    /// Chats whose last save to this phone failed, by id. Each failure goes into the diagnostics
+    /// log once; every later save (of that chat or any other) tries them again until one works.
+    @ObservationIgnored private var unsavedChats: [UUID: Chat] = [:]
+
+    private func noteFailedSave(_ chat: Chat, _ error: Error) {
+        if unsavedChats.updateValue(chat, forKey: chat.id) == nil {
+            _ = app?.report(error, area: "chats", operation: "save chat", path: ChatStore.relativePath(for: chat.id))
+        }
+    }
+
+    private func retryUnsavedChats() async {
+        for id in Array(unsavedChats.keys) {
+            // A chat deleted since stays deleted.
+            guard sessions[id] != nil || summaries.contains(where: { $0.id == id }) else {
+                unsavedChats[id] = nil
+                continue
+            }
+            guard let latest = sessions[id]?.chat ?? unsavedChats[id] else { continue }
+            do {
+                try await store.save(latest)
+                unsavedChats[id] = nil
+            } catch {
+                // Still failing: tried again with the next save.
+            }
+        }
     }
 
     func rename(_ id: UUID, to title: String) async {

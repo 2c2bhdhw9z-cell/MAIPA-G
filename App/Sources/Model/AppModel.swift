@@ -153,6 +153,14 @@ final class AppModel {
     var isMenuOpen = false
     var sheet: AppSheet?
     @ObservationIgnored private var started = false
+    /// Set once launch has carried on the replies left running (after connectors and models
+    /// loaded). Until then coming to the foreground doesn't resume chats, so none starts early.
+    @ObservationIgnored private var resumedRunningChats = false
+    /// The foreground refresh, waiting out its short debounce.
+    @ObservationIgnored private var foregroundRefresh: Task<Void, Never>?
+    /// How long the app stays in the foreground before it refreshes balances, connectors and
+    /// updates, so quickly switching apps back and forth doesn't refresh each time.
+    static let foregroundRefreshDelay: UInt64 = 2_000_000_000
 
     init() {
         let paths = AppPaths.make()
@@ -205,6 +213,9 @@ final class AppModel {
         home.repo = settings.lastRepo
     }
 
+    /// How many jobs the live status lists one by one before it just counts the rest.
+    static let jobsListedInStatus = 3
+
     func liveStatusText(for session: ChatSession? = nil) -> String {
         let targetSession = session ?? library.openSession
         let activeChoice = targetSession?.chat.model ?? home.model
@@ -235,9 +246,17 @@ final class AppModel {
         for connector in connectors.connected {
             lines.append("Connector \(connector.displayName): \(connectors.states[connector.id]?.rawValue ?? "unknown")")
         }
-        for job in jobs.jobs.prefix(50) {
+        // The first few jobs, unfinished ones first, then how many more there are.
+        let finishedStatuses: [JobRecord.Status] = [.done, .failed, .stopped]
+        let orderedJobs = jobs.jobs.filter { !finishedStatuses.contains($0.status) } + jobs.jobs.filter { finishedStatuses.contains($0.status) }
+        let listedJobs = orderedJobs.prefix(Self.jobsListedInStatus)
+        for job in listedJobs {
             let step = job.steps.last(where: { $0.status == .running || $0.status == .failed })?.title ?? job.steps.last?.title ?? "no step"
             lines.append("Job \(job.title): \(job.status.rawValue); step: \(step); run: \(job.workflowRunURL ?? "none"); result: \(job.result?.summary ?? "none")")
+        }
+        if orderedJobs.count > listedJobs.count {
+            let more = orderedJobs.count - listedJobs.count
+            lines.append("…and \(more) more job\(more == 1 ? "" : "s") (\(jobs.activeCount) unfinished in all)")
         }
         return lines.joined(separator: "\n")
     }
@@ -262,22 +281,32 @@ final class AppModel {
         openRouter.restore()
         github.restore()
         gitlab.restore()
-        await library.load()
-        await home.load()
-        await jobs.load()
-        await automations.load()
-        await memories.load()
-        await groups.load()
-        await specs.load()
-        await connectors.load()
+        // The model list, the AI balance and both accounts come over the network: they start now
+        // and load alongside what is read from this phone.
+        async let models: Void = openRouter.loadModels()
+        async let key: Void = openRouter.refreshKeyInfo()
+        async let githubChecked: Void = github.refresh()
+        async let gitlabChecked: Void = gitlab.refresh()
+        // Everything saved on this phone, read side by side (none of these reads another's data).
+        async let chatsRead: Void = library.load()
+        async let homeRead: Void = home.load()
+        async let jobsRead: Void = jobs.load()
+        async let automationsRead: Void = automations.load()
+        async let memoriesRead: Void = memories.load()
+        async let groupsRead: Void = groups.load()
+        async let specsRead: Void = specs.load()
+        async let connectorsRead: Void = connectors.load()
+        _ = await (chatsRead, homeRead, jobsRead, automationsRead, memoriesRead, groupsRead, specsRead, connectorsRead)
         let housekeeping = await DataHousekeeping(dataDirectory: paths.data).run()
         if housekeeping.removedOrphanBlobs + housekeeping.purgedTrashItems + housekeeping.compactedJobs > 0 {
             sync.request(after: 0)
         }
-        async let models: Void = openRouter.loadModels()
-        async let key: Void = openRouter.refreshKeyInfo()
-        await github.refresh()
-        await gitlab.refresh()
+        // A reply still running when the app closed carries on only now, with the connectors and
+        // the model list loaded; it used to start before either was there.
+        await models
+        await library.resumeRunning()
+        resumedRunningChats = true
+        _ = await (githubChecked, gitlabChecked)
         await startSaving()
         await jobs.updateAutonomousWorkflows()
         // Builds before the secret record existed: find the repos they set up, once.
@@ -350,8 +379,12 @@ final class AppModel {
         guard !PreviewScenes.isActive else { return }
         switch phase {
         case .background:
+            foregroundRefresh?.cancel()
+            foregroundRefresh = nil
+            let hasActiveJobs = jobs.activeCount > 0
+            let hasSpecJobs = specs.hasActiveJobs
             backgroundJobs.schedule(
-                hasActiveJobs: jobs.activeCount > 0,
+                hasActiveJobs: hasActiveJobs,
                 hasActiveChats: library.hasActiveWork,
                 chatSubtitle: library.activeWorkSummary
             )
@@ -361,18 +394,25 @@ final class AppModel {
             Task {
                 await library.checkpointActiveSessions()
                 await sync.syncNow()
-                await jobs.refresh()
-                await specs.refreshJobs()
+                // Job and spec status only when something is still running: with nothing running
+                // there is nothing new to read, and each refresh saves to GitHub again.
+                if hasActiveJobs || hasSpecJobs { await jobs.refresh() }
+                if hasSpecJobs { await specs.refreshJobs() }
                 grace.end()
             }
         case .active:
             guard started else { return }
-            library.resumePausedChats()
-            Task {
-                await openRouter.refreshKeyInfo()
-                await connectors.reconnectIfNeeded()
-                await updates.check(using: github.publicClient)
-                sync.request(after: 1)
+            // Launch carries on the replies left running itself, once connectors and models are in.
+            if resumedRunningChats { library.resumePausedChats() }
+            foregroundRefresh?.cancel()
+            foregroundRefresh = Task { [weak self] in
+                do { try await Task.sleep(nanoseconds: Self.foregroundRefreshDelay) } catch { return }
+                guard let self, !Task.isCancelled else { return }
+                self.foregroundRefresh = nil
+                await self.openRouter.refreshKeyInfo()
+                await self.connectors.reconnectIfNeeded()
+                await self.updates.check(using: self.github.publicClient)
+                self.sync.request(after: 1)
             }
         default:
             break
@@ -463,6 +503,11 @@ final class AppModel {
     }
 
     func turnFinished(in session: ChatSession) {
+        // The phone stopped following a reply that is still running on the chat computer (it lost
+        // contact, or the app is going away): the reply hasn't finished, so no "finished"
+        // notification, no balance reading yet and no end to its spend tracking. This runs again
+        // when the phone picks the reply up and it really ends.
+        guard !session.hasComputerRun else { return }
         // Real spend: read the balance again after the turn, and once more a little later because
         // providers can take a few seconds to charge. The turn's real cost is the difference.
         // Only the provider the turn used is read; a turn that overlapped another on that provider

@@ -87,8 +87,12 @@ struct SideMenu: View {
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
             if !query.isEmpty {
-                Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(Theme.secondaryText) }
-                    .buttonStyle(.plain)
+                Button { query = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(Theme.secondaryText)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
             }
         }
         .padding(.horizontal, 12)
@@ -122,7 +126,9 @@ struct SideMenu: View {
 
     private func row(_ chat: ChatSummary) -> some View {
         let isOpen = app.library.openSession?.id == chat.id
-        let isWorking = app.library.session(chat.id)?.isRunning == true
+        // Observed on the library: the sessions themselves aren't, so this used to miss a reply
+        // starting or ending in a chat whose session appeared after the list was drawn.
+        let isWorking = app.library.runningChatIDs.contains(chat.id)
         return Button {
             Task {
                 await app.library.open(chat.id)
@@ -236,6 +242,7 @@ struct SideMenu: View {
                     .accessibilityLabel("Connectors")
                     Button {
                         app.sheet = .settings
+                        app.isMenuOpen = false
                     } label: {
                         Image(systemName: "gearshape")
                             .font(.body.weight(.semibold))

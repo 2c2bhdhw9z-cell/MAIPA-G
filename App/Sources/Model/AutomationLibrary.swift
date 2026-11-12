@@ -153,25 +153,27 @@ final class AutomationLibrary {
         lastError = nil
     }
 
+    /// Starts the run as a job and returns it, or nil with `lastError` saying why. The screen that
+    /// started it shows its progress, so the Jobs screen only opens when `openJobsSheet` asks.
     @discardableResult
-    func run(_ workflow: WorkflowDefinition, request: String, repo: ChatRepo?) async -> Bool {
+    func run(_ workflow: WorkflowDefinition, request: String, repo: ChatRepo?, openJobsSheet: Bool = false) async -> JobRecord? {
         lastError = nil
         guard workflow.isApproved else {
             lastError = "Approve this workflow before its first run."
-            return false
+            return nil
         }
-        guard let app else { return false }
+        guard let app else { return nil }
         // Workflows off means nothing can start a workflow from anywhere. A single agent run from
-        // the Agents screen is not a workflow, so it still runs.
+        // the Agents screen is not a workflow, so it still runs. Settings has no Workflows switch
+        // any more (the AI decides when work needs one), so the message doesn't send anyone there.
         guard app.settings.workflowsEnabled || workflow.id.hasPrefix("agent-run:") else {
-            lastError = "Workflows are off in Settings → Features. Turn them on to run one."
-            return false
+            lastError = "Workflows are turned off in this version of MAIPA-G, and Settings has no switch for them. Ask for the work in a chat and the AI does the steps itself, or run a single agent from Agents."
+            return nil
         }
-        let job = await app.jobs.start(workflow: workflow, request: request, repo: repo)
+        let job = await app.jobs.start(workflow: workflow, request: request, repo: repo, openJobsSheet: openJobsSheet)
         if job == nil {
             lastError = app.jobs.lastError ?? "Couldn't start this run."
-            return false
         }
-        return true
+        return job
     }
 }
