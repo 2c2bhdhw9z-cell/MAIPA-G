@@ -530,7 +530,7 @@ final class JobCoordinator {
             try await store.delete(id)
             if selectedJobID == id { selectedJobID = nil }
             jobs = await store.all()
-            app.sync.request(after: 0)
+            // One save, not two: a request here as well started a second pass straight after.
             await app.sync.syncNow()
         } catch { lastError = ErrorExplainer.explain(error).message }
     }
@@ -831,7 +831,8 @@ final class JobCoordinator {
 
     private func reloadAndSync() async {
         jobs = await store.all()
-        app?.sync.request(after: 0.1)
+        // syncNow alone: it saves now, or after the pass already running. A request as well
+        // started a second pass for the same change.
         await app?.sync.syncNow()
     }
 

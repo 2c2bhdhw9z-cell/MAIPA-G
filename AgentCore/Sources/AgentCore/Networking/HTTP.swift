@@ -15,6 +15,9 @@ public struct HTTPRequest: Sendable {
     /// Longest silence allowed between two packets. AI replies can pause while the model thinks, and
     /// OpenRouter sends a keep-alive comment every few seconds, so two minutes is generous.
     public var idleTimeout: TimeInterval
+    /// Told how many body bytes have gone out so far, while a big body is being sent. A long upload
+    /// otherwise shows no sign of life until GitHub answers, and looked stuck to the backup.
+    public var uploadProgress: (@Sendable (Int64) -> Void)?
 
     public init(
         method: String = "GET",
@@ -22,7 +25,8 @@ public struct HTTPRequest: Sendable {
         headers: [String: String] = [:],
         body: Data? = nil,
         idleTimeout: TimeInterval = 60,
-        followsRedirects: Bool = true
+        followsRedirects: Bool = true,
+        uploadProgress: (@Sendable (Int64) -> Void)? = nil
     ) {
         self.method = method
         self.url = url
@@ -30,6 +34,7 @@ public struct HTTPRequest: Sendable {
         self.body = body
         self.idleTimeout = idleTimeout
         self.followsRedirects = followsRedirects
+        self.uploadProgress = uploadProgress
     }
 
     public static func json<Body: Encodable>(
@@ -191,6 +196,28 @@ private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unche
     }
 }
 
+#if !canImport(FoundationNetworking)
+/// Passes a request's sent-bytes count to `HTTPRequest.uploadProgress`. Used as a per-task
+/// delegate, so the session's own delegate still handles redirects.
+private final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let progress: @Sendable (Int64) -> Void
+
+    init(progress: @escaping @Sendable (Int64) -> Void) {
+        self.progress = progress
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64,
+        totalBytesExpectedToSend: Int64
+    ) {
+        progress(totalBytesSent)
+    }
+}
+#endif
+
 /// The real transport. One session for whole responses and one for streams, so the streaming
 /// delegate never sees tasks it did not start.
 public final class URLSessionTransport: HTTPTransport, @unchecked Sendable {
@@ -231,7 +258,15 @@ public final class URLSessionTransport: HTTPTransport, @unchecked Sendable {
         let urlRequest = Self.makeURLRequest(request)
         do {
             let session = request.followsRedirects ? plainSession : noRedirectSession
+            #if canImport(FoundationNetworking)
             let (data, response) = try await session.data(for: urlRequest)
+            #else
+            var progressDelegate: (any URLSessionTaskDelegate)?
+            if let progress = request.uploadProgress, request.body != nil {
+                progressDelegate = UploadProgressDelegate(progress: progress)
+            }
+            let (data, response) = try await session.data(for: urlRequest, delegate: progressDelegate)
+            #endif
             guard let http = response as? HTTPURLResponse else {
                 throw HTTPError.transport("Not an HTTP response", isOffline: false)
             }
@@ -255,7 +290,11 @@ public final class URLSessionTransport: HTTPTransport, @unchecked Sendable {
             let (data, response) = try await plainSession.data(for: bodied)
             #else
             let session = request.followsRedirects ? plainSession : noRedirectSession
-            let (data, response) = try await session.upload(for: urlRequest, fromFile: file)
+            var progressDelegate: (any URLSessionTaskDelegate)?
+            if let progress = request.uploadProgress {
+                progressDelegate = UploadProgressDelegate(progress: progress)
+            }
+            let (data, response) = try await session.upload(for: urlRequest, fromFile: file, delegate: progressDelegate)
             #endif
             guard let http = response as? HTTPURLResponse else {
                 throw HTTPError.transport("Not an HTTP response", isOffline: false)
@@ -316,6 +355,9 @@ public final class URLSessionTransport: HTTPTransport, @unchecked Sendable {
         if error is CancellationError { return error }
         if let urlError = error as? URLError {
             if urlError.code == .cancelled { return CancellationError() }
+            // Only these mean the phone itself has no connection. A dropped connection (-1005,
+            // networkConnectionLost, common when iOS reuses a connection it had idled) or a
+            // timeout is temporary: reads and writes that are safe to repeat try again on it.
             let offline: Set<URLError.Code> = [
                 .notConnectedToInternet, .dataNotAllowed, .internationalRoamingOff,
             ]
