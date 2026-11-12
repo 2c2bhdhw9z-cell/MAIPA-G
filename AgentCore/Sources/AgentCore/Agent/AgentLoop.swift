@@ -3,10 +3,30 @@ import Foundation
 public struct BackgroundSubagentCardPatch: Sendable {
     public var callID: String
     public var update: ToolLiveUpdate
+    /// Where this update stands among the card's updates (higher is newer). Updates are handed
+    /// over from separate tasks, so an older one can arrive after a newer one; the inbox keeps
+    /// only the newest. 0 means unordered: always taken, as before.
+    public var sequence: Int
 
-    public init(callID: String, update: ToolLiveUpdate) {
+    public init(callID: String, update: ToolLiveUpdate, sequence: Int = 0) {
         self.callID = callID
         self.update = update
+        self.sequence = sequence
+    }
+}
+
+/// Numbers background card updates across the whole process, so a later sub-agent batch on the
+/// same tool call (a Retry) always numbers above the one before it.
+final class CardPatchClock: @unchecked Sendable {
+    static let shared = CardPatchClock()
+    private let lock = NSLock()
+    private var last = 0
+
+    func next() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        last += 1
+        return last
     }
 }
 
@@ -16,6 +36,8 @@ public actor SteeringInbox {
     private var pendingMessages: [String] = []
     private var completedBackgroundReports: [String] = []
     private var pendingCardPatches: [BackgroundSubagentCardPatch] = []
+    /// The newest sequence recorded per card, kept after the patches are drained.
+    private var newestCardPatchSequence: [String: Int] = [:]
     private var backgroundTasks: [UUID: Task<Void, Never>] = [:]
     private var steerWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var activityWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
@@ -40,6 +62,17 @@ public actor SteeringInbox {
         let items = pendingMessages
         pendingMessages.removeAll()
         return items
+    }
+
+    /// Puts steering back at the front, in its original order, ahead of anything that arrived
+    /// since: a steer that couldn't be sent (or was handed back) goes out first next time, instead
+    /// of last or not at all.
+    public func prepend(_ texts: [String]) {
+        let cleaned = texts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard !cleaned.isEmpty else { return }
+        pendingMessages.insert(contentsOf: cleaned, at: 0)
+        wakeSteerWaiters()
+        wakeActivityWaiters()
     }
 
     public func peek() -> [String] {
@@ -97,12 +130,24 @@ public actor SteeringInbox {
     }
 
     public func recordBackgroundCardPatch(_ patch: BackgroundSubagentCardPatch) {
+        guard storeCardPatch(patch) else { return }
+        wakeActivityWaiters()
+    }
+
+    /// Keeps the newest update for a card. An older one (lower sequence) arriving late is dropped,
+    /// even after the newer one was already applied and drained, so a card never goes backwards.
+    @discardableResult
+    private func storeCardPatch(_ patch: BackgroundSubagentCardPatch) -> Bool {
+        if patch.sequence > 0 {
+            if let newest = newestCardPatchSequence[patch.callID], patch.sequence <= newest { return false }
+            newestCardPatchSequence[patch.callID] = patch.sequence
+        }
         if let idx = pendingCardPatches.firstIndex(where: { $0.callID == patch.callID }) {
             pendingCardPatches[idx] = patch
         } else {
             pendingCardPatches.append(patch)
         }
-        wakeActivityWaiters()
+        return true
     }
 
     public func completeBackgroundTask(
@@ -114,11 +159,7 @@ public actor SteeringInbox {
             finishedBeforeRegistration.insert(id)
         }
         if let finalPatch {
-            if let idx = pendingCardPatches.firstIndex(where: { $0.callID == finalPatch.callID }) {
-                pendingCardPatches[idx] = finalPatch
-            } else {
-                pendingCardPatches.append(finalPatch)
-            }
+            storeCardPatch(finalPatch)
         }
         if let report, !report.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             completedBackgroundReports.append(report)
@@ -249,6 +290,12 @@ public struct AgentTurnInput: Sendable {
     /// Set when the person tapped Retry on a reply that stopped early. The turn carries on from
     /// where it stopped, and the model is told plainly that it was cut off. Not saved in the chat.
     public var resumeNote: String?
+    /// An allowance shared with other agents running at the same time (sub-agents side by side):
+    /// checked, like `spendLimit`, before every request to the AI, against what all of them spent.
+    public var sharedSpend: SharedSpendBudget?
+    /// This run's entry in `sharedSpend`. A run carried on after a failure keeps the same entry, so
+    /// its earlier spend isn't counted twice.
+    public var sharedSpendMember = UUID()
 
     public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 250, spendLimit: Double? = nil, attachmentData: [UUID: Data] = [:], serverTools: [ToolSpec] = [], fallbackModels: [String] = [], requiresInitialSpendApproval: Bool = false, agent: AgentDefinition? = nil, steering: SteeringInbox? = nil, allowAskUser: Bool = true, resumeNote: String? = nil, autoApprove: Bool = false) {
         self.autoApprove = autoApprove
@@ -381,6 +428,55 @@ public enum AgentLoop {
     /// The plain words a failed turn shows for `error`.
     static func describe(_ error: Error) -> TurnFailure { Runner.describe(error) }
 
+    /// The result a tool gets when the reply stopped while it was running. With a result, carrying
+    /// the reply on doesn't run it again blindly; the AI is told it may have partly run.
+    public static let interruptedToolResult = "Interrupted: the reply was stopped before this tool finished. It may have partly run, so check what it did before running it again."
+
+    /// Settles a turn's tools that still show as running when nothing is running them any more
+    /// (the reply on the computer ended without saying so): each is marked stopped, with the
+    /// interrupted result, and running sub-agents as stopped. True when anything changed.
+    @discardableResult
+    public static func settleRunningTools(in turn: inout AssistantTurn, note: String = "Stopped") -> Bool {
+        var changed = false
+        let now = Date()
+        for stepIndex in turn.steps.indices {
+            var stepChanged = false
+            for callIndex in turn.steps[stepIndex].toolCalls.indices {
+                var record = turn.steps[stepIndex].toolCalls[callIndex]
+                let hasRunningSubagents = record.subagents?.contains(where: { $0.status == .running }) == true
+                guard record.status == .running || hasRunningSubagents else { continue }
+                if record.status == .running { record.status = .done }
+                if record.detail == nil || record.detail?.isEmpty == true { record.detail = note }
+                let base = record.summary.replacingOccurrences(of: "…", with: "").trimmingCharacters(in: .whitespaces)
+                if !base.lowercased().contains("stopped") { record.summary = base.isEmpty ? "Stopped" : "\(base) · stopped" }
+                if var subs = record.subagents {
+                    for index in subs.indices where subs[index].status == .running {
+                        subs[index].status = .cancelled
+                        subs[index].latestActivity = "Stopped"
+                    }
+                    record.subagents = subs
+                }
+                if record.result == nil {
+                    if SubagentTools.isSubagentTool(record.name) {
+                        let actionsDone = (record.subagents ?? []).reduce(0) { $0 + $1.toolCallCount }
+                        let progressNote = actionsDone > 0 ? " after \(actionsDone) actions of partial progress" : ""
+                        record.result = "Paused/stopped before completion\(progressNote) (not a tool failure). Sub-agent launching works normally — launch sub-agents in parallel when continuing."
+                    } else {
+                        record.result = interruptedToolResult
+                    }
+                }
+                if record.finishedAt == nil { record.finishedAt = now }
+                turn.steps[stepIndex].toolCalls[callIndex] = record
+                stepChanged = true
+            }
+            if stepChanged {
+                changed = true
+                if turn.steps[stepIndex].finishedAt == nil { turn.steps[stepIndex].finishedAt = now }
+            }
+        }
+        return changed
+    }
+
     /// The notice on any reply that ended some way other than a normal finish.
     public static let stoppedEarlyNotice = "This reply stopped early. Tap retry. Retry carries on from where it stopped; staged file changes are kept, but the AI's own thinking and file reads from this attempt are lost."
 
@@ -491,6 +587,8 @@ private struct Runner {
     let allowAskUser: Bool
     let autoApprove: Bool
     let endAfterTools: Set<String>
+    let sharedSpend: SharedSpendBudget?
+    let sharedSpendMember: UUID
     let environment: AgentEnvironment
     let continuation: AsyncStream<AgentEvent>.Continuation
     var maxPayloadBytes = Transcript.defaultMaxPayloadBytes
@@ -539,6 +637,8 @@ private struct Runner {
         allowAskUser = input.allowAskUser
         autoApprove = input.autoApprove
         endAfterTools = input.endAfterTools
+        sharedSpend = input.sharedSpend
+        sharedSpendMember = input.sharedSpendMember
         self.environment = environment
         self.continuation = continuation
         if let note = input.resumeNote {
@@ -674,6 +774,14 @@ private struct Runner {
                     turn.status = .done
                     break
                 }
+                // A reply picked up again (back from the background, or after the app was closed)
+                // whose last step was cut off part way: the model never said it was done, so the
+                // partial text isn't the answer. It carries on from where it stopped, the way
+                // Retry does, instead of being marked done with half a reply.
+                if newSteps == 0, pendingBlankReplyNudge == nil, let last = turn.steps.last, last.toolCalls.isEmpty,
+                   last.finishedAt != nil, !AgentLoop.isNormalFinish(last.finishReason) {
+                    pendingBlankReplyNudge = AgentLoop.resumeNote(partialText: last.text)
+                }
                 if pendingBlankReplyNudge == nil, let last = turn.steps.last, last.toolCalls.isEmpty, last.finishedAt != nil {
                     // If the user sent a live mid-run steering note or a backgrounded sub-agent completed, continue immediately!
                     if !injectedSteeringNotes.isEmpty || !pendingBackgroundReports.isEmpty {
@@ -725,8 +833,19 @@ private struct Runner {
                         break
                     }
                 }
+                // The same check against an allowance shared with agents running alongside this
+                // one, so side-by-side sub-agents can't each spend the whole amount.
+                if let sharedSpend {
+                    let spent = turn.usage.cost ?? 0
+                    if await sharedSpend.isExhausted(member: sharedSpendMember, spent: spent) {
+                        turn.status = .waitingForUser
+                        turn.spendCheck = spent
+                        break
+                    }
+                }
                 newSteps += 1
                 try await requestStep()
+                await sharedSpend?.record(member: sharedSpendMember, spent: turn.usage.cost ?? 0)
             }
         } catch is CancellationError {
             await steering?.cancelAllBackgroundTasks()
@@ -747,6 +866,7 @@ private struct Runner {
             }
         }
         if Task.isCancelled, turn.status == .running { turn.status = .stopped }
+        await sharedSpend?.record(member: sharedSpendMember, spent: turn.usage.cost ?? 0)
         // Measured, not guessed: a slow reply says where its time went, so the cause is evidence.
         let elapsed = Date().timeIntervalSince(runStartedAt)
         if elapsed >= Self.slowTurnSeconds, firstStepOfRun < turn.steps.count {
@@ -798,6 +918,13 @@ private struct Runner {
                     let actionsDone = (record.subagents ?? []).reduce(0) { $0 + $1.toolCallCount }
                     let progressNote = actionsDone > 0 ? " after \(actionsDone) actions of partial progress" : ""
                     record.result = "Paused/stopped before completion\(progressNote) (not a tool failure). Sub-agent launching works normally — launch sub-agents in parallel when continuing."
+                }
+                // A tool with no result is run again when the reply carries on. One cut off part
+                // way may already have done something (a command, a save), so it gets a result
+                // saying so instead of being re-run blindly. Sub-agent calls are left out: theirs
+                // resume, keeping the sub-agents that already finished.
+                if record.result == nil, !SubagentTools.isSubagentTool(record.name) {
+                    record.result = AgentLoop.interruptedToolResult
                 }
                 if record.finishedAt == nil {
                     record.finishedAt = Date()
@@ -860,10 +987,10 @@ private struct Runner {
                     activeBackgroundReports.joined(separator: "\n\n---\n\n"),
                     limit: Transcript.maxToolResultCharacters - heading.count - footer.count
                 )
-                rawMessages.append(.user(heading + report + footer))
+                rawMessages.append(.syntheticUser(heading + report + footer))
             }
             if let nudge = activeBlankNudge {
-                rawMessages.append(.user(nudge))
+                rawMessages.append(.syntheticUser(nudge))
             }
             let isExternalProvider = AIProviderModelID.decode(route.model) != nil
             var effectiveSpecs = specs
@@ -969,10 +1096,12 @@ private struct Runner {
                     // The stream ended without the model saying it was done: a dropped connection
                     // or a server closing mid-reply. The text so far must not look finished.
                     markStoppedEarly()
-                } else if accumulator.finishReason != "length",
+                } else if accumulator.finishReason != "length", AgentLoop.isNormalFinish(accumulator.finishReason),
                           !accumulator.toolCalls.isEmpty || !accumulator.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     // A normal finish with something in it: an earlier step's early stop (or a
-                    // reasoning-only step before it) no longer describes this reply.
+                    // reasoning-only step before it) no longer describes this reply. Only a finish
+                    // the model itself reported counts: tool calls on a stream that just ended
+                    // don't say the reply carried on properly.
                     clearStoppedEarly()
                 }
                 emit(milestone: true)

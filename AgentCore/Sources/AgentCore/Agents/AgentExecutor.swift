@@ -45,6 +45,11 @@ public struct AgentInvocation: Sendable {
     public var onProgress: (@Sendable (Int, String) -> Void)?
     /// Rich live progress callback carrying model, tool list, live thoughts, and partial text for sub-agent cards.
     public var onLiveProgress: (@Sendable (AgentLiveProgress) -> Void)?
+    /// The allowance this agent shares with the others launched alongside it (`spendLimit` is
+    /// its own share). Nil when there is no spending limit.
+    public var sharedSpend: SharedSpendBudget? = nil
+    /// This agent's entry in `sharedSpend`.
+    public var sharedSpendMember = UUID()
 
     public init(
         definition: AgentDefinition,
@@ -127,6 +132,10 @@ public struct AgentHelperResult: Sendable, Hashable {
 }
 
 public struct AgentExecutionResult: Sendable, Hashable {
+    /// The status of a sub-agent the spending limit stopped before it finished. Shown as stopped,
+    /// never as completed.
+    public static let stoppedForBudgetStatus = "stopped_for_budget"
+
     public var output: String
     public var model: String?
     public var goalOutcome: AgentGoalOutcome
@@ -282,6 +291,37 @@ public struct AgentExecutor: Sendable {
     }
 }
 
+/// One spending allowance shared by agents that run at the same time (sub-agents side by side).
+/// Each reports what it has spent so far under its own entry; the allowance is used up when all of
+/// them together reach the limit. Before, each parallel sub-agent was checked only against its own
+/// spend, so three at once could spend three times the limit.
+public actor SharedSpendBudget {
+    public nonisolated let limit: Double
+    private var spentBefore: Double
+    private var spentBy: [UUID: Double] = [:]
+
+    /// `alreadySpent`: spent from this allowance before any member reported.
+    public init(limit: Double, alreadySpent: Double = 0) {
+        self.limit = limit
+        self.spentBefore = max(0, alreadySpent)
+    }
+
+    /// Records what one member has spent in all so far (not an increment). It never goes down.
+    public func record(member: UUID, spent: Double) {
+        spentBy[member] = max(spentBy[member] ?? 0, max(0, spent))
+    }
+
+    public func total() -> Double { spentBefore + spentBy.values.reduce(0, +) }
+
+    public func remaining() -> Double { max(0, limit - total()) }
+
+    /// Records `spent` for `member`, then says whether the allowance is used up.
+    public func isExhausted(member: UUID, spent: Double) -> Bool {
+        record(member: member, spent: spent)
+        return total() >= limit
+    }
+}
+
 /// Shared bounded scheduler behind the agent-visible sub-agent tool (`launch_helpers`). It reserves
 /// the caller's declared allowance across repeated calls, executes children independently in fresh
 /// context windows, streams live tool counts, and handles cancellation cleanly (`status == "cancelled"`).
@@ -292,6 +332,9 @@ public actor AgentHelperCoordinator {
     private let spendLimit: Double?
     private let runner: AgentExecutor.Runner
     private let steering: SteeringInbox?
+    /// The reply's spending limit, shared by every sub-agent it launches, including ones running
+    /// side by side from separate calls.
+    private let budget: SharedSpendBudget?
     private var launched = 0
     private var records: [AgentHelperResult] = []
 
@@ -309,6 +352,12 @@ public actor AgentHelperCoordinator {
         self.spendLimit = spendLimit
         self.steering = steering
         self.runner = runner
+        self.budget = spendLimit.map { SharedSpendBudget(limit: $0) }
+    }
+
+    /// What the sub-agents have spent from the shared allowance so far.
+    public func spentFromBudget() async -> Double? {
+        await budget?.total()
     }
 
     public func launch(
@@ -319,11 +368,6 @@ public actor AgentHelperCoordinator {
         onLiveUpdate: (@Sendable (ToolLiveUpdate) -> Void)? = nil
     ) async throws -> [AgentHelperResult] {
         guard !requests.isEmpty else { throw ToolInputError("Choose at least one helper.") }
-        guard launched + requests.count <= lead.maximumHelpers else {
-            throw AgentExecutorError.tooManyHelpers(maximum: lead.maximumHelpers)
-        }
-        launched += requests.count
-        let priorCost = records.reduce(0) { $0 + $1.cost }
         let resolved = try requests.map { request -> (AgentDefinition, String) in
             guard let definition = definitions[request.agentID] else { throw AgentExecutorError.unknownAgent(request.agentID) }
             let task = request.task.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -339,9 +383,27 @@ public actor AgentHelperCoordinator {
             }
             return map
         }()
-        let remainingCount = max(1, resolved.count - completedExisting.count)
+        // Counted once they are sure to launch: a call that failed the checks above (an unknown
+        // sub-agent, an empty task) used to use up places all the same. Ones that already finished
+        // in an earlier attempt aren't launched again, so they don't count either.
+        let launching = resolved.count - completedExisting.count
+        guard launched + launching <= lead.maximumHelpers else {
+            throw AgentExecutorError.tooManyHelpers(maximum: lead.maximumHelpers)
+        }
+        launched += launching
+        let remainingCount = max(1, launching)
         let resumedPriorCost = completedExisting.values.reduce(0) { $0 + $1.cost }
-        let operationLimit = spendLimit.map { max(0.000_001, $0 - priorCost - resumedPriorCost) / Double(remainingCount) }
+        // What is left comes from the shared allowance, which counts what sub-agents still running
+        // from other calls have spent so far, not just finished ones; each of these gets an equal
+        // share of it, and all of them stop when the allowance as a whole is used up.
+        let sharedBudget = budget
+        let operationLimit: Double?
+        if let sharedBudget {
+            if resumedPriorCost > 0 { await sharedBudget.record(member: UUID(), spent: resumedPriorCost) }
+            operationLimit = max(0.000_001, await sharedBudget.remaining()) / Double(remainingCount)
+        } else {
+            operationLimit = nil
+        }
 
         let liveTracker = LiveHelperProgressTracker(
             callID: callID,
@@ -373,27 +435,32 @@ public actor AgentHelperCoordinator {
                 }
                 let taskID = UUID()
                 let helperTask = Task<Void, Never> {
-                    let emitLive: @Sendable (ToolLiveUpdate) -> Void = { live in
+                    // Each update carries its number, taken when it was built: these hand-overs
+                    // run as separate tasks, so an older one can land after a newer one, and the
+                    // inbox drops it rather than put the card back.
+                    let emitLive: @Sendable (LiveHelperProgressTracker.Stamped) -> Void = { stamped in
+                        let live = stamped.update
                         onProgress?(live.summary)
                         onLiveUpdate?(live)
                         Task {
                             if await batchState.isDetached(index: index) {
-                                await steeringBox.recordBackgroundCardPatch(BackgroundSubagentCardPatch(callID: callID, update: live))
+                                await steeringBox.recordBackgroundCardPatch(BackgroundSubagentCardPatch(callID: callID, update: live, sequence: stamped.sequence))
                             }
                         }
                     }
-                    let invocation = AgentInvocation(
+                    var invocation = AgentInvocation(
                         definition: item.0,
                         task: item.1,
                         context: contextCopy,
                         spendLimit: operationLimit,
                         onProgress: { toolCount, latest in
-                            emitLive(liveTracker.updateBasic(index: index, toolCount: toolCount, latest: latest))
+                            emitLive(liveTracker.updateBasicStamped(index: index, toolCount: toolCount, latest: latest))
                         },
                         onLiveProgress: { progress in
-                            emitLive(liveTracker.updateRich(index: index, progress: progress))
+                            emitLive(liveTracker.updateRichStamped(index: index, progress: progress))
                         }
                     )
+                    invocation.sharedSpend = sharedBudget
                     let finalOutcome: AgentExecutionResult
                     do {
                         finalOutcome = try await runnerFn(invocation)
@@ -404,7 +471,9 @@ public actor AgentHelperCoordinator {
                             ? liveTracker.cancelledResult(at: index)
                             : liveTracker.failedResult(at: index, error: error)
                     }
-                    let finalLive = liveTracker.finish(index: index, result: finalOutcome)
+                    await sharedBudget?.record(member: invocation.sharedSpendMember, spent: finalOutcome.cost)
+                    let finalStamped = liveTracker.finishStamped(index: index, result: finalOutcome)
+                    let finalLive = finalStamped.update
                     onProgress?(finalLive.summary)
                     onLiveUpdate?(finalLive)
                     let wasDetached = await batchState.recordCompletion(index: index, result: finalOutcome)
@@ -412,13 +481,14 @@ public actor AgentHelperCoordinator {
                         let reportText: String? = {
                             guard finalOutcome.status != "cancelled" else { return nil }
                             let badge = finalOutcome.toolCallCount == 1 ? "1 action" : "\(finalOutcome.toolCallCount) actions"
-                            let statusSuffix = finalOutcome.status == "failed" ? " · failed" : ""
+                            let statusSuffix = finalOutcome.status == "failed" ? " · failed"
+                                : (finalOutcome.status == AgentExecutionResult.stoppedForBudgetStatus ? " · stopped at the spending limit" : "")
                             return "Sub-agent (\(item.0.name) · \(badge) · \(finalOutcome.model ?? "model not reported")\(statusSuffix)) — Task: \(item.1)\n\(finalOutcome.output)"
                         }()
                         await steeringBox.completeBackgroundTask(
                             taskID,
                             report: reportText,
-                            finalPatch: BackgroundSubagentCardPatch(callID: callID, update: finalLive)
+                            finalPatch: BackgroundSubagentCardPatch(callID: callID, update: finalLive, sequence: finalStamped.sequence)
                         )
                     }
                 }
@@ -498,7 +568,7 @@ public actor AgentHelperCoordinator {
                     continue
                 }
                 group.addTask {
-                    let invocation = AgentInvocation(
+                    var invocation = AgentInvocation(
                         definition: item.0,
                         task: item.1,
                         context: self.context,
@@ -514,8 +584,10 @@ public actor AgentHelperCoordinator {
                             onLiveUpdate?(live)
                         }
                     )
+                    invocation.sharedSpend = sharedBudget
                     do {
                         let outcome = try await self.runner(invocation)
+                        await sharedBudget?.record(member: invocation.sharedSpendMember, spent: outcome.cost)
                         let live = liveTracker.finish(index: index, result: outcome)
                         onProgress?(live.summary)
                         onLiveUpdate?(live)
@@ -686,7 +758,30 @@ private final class LiveHelperProgressTracker: @unchecked Sendable {
         return buildUpdateLocked()
     }
 
+    /// A card update and where it stands among this card's updates, numbered under the same lock
+    /// that built it, so a higher number is always a newer card.
+    struct Stamped: Sendable {
+        var update: ToolLiveUpdate
+        var sequence: Int
+    }
+
+    private func stampedLocked() -> Stamped {
+        Stamped(update: buildUpdateLocked(), sequence: CardPatchClock.shared.next())
+    }
+
     func updateBasic(index: Int, toolCount: Int, latest: String) -> ToolLiveUpdate {
+        updateBasicStamped(index: index, toolCount: toolCount, latest: latest).update
+    }
+
+    func updateRich(index: Int, progress: AgentLiveProgress) -> ToolLiveUpdate {
+        updateRichStamped(index: index, progress: progress).update
+    }
+
+    func finish(index: Int, result: AgentExecutionResult) -> ToolLiveUpdate {
+        finishStamped(index: index, result: result).update
+    }
+
+    func updateBasicStamped(index: Int, toolCount: Int, latest: String) -> Stamped {
         lock.lock()
         defer { lock.unlock() }
         if items.indices.contains(index), items[index].status == .running {
@@ -698,10 +793,10 @@ private final class LiveHelperProgressTracker: @unchecked Sendable {
                 }
             }
         }
-        return buildUpdateLocked()
+        return stampedLocked()
     }
 
-    func updateRich(index: Int, progress: AgentLiveProgress) -> ToolLiveUpdate {
+    func updateRichStamped(index: Int, progress: AgentLiveProgress) -> Stamped {
         lock.lock()
         defer { lock.unlock() }
         if items.indices.contains(index), items[index].status == .running {
@@ -718,10 +813,10 @@ private final class LiveHelperProgressTracker: @unchecked Sendable {
                 items[index].output = progress.partialOutput
             }
         }
-        return buildUpdateLocked()
+        return stampedLocked()
     }
 
-    func finish(index: Int, result: AgentExecutionResult) -> ToolLiveUpdate {
+    func finishStamped(index: Int, result: AgentExecutionResult) -> Stamped {
         lock.lock()
         defer { lock.unlock() }
         if items.indices.contains(index) {
@@ -745,13 +840,17 @@ private final class LiveHelperProgressTracker: @unchecked Sendable {
                 items[index].status = .failed
                 items[index].latestActivity = "Failed"
                 items[index].output = result.output
+            case AgentExecutionResult.stoppedForBudgetStatus:
+                items[index].status = .cancelled
+                items[index].latestActivity = "Stopped at the spending limit"
+                items[index].output = result.output
             default:
                 items[index].status = .completed
                 items[index].latestActivity = "Completed"
                 items[index].output = result.output
             }
         }
-        return buildUpdateLocked()
+        return stampedLocked()
     }
 
     func cancelledResult(at index: Int) -> AgentExecutionResult {
@@ -1001,7 +1100,8 @@ public struct LaunchHelpersTool: AgentTool {
                 return "Sub-agent \(index + 1) (\(result.name) · \(toolBadge)): STILL RUNNING IN THE BACKGROUND (not stopped). Its complete report will arrive automatically when it finishes. Respond right now to the user's new live steering message — you may also call `launch_helpers` to start additional sub-agents in parallel without interrupting this running sub-agent."
             }
             let toolBadge = result.toolCallCount == 1 ? "1 action" : "\(result.toolCallCount) actions"
-            let statusTag = result.status == "failed" ? " · failed" : ""
+            let statusTag = result.status == "failed" ? " · failed"
+                : (result.status == AgentExecutionResult.stoppedForBudgetStatus ? " · stopped at the spending limit, not finished" : "")
             return "Sub-agent \(index + 1) (\(result.name) · \(toolBadge) · \(result.model ?? "model not reported")\(statusTag)):\n\(result.output)"
         }.joined(separator: "\n\n")
 
@@ -1009,7 +1109,8 @@ public struct LaunchHelpersTool: AgentTool {
             let toolBadge = result.toolCallCount == 1 ? "1 action" : "\(result.toolCallCount) actions"
             let modelBadge = result.model.map { " · \($0)" } ?? ""
             let stepsLine = result.toolSummaries.isEmpty ? "" : "\nActions:\n" + result.toolSummaries.map { "- \($0)" }.joined(separator: "\n")
-            let statusLabel = result.status == "running_in_background" ? "running" : result.status
+            let statusLabel = result.status == "running_in_background" ? "running"
+                : (result.status == AgentExecutionResult.stoppedForBudgetStatus ? "stopped at the spending limit" : result.status)
             return "### Sub-agent: \(result.name) (\(toolBadge)\(modelBadge))\nTask: \(result.task)\nStatus: \(statusLabel)\(stepsLine)\n\n\(result.output)"
         }.joined(separator: "\n\n---\n\n")
 
@@ -1017,7 +1118,7 @@ public struct LaunchHelpersTool: AgentTool {
             let itemStatus: SubagentRunItem.Status = {
                 switch result.status {
                 case "running_in_background": return .running
-                case "cancelled": return .cancelled
+                case "cancelled", AgentExecutionResult.stoppedForBudgetStatus: return .cancelled
                 case "failed": return .failed
                 default: return .completed
                 }
@@ -1029,7 +1130,7 @@ public struct LaunchHelpersTool: AgentTool {
                 case .completed:
                     return "Completed"
                 case .cancelled:
-                    return "Stopped"
+                    return result.status == AgentExecutionResult.stoppedForBudgetStatus ? "Stopped at the spending limit" : "Stopped"
                 case .failed:
                     return "Failed"
                 }

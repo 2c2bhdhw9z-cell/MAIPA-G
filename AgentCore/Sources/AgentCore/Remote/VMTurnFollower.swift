@@ -6,21 +6,36 @@ public actor VMRunHandle {
     public nonisolated let id: String
     public nonisolated let control: VMControl
     private(set) var stopRequested = false
+    /// How many times Stop was tapped. Each tap starts sending the stop again.
+    private(set) var stopRequests = 0
 
     public init(id: String, control: VMControl) {
         self.id = id
         self.control = control
     }
 
-    /// Stop was tapped: the runner is asked to stop, and following carries on until its final
-    /// state arrives.
-    public func requestStop() { stopRequested = true }
+    /// Stop was tapped: the runner is asked to stop (again and again for a while if the computer
+    /// can't be reached), and following carries on until its final state arrives.
+    public func requestStop() {
+        stopRequested = true
+        stopRequests += 1
+    }
 }
 
 extension AgentRun {
     public static let computerPollInterval: UInt64 = 1_200_000_000
     /// The longest one check on the reply may take before it's given up and asked again.
     static let pollTimeLimit: TimeInterval = 45
+    /// The longest one attempt to stop the reply may take: the computer waits up to about 26
+    /// seconds for the runner to end (`VMControl.stopScript`).
+    public static let stopTimeLimit: TimeInterval = 45
+    /// How long a Stop that can't reach the computer is sent again before the chat says so.
+    public static let stopRetryWindow: TimeInterval = 60
+
+    /// The wait before the next attempt to send a stop that failed: 1, 2, 4, 8, then 10 seconds.
+    static func stopRetryDelay(afterFailures failures: Int) -> TimeInterval {
+        min(pow(2, Double(max(failures, 1) - 1)), 10)
+    }
 
     /// Follows a reply on the chat computer. Each state the runner writes arrives as an event, the
     /// same as a reply running on the phone; steering typed meanwhile is sent to the runner.
@@ -30,6 +45,7 @@ extension AgentRun {
         startingTurn: AssistantTurn,
         afterSeq: Int = 0,
         pollInterval: UInt64 = computerPollInterval,
+        stopRetryWindow: TimeInterval = AgentRun.stopRetryWindow,
         onState: @escaping @Sendable (VMTurnState) async -> Void
     ) -> AgentRun {
         let steering = SteeringInbox()
@@ -38,24 +54,70 @@ extension AgentRun {
             var seq = afterSeq
             var turn = startingTurn
             var failures = 0
-            var stopSent = false
             var goneSince: Date?
             var warnedAwake = false
             var stagedSeen = 0
+            // Stop: each tap is a round, sent again with growing waits until the computer takes
+            // it or the reply is seen to end, for up to `stopRetryWindow`. One silent try used to
+            // be all, so a Stop tapped while the computer didn't answer was lost.
+            var stopRound = 0
+            var stopDelivered = false
+            var stopGaveUp = false
+            var stopAskedAt = Date()
+            var stopFailures = 0
+            var nextStopTry = Date.distantPast
             func finish(_ notice: String, stoppedEarly: Bool) {
                 if !turn.notices.contains(notice) { turn.notices.append(notice) }
+                turn.notices.removeAll { $0 == VMNotices.stopFailed }
                 if turn.status == .running { turn.status = .stopped }
                 if stoppedEarly { turn.stoppedEarly = true }
+                // Nothing is running these any more: they mustn't go on showing as running.
+                AgentLoop.settleRunningTools(in: &turn)
                 continuation.yield(.updated(turn, milestone: true))
             }
             while !Task.isCancelled {
-                for text in await steering.drain() {
+                // Steering goes out in the order it was typed. One that can't be sent goes back
+                // to the front with everything after it, to go out next time (the ones after a
+                // failed one used to be lost, and the failed one went to the back).
+                let outgoing = await steering.drain()
+                for (index, text) in outgoing.enumerated() {
                     do { try await handle.control.steer(id: handle.id, text: text) }
-                    catch { await steering.enqueue(text); break }
+                    catch { await steering.prepend(Array(outgoing[index...])); break }
                 }
-                if await handle.stopRequested, !stopSent {
-                    stopSent = true
-                    try? await handle.control.stop(id: handle.id)
+                let requests = await handle.stopRequests
+                if requests > stopRound {
+                    stopRound = requests
+                    stopDelivered = false
+                    stopGaveUp = false
+                    stopAskedAt = Date()
+                    stopFailures = 0
+                    nextStopTry = .distantPast
+                    if turn.notices.contains(VMNotices.stopFailed) {
+                        turn.notices.removeAll { $0 == VMNotices.stopFailed }
+                        continuation.yield(.updated(turn, milestone: false))
+                    }
+                }
+                if stopRound > 0, !stopDelivered, !stopGaveUp, Date() >= nextStopTry {
+                    let id = handle.id, control = handle.control
+                    do {
+                        try await AgentLoop.bounded(seconds: AgentRun.stopTimeLimit, label: "Stopping the reply") {
+                            try await control.stop(id: id)
+                        }
+                        stopDelivered = true
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        if Task.isCancelled { break }
+                        stopFailures += 1
+                        if Date().timeIntervalSince(stopAskedAt) >= stopRetryWindow {
+                            // Said plainly: the reply may well still be going on the computer.
+                            stopGaveUp = true
+                            if !turn.notices.contains(VMNotices.stopFailed) { turn.notices.append(VMNotices.stopFailed) }
+                            continuation.yield(.updated(turn, milestone: true))
+                        } else {
+                            nextStopTry = Date().addingTimeInterval(AgentRun.stopRetryDelay(afterFailures: stopFailures))
+                        }
+                    }
                 }
                 let asked = Date()
                 do {
@@ -94,7 +156,12 @@ extension AgentRun {
                         turn = next
                         await onState(state)
                         if state.isFinished {
-                            for text in state.unconsumedSteering { await steering.enqueue(text) }
+                            // Handed back by the runner: these were sent before anything still
+                            // waiting here, so they go first.
+                            await steering.prepend(state.unconsumedSteering)
+                            turn.notices.removeAll { $0 == VMNotices.stopFailed }
+                            if turn.status == .running { turn.status = .stopped }
+                            AgentLoop.settleRunningTools(in: &turn)
                             continuation.yield(.updated(turn, milestone: true))
                             break
                         }
@@ -106,7 +173,7 @@ extension AgentRun {
                         let since = goneSince ?? Date()
                         goneSince = since
                         if Date().timeIntervalSince(since) > 4 {
-                            if stopSent {
+                            if stopRound > 0 {
                                 finish("Stopped on your computer.", stoppedEarly: false)
                             } else {
                                 // Say why, from the runner's own last words (a crash or the computer
@@ -156,12 +223,13 @@ public enum VMNotices {
     public static let runnerEnded = "The reply ended on your computer without finishing (the runner stopped). Tap retry to carry on from where it stopped."
     public static let lostContact = "Lost contact with your computer. The reply keeps going there, and MAIPA-G keeps trying to reach it."
     public static let signInNeeded = "Your computer's connector needs you to sign in again (Settings → Connectors). The reply keeps going there, and shows up here once you do."
+    public static let stopFailed = "MAIPA-G couldn't reach your computer to stop this reply, so it may still be running there. Tap Stop again to try again."
 
     public static func fellBack(_ reason: String) -> String {
         "Your computer couldn't take this reply (\(reason)), so it runs on the phone and stops if you leave the app."
     }
 
     static func isPhoneNotice(_ notice: String) -> Bool {
-        notice == runningOnComputer || notice == cantStayAwake || notice.hasPrefix("Your computer couldn't take")
+        notice == runningOnComputer || notice == cantStayAwake || notice == stopFailed || notice.hasPrefix("Your computer couldn't take")
     }
 }

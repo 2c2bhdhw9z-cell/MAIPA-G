@@ -174,6 +174,7 @@ public struct VMControl: Sendable {
         d="$HOME/\(VMRun.folder(id))"
         r="$HOME/\(runnerFolder(revision))/run.sh"
         [ -x "$r" ] && [ -f "$HOME/\(runnerFolder(revision))/ready" ] || { echo maipa-g-no-runner; exit 0; }
+        \(staleRunCleanup)
         mkdir -p "$d/steer"
         cat > "$d/launch.sh" <<'MAIPA_G_LAUNCH'
         \(launchBody)
@@ -190,6 +191,22 @@ public struct VMControl: Sendable {
         echo maipa-g-run-started
         """
     }
+
+    /// A Retry runs the same reply again under the same id, so its folder may still hold the last
+    /// run's files. They are cleared before the new runner starts (the request and keys just
+    /// uploaded, the log and the files the reply made stay): an old `stop` stopped the new run at
+    /// once, and an old `seq` and states made the phone take the old run's end as the new one's.
+    /// A runner still going there is stopped first, so two never work in one folder.
+    static let staleRunCleanup = #"""
+    p=$(cat "$d/runner.pid" 2>/dev/null | tr -dc 0-9)
+    alive() { [ -n "$p" ] && [ -r "/proc/$p/stat" ] && [ "$(sed 's/.*) //' "/proc/$p/stat" | cut -d' ' -f1)" != Z ]; }
+    if alive; then
+      touch "$d/stop"
+      i=0; while alive && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+      if alive; then kill -KILL -- "-$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null || true; sleep 0.2; fi
+    fi
+    rm -rf "$d/state" "$d/staged" "$d/steer" "$d/memories-copy" "$d/seq" "$d/stop" "$d/runner.pid" "$d/awake" "$d/token-refresh.json.gz"
+    """#
 
     /// Runs the runner and holds the Sprite awake while it works, the way the tool setup does
     /// (docs.fly.io/sprites/keeping-sprites-running): a 5-minute task renewed every minute and
@@ -249,18 +266,33 @@ public struct VMControl: Sendable {
     }
 
     /// The run's newest state, when it is newer than `after`.
+    ///
+    /// A big state is read in pieces. If it is gone part way (the runner deleted it as old), the
+    /// newest one is asked for again straight away, once, instead of waiting for the next check.
     public func poll(id: String, after: Int) async throws -> Poll {
+        try await poll(id: id, after: after, triesLeft: 2)
+    }
+
+    func poll(id: String, after: Int, triesLeft: Int) async throws -> Poll {
         guard VMRun.isRunID(id) else { throw Failure.badID }
         let output = ComputerControl.plainOutput(try await computer.run(Self.pollScript(id: id, after: after)))
         var poll = try Self.parsePoll(output)
-        guard !poll.missing, poll.seq > after, let size = Self.number(after: "maipa-g-size", in: output), size > 0 else { return poll }
+        guard !poll.missing, poll.seq > after else { return poll }
+        // `seq` names a state that is always written first, so an empty one was deleted between
+        // the two reads: ask again.
+        guard let size = Self.number(after: "maipa-g-size", in: output), size > 0 else {
+            return triesLeft > 1 ? try await self.poll(id: id, after: after, triesLeft: triesLeft - 1) : poll
+        }
         var data = Self.base64Payload(in: output) ?? Data()
         while data.count < size {
             let more = ComputerControl.plainOutput(try await computer.run(Self.readScript(id: id, seq: poll.seq, offset: data.count)))
-            guard let piece = Self.base64Payload(in: more), !piece.isEmpty else { break }
+            // The file was deleted (or replaced) part way: what was read can't be put together.
+            guard Self.number(after: "maipa-g-size", in: more) == size, let piece = Self.base64Payload(in: more), !piece.isEmpty else { break }
             data.append(piece)
         }
-        guard data.count == size else { return poll }
+        guard data.count == size else {
+            return triesLeft > 1 ? try await self.poll(id: id, after: after, triesLeft: triesLeft - 1) : poll
+        }
         poll.state = try VMCoding.unpack(VMTurnState.self, from: data)
         return poll
     }
@@ -337,24 +369,36 @@ public struct VMControl: Sendable {
         guard output.contains("maipa-g-steer-ok") else { throw Failure.unexpected(output) }
     }
 
-    /// Asks the runner to stop the gentle way (it finishes writing its state), and ends its whole
-    /// process group if it hasn't gone after a few seconds.
-    public func stop(id: String) async throws {
+    /// How long a stop waits for the runner to end by itself (it sees the stop file within a
+    /// second, then stops its tools and writes its final state), and then after SIGTERM, before
+    /// its whole process group is killed. 6 seconds in all used to be the limit, which killed a
+    /// runner still writing its final state, so the reply's last step was lost.
+    public static let stopGraceSeconds = 20
+    public static let stopTermSeconds = 5
+
+    /// Asks the runner to stop the gentle way (it finishes writing its state), then sends its
+    /// whole process group SIGTERM, then SIGKILL, if it hasn't gone. Takes at most about
+    /// `graceSeconds + termSeconds` seconds.
+    public func stop(id: String, graceSeconds: Int = VMControl.stopGraceSeconds, termSeconds: Int = VMControl.stopTermSeconds) async throws {
         guard VMRun.isRunID(id) else { throw Failure.badID }
-        _ = try await computer.run(Self.stopScript(id: id))
+        let output = ComputerControl.plainOutput(try await computer.run(Self.stopScript(id: id, graceSeconds: graceSeconds, termSeconds: termSeconds)))
+        guard output.contains("maipa-g-stopped") else { throw Failure.unexpected(output) }
     }
 
-    static func stopScript(id: String) -> String {
+    static func stopScript(id: String, graceSeconds: Int = stopGraceSeconds, termSeconds: Int = stopTermSeconds) -> String {
         """
         d="$HOME/\(VMRun.folder(id))"
         [ -d "$d" ] || { echo maipa-g-stopped; exit 0; }
         touch "$d/stop"
         p=$(cat "$d/runner.pid" 2>/dev/null | tr -dc 0-9)
         alive() { [ -n "$p" ] && [ -r "/proc/$p/stat" ] && [ "$(sed 's/.*) //' "/proc/$p/stat" | cut -d' ' -f1)" != Z ]; }
-        i=0; while alive && [ $i -lt 60 ]; do sleep 0.1; i=$((i + 1)); done
-        if alive; then kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null || true; sleep 1; fi
-        if alive; then kill -KILL -- "-$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null || true; fi
-        echo maipa-g-stopped
+        i=0; while alive && [ $i -lt \(max(graceSeconds, 0) * 10) ]; do sleep 0.1; i=$((i + 1)); done
+        if alive; then
+          kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null || true
+          i=0; while alive && [ $i -lt \(max(termSeconds, 0) * 10) ]; do sleep 0.1; i=$((i + 1)); done
+        fi
+        if alive; then kill -KILL -- "-$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null || true; sleep 0.2; fi
+        if alive; then echo maipa-g-still-running; else echo maipa-g-stopped; fi
         """
     }
 

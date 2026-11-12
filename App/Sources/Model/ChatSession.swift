@@ -357,6 +357,8 @@ final class ChatSession: Identifiable {
 
     /// The reply was still going when the app was closed. Continue it, unless that just crashed.
     func resumeFromRelaunchIfSafe() {
+        // A Stop that couldn't reach the computer last time is sent again now.
+        if !isRunning { sendPendingComputerStopsSoon() }
         // A reply on the chat computer kept going while the app was closed: follow it again. That
         // only reads its state, so it can't be what crashed the app.
         if !isRunning, hasComputerRun {
@@ -538,13 +540,18 @@ final class ChatSession: Identifiable {
         pendingSteers.removeAll()
         flush()
         guard isRunning else {
-            // Lost contact with a reply on the chat computer: Stop still reaches it.
+            // Lost contact with a reply on the chat computer: Stop still reaches it. The run is
+            // remembered on this phone until the stop gets there; it used to be forgotten at once,
+            // so a Stop tapped while the computer couldn't be reached never arrived.
             if hasComputerRun, let runID = chat.computerRunID {
                 chat.computerRunID = nil
-                if let control = app?.connectors.computerControl() {
-                    Task { try? await VMControl(computer: control).stop(id: runID) }
+                rememberPendingComputerStop(runID)
+                sendPendingComputerStopsSoon()
+                if var turn = lastTurn, turn.status == .running {
+                    turn.status = .stopped
+                    AgentLoop.settleRunningTools(in: &turn)
+                    replaceLastTurn(turn)
                 }
-                if var turn = lastTurn, turn.status == .running { turn.status = .stopped; replaceLastTurn(turn) }
                 saveSoon(immediately: true)
             }
             settleWaitingTurn()
@@ -1348,6 +1355,12 @@ final class ChatSession: Identifiable {
             app?.turnFinished(in: self)
         }
         guard let app else { return }
+        // Stops still waiting for the computer go first (for a short while at most), so one sent
+        // late can't land on the run this reply is about to start.
+        sendPendingComputerStopsSoon()
+        if let pending = pendingStopTask {
+            _ = try? await AgentLoop.bounded(seconds: 30, label: "Sending a stop to your computer") { await pending.value }
+        }
         // A reply already running on the chat computer: follow it rather than start it again.
         if let runID = chat.computerRunID {
             if hasComputerRun {
@@ -1355,9 +1368,18 @@ final class ChatSession: Identifiable {
                 return
             }
             // A run left over from an earlier reply: stop it so two replies never work at once.
+            // Remembered until the stop gets there, as the computer may not answer right now.
             chat.computerRunID = nil
+            rememberPendingComputerStop(runID)
             if let control = app.connectors.computerControl() {
-                Task { let vm = VMControl(computer: control); try? await vm.stop(id: runID); try? await vm.remove(id: runID) }
+                Task { [weak self] in
+                    let vm = VMControl(computer: control)
+                    do {
+                        try await vm.stop(id: runID)
+                        self?.forgetPendingComputerStop(runID)
+                        try? await vm.remove(id: runID)
+                    } catch {}
+                }
             }
         }
         // Kiro checkpoint: the chat as it was before this message ran.
@@ -2001,6 +2023,7 @@ final class ChatSession: Identifiable {
             receive(turn, milestone: milestone)
         }
         flush()
+        forgetEndedComputerRun(computerHandle?.id)
         // `KiroCrew#20549`: If a live steer arrived right as the turn finished without another step boundary,
         // promote it immediately so the model answers it instead of stranding it!
         if !userStoppedExplicitly, !pausedInBackground {
@@ -2010,7 +2033,7 @@ final class ChatSession: Identifiable {
                 syncQueuedFollowUpsToChat()
             }
         }
-        pendingSteers.removeAll()
+        await keepUnsentComputerSteering(from: run)
         if lastTurn?.steps.flatMap(\.toolCalls).contains(where: { $0.name == "add_memory" || $0.name == "edit_memory" }) == true {
             await app.memories.load()
             app.sync.request()
@@ -2074,6 +2097,97 @@ final class ChatSession: Identifiable {
     var hasComputerRun: Bool {
         guard let runID = chat.computerRunID, let last = chat.messages.last, last.assistantTurn != nil else { return false }
         return runID == ComputerRuns.runID(forReply: last.id)
+    }
+
+    /// Following a reply on the computer ended and the reply is no longer running (it finished,
+    /// the runner died, its files were gone, or it was stopped): forget the run. Left set, Retry
+    /// followed the dead run again instead of carrying the reply on. When the app only went to
+    /// the background the reply is still running there, and the run is kept to follow again.
+    private func forgetEndedComputerRun(_ runID: String?) {
+        guard let runID, chat.computerRunID == runID, let turn = lastTurn, turn.status != .running else { return }
+        chat.computerRunID = nil
+        saveSoon(immediately: true)
+    }
+
+    /// After following ends: when the app only went to the background with a reply still running
+    /// on the computer, steering that hadn't been sent there yet is kept and sent when the reply is
+    /// followed again (it used to be thrown away). Otherwise the waiting steering is cleared.
+    private func keepUnsentComputerSteering(from run: AgentRun) async {
+        if pausedInBackground, !userStoppedExplicitly, computerHandle != nil, hasComputerRun {
+            pendingSteers = await run.drainUnconsumedSteering().map { PendingSteer(text: $0) }
+        } else {
+            pendingSteers.removeAll()
+        }
+    }
+
+    // MARK: Stops waiting for the computer
+
+    /// Runs on the computer whose Stop hasn't got there yet (it couldn't be reached), kept on this
+    /// phone across launches and sent again on the next reply, follow or launch.
+    private static func pendingStopsKey(_ chatID: UUID) -> String { "maipag.pendingComputerStops.\(chatID.uuidString)" }
+
+    private var pendingComputerStops: [String] {
+        get { UserDefaults.standard.stringArray(forKey: Self.pendingStopsKey(chat.id)) ?? [] }
+        set {
+            if newValue.isEmpty {
+                UserDefaults.standard.removeObject(forKey: Self.pendingStopsKey(chat.id))
+            } else {
+                UserDefaults.standard.set(newValue, forKey: Self.pendingStopsKey(chat.id))
+            }
+        }
+    }
+
+    @ObservationIgnored private var pendingStopTask: Task<Void, Never>?
+
+    private func rememberPendingComputerStop(_ runID: String) {
+        var stops = pendingComputerStops
+        guard !stops.contains(runID) else { return }
+        stops.append(runID)
+        pendingComputerStops = stops
+    }
+
+    private func forgetPendingComputerStop(_ runID: String) {
+        let stops = pendingComputerStops
+        guard stops.contains(runID) else { return }
+        pendingComputerStops = stops.filter { $0 != runID }
+    }
+
+    /// The waiting Stops that may go now. Not one for the run this chat follows (started again
+    /// under the same id, which stopped any earlier runner there), nor, while a reply is starting,
+    /// one for that reply's id: it would land on the new run.
+    private var computerStopsToSendNow: [String] {
+        pendingComputerStops.filter { runID in
+            if chat.computerRunID == runID { return false }
+            if isRunning, let reply = chat.messages.last, ComputerRuns.runID(forReply: reply.id) == runID { return false }
+            return true
+        }
+    }
+
+    /// Sends the waiting Stops in the background, once at a time.
+    private func sendPendingComputerStopsSoon() {
+        guard pendingStopTask == nil, !computerStopsToSendNow.isEmpty, app != nil else { return }
+        pendingStopTask = Task { [weak self] in
+            await self?.sendPendingComputerStops()
+            self?.pendingStopTask = nil
+        }
+    }
+
+    /// Each Stop that gets there is forgotten; the rest wait for the next time.
+    private func sendPendingComputerStops() async {
+        guard let app, !computerStopsToSendNow.isEmpty,
+              let control = await app.connectors.ensureComputerSession(), control.commandTool != nil else { return }
+        let vm = VMControl(computer: control)
+        for runID in pendingComputerStops {
+            guard computerStopsToSendNow.contains(runID) else { continue }
+            do {
+                try await AgentLoop.bounded(seconds: AgentRun.stopTimeLimit, label: "Stopping the reply on your computer") {
+                    try await vm.stop(id: runID)
+                }
+                forgetPendingComputerStop(runID)
+            } catch {
+                if error is CancellationError || Task.isCancelled { return }
+            }
+        }
     }
 
     /// When the computer last got a GitHub token from this phone. A reply picked up again after
@@ -2141,6 +2255,9 @@ final class ChatSession: Identifiable {
             return fallBack("handing the reply over failed: \(ErrorExplainer.explain(error).message)")
         }
         chat.computerRunID = id
+        // Starting it again stopped any earlier runner under this id (VMControl.launchScript), so
+        // a stop still waiting for that one mustn't be sent to this run.
+        forgetPendingComputerStop(id)
         lastTokenHandover = Date()
         if var turn = lastTurn {
             if !turn.notices.contains(VMNotices.runningOnComputer) { turn.notices.append(VMNotices.runningOnComputer) }
@@ -2180,6 +2297,7 @@ final class ChatSession: Identifiable {
                     turn.notices.append("MAIPA-G couldn't reach your computer for 20 minutes, so it stopped waiting. The reply may have finished there: tap Retry to pick it up, or check the computer in Settings → Check everything.")
                     turn.status = .stopped
                     turn.stoppedEarly = true
+                    AgentLoop.settleRunningTools(in: &turn)
                     replaceLastTurn(turn)
                 }
                 return
@@ -2192,13 +2310,20 @@ final class ChatSession: Identifiable {
             turn.notices.removeAll { $0 == notice }
             replaceLastTurn(turn)
         }
+        // The computer answers again: any Stop that couldn't reach it before goes now.
+        sendPendingComputerStopsSoon()
         let run = followRun(id: runID, vm: VMControl(computer: control), app: app)
         self.run = run
+        // Steering typed before the app went to the background that hadn't reached the computer.
+        for steer in pendingSteers { await run.steer(steer.text) }
         for await event in run.events {
             guard case .updated(let turn, let milestone) = event else { continue }
             receive(turn, milestone: milestone)
         }
         flush()
+        // The follower ended with the reply over (not just the app going to the background):
+        // forget the run, or Retry followed the dead run again instead of carrying the reply on.
+        forgetEndedComputerRun(runID)
         if !userStoppedExplicitly, !pausedInBackground {
             let unconsumed = await run.drainUnconsumedSteering()
             if !unconsumed.isEmpty {
@@ -2206,7 +2331,7 @@ final class ChatSession: Identifiable {
                 syncQueuedFollowUpsToChat()
             }
         }
-        pendingSteers.removeAll()
+        await keepUnsentComputerSteering(from: run)
         guard !hasComputerRun else { return }
         await refreshReviewState()
         chat.updatedAt = Date()
