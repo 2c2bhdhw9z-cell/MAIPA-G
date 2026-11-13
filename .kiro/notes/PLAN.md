@@ -1,6 +1,6 @@
 # MAIPA-G plan
 
-**Status (12 November 2026, morning Eastern): Build 176 shipped the OK'd Settings, Workflows, Jobs and sub-agent changes. This batch fixes what his build 176 screenshots and chats showed (below, "Fifth follow-up"); checked on Linux and on a temporary tag, then published from that one build.**
+**Status (13 November 2026, afternoon Eastern): Build 190 shipped the audit fixes. This batch ("Eleventh follow-up", at the end) makes steering look like Kiro's, hides the status lines Kiro doesn't have, and puts any chat file on the computer as the real file. Owner said build it without a plan first.**
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
 saving works (Settings and the side menu showed "Saved just now", and the 173 MB Continuum .ipa is
@@ -1416,3 +1416,29 @@ Five audits (tools, sync, engine, canvas, app screens). The fixes are in build 1
     - Drawn cards at 18-45% zoom.
     - Folder rows in Files (custom chevron).
     - That `stop()` (up to ~26 s against a stuck runner) fits the connector's time limit.
+
+## Eleventh follow-up (13 November 2026): steering like Kiro, no extra lines, files anywhere
+
+Owner, with screenshots of a chat: "this is not how your steering works", "you don't have all
+this" (circled: "Saved a memory", "Slow reply…", "Running on your computer…"), "I want everything
+like you", and "fix it so if I give it an IPA or apk or anything, it can go anywhere it needs to
+go". He said to build it without a plan first.
+
+**Built**
+- **Steering:** a message sent while a reply runs shows at once as his normal message bubble at the
+  bottom of the chat, and stays there in the reply once the AI reads it. The "Steering message
+  queued" box, the "Steered:" box and the "Steered mid-run:" line are gone. Long-press the bubble
+  for Copy, or Take back while the AI hasn't read it yet. The AI gets Kiro's live-steering wording
+  (`Transcript.liveSteeringMessage`) and is asked to say briefly how it handled the message.
+- **Lines Kiro doesn't show:** `AssistantTurn.shownNotices` hides "Saved/Updated a memory", "Slow
+  reply (…)", "Running on your computer…", "Getting ready took Ns…" and "Steered mid-run", old chats
+  included. Memory lines and steer lines are no longer written; the timing lines are still saved
+  in the chat as evidence for slow replies, just not shown.
+- **Files to the computer:** new `copy_file_to_computer` (any kind, up to 250 MB) puts a chat file
+  at `~/attachments/<id8>/<name>`. The phone uploads it once to MAIPA-G-data's `maipa-g-files`
+  release under its SHA-256 (the name saving uses, so it's never stored twice), asks GitHub for the
+  short-lived storage address (`GitHubClient.releaseAssetLink`), and the computer downloads it with
+  curl and checks the size. No token goes to the computer. A reply that runs on the computer gets
+  the chat's newest 50 files put there first, with their paths in its prompt. The transcript and
+  system prompt tell the AI the path and to stop reading binaries as text.
+- `send_file` brings files back from the computer up to 250 MB (was 100 MB), so a rebuilt .ipa fits.

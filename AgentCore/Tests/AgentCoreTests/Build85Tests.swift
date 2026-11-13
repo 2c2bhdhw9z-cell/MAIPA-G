@@ -240,7 +240,9 @@ struct Build85Tests {
         #expect(await timeline.sub1Finished == true)
         #expect(await timeline.continuedWhileSub1Running == false)
         #expect(settled.steps.last?.text == "Waited for the sub-agent, then answered.")
-        #expect(settled.notices.contains { $0.contains("Do another sub agent right now") })
+        // The steer is shown as the person's own message in the reply, not as a notice line.
+        #expect(settled.steps.contains { ($0.steeredMessages ?? []).contains("Do another sub agent right now") })
+        #expect(!settled.notices.contains { $0.contains("Do another sub agent right now") })
         // Verify Sub-Agent 1's card updated all the way to `.completed` with 90 actions!
         let sub1Card = settled.steps.first?.toolCalls.first?.subagents?.first
         #expect(sub1Card?.status == .completed)

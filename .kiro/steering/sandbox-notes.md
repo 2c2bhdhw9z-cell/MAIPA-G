@@ -60,6 +60,10 @@ Things that cost time to find out. Keep them short and true.
 - Never type a run id or a commit sha by hand: look them up (`git rev-parse`, `gh api
   "…/actions/runs?branch=<tag>&per_page=1" --jq '.workflow_runs[0].id'`). A mistyped run id made
   the wait loop spin its full half hour on 404s, twice.
+- The Sprites MCP server has no file-writing tool (its 18 tools: exec, services, checkpoints,
+  policies, sprites), so `ComputerControl.writeFile` falls back to ~1.2 KB per command there. Big
+  files go to the computer through a GitHub release asset's short-lived address and curl
+  (`ComputerFiles.swift`), never through `writeFile`.
 - Scripts run by AgentCore tests also run on GitHub's Mac: no `stat -c` or `base64 -w0` there
   (use `wc -c < f` and `base64 | tr -d '\n'`).
 

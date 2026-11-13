@@ -7,6 +7,30 @@ import Foundation
 /// run needs. GitHub only builds the app.
 @MainActor
 enum ComputerRuns {
+    /// How a chat file reaches the computer: it goes up once to MAIPA-G-data's private files
+    /// release (named by its SHA-256, the same name saving uses, so it is never stored twice), and
+    /// the computer downloads it from the short-lived address GitHub gives. No token goes there.
+    static func chatFileLink(app: AppModel) -> ChatFileLink {
+        let store = app.attachmentStore
+        let github = app.github.client
+        let dataRepo = app.sync.repo
+        return { attachment in
+            guard let github, let dataRepo else {
+                throw ToolInputError("Files reach the computer through GitHub and MAIPA-G's private data repo. Connect GitHub in Settings and let saving set up first.")
+            }
+            let file = try store.fileURL(for: attachment)
+            let name = try Hashing.sha256Hex(fileAt: file) + ".bin"
+            let releaseID = try await github.filesRelease(dataRepo)
+            let asset: GitHubClient.ReleaseAsset
+            if let existing = try await github.releaseAssets(dataRepo, releaseID: releaseID).first(where: { $0.name == name && $0.isUploaded && $0.size == attachment.bytes }) {
+                asset = existing
+            } else {
+                asset = try await github.uploadReleaseAsset(dataRepo, releaseID: releaseID, name: name, file: file)
+            }
+            return try await github.releaseAssetLink(dataRepo, assetID: asset.id)
+        }
+    }
+
     /// The commit this app was built from; the runner on the computer is that same code.
     static var revision: String? {
         guard let value = Bundle.main.object(forInfoDictionaryKey: "MAIPAGReviewedRevision") as? String,

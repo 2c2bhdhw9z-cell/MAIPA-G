@@ -53,7 +53,8 @@ public struct SendFileTool: AgentTool {
             progress("Bringing the file from the computer…")
             shownName = (relative as NSString).lastPathComponent
             file = folder.appendingPathComponent(shownName)
-            try await computer.readFile(homePath: relative, maxBytes: 100 * 1024 * 1024).write(to: file)
+            // As big as a chat file can be, so a rebuilt app (often 150 MB or more) comes back too.
+            try await computer.readFile(homePath: relative, maxBytes: AttachmentStore.maximumAttachmentBytes).write(to: file)
         } else if let raw = arguments.optionalString("url"), let url = URL(string: raw), url.scheme == "https", let host = url.host?.lowercased() {
             progress("Downloading the file…")
             shownName = url.lastPathComponent.isEmpty || url.lastPathComponent == "zip" ? "download.zip" : url.lastPathComponent

@@ -284,7 +284,9 @@ struct AssistantTurnView: View {
             ForEach(segments) { segment in
                 switch segment {
                 case .steered(_, let steeredMessages):
-                    SteeredInlineBanner(messages: steeredMessages)
+                    ForEach(Array(steeredMessages.enumerated()), id: \.offset) { _, text in
+                        SteerBubble(text: text)
+                    }
                 case .activity(let id, let items, let isActive):
                     ActivityTimelineCard(id: id, items: items, isActive: isActive)
                 case .subagents(let call):
@@ -307,8 +309,7 @@ struct AssistantTurnView: View {
             } else if turn.status == .stopped, isLatest {
                 StoppedLine(onContinue: actions.keepGoing)
             }
-            let hasInlineSteers = turn.steps.contains { !($0.steeredMessages ?? []).isEmpty }
-            ForEach(turn.notices.filter { !hasInlineSteers || !$0.hasPrefix("Steered mid-run:") }, id: \.self) { notice in
+            ForEach(turn.shownNotices, id: \.self) { notice in
                 Label(notice, systemImage: "info.circle")
                     .font(.footnote)
                     .foregroundStyle(Theme.secondaryText)
@@ -505,33 +506,37 @@ enum TurnSegment: Identifiable {
     }
 }
 
-private struct SteeredInlineBanner: View {
-    let messages: [String]
+/// A message the person sent while a reply was running. It looks like any other message they
+/// sent, the way Kiro shows it, and sits where it was sent; the reply carries on under it.
+/// `onTakeBack` is set while the reply hasn't read it yet.
+struct SteerBubble: View {
+    let text: String
+    var onTakeBack: (() -> Void)?
     @Environment(\.theme) private var theme
 
+    init(text: String, onTakeBack: (() -> Void)? = nil) {
+        self.text = text
+        self.onTakeBack = onTakeBack
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array(messages.enumerated()), id: \.offset) { _, note in
-                HStack(alignment: .top, spacing: 7) {
-                    Image(systemName: "arrow.turn.down.right")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(theme.accent)
-                        .padding(.top, 2)
-                    Text("Steered: \(note)")
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(.primary.opacity(0.92))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+        HStack {
+            Spacer(minLength: 36)
+            Text(text)
+                .font(.body)
+                .textSelection(.enabled)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(theme.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(theme.accent.opacity(0.25)))
+                .contextMenu {
+                    Button { UIPasteboard.general.string = text } label: { Label("Copy", systemImage: "doc.on.doc") }
+                    if let onTakeBack {
+                        Button(action: onTakeBack) { Label("Take back", systemImage: "arrow.uturn.backward") }
+                    }
                 }
-            }
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 8)
-        .background(theme.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(theme.accent.opacity(0.30))
-        )
+        .frame(maxWidth: .infinity, alignment: .trailing)
     }
 }
 

@@ -422,7 +422,8 @@ struct AgentLoopTests {
         let turn = try #require(result.0)
         let saved = try #require(await store.loadAll().first)
         #expect(saved.text == "Keep replies short" && saved.source == .ai)
-        #expect(turn.notices.contains { $0 == "Saved a memory: Keep replies short" })
+        // Shown as its tool row only, as in Kiro: no extra "Saved a memory:" line under the reply.
+        #expect(!turn.notices.contains { $0.hasPrefix("Saved a memory") })
         #expect(turn.steps[0].toolCalls[0].summary == "Saved a memory")
 
         _ = try await AddMemoryTool(store: store).run(arguments: ["text": "Keep replies short"], progress: { _ in })

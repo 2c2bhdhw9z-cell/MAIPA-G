@@ -1727,6 +1727,9 @@ final class ChatSession: Identifiable {
                 // Exact picture work happens on the computer: pictures go there and come back.
                 let pictures = chatPictures()
                 if !pictures.isEmpty { tools.append(CopyPictureToComputerTool(control: control, store: app.attachmentStore, pictures: pictures)) }
+                // Any chat file (an app, an archive, anything) goes there as the real file.
+                let files = chatFiles()
+                if !files.isEmpty { tools.append(CopyFileToComputerTool(control: control, files: files, link: ComputerRuns.chatFileLink(app: app))) }
                 tools.append(ShowComputerPictureTool(control: control, store: app.attachmentStore))
             } else if var turn = lastTurn {
                 // Say it out loud. A missing computer must never look like work that simply failed.
@@ -2250,6 +2253,10 @@ final class ChatSession: Identifiable {
             if githubToken == nil { return fallBack("GitHub didn't give MAIPA-G a token for it") }
         }
         if userStoppedExplicitly { return nil }
+        // The chat's files go there first, as the real files: the runner can't reach the phone's.
+        var systemPrompt = input.systemPrompt
+        if let filesNote = await putChatFilesOnComputer(vm.computer, app: app) { systemPrompt += "\n\n" + filesNote }
+        if userStoppedExplicitly { return nil }
         var repo: VMTurnRepo?
         if let repoContext, let chatRepo = chat.repo {
             let staged = await changeWorkspace?.stagedChanges() ?? []
@@ -2261,7 +2268,7 @@ final class ChatSession: Identifiable {
         }
         let id = ComputerRuns.runID(forReply: reply.id)
         let request = VMTurnRequest(
-            id: id, chat: input.chat, route: input.route, systemPrompt: input.systemPrompt, allowTools: input.allowTools,
+            id: id, chat: input.chat, route: input.route, systemPrompt: systemPrompt, allowTools: input.allowTools,
             spendLimit: input.spendLimit, fallbackModels: input.fallbackModels, resumeNote: input.resumeNote,
             lastUserMessage: lastMessage, webEnabled: webEnabled, repo: repo,
             specMode: effectiveMode == .spec && repoContext != nil, specGate: chat.kiroSpec, specKind: specKind,
@@ -3124,6 +3131,42 @@ final class ChatSession: Identifiable {
             }
         }
         return nil
+    }
+
+    /// Every file the person attached in this chat, oldest first.
+    func chatFiles() -> [AttachmentReference] {
+        chat.messages.flatMap { message -> [AttachmentReference] in
+            if case .user(let user) = message.body { return user.attachments }
+            return []
+        }
+    }
+
+    /// Puts the chat's newest 50 files on the computer before a reply runs there (the runner
+    /// can't reach the phone's files), and says where they are for the reply's system prompt.
+    /// Files already there aren't sent again. A file that can't go is named, so the AI says so.
+    private func putChatFilesOnComputer(_ control: ComputerControl, app: AppModel) async -> String? {
+        let files = Array(chatFiles().suffix(50))
+        guard !files.isEmpty else { return nil }
+        let link = ComputerRuns.chatFileLink(app: app)
+        let present = (try? await control.filesPresent(files.map { (ComputerControl.attachmentHomePath($0), $0.bytes) })) ?? []
+        var placed: [String] = []
+        var failed: [String] = []
+        for file in files {
+            if userStoppedExplicitly { break }
+            let path = ComputerControl.attachmentHomePath(file)
+            if !present.contains(path) {
+                do {
+                    try await control.download(try await link(file), toHomePath: path, bytes: file.bytes)
+                } catch {
+                    failed.append("\"\(file.name)\" (\(ErrorExplainer.explain(error).message))")
+                    continue
+                }
+            }
+            placed.append("- ~/\(path): \"\(file.name)\", \(file.bytes) bytes")
+        }
+        var note = "Files attached in this chat, as the real files on this computer (work on them with run_command):\n" + placed.joined(separator: "\n")
+        if !failed.isEmpty { note += "\nThese couldn't be put on this computer; say so if the work needs them: " + failed.joined(separator: ", ") }
+        return note
     }
 
     func chatPictures() -> [AttachmentReference] {

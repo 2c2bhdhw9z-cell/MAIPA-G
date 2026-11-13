@@ -185,7 +185,7 @@ public enum Transcript {
                     case .text:
                         extraNotes.append("[Attached text file: \"\(attachment.name)\" (\(attachment.bytes) bytes) — call read_attachment(name: \"\(attachment.name)\") to read it.]")
                     case .file:
-                        extraNotes.append("[Attached file: \"\(attachment.name)\" (\(attachment.bytes) bytes, \(attachment.mimeType))]")
+                        extraNotes.append("[Attached file: \"\(attachment.name)\" (\(attachment.bytes) bytes, \(attachment.mimeType)). The real file goes on the chat computer at ~/\(ComputerControl.attachmentHomePath(attachment)) (copy_file_to_computer puts it there).]")
                     case .image:
                         if !readsImages {
                             extraNotes.append("[Attached image: \"\(attachment.name)\" (\(attachment.bytes) bytes) — current AI is text-only, so image pixels are omitted.]")
@@ -243,8 +243,7 @@ public enum Transcript {
                 let isOlderTurn = age == .older
                 for step in turn.steps {
                     if let steered = step.steeredMessages, !steered.isEmpty {
-                        let notes = steered.joined(separator: "\n\n")
-                        result.append(.syntheticUser("Live steering from the user while you were working — incorporate this into your approach and answer:\n\(notes)"))
+                        result.append(.syntheticUser(Self.liveSteeringMessage(steered)))
                     }
                     let calls = step.toolCalls
                     let text = step.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -294,6 +293,22 @@ public enum Transcript {
         let head = result.prefix(limit * 2 / 3)
         let tail = result.suffix(limit / 4)
         return "\(head)\n\n[… \(result.count - head.count - tail.count) characters of this earlier \(tool) output left out to keep replies fast; run it again if you need them …]\n\n\(tail)"
+    }
+
+    /// How a message sent while the AI works reaches it: Kiro's live-steering wording. Several
+    /// messages taken at the same step go together, separated by a blank line, as Kiro does.
+    static func liveSteeringMessage(_ messages: [String]) -> String {
+        """
+        [LIVE STEERING - New message from user]
+
+        The user sent a new message while you are working. As the currently active agent, adjust your approach if necessary based on this guidance.
+
+        <user_message>
+        \(messages.joined(separator: "\n\n"))
+        </user_message>
+
+        IMPORTANT: After completing your work, include a brief note in plain words about how you handled this message.
+        """
     }
 
     static func toolResultText(for call: ToolCallRecord, turnIsCurrent: Bool, isOlderTurn: Bool = false, age: ToolResultAge? = nil) -> String {

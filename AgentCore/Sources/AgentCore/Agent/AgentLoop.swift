@@ -749,11 +749,9 @@ private struct Runner {
                     continue
                 }
                 if let incoming = await steering?.drain(), !incoming.isEmpty {
+                    // The message shows in the chat as the person's own message (the next step's
+                    // steeredMessages), the way Kiro shows it. No extra notice line.
                     injectedSteeringNotes.append(contentsOf: incoming)
-                    for note in incoming {
-                        let preview = note.count > 120 ? String(note.prefix(120)) + "…" : note
-                        turn.notices.append("Steered mid-run: \(preview)")
-                    }
                     emit(milestone: false)
                 }
                 if let completedReports = await steering?.drainBackgroundReports(), !completedReports.isEmpty {
@@ -1569,13 +1567,7 @@ private struct Runner {
             if !output.inlineImages.isEmpty {
                 toolInlineImages[record.id] = output.inlineImages
             }
-            if !output.isError, callIndex < turn.steps[stepIndex].toolCalls.count {
-                if record.name == "add_memory", !turn.notices.contains("Saved a memory: \(output.detail ?? output.summary)") {
-                    turn.notices.append("Saved a memory: \(output.detail ?? output.summary)")
-                } else if record.name == "edit_memory", !turn.notices.contains("Updated a memory: \(output.detail ?? output.summary)") {
-                    turn.notices.append("Updated a memory: \(output.detail ?? output.summary)")
-                }
-            }
+            // A saved or updated memory shows as its tool row in the activity list, as in Kiro.
         case .failure(let error):
             let base = turn.steps[stepIndex].toolCalls[callIndex].summary.replacingOccurrences(of: "…", with: "")
             let message: String

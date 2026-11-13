@@ -983,3 +983,22 @@ public struct QuestionSet: Codable, Sendable, Hashable {
         }.joined(separator: "\n\n")
     }
 }
+
+public extension AssistantTurn {
+    /// The notes the chat shows under a reply. Kiro shows no status lines for saved memories,
+    /// steering, timings or where a reply runs, so those stay in the saved chat (the timings are
+    /// evidence when a reply is slow) but are not shown. Older chats saved them, so this filters
+    /// rather than relying on new replies not adding them.
+    var shownNotices: [String] {
+        notices.filter { !Self.isHiddenNotice($0) }
+    }
+
+    static func isHiddenNotice(_ notice: String) -> Bool {
+        notice.hasPrefix("Steered mid-run:")
+            || notice.hasPrefix("Saved a memory:")
+            || notice.hasPrefix("Updated a memory:")
+            || notice.hasPrefix("Slow reply (")
+            || notice == VMNotices.runningOnComputer
+            || (notice.hasPrefix("Getting ready took ") && notice.contains("before the AI was asked"))
+    }
+}

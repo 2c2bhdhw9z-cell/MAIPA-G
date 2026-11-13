@@ -573,6 +573,16 @@ public struct GitHubClient: Sendable {
         _ = try await send("DELETE", Self.path(repo, "/releases/assets/\(assetID)"), allow: [404])
     }
 
+    /// The short-lived storage address GitHub gives for an asset (a few minutes). It works without
+    /// a token, so the chat computer can download the file without being given one.
+    public func releaseAssetLink(_ repo: RepoRef, assetID: Int) async throws -> URL {
+        let response = try await send("GET", Self.path(repo, "/releases/assets/\(assetID)"), accept: "application/octet-stream", allow: [301, 302, 303, 307, 308], followsRedirects: false)
+        guard let location = response.header("location"), let url = URL(string: location), url.scheme == "https" else {
+            throw GitHubAPIError(status: response.status, message: "GitHub didn't give a download address for the saved file")
+        }
+        return url
+    }
+
     /// Streams an asset to `destination`. GitHub answers with a short-lived storage address;
     /// the app's token is sent only to GitHub, never to that storage.
     public func downloadReleaseAsset(_ repo: RepoRef, assetID: Int, to destination: URL) async throws {
