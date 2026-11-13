@@ -68,6 +68,16 @@ final class SyncCoordinator {
 
     var repoURL: URL? { repo?.webURL }
 
+    /// MAIPA-G-data as soon as saving is set up. `repo` is only filled in once this launch's
+    /// first save finishes, and a big new attachment can keep that save going for minutes.
+    var dataRepository: RepoRef? {
+        get async {
+            if let repo { return repo }
+            guard let engine, let setup else { return nil }
+            return await engine.state.repo ?? RepoRef(owner: setup.owner, name: DataRepoSync.repoName)
+        }
+    }
+
     /// Sets saving up for a connected account and brings this phone up to date with GitHub.
     func configure(client: GitHubClient, owner: String, installationID: Int) async {
         engine = DataRepoSync(github: client, dataDirectory: paths.data, stateURL: paths.syncState)

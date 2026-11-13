@@ -398,6 +398,17 @@ public struct VMTurnRunner: Sendable {
         tools.append(AddMemoryTool(store: memoryStore))
         tools.append(EditMemoryTool(store: memoryStore))
         tools.append(ShowComputerPictureTool(control: control, store: media))
+        // The phone puts the chat's files here before the reply starts. The tool finds them; one
+        // that isn't here can't be fetched from this side, and it says why.
+        let chatFiles = request.chat.messages.flatMap { message -> [AttachmentReference] in
+            if case .user(let user) = message.body { return user.attachments }
+            return []
+        }
+        if !chatFiles.isEmpty {
+            tools.append(CopyFileToComputerTool(control: control, files: chatFiles, link: { file in
+                throw ToolInputError("\(file.name) isn't on this computer: the phone puts the chat's files here when a reply starts, and it couldn't this time (the reason is in your instructions, under the chat's files). Tell the person that reason in plain words and ask them to send the message again.")
+            }))
+        }
         if request.webEnabled {
             tools.append(WebSearchTool(transport: transport))
             tools.append(ReadWebPageTool(transport: transport))

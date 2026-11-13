@@ -12,11 +12,15 @@ enum ComputerRuns {
     /// the computer downloads it from the short-lived address GitHub gives. No token goes there.
     static func chatFileLink(app: AppModel) -> ChatFileLink {
         let store = app.attachmentStore
-        let github = app.github.client
-        let dataRepo = app.sync.repo
+        let account = app.github
+        let sync = app.sync
         return { attachment in
-            guard let github, let dataRepo else {
-                throw ToolInputError("Files reach the computer through GitHub and MAIPA-G's private data repo. Connect GitHub in Settings and let saving set up first.")
+            // Looked up when the file is sent, not when the reply started.
+            guard let github = await account.client else {
+                throw ToolInputError("GitHub isn't connected in MAIPA-G (Settings → GitHub), and files reach the computer through it.")
+            }
+            guard let dataRepo = await sync.dataRepository else {
+                throw ToolInputError("Saving to MAIPA-G-data isn't set up on this phone yet (Settings → Saving), and files reach the computer through it.")
             }
             let file = try store.fileURL(for: attachment)
             let name = try Hashing.sha256Hex(fileAt: file) + ".bin"
@@ -25,7 +29,12 @@ enum ComputerRuns {
             if let existing = try await github.releaseAssets(dataRepo, releaseID: releaseID).first(where: { $0.name == name && $0.isUploaded && $0.size == attachment.bytes }) {
                 asset = existing
             } else {
-                asset = try await github.uploadReleaseAsset(dataRepo, releaseID: releaseID, name: name, file: file)
+                do {
+                    asset = try await github.uploadReleaseAsset(dataRepo, releaseID: releaseID, name: name, file: file)
+                } catch let error as GitHubAPIError where error.status == 409 {
+                    // Saving was uploading the same file and its unfinished copy was removed.
+                    asset = try await github.uploadReleaseAsset(dataRepo, releaseID: releaseID, name: name, file: file)
+                }
             }
             return try await github.releaseAssetLink(dataRepo, assetID: asset.id)
         }

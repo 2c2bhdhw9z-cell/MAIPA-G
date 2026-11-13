@@ -1442,3 +1442,10 @@ go". He said to build it without a plan first.
   the chat's newest 50 files put there first, with their paths in its prompt. The transcript and
   system prompt tell the AI the path and to stop reading binaries as text.
 - `send_file` brings files back from the computer up to 250 MB (was 100 MB), so a rebuilt .ipa fits.
+
+**Fixed after his build 194 test (3:13–3:23 PM):** the file never went because the data repo was
+only known once the launch's first save finished, and saving was still uploading his 104.8 MB IPA,
+so `copy_file_to_computer` said "Connect GitHub". It now uses `SyncCoordinator.dataRepository`
+(known as soon as saving is set up), looks GitHub up when the file is sent, and retries once when
+saving was uploading the same file. Replies on the computer have `copy_file_to_computer` too: it
+finds the files the phone put there, or says why one is missing.
