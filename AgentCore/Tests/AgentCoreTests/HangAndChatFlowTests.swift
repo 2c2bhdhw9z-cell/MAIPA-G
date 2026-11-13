@@ -97,8 +97,11 @@ struct HangAndChatFlowTests {
     @Test("bounded with an activity clock counts from the last sign of life")
     func boundedByInactivity() async throws {
         let clock = ActivityClock()
-        let value = try await AgentLoop.bounded(seconds: 0.3, label: "busy", activity: clock) {
-            for _ in 0..<8 {
+        // About 2.5 seconds of work against a 1 second quiet limit. GitHub's busy Mac has let a
+        // 0.1 second sleep run past 0.3 seconds, so the gap between signs of life is kept at a
+        // tenth of the limit.
+        let value = try await AgentLoop.bounded(seconds: 1.0, label: "busy", activity: clock) {
+            for _ in 0..<25 {
                 try await Task.sleep(nanoseconds: 100_000_000)
                 clock.touch()
             }
