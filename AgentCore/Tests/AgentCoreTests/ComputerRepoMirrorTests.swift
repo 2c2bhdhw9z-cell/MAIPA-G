@@ -95,7 +95,8 @@ struct ComputerRepoMirrorTests {
         let repo = try await Self.repo()
         defer { try? FileManager.default.removeItem(at: repo.home) }
         await repo.mirror.start()
-        let output = try await repo.run("run_command", ["command": "sed -i \"s/'v1'/'v3'/\" app.js && printf 'notes\\n' > notes.md"])
+        // printf, not `sed -i`: these tests also run on GitHub's Mac, whose sed takes -i differently.
+        let output = try await repo.run("run_command", ["command": "printf \"export const version = 'v3';\\n\" > app.js && printf 'notes\\n' > notes.md"])
         #expect(output.forModel.contains("now staged as changed on the computer: app.js, notes.md"))
         #expect(await repo.staged("app.js") == "export const version = 'v3';\n")
         #expect(await repo.staged("notes.md") == "notes\n")
