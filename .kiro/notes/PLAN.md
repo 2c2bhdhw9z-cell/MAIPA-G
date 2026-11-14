@@ -1490,3 +1490,16 @@ Evidence: the saved chat through 13 Nov 6:38 PM (196 steps, 329 tool calls). Fix
 Also from the 12 November audit list above, still open: steers lost on the phone in the background
 (item 8), `update_session_information` on the phone (item 2), `list_files on_computer` from the
 phone (item 3).
+
+### Screenshots in a repo chat ran on the phone (fixed 14 November 2026)
+His 8:32 AM message in the Korg-Bot chat (a screenshot plus about 20 words) ended "The AI sent
+nothing for 14 minutes" after he left the app. `MediaRequest.wanted` called it a picture request:
+an image attachment with 30 words or fewer, or any chat that already has pictures plus "fix",
+"edit", "change" or "previous" in the message. So nearly every message in a chat full of screenshots
+ran on the phone at Low thinking, and iOS froze it in the background (14 minutes of wall time counted
+as AI silence; the computer's runner would have said 5 minutes). Now a chat with a repo only counts an
+explicit ask (`MediaRequest.asksForMedia`: draw/upscale/recolor/wallpaper/sticker, a making verb with a
+picture or video noun, or the picture screen's buttons). Chats without a repo keep the quick edits.
+**Still open:** a reply that does run on the phone still dies when iOS freezes the app, and says the AI
+went silent. `suspendForBackgroundIfNeeded` is still never called (audit item 7). Make it pause on
+`.background` and carry on at `.active`, and never report frozen time as the AI's silence.

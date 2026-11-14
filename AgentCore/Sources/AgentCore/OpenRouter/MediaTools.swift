@@ -434,9 +434,31 @@ public enum MediaRequest {
         "video", "videos", "clip", "animate", "animation", "upscale", "background", "recolor", "recolour",
     ]
 
+    /// Words that only mean making or changing a picture, even in a chat about code.
+    static let makingOnlyWords: Set<String> = ["draw", "upscale", "recolor", "recolour", "wallpaper", "sticker"]
+    static let makingVerbs: Set<String> = ["make", "generate", "create", "draw", "render", "design", "produce", "edit", "redo", "turn"]
+    static let mediaNouns: Set<String> = [
+        "picture", "pictures", "pic", "pics", "image", "images", "photo", "photos", "video", "videos",
+        "logo", "logos", "icon", "icons", "thumbnail", "clip", "wallpaper", "sticker", "poster", "illustration",
+    ]
+
+    /// In a chat working on a repo, a screenshot is almost always there to show the AI something,
+    /// and "fix" or "edit" is about the code. Only an explicit ask for a picture or video counts
+    /// ("make a picture of…", "generate an image", the picture screen's buttons). Owner, 14 November
+    /// 2026: a screenshot with a short message ran on the phone with Low thinking and died when he
+    /// left the app.
+    public static func asksForMedia(_ text: String) -> Bool {
+        if QuickPictureRequest.parse(text) != nil { return true }
+        let tokens = Set(text.lowercased().components(separatedBy: CharacterSet.letters.inverted).filter { !$0.isEmpty })
+        if !tokens.isDisjoint(with: makingOnlyWords) { return true }
+        return !tokens.isDisjoint(with: makingVerbs) && !tokens.isDisjoint(with: mediaNouns)
+    }
+
     /// `hasImageAttachments`: this message has photos. `chatHasPictures`: the chat already has
-    /// pictures the message may be about ("make it bluer").
-    public static func wanted(_ text: String, hasImageAttachments: Bool, chatHasPictures: Bool = false) -> Bool {
+    /// pictures the message may be about ("make it bluer"). `workingOnRepo`: the chat has a repo,
+    /// so only an explicit picture or video request counts (`asksForMedia`).
+    public static func wanted(_ text: String, hasImageAttachments: Bool, chatHasPictures: Bool = false, workingOnRepo: Bool = false) -> Bool {
+        if workingOnRepo { return asksForMedia(text) }
         let tokens = text.lowercased().components(separatedBy: CharacterSet.letters.inverted).filter { !$0.isEmpty }
         if !Set(tokens).isDisjoint(with: words) { return true }
         let refersToPicture = ImageEditIntent.refersToEarlierPicture(text)

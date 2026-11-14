@@ -1883,7 +1883,7 @@ final class ChatSession: Identifiable {
         }
         // A picture or video request is one quick tool call: long thinking only made it slow
         // (11 November 2026: a colour change took over 3 minutes at Extra high).
-        let isMediaTurn = MediaRequest.wanted(lastMessage, hasImageAttachments: lastUserAttachments.contains { $0.kind == .image }, chatHasPictures: !chatPictures().isEmpty)
+        let isMediaTurn = MediaRequest.wanted(lastMessage, hasImageAttachments: lastUserAttachments.contains { $0.kind == .image }, chatHasPictures: !chatPictures().isEmpty, workingOnRepo: chat.repo != nil)
         let thinking = isMediaTurn ? min(chat.thinking, .low) : chat.thinking
         let judgedDifficulty = difficulty
         let hasImageInput = allAttachments.contains { $0.kind == .image }
@@ -2264,7 +2264,7 @@ final class ChatSession: Identifiable {
         if attachmentData.values.reduce(0, { $0 + $1.count }) > 3_000_000 { return fallBack("the attached files are too big to send there") }
         // Pictures and videos are made on the phone, where the picture tools are.
         let lastAttachments = chat.messages.last(where: { $0.userText != nil })?.userAttachments ?? []
-        if MediaRequest.wanted(lastMessage, hasImageAttachments: lastAttachments.contains { $0.kind == .image }, chatHasPictures: !chatPictures().isEmpty) { return nil }
+        if MediaRequest.wanted(lastMessage, hasImageAttachments: lastAttachments.contains { $0.kind == .image }, chatHasPictures: !chatPictures().isEmpty, workingOnRepo: chat.repo != nil) { return nil }
         let vm: VMControl
         switch await ComputerRuns.prepare(app: app) {
         case .ready(let ready): vm = ready
