@@ -1503,3 +1503,6 @@ picture or video noun, or the picture screen's buttons). Chats without a repo ke
 **Still open:** a reply that does run on the phone still dies when iOS freezes the app, and says the AI
 went silent. `suspendForBackgroundIfNeeded` is still never called (audit item 7). Make it pause on
 `.background` and carry on at `.active`, and never report frozen time as the AI's silence.
+
+### Mac test hang (14 November 2026)
+The macOS "AgentCore tests" step hit its 15-minute limit on 6f22bca with 26 tests never finishing; the first stuck one was "list_files can list the real checkout on the computer" (real shell, no Linux guard). Four real-shell tests had no `.enabled(if: onLinux)`: ToolParityTests "run_command puts the exit code first...", "run_command can start a command in the background...", "list_files can list the real checkout on the computer", and ComputerRunnerTests "A failing staged sync never loses the computer's own edits". Guard them (and every new test that uses `ComputerControl.local`) with the Linux-only flag; push with the next code change.
