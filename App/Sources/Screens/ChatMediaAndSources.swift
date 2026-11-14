@@ -730,9 +730,10 @@ struct TurnSourceItem: Identifiable, Hashable {
     let title: String
     let url: String
     let domain: String
+    /// The page's own title (from the search result or the page), not one made from its address.
+    var hasRealTitle = false
 
     static func collect(from turn: AssistantTurn) -> [TurnSourceItem] {
-        var seen: Set<String> = []
         var items: [TurnSourceItem] = []
 
         func isGenuineWebSource(url parsed: URL, host cleanHost: String, raw: String) -> Bool {
@@ -757,6 +758,9 @@ struct TurnSourceItem: Identifiable, Hashable {
             return true
         }
 
+        // One row per page: the same page written with or without https://, www. or a trailing
+        // slash (search results also show each address as plain text) was listed twice.
+        var indexByKey: [String: Int] = [:]
         func add(url rawURL: String, title: String?) {
             let trimmed = rawURL.trimmingCharacters(in: CharacterSet(charactersIn: " \t\n\r\"'()[]<>.,;`"))
             guard let parsed = URL(string: trimmed),
@@ -768,17 +772,27 @@ struct TurnSourceItem: Identifiable, Hashable {
             else { return }
             let cleanHost = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
             guard isGenuineWebSource(url: parsed, host: cleanHost, raw: trimmed) else { return }
+            let key = Self.key(for: parsed)
             let canonical = parsed.absoluteString
-            guard !seen.contains(canonical) else { return }
-            seen.insert(canonical)
+            var givenTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if givenTitle?.isEmpty == true || givenTitle == canonical { givenTitle = nil }
+            if let index = indexByKey[key] {
+                // Seen already: keep one row, with a real title and https when either copy has them.
+                let existing = items[index]
+                let betterURL = existing.url.hasPrefix("http://") && scheme == "https" ? canonical : existing.url
+                let betterTitle = existing.hasRealTitle ? existing.title : (givenTitle ?? existing.title)
+                items[index] = TurnSourceItem(title: betterTitle, url: betterURL, domain: existing.domain, hasRealTitle: existing.hasRealTitle || givenTitle != nil)
+                return
+            }
+            indexByKey[key] = items.count
             let displayTitle: String
-            if let t = title?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty, t != canonical {
-                displayTitle = t
+            if let givenTitle {
+                displayTitle = givenTitle
             } else {
                 let pathLabel = parsed.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
                 displayTitle = pathLabel.isEmpty ? cleanHost : "\(cleanHost)/\(pathLabel)"
             }
-            items.append(TurnSourceItem(title: displayTitle, url: canonical, domain: cleanHost))
+            items.append(TurnSourceItem(title: displayTitle, url: canonical, domain: cleanHost, hasRealTitle: givenTitle != nil))
         }
 
         let excludedLocalTools: Set<String> = [
@@ -793,29 +807,73 @@ struct TurnSourceItem: Identifiable, Hashable {
             for call in step.toolCalls {
                 let lowerName = call.name.lowercased()
                 guard !excludedLocalTools.contains(lowerName) else { continue }
-                let isSourceTool = lowerName == "web_search"
+                // Tools that read one page: the page is the source, not every link inside it
+                // (an Expo changelog read listed its pull requests as 17 "sources").
+                let readsOnePage = lowerName == "read_web_page" || lowerName == "fetch_page" || lowerName.contains("jina")
+                let isSourceTool = readsOnePage
+                    || lowerName == "web_search"
                     || lowerName == "openrouter:web_search"
-                    || lowerName == "read_web_page"
-                    || lowerName == "fetch_page"
                     || lowerName.contains("web_search")
                     || lowerName.contains("wikipedia")
                     || lowerName.contains("arxiv")
                     || lowerName.contains("hackernews")
                     || lowerName.contains("reddit")
-                    || lowerName.contains("jina")
                     || lowerName.contains("brave")
                     || lowerName.contains("perplexity")
                     || lowerName.contains("tavily")
                     || lowerName.contains("exa_")
                     || lowerName.contains("firecrawl")
                 guard isSourceTool else { continue }
+                let titles = call.result.map { knownTitles(in: $0) } ?? [:]
+                if readsOnePage {
+                    for url in extractURLs(from: call.arguments) {
+                        add(url: url, title: URL(string: url).flatMap { titles[Self.key(for: $0)] })
+                    }
+                    continue
+                }
                 extractURLs(from: call.arguments).forEach { add(url: $0, title: nil) }
                 if let res = call.result {
-                    extractURLs(from: String(res.prefix(24_000))).prefix(18).forEach { add(url: $0, title: nil) }
+                    // Each search result shows its address twice (link and plain text), so 10 results
+                    // are 20 addresses; 18 cut the last result off.
+                    for url in extractURLs(from: String(res.prefix(24_000))).prefix(40) {
+                        add(url: url, title: URL(string: url).flatMap { titles[Self.key(for: $0)] })
+                    }
                 }
             }
         }
         return items
+    }
+
+    /// The same page however its address is written: no scheme, no www., no fragment, no
+    /// trailing slash.
+    static func key(for url: URL) -> String {
+        var host = url.host?.lowercased() ?? ""
+        if host.hasPrefix("www.") { host = String(host.dropFirst(4)) }
+        var path = url.path
+        while path.hasSuffix("/") { path.removeLast() }
+        let query = url.query.map { "?" + $0 } ?? ""
+        return host + path + query
+    }
+
+    /// Page titles the tools already gave: web_search writes "N. title" on the line above each
+    /// address, and read_web_page starts with "Source: address" and then "Title: title".
+    private static func knownTitles(in result: String) -> [String: String] {
+        var titles: [String: String] = [:]
+        let lines = result.components(separatedBy: "\n")
+        for index in lines.indices.dropFirst() {
+            let line = lines[index].trimmingCharacters(in: .whitespaces)
+            let above = lines[index - 1].trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("http"), let url = URL(string: line), let dot = above.firstIndex(of: "."),
+               Int(above[..<dot]) != nil {
+                let title = above[above.index(after: dot)...].trimmingCharacters(in: .whitespaces)
+                if !title.isEmpty { titles[key(for: url)] = title }
+            }
+            if line.hasPrefix("Title: "), above.hasPrefix("Source: "), let url = URL(string: String(above.dropFirst("Source: ".count))) {
+                let title = String(line.dropFirst("Title: ".count)).trimmingCharacters(in: .whitespaces)
+                if !title.isEmpty { titles[key(for: url)] = title }
+            }
+        }
+        return titles
     }
 
     private static func extractURLs(from text: String) -> [String] {
@@ -865,9 +923,20 @@ struct TurnSourcesPill: View {
     }
 }
 
+/// A source's site icon (its favicon), like other AI apps show; the coloured letter stands in
+/// while it loads and for a site that has none.
+@MainActor
 struct SourceDomainBadge: View {
     let domain: String
-    var size: CGFloat = 20
+    var size: CGFloat
+    @State private var icon: UIImage?
+
+    init(domain: String, size: CGFloat = 20) {
+        self.domain = domain
+        self.size = size
+        // Already loaded: shown on the first frame, without the letter flashing first.
+        _icon = State(initialValue: SiteIcons.cached(domain))
+    }
 
     private var letter: String {
         String(domain.first ?? "w").uppercased()
@@ -882,13 +951,65 @@ struct SourceDomainBadge: View {
 
     var body: some View {
         ZStack {
-            Circle().fill(color)
-            Text(letter)
-                .font(.system(size: size * 0.54, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
+            if let icon {
+                Circle().fill(Color.white)
+                Image(uiImage: icon)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .padding(size * 0.14)
+            } else {
+                Circle().fill(color)
+                Text(letter)
+                    .font(.system(size: size * 0.54, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+            }
         }
         .frame(width: size, height: size)
+        .clipShape(Circle())
         .overlay(Circle().strokeBorder(Theme.surface, lineWidth: 1.4))
+        .task(id: domain) {
+            guard icon == nil else { return }
+            icon = await SiteIcons.load(domain)
+        }
+    }
+}
+
+/// Site icons from Google's favicon service (64 px), kept in memory while the app runs. A site
+/// Google has no icon for (it answers 404) keeps its letter; a failed download is tried again
+/// the next time the source shows.
+@MainActor
+enum SiteIcons {
+    private static var images: [String: UIImage] = [:]
+    private static var missing: Set<String> = []
+    private static var loading: [String: Task<Data?, Never>] = [:]
+
+    static func cached(_ domain: String) -> UIImage? { images[domain] }
+
+    static func load(_ domain: String) async -> UIImage? {
+        if let image = images[domain] { return image }
+        if missing.contains(domain) { return nil }
+        let task: Task<Data?, Never>
+        if let running = loading[domain] {
+            task = running
+        } else {
+            task = Task<Data?, Never> {
+                var components = URLComponents(string: "https://www.google.com/s2/favicons")
+                components?.queryItems = [URLQueryItem(name: "domain", value: domain), URLQueryItem(name: "sz", value: "64")]
+                guard let url = components?.url,
+                      let answer = try? await URLSession.shared.data(from: url),
+                      let status = (answer.1 as? HTTPURLResponse)?.statusCode else { return nil }
+                if status == 404 { SiteIcons.missing.insert(domain) }
+                return status == 200 ? answer.0 : nil
+            }
+            loading[domain] = task
+        }
+        let data = await task.value
+        loading[domain] = nil
+        if let image = images[domain] { return image }
+        guard let data, let image = UIImage(data: data) else { return nil }
+        images[domain] = image
+        return image
     }
 }
 
