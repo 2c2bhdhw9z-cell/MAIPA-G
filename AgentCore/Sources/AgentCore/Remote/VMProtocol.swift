@@ -25,6 +25,8 @@ public enum VMRun {
 
     /// The run's folder relative to the computer's home folder.
     public static func folder(_ id: String) -> String { "\(root)/\(id)" }
+    /// Where the phone puts the next MAIPA-G-data token (read and deleted by the runner).
+    public static let dataTokenRefreshFile = "data-token-refresh.json.gz"
 
     public static func newTurnID() -> String { "turn-" + UUID().uuidString.lowercased() }
     public static func jobRunID(_ job: UUID) -> String { "job-" + job.uuidString.lowercased() }
@@ -45,6 +47,7 @@ public struct VMRoute: Codable, Sendable, Hashable {
     public var readsImages: Bool
     public var readsPDFs: Bool
     public var generatesImages: Bool
+    public var priceStepTokens: Int?
 
     public init(_ route: Route) {
         model = route.model; plugins = route.plugins; effort = route.effort
@@ -52,13 +55,14 @@ public struct VMRoute: Codable, Sendable, Hashable {
         label = route.label; contextWindow = route.contextWindow; contextBudget = route.contextBudget
         maxOutputTokens = route.maxOutputTokens; readsImages = route.readsImages
         readsPDFs = route.readsPDFs; generatesImages = route.generatesImages
+        priceStepTokens = route.priceStepTokens
     }
 
     public var route: Route {
         Route(model: model, plugins: plugins, effort: effort, automaticCaching: automaticCaching,
               isFree: isFree, isAuto: isAuto, label: label, contextWindow: contextWindow,
               contextBudget: contextBudget, maxOutputTokens: maxOutputTokens, readsImages: readsImages,
-              readsPDFs: readsPDFs, generatesImages: generatesImages)
+              readsPDFs: readsPDFs, generatesImages: generatesImages, priceStepTokens: priceStepTokens)
     }
 }
 
@@ -109,6 +113,10 @@ public struct VMTurnRequest: Codable, Sendable, Hashable {
     /// The person's saved memories, so the AI on the computer can add and edit them like it does
     /// on the phone. What it saves comes back in `VMTurnState.memories`.
     public var memories: [MemoryRecord]?
+    /// MAIPA-G-data, where big files the reply makes go (`VMSecrets.dataToken` reaches only it),
+    /// and where the chat is kept saved while the phone isn't following.
+    public var dataRepository: RepoRef?
+    public var dataBranch: String?
     public var createdAt: Date
 
     public init(
@@ -116,7 +124,7 @@ public struct VMTurnRequest: Codable, Sendable, Hashable {
         fallbackModels: [String], resumeNote: String?, lastUserMessage: String, webEnabled: Bool,
         repo: VMTurnRepo?, specMode: Bool = false, specGate: KiroSpecState? = nil, specKind: KiroSpecKind? = nil,
         supervised: Bool = false, acceptedChanges: [String] = [], earlySteering: [String] = [], attachmentData: [UUID: Data] = [:],
-        memories: [MemoryRecord]? = nil, createdAt: Date = Date()
+        memories: [MemoryRecord]? = nil, dataRepository: RepoRef? = nil, dataBranch: String? = nil, createdAt: Date = Date()
     ) {
         format = Self.currentFormat
         self.id = id; self.chat = chat; self.route = VMRoute(route); self.systemPrompt = systemPrompt
@@ -124,7 +132,7 @@ public struct VMTurnRequest: Codable, Sendable, Hashable {
         self.resumeNote = resumeNote; self.lastUserMessage = lastUserMessage; self.webEnabled = webEnabled
         self.repo = repo; self.specMode = specMode; self.specGate = specGate; self.specKind = specKind; self.supervised = supervised
         self.acceptedChanges = acceptedChanges; self.earlySteering = earlySteering; self.attachmentData = attachmentData
-        self.memories = memories; self.createdAt = createdAt
+        self.memories = memories; self.dataRepository = dataRepository; self.dataBranch = dataBranch; self.createdAt = createdAt
     }
 }
 
@@ -147,7 +155,8 @@ public struct VMSecrets: Codable, Sendable, Hashable {
     public var openRouterKey: String?
     public var providers: [AIProviderEndpoint]
     public var githubToken: String?
-    /// A second token for the private data repo (jobs only).
+    /// A second token, for the private data repo only (MAIPA-G-data): jobs save there, and a
+    /// chat reply puts its big files and the chat itself there.
     public var dataToken: String?
     public var connectors: [VMConnector]
     /// Values for stdio connectors, as Autonomous jobs had them (`<id>.<name>`).
@@ -233,21 +242,40 @@ public struct VMJobRequest: Codable, Sendable, Hashable {
 public enum VMMedia {
     public static let folder = "data"
 
-    /// The made files in a turn that the phone doesn't have yet.
-    public static func missing(in turn: AssistantTurn, dataDirectory: URL) -> [AttachmentReference] {
-        turn.steps.flatMap { $0.generatedImages ?? [] }.map(\.attachment).filter { reference in
-            SnapshotStore.isSafeRelativePath(reference.path) && reference.path.hasPrefix("media/")
+    /// The made files in a turn that the phone doesn't have yet, with where each comes from.
+    public static func missingResults(in turn: AssistantTurn, dataDirectory: URL) -> [GeneratedImageResult] {
+        var seen = Set<UUID>()
+        return turn.steps.flatMap { $0.generatedImages ?? [] }.filter { result in
+            let reference = result.attachment
+            return seen.insert(result.id).inserted && SnapshotStore.isSafeRelativePath(reference.path) && reference.path.hasPrefix("media/")
                 && !FileManager.default.fileExists(atPath: dataDirectory.appendingPathComponent(reference.path).path)
         }
     }
 
-    /// Copies them from the computer.
-    public static func fetch(_ references: [AttachmentReference], runID: String, from computer: ComputerControl, into dataDirectory: URL) async {
-        for reference in references {
-            guard let data = try? await computer.readFile(homePath: "\(VMRun.folder(runID))/\(folder)/\(reference.path)", maxBytes: 260 * 1024 * 1024) else { continue }
-            let target = dataDirectory.appendingPathComponent(reference.path)
-            try? FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? data.write(to: target, options: .atomic)
+    /// Brings one made file to the phone: from MAIPA-G-data's files release when the computer put
+    /// it there (checked by size and SHA-256), otherwise through the computer's command tool.
+    /// Throws with the real reason, so the card can say it and offer Retry.
+    public static func bring(_ result: GeneratedImageResult, runID: String, computer: ComputerControl?, github: GitHubClient?, into dataDirectory: URL) async throws {
+        let reference = result.attachment
+        guard SnapshotStore.isSafeRelativePath(reference.path), reference.path.hasPrefix("media/") else {
+            throw ToolInputError("The file's place on the phone isn't safe to write to.")
         }
+        let target = dataDirectory.appendingPathComponent(reference.path)
+        try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let relay = result.relay {
+            guard let github else { throw ToolInputError("Connect GitHub to bring \(reference.name) to this phone.") }
+            let partial = target.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).download")
+            defer { try? FileManager.default.removeItem(at: partial) }
+            try await github.downloadReleaseAsset(relay.repo, assetID: relay.assetID, to: partial)
+            let size = ((try? FileManager.default.attributesOfItem(atPath: partial.path)[.size]) as? Int) ?? 0
+            guard size == relay.size else { throw ToolInputError("\(reference.name) came down cut short (\(size) of \(relay.size) bytes).") }
+            guard try Hashing.sha256Hex(fileAt: partial) == relay.sha256 else { throw ToolInputError("\(reference.name) came down damaged (its checksum doesn't match).") }
+            if FileManager.default.fileExists(atPath: target.path) { try FileManager.default.removeItem(at: target) }
+            try FileManager.default.moveItem(at: partial, to: target)
+            return
+        }
+        guard let computer else { throw ToolInputError("The computer isn't connected, so \(reference.name) can't come over yet.") }
+        let data = try await computer.readFile(homePath: "\(VMRun.folder(runID))/\(folder)/\(reference.path)", maxBytes: 260 * 1024 * 1024)
+        try data.write(to: target, options: .atomic)
     }
 }

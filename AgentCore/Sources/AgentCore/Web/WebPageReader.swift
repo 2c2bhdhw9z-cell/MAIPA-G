@@ -37,6 +37,34 @@ public struct WebPageReader: Sendable {
     public init(transport: any HTTPTransport) { self.transport = transport }
 
     public func read(_ url: URL) async throws -> WebPage {
+        do {
+            return try await readDirectly(url)
+        } catch WebPageError.http(let status) where Self.refusals.contains(status) {
+            // Sites behind bot checks refuse programs (5 of 17 page reads in the Korg chat: 403
+            // four times). Jina's free reader (r.jina.ai, no key) fetches the public page and gives
+            // its text. Never for an address that looks like it carries a key or signature.
+            guard let reader = Self.readerURL(for: url) else { throw WebPageError.http(status) }
+            guard var page = try? await readDirectly(reader), !page.text.isEmpty else { throw WebPageError.http(status) }
+            page.url = url
+            page.text = "[The site refused a direct read (HTTP \(status)), so this text came through Jina's reader, r.jina.ai.]\n\n" + page.text
+            return page
+        }
+    }
+
+    /// Statuses a site gives a program it won't serve.
+    static let refusals: Set<Int> = [401, 403, 406, 429, 451, 503]
+
+    /// The address of `url` through Jina's reader; nil when it shouldn't go to another service.
+    static func readerURL(for url: URL) -> URL? {
+        guard url.host?.lowercased() != "r.jina.ai", url.user == nil, url.password == nil else { return nil }
+        if let query = url.query?.lowercased(),
+           ["token", "key", "sig", "signature", "auth", "secret", "password", "x-amz", "session", "code="].contains(where: query.contains) {
+            return nil
+        }
+        return URL(string: "https://r.jina.ai/" + url.absoluteString)
+    }
+
+    func readDirectly(_ url: URL) async throws -> WebPage {
         guard Self.isSafe(url) else { throw WebPageError.unsafeURL }
         let response: HTTPResponse
         if transport is URLSessionTransport {

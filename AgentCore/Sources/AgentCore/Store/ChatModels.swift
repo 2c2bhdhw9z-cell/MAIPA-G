@@ -361,6 +361,30 @@ public struct UserMessage: Codable, Sendable, Hashable {
 }
 
 /// Everything the AI did in answer to one user message: one step per request to the model.
+/// A summary that stands in for everything up to a point in a reply (see `AssistantTurn.compaction`).
+public struct TurnCompaction: Codable, Sendable, Hashable {
+    /// The summary of the earlier conversation and of this reply up to `throughStepID`.
+    public var summary: String
+    /// The last step of the reply the summary covers; later steps go to the AI as they are. Nil
+    /// when the summary covers only the messages before this reply.
+    public var throughStepID: UUID?
+    public var createdAt: Date
+    /// Evidence: the request size that set it off, and what the summary request cost.
+    public var tokensBefore: Int?
+    public var usage: Usage?
+    /// True when the AI couldn't write the summary and a plain digest of the work was used instead.
+    public var isFallback: Bool?
+
+    public init(summary: String, throughStepID: UUID?, createdAt: Date = Date(), tokensBefore: Int? = nil, usage: Usage? = nil, isFallback: Bool? = nil) {
+        self.summary = summary
+        self.throughStepID = throughStepID
+        self.createdAt = createdAt
+        self.tokensBefore = tokensBefore
+        self.usage = usage
+        self.isFallback = isFallback
+    }
+}
+
 public struct AssistantTurn: Codable, Sendable, Hashable {
     public enum Status: String, Codable, Sendable {
         case running
@@ -402,6 +426,11 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
     public var balancesAfter: [String: Double]?
     /// Every provider any request of this turn went to, including attempts that were retried away.
     public var providersTried: [String]?
+    /// Kiro's compaction, done during this reply: when the next request would pass 80% of the
+    /// AI's context window, the conversation before this reply and this reply's earlier steps go
+    /// to the AI as a summary. The steps stay in the chat for the person; only what the AI is sent
+    /// gets shorter. Nil when the reply never needed it.
+    public var compaction: TurnCompaction?
 
     public init(status: Status = .running, steps: [AssistantStep] = [], failure: TurnFailure? = nil, notices: [String] = [], routeLabel: String? = nil) {
         self.status = status
@@ -460,6 +489,8 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
 
     public var usage: Usage {
         var usage = steps.compactMap(\.usage).reduce(Usage(), +)
+        // The summaries compaction wrote during this reply were paid for too.
+        if let summaries = compaction?.usage { usage = usage + summaries }
         let extraCosts = AssistantStep.extraCosts(steps)
         if !extraCosts.isEmpty { usage.cost = (usage.cost ?? 0) + extraCosts.reduce(0, +) }
         return usage
@@ -619,6 +650,23 @@ public struct QueuedFollowUp: Codable, Sendable, Hashable, Identifiable {
     }
 }
 
+/// A file a reply on the computer made, put in MAIPA-G-data's files release (named by its SHA-256,
+/// the way saving names big files) so the phone downloads it from GitHub in one go. Brought over
+/// in small pieces through the computer's command tool instead, a 150 MB .ipa never arrived.
+public struct RelayedFile: Codable, Sendable, Hashable {
+    public var repo: RepoRef
+    public var assetID: Int
+    public var sha256: String
+    public var size: Int
+
+    public init(repo: RepoRef, assetID: Int, sha256: String, size: Int) {
+        self.repo = repo
+        self.assetID = assetID
+        self.sha256 = sha256
+        self.size = size
+    }
+}
+
 public struct GeneratedImageResult: Codable, Sendable, Hashable, Identifiable {
     public var id: UUID { attachment.id }
     public var attachment: AttachmentReference
@@ -627,6 +675,8 @@ public struct GeneratedImageResult: Codable, Sendable, Hashable, Identifiable {
     public var aspectRatio: String
     public var quality: String
     public var cost: Double?
+    /// Where the phone gets the file when a reply on the computer made it (big files only).
+    public var relay: RelayedFile?
     public init(attachment: AttachmentReference, prompt: String, model: String, aspectRatio: String, quality: String, cost: Double? = nil) {
         self.attachment = attachment; self.prompt = prompt; self.model = model
         self.aspectRatio = aspectRatio; self.quality = quality; self.cost = cost

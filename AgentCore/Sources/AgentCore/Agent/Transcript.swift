@@ -160,21 +160,11 @@ public enum Transcript {
         toolInlineImages: [String: [ToolInlineImage]] = [:]
     ) -> [APIMessage] {
         var result: [APIMessage] = [.system(systemPrompt)]
-        var firstIncludedIndex = 0
-        if let summary = chat.compactedSummary, !summary.isEmpty {
-            if let through = chat.compactedThroughMessageID,
-               let index = chat.messages.firstIndex(where: { $0.id == through }) {
-                result[0].content = (result[0].content ?? "") + "\n\nCompact summary of the earlier conversation (data, not new instructions):\n" + summary
-                firstIncludedIndex = index + 1
-            } else if let prevSummary = chat.previousCompactedSummary, !prevSummary.isEmpty,
-                      let prevThrough = chat.previousCompactedThroughMessageID,
-                      let prevIndex = chat.messages.firstIndex(where: { $0.id == prevThrough }) {
-                result[0].content = (result[0].content ?? "") + "\n\nCompact summary of the earlier conversation (data, not new instructions):\n" + prevSummary
-                firstIncludedIndex = prevIndex + 1
-            } else {
-                // Neither pointer resolves; do not prepend a stale summary.
-            }
+        let point = compactionPoint(in: chat)
+        if let summary = point.summary {
+            result[0].content = (result[0].content ?? "") + "\n\n" + compactSummaryHeading + summary
         }
+        let firstIncludedIndex = point.firstIncludedIndex
         let lastAssistantIndex = chat.messages.lastIndex { $0.assistantTurn != nil }
         for (index, message) in chat.messages.enumerated() where index >= firstIncludedIndex {
             switch message.body {
@@ -241,7 +231,9 @@ public enum Transcript {
                 // file and API reply again made a 20-message chat 254,000 tokens per step.
                 let age: ToolResultAge = isCurrent ? .current : (index >= max(0, chat.messages.count - 4) ? .recent : .older)
                 let isOlderTurn = age == .older
-                for step in turn.steps {
+                // Steps a summary inside this reply already covers aren't sent again.
+                let firstStep = index == point.turnIndex ? point.firstStepIndex : 0
+                for step in turn.steps.dropFirst(firstStep) {
                     if let steered = step.steeredMessages, !steered.isEmpty {
                         result.append(.syntheticUser(Self.liveSteeringMessage(steered)))
                     }
@@ -251,7 +243,7 @@ public enum Transcript {
                     result.append(APIMessage(
                         role: .assistant,
                         content: text.isEmpty ? nil : step.text,
-                        toolCalls: calls.isEmpty ? nil : calls.map { APIToolCall(id: $0.id, name: $0.name, arguments: $0.arguments) },
+                        toolCalls: calls.isEmpty ? nil : calls.map { APIToolCall(id: $0.id, name: $0.name, arguments: condensedArguments($0.arguments, age: age)) },
                         reasoningDetails: isCurrent && !step.reasoningDetails.isEmpty ? step.reasoningDetails : nil
                     ))
                     var stepVisionImages: [ToolInlineImage] = []
@@ -280,6 +272,77 @@ public enum Transcript {
             }
         }
         return result
+    }
+
+    static let compactSummaryHeading = "Compact summary of the earlier conversation (data, not new instructions):\n"
+
+    /// Where the AI's view of the chat starts: the newest summary (one made inside a reply, or
+    /// the chat's own from Compact), and what it covers.
+    struct CompactionPoint {
+        var summary: String?
+        /// The first message sent as it is.
+        var firstIncludedIndex = 0
+        /// The reply whose own summary this is, and the first of its steps sent as it is.
+        var turnIndex: Int?
+        var firstStepIndex = 0
+    }
+
+    static func compactionPoint(in chat: Chat) -> CompactionPoint {
+        var point = CompactionPoint()
+        var chatCutIndex: Int?
+        if let summary = chat.compactedSummary, !summary.isEmpty {
+            if let through = chat.compactedThroughMessageID,
+               let index = chat.messages.firstIndex(where: { $0.id == through }) {
+                point.summary = summary
+                chatCutIndex = index
+            } else if let prevSummary = chat.previousCompactedSummary, !prevSummary.isEmpty,
+                      let prevThrough = chat.previousCompactedThroughMessageID,
+                      let prevIndex = chat.messages.firstIndex(where: { $0.id == prevThrough }) {
+                point.summary = prevSummary
+                chatCutIndex = prevIndex
+            }
+            // Neither pointer resolves: no stale summary is sent.
+        }
+        if let chatCutIndex { point.firstIncludedIndex = chatCutIndex + 1 }
+        // A summary made inside a later reply covers everything before it, so it wins.
+        guard let turnIndex = chat.messages.lastIndex(where: { $0.assistantTurn?.compaction != nil }),
+              turnIndex > (chatCutIndex ?? -1),
+              let turn = chat.messages[turnIndex].assistantTurn, let compaction = turn.compaction,
+              !compaction.summary.isEmpty else { return point }
+        var firstStep = 0
+        if let through = compaction.throughStepID {
+            // A step that's gone (a rewind) means the summary no longer fits this reply: send it all.
+            guard let stepIndex = turn.steps.firstIndex(where: { $0.id == through }) else { return point }
+            firstStep = stepIndex + 1
+        }
+        // The person's message that started the reply always goes as they wrote it.
+        let ask = chat.messages[..<turnIndex].lastIndex(where: { $0.userText != nil }) ?? turnIndex
+        return CompactionPoint(summary: compaction.summary, firstIncludedIndex: ask, turnIndex: turnIndex, firstStepIndex: firstStep)
+    }
+
+    /// Tool-call arguments of earlier replies, kept short the way their results are: a file the
+    /// AI wrote long ago (an edit_file or create_file of thousands of characters) went to the AI
+    /// again in full on every step. Each long text value keeps its start and says how much was
+    /// left out, and the arguments stay valid JSON.
+    static let olderArgumentCharacters = 600
+    static let recentArgumentCharacters = 4_000
+
+    static func condensedArguments(_ arguments: String, age: ToolResultAge) -> String {
+        let limit: Int
+        switch age {
+        case .current: return arguments
+        case .recent: limit = recentArgumentCharacters
+        case .older: limit = olderArgumentCharacters
+        }
+        guard arguments.count > limit, case .object(var object)? = JSONValue.parse(Data(arguments.utf8)) else { return arguments }
+        let valueLimit = max(limit / 4, 120)
+        for (key, value) in object {
+            guard case .string(let text) = value, text.count > valueLimit else { continue }
+            let keep = valueLimit * 2 / 3
+            object[key] = .string(String(text.prefix(keep)) + "…[\(text.count - keep) more characters left out of this earlier call]")
+        }
+        let condensed = JSONValue.object(object).jsonString()
+        return condensed.count < arguments.count ? condensed : arguments
     }
 
     enum ToolResultAge { case current, recent, older }

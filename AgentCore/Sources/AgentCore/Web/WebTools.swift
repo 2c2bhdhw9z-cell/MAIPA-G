@@ -10,28 +10,154 @@ public struct FreeWebSearch: Sendable {
     let transport: any HTTPTransport
     public init(transport: any HTTPTransport) { self.transport = transport }
 
-    public func search(_ query: String) async throws -> [WebSearchResult] {
-        var components = URLComponents(string: "https://html.duckduckgo.com/html/")!
-        components.queryItems = [URLQueryItem(name: "q", value: query)]
-        let ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
-        let response = try await transport.send(HTTPRequest(url: components.url!, headers: ["Accept": "text/html,application/xhtml+xml;q=0.9", "User-Agent": ua], idleTimeout: 30))
-        if response.status == 202 {
-            // DuckDuckGo HTML returns 202 with an empty challenge body under load; try Lite once before failing honestly.
-            var lite = URLComponents(string: "https://lite.duckduckgo.com/lite/")!
-            lite.queryItems = [URLQueryItem(name: "q", value: query)]
-            if let liteResp = try? await transport.send(HTTPRequest(url: lite.url!, headers: ["Accept": "text/html", "User-Agent": ua], idleTimeout: 30)),
-               liteResp.status == 200, liteResp.body.count <= WebPageReader.maxBytes {
-                let parsed = Self.parse(liteResp.text)
-                if !parsed.isEmpty { return parsed }
+    /// The search services tried, in order. Each answers people, not programs, and refuses an
+    /// automated search now and then (DuckDuckGo answers HTTP 202 with a check page, and did for
+    /// 4 searches out of 4 from the chat computer on 13 November 2026), so a refusal moves on to
+    /// the next one instead of failing the search.
+    enum Engine: String, CaseIterable, Sendable {
+        case duckDuckGo = "DuckDuckGo"
+        case bing = "Bing"
+        case brave = "Brave Search"
+        case duckDuckGoLite = "DuckDuckGo Lite"
+
+        func url(for query: String) -> URL {
+            var components: URLComponents
+            switch self {
+            case .duckDuckGo:
+                components = URLComponents(string: "https://html.duckduckgo.com/html/")!
+                components.queryItems = [URLQueryItem(name: "q", value: query)]
+            case .bing:
+                components = URLComponents(string: "https://www.bing.com/search")!
+                components.queryItems = [URLQueryItem(name: "q", value: query), URLQueryItem(name: "setlang", value: "en"), URLQueryItem(name: "cc", value: "US")]
+            case .brave:
+                components = URLComponents(string: "https://search.brave.com/search")!
+                components.queryItems = [URLQueryItem(name: "q", value: query), URLQueryItem(name: "source", value: "web")]
+            case .duckDuckGoLite:
+                components = URLComponents(string: "https://lite.duckduckgo.com/lite/")!
+                components.queryItems = [URLQueryItem(name: "q", value: query)]
             }
-            throw WebPageError.http(202)
+            return components.url!
         }
-        guard (200..<300).contains(response.status) else { throw WebPageError.http(response.status) }
-        guard response.body.count <= WebPageReader.maxBytes else { throw WebPageError.tooLarge }
-        let results = Self.parse(response.text)
-        // An empty list means "nothing found" only when the page says so; otherwise the page
-        // wasn't one MAIPA-G could read (a check page, or a changed layout).
-        if results.isEmpty, !Self.saysNoResults(response.text) { throw WebSearchError.unreadableResults }
+
+        func parse(_ html: String) -> [WebSearchResult] {
+            switch self {
+            case .duckDuckGo, .duckDuckGoLite: FreeWebSearch.parse(html)
+            case .bing: FreeWebSearch.parseBing(html)
+            case .brave: FreeWebSearch.parseBrave(html)
+            }
+        }
+
+        func saysNoResults(_ html: String) -> Bool {
+            switch self {
+            case .duckDuckGo, .duckDuckGoLite: FreeWebSearch.saysNoResults(html)
+            case .bing: html.contains("class=\"b_no\"") || html.lowercased().contains("there are no results for")
+            case .brave: html.lowercased().contains("not many great matches") || html.lowercased().contains("no results found")
+            }
+        }
+    }
+
+    static let headers = [
+        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+    ]
+
+    public func search(_ query: String) async throws -> [WebSearchResult] {
+        var refusals: [String] = []
+        var allUnreadable = true
+        for engine in Engine.allCases {
+            try Task.checkCancellation()
+            let response: HTTPResponse
+            do {
+                response = try await transport.send(HTTPRequest(url: engine.url(for: query), headers: Self.headers, idleTimeout: 20))
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                allUnreadable = false
+                refusals.append("\(engine.rawValue) couldn't be reached (\(ErrorExplainer.describe(error).message))")
+                continue
+            }
+            guard response.status == 200 else {
+                allUnreadable = false
+                refusals.append("\(engine.rawValue) answered HTTP \(response.status)\(response.status == 202 ? " (it refuses automated searches for a while)" : "")")
+                continue
+            }
+            guard response.body.count <= WebPageReader.maxBytes else {
+                refusals.append("\(engine.rawValue) sent a page too big to read")
+                continue
+            }
+            let html = response.text
+            let results = engine.parse(html)
+            if !results.isEmpty { return results }
+            // An empty list means "nothing found" only when the page says so; otherwise the page
+            // wasn't one MAIPA-G could read (a check page, or a changed layout).
+            if engine.saysNoResults(html) { return [] }
+            refusals.append("\(engine.rawValue) sent a page with no readable results (a check page or a new layout)")
+        }
+        if allUnreadable { throw WebSearchError.unreadableResults }
+        throw WebSearchError.everyServiceRefused(refusals)
+    }
+
+    /// Bing: each result is an `li.b_algo` with the link in its heading (through Bing's own
+    /// address, which carries the real one base64-encoded after `u=a1`) and the snippet in a `p`.
+    static func parseBing(_ html: String) -> [WebSearchResult] {
+        guard let block = try? NSRegularExpression(pattern: #"(?is)<li class="b_algo"(.*?)</li>"#),
+              let heading = try? NSRegularExpression(pattern: #"(?is)<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#),
+              let paragraph = try? NSRegularExpression(pattern: #"(?is)<p[^>]*>(.*?)</p>"#) else { return [] }
+        var results: [WebSearchResult] = []
+        for match in block.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
+            guard results.count < 10, let range = Range(match.range(at: 1), in: html) else { continue }
+            let item = String(html[range])
+            let whole = NSRange(item.startIndex..., in: item)
+            guard let link = heading.firstMatch(in: item, range: whole),
+                  let hrefRange = Range(link.range(at: 1), in: item), let titleRange = Range(link.range(at: 2), in: item) else { continue }
+            guard let url = bingTarget(WebPageReader.clean(String(item[hrefRange]))), WebPageReader.isSafe(url) else { continue }
+            var snippet = ""
+            if let text = paragraph.firstMatch(in: item, range: whole), let textRange = Range(text.range(at: 1), in: item) {
+                snippet = WebPageReader.readableText(String(item[textRange]))
+            }
+            results.append(WebSearchResult(title: WebPageReader.readableText(String(item[titleRange])), url: url, snippet: String(snippet.prefix(500))))
+        }
+        return results
+    }
+
+    static func bingTarget(_ href: String) -> URL? {
+        guard let components = URLComponents(string: href) else { return nil }
+        if components.host?.hasSuffix("bing.com") == true, components.path.hasPrefix("/ck/") {
+            guard let encoded = components.queryItems?.first(where: { $0.name == "u" })?.value, encoded.hasPrefix("a1") else { return nil }
+            var base64 = String(encoded.dropFirst(2)).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+            while base64.count % 4 != 0 { base64 += "=" }
+            guard let data = Data(base64Encoded: base64), let target = String(data: data, encoding: .utf8) else { return nil }
+            return URL(string: target)
+        }
+        return URL(string: href)
+    }
+
+    /// Brave Search: each web result is a `div.snippet` with `data-type="web"`; its first link is
+    /// the page, the title is in `.title`, the snippet in `.content`.
+    static func parseBrave(_ html: String) -> [WebSearchResult] {
+        guard let link = try? NSRegularExpression(pattern: #"(?is)<a[^>]*href="(https?://[^"]+)""#),
+              let title = try? NSRegularExpression(pattern: #"(?is)<div class="title[^"]*"[^>]*>(.*?)</div>"#),
+              let content = try? NSRegularExpression(pattern: #"(?is)<div class="content[^"]*"[^>]*>(.*?)</div>"#) else { return [] }
+        var results: [WebSearchResult] = []
+        for piece in html.components(separatedBy: #"data-type="web""#).dropFirst() {
+            guard results.count < 10 else { break }
+            let item = String(piece.prefix(12_000))
+            let whole = NSRange(item.startIndex..., in: item)
+            guard let found = link.firstMatch(in: item, range: whole), let hrefRange = Range(found.range(at: 1), in: item),
+                  let url = URL(string: WebPageReader.clean(String(item[hrefRange]))), WebPageReader.isSafe(url),
+                  url.host?.hasSuffix("brave.com") != true else { continue }
+            var name = ""
+            if let match = title.firstMatch(in: item, range: whole), let range = Range(match.range(at: 1), in: item) {
+                name = WebPageReader.readableText(String(item[range]))
+            }
+            var snippet = ""
+            if let match = content.firstMatch(in: item, range: whole), let range = Range(match.range(at: 1), in: item) {
+                snippet = WebPageReader.readableText(String(item[range]))
+            }
+            guard !name.isEmpty else { continue }
+            results.append(WebSearchResult(title: name, url: url, snippet: String(snippet.prefix(500))))
+        }
         return results
     }
 
@@ -64,11 +190,15 @@ public enum WebSearchError: Error, Sendable, Equatable, CustomStringConvertible,
     /// The search service answered, but not with a results page MAIPA-G could read.
     case unreadableResults
     case queryTooLong(Int)
+    /// Every search service was tried and none gave results; what each one said.
+    case everyServiceRefused([String])
 
     public var description: String {
         switch self {
         case .unreadableResults:
             return "The search ran, but its results page couldn't be read (the search service may have shown a check page or changed its layout). This is not \"no results\": try again in a moment or with different words."
+        case .everyServiceRefused(let reasons):
+            return "No search service gave results this time: \(reasons.joined(separator: "; ")). This is not \"no results\". Try again in a minute, or read a page you know directly with read_web_page (for example the project's docs or GitHub page), or search from the computer with run_command and curl."
         case .queryTooLong(let count):
             return "The search query is \(count) characters; keep it to \(WebSearchTool.maxQueryCharacters) or fewer. Use the few words that matter most."
         }
@@ -103,7 +233,13 @@ public struct WebSearchTool: AgentTool {
     public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let query = try arguments.requiredString("query").trimmingCharacters(in: .whitespacesAndNewlines)
         guard query.count <= Self.maxQueryCharacters else { throw ToolInputError(WebSearchError.queryTooLong(query.count).description) }
-        let results = try await searcher.search(query)
+        let results: [WebSearchResult]
+        do {
+            results = try await searcher.search(query)
+        } catch WebSearchError.everyServiceRefused(let reasons) {
+            // Said as it is: a generic "try again" hid which services refused and what to do instead.
+            throw ToolInputError(WebSearchError.everyServiceRefused(reasons).description)
+        }
         let text = results.enumerated().map { "\($0.offset + 1). \($0.element.title)\n\($0.element.url.absoluteString)\n\($0.element.snippet)" }.joined(separator: "\n\n")
         return ToolOutput(forModel: text.isEmpty ? "No web results found for \(query). The search ran and found nothing; try other words." : text, summary: "Searched the web · \(results.count) result\(results.count == 1 ? "" : "s")", detail: text)
     }

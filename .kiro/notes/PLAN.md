@@ -1,6 +1,6 @@
 # MAIPA-G plan
 
-**Status (13 November 2026, afternoon Eastern): Build 190 shipped the audit fixes. This batch ("Eleventh follow-up", at the end) makes steering look like Kiro's, hides the status lines Kiro doesn't have, and puts any chat file on the computer as the real file. Owner said build it without a plan first.**
+**Status (14 November 2026, afternoon Eastern): this batch ("Thirteenth follow-up", at the end) removes the 250-step stop, makes compaction run inside replies on the phone and the computer, fixes web search, keeps running chats saved, and brings computer files to the phone through GitHub. Owner: build it ("idgaF" to the questions).**
 
 Confirmed on the owner's phone with build 55 (4:04 PM), build 59 (6:42 PM), and build 60 (7:20 PM):
 saving works (Settings and the side menu showed "Saved just now", and the 173 MB Continuum .ipa is
@@ -1473,7 +1473,7 @@ wouldn't have asked; secret-shaped files, node_modules/.venv/etc., files over 25
 updated after each refresh, so the next reply's start doesn't stash. Prompt: `mirrorsRepo` text.
 Tests: `ComputerRepoMirrorTests` (real git and shell).
 
-### Still not like Kiro (found 14 November 2026 in his Korg chat 6cac7c12; not fixed, he's out of credits)
+### Still not like Kiro (found 14 November 2026 in his Korg chat 6cac7c12; fixed in the thirteenth follow-up)
 Evidence: the saved chat through 13 Nov 6:38 PM (196 steps, 329 tool calls). Fix in this order.
 1. **Web search doesn't work.** `web_search` failed 4 of 4 times; `read_web_page` failed 5 of 17
    (HTTP 202 four times, HTTP 403 four times, HTTP 404 once: "The page returned HTTP 202. Try
@@ -1540,3 +1540,52 @@ Workstation list with the turn (names, kinds, sizes, ids; no bytes); a read brin
 computer through the MAIPA-G-data release (the chat-file route from build 195, `copy_file_to_computer`);
 a write goes back through the release like part 1, and the phone adds it to the canvas when the state
 arrives. Drop "the Workstation" from the runner's "aren't available" note once it works.
+
+## Thirteenth follow-up (14 November 2026): the core loop, like Kiro
+
+Owner: "How close is it? -1%", "everything needs to function correctly". Asked whether to fix the
+core first: "idgaF". Then: compaction "don't work" (screenshots at 850,000 tokens, "random"), and
+"it stops at like 250 steps. You don't."
+
+**Measured first (his Korg chat 6cac7c12, final state, from MAIPA-G-data's history at adb11398):**
+1,149 steps, 442 million prompt tokens, 385,000 a step on average, 727,822 at most; 95% of it
+cached. In the biggest step: earlier replies' tool results 38%, their tool-call arguments 18%,
+the reply before's results 14%, this reply's results 19%. Two replies ended at exactly 250 steps.
+
+**Causes:** compaction only ran on the phone, between replies, after 80% of the 1,050,000-token
+window, so a reply on the computer never compacted and one long reply just grew; `fit` only trims
+near the full window. `maxSteps` defaulted to 250. `web_search` scraped DuckDuckGo only, which
+answers servers HTTP 202. A running chat was held back from MAIPA-G-data for up to 10 minutes, and
+not at all while the phone was frozen. Computer files came over in base64 pieces through `exec`.
+
+**Built:**
+- **No step limit** on replies (`AgentTurnInput.unlimitedSteps`); sub-agents keep 400.
+- **Compaction inside the reply** (`Compaction.swift`, `Runner.compactIfNeeded`), on the phone and
+  the computer: before a request that would pass 80% of the window (Kiro's default), or the
+  provider's price step if sooner (TeamoRouter's 272K, `Route.priceStepTokens` from
+  `context_tier_pricing`), everything before the newest steps (at least 2 steps and 2% of the
+  window, Kiro's defaults) goes to the AI as a structured summary (`AssistantTurn.compaction`).
+  The steps stay visible; Undo / Restore full memory clear it. If the AI can't summarize, a digest
+  of the newest work stands in. Its cost counts in the turn. The phone's own between-replies
+  auto-compaction is gone (manual Compact stays).
+- **Earlier replies' tool-call arguments** are cut like their results (older 600, previous 4,000
+  characters, still valid JSON): about 60,000 tokens a step less on the Korg chat.
+- **web_search** tries DuckDuckGo, Bing, Brave Search, then DuckDuckGo Lite; all four parse their
+  live pages (checked from the sandbox). If all refuse, the AI is told what each said and what to do
+  instead. **read_web_page** reads a page that refuses programs (401/403/406/429/451/503) through
+  Jina's free reader, never for an address with a key or signature in it.
+- **Running chats saved:** the phone saves a running chat when its reply starts and every 5 minutes
+  (was only at the end, or after 10). The runner keeps the chat saved in MAIPA-G-data every 5
+  minutes and at the end while the phone hasn't looked for 3 minutes (the poll touches
+  `phone-seen`), only over a copy already there, so a deleted chat stays deleted.
+- **Computer files reach the phone:** on the computer, `send_file` copies the file (no base64
+  loop); a file of 2 MB or more goes to MAIPA-G-data's `maipa-g-files` release by SHA-256
+  (`ComputerDataRepo.relay`), and the phone downloads it in the background and checks size and
+  checksum (`VMMedia.bring`, `ComputerFileArrivals`). The card says "Coming from your computer…",
+  or "Didn't arrive: <reason>" with Retry. The run's folder stays until small files are in.
+- The computer gets a token for MAIPA-G-data alone (`contentsToken`, contents:write), every reply,
+  renewed every 40 minutes while followed.
+
+**Not in this batch:** the Workstation tools on the computer (part 2 of the held fix); steers lost
+on the phone in the background (audit item 8); `update_session_information` on the phone (item 2).
+

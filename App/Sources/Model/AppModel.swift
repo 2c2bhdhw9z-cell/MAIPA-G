@@ -137,6 +137,8 @@ final class AppModel {
     let diagnostics: DiagnosticsLog
     let metricKit: MetricKitCollector
     let notifications = Notifications()
+    /// Files replies on the computer made, on their way to this phone.
+    let fileArrivals = ComputerFileArrivals()
     let jobs: JobCoordinator
     let automations: AutomationLibrary
     let memories: MemoryLibrary
@@ -198,6 +200,7 @@ final class AppModel {
         previews = PreviewCoordinator(root: paths.previews)
         settings = Self.readSettings(paths)
         library.app = self
+        fileArrivals.app = self
         home.app = self
         openRouter.app = self
         sync.app = self

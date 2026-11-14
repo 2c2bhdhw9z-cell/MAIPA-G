@@ -34,10 +34,19 @@ struct GeneratedFileCard: View {
         }
     }
 
+    private func statusLine(exists: Bool, failure: String?) -> String {
+        if exists { return "\(ext.isEmpty ? "File" : ext) · \(ByteCountFormatter.string(fromByteCount: Int64(result.attachment.bytes), countStyle: .file))" }
+        if let failure { return "Didn't arrive: \(failure)" }
+        return "Coming from your computer…"
+    }
+
     var body: some View {
+        // Read first, so the card redraws when the file arrives or fails.
+        let failure = app.fileArrivals.failure(for: result.id)
+        let arriving = app.fileArrivals.isArriving(result.id)
         let location = GeneratedMediaLocations.location(for: result.attachment, store: app.attachmentStore)
         let url = location.url
-        let exists = location.exists
+        let exists = location.exists && !arriving
         HStack(spacing: 12) {
             Image(systemName: icon)
                 .font(.title2)
@@ -49,11 +58,19 @@ struct GeneratedFileCard: View {
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text(exists ? "\(ext.isEmpty ? "File" : ext) · \(ByteCountFormatter.string(fromByteCount: Int64(result.attachment.bytes), countStyle: .file))" : "Still coming from your computer…")
+                Text(statusLine(exists: exists, failure: failure))
                     .font(.caption)
-                    .foregroundStyle(Theme.secondaryText)
+                    .foregroundStyle(failure != nil && !exists ? Theme.danger : Theme.secondaryText)
+                    .lineLimit(3)
             }
             Spacer(minLength: 8)
+            if !exists, failure != nil, app.fileArrivals.canRetry(result.id) {
+                Button("Retry") { app.fileArrivals.retry(result.id) }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("Try bringing \(result.attachment.name) again")
+            } else if !exists, app.fileArrivals.isArriving(result.id) {
+                ProgressView()
+            }
             if let url, exists {
                 ShareLink(item: url) {
                     Image(systemName: "square.and.arrow.up")

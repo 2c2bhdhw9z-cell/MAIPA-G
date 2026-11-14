@@ -78,6 +78,14 @@ final class SyncCoordinator {
         }
     }
 
+    /// The branch MAIPA-G-data saves to, once saving has worked it out.
+    var dataBranch: String? {
+        get async {
+            guard let engine else { return nil }
+            return await engine.state.branch
+        }
+    }
+
     /// Sets saving up for a connected account and brings this phone up to date with GitHub.
     func configure(client: GitHubClient, owner: String, installationID: Int) async {
         engine = DataRepoSync(github: client, dataDirectory: paths.data, stateURL: paths.syncState)

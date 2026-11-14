@@ -265,7 +265,12 @@ public struct AgentTurnInput: Sendable {
     public var tools: [any AgentTool]
     /// False for AIs that can't use tools at all: then no tools, not even ask_user, are offered.
     public var allowTools: Bool
+    /// Most model steps one reply may take. Kiro has no such limit, and neither do replies here:
+    /// compaction keeps every step within the AI's context, and Stop ends a reply. (A reply that
+    /// stopped "after 250 steps so this doesn't run up a bill" came up again and again.) Sub-agents
+    /// keep a limit of their own.
     public var maxSteps: Int
+    public static let unlimitedSteps = Int.max
     /// "Stop and ask when a job has cost $__", in dollars, or nil when that setting is off.
     public var spendLimit: Double?
     /// Bytes for image/PDF references in the chat, loaded only for the active request.
@@ -297,7 +302,7 @@ public struct AgentTurnInput: Sendable {
     /// its earlier spend isn't counted twice.
     public var sharedSpendMember = UUID()
 
-    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = 250, spendLimit: Double? = nil, attachmentData: [UUID: Data] = [:], serverTools: [ToolSpec] = [], fallbackModels: [String] = [], requiresInitialSpendApproval: Bool = false, agent: AgentDefinition? = nil, steering: SteeringInbox? = nil, allowAskUser: Bool = true, resumeNote: String? = nil, autoApprove: Bool = false) {
+    public init(chat: Chat, route: Route, systemPrompt: String, tools: [any AgentTool], allowTools: Bool = true, maxSteps: Int = AgentTurnInput.unlimitedSteps, spendLimit: Double? = nil, attachmentData: [UUID: Data] = [:], serverTools: [ToolSpec] = [], fallbackModels: [String] = [], requiresInitialSpendApproval: Bool = false, agent: AgentDefinition? = nil, steering: SteeringInbox? = nil, allowAskUser: Bool = true, resumeNote: String? = nil, autoApprove: Bool = false) {
         self.autoApprove = autoApprove
         self.endAfterTools = []
         self.chat = chat
@@ -567,6 +572,11 @@ public enum AgentLoop {
         guard let reason = reason?.lowercased() else { return false }
         return ["stop", "tool_calls", "function_call", "end_turn", "length", "max_tokens", "stop_sequence", "tool_use"].contains(reason)
     }
+}
+
+private struct CompactionAnswer: Sendable {
+    var text: String
+    var usage: Usage?
 }
 
 private struct Runner {
@@ -842,6 +852,8 @@ private struct Runner {
                     }
                 }
                 newSteps += 1
+                await compactIfNeeded()
+                try Task.checkCancellation()
                 try await requestStep()
                 await sharedSpend?.record(member: sharedSpendMember, spent: turn.usage.cost ?? 0)
             }
@@ -931,6 +943,80 @@ private struct Runner {
             }
             if turn.steps[stepIndex].finishedAt == nil { turn.steps[stepIndex].finishedAt = Date() }
         }
+    }
+
+    // MARK: Compaction
+
+    /// Kiro's automatic compaction, inside the reply: when the next request would pass 80% of the
+    /// model's context window, everything before the newest steps goes to the AI as a summary.
+    mutating func compactIfNeeded() async {
+        let window = route.contextWindow
+        guard window >= 16_000, !turn.steps.isEmpty || chat.messages.count > 2 else { return }
+        let threshold = Compaction.threshold(window: window, priceStep: route.priceStepTokens)
+        chat.messages[chat.messages.count - 1].assistantTurn = turn
+        let messages = Transcript.messages(
+            for: chat, systemPrompt: systemPrompt, attachmentData: attachmentData,
+            readsImages: route.readsImages, readsPDFs: route.readsPDFs, toolInlineImages: toolInlineImages
+        )
+        var size = Transcript.estimatedTokens(messages) + Transcript.estimatedToolTokens(specs)
+        // The provider's own count of the last request, when it was sent after the newest summary.
+        if let last = turn.steps.last, let prompt = last.usage?.promptTokens,
+           turn.compaction.map({ last.startedAt > $0.createdAt }) ?? true {
+            size = max(size, prompt + (last.usage?.completionTokens ?? 0))
+        }
+        guard size > threshold else { return }
+
+        let currentIndex = chat.messages.count - 1
+        let point = Transcript.compactionPoint(in: chat)
+        let ask = chat.messages[..<currentIndex].lastIndex(where: { $0.userText != nil }) ?? currentIndex
+        let coveredSteps = point.turnIndex == currentIndex ? point.firstStepIndex : 0
+        let keepFrom = max(coveredSteps, Compaction.firstKeptStep(turn.steps, window: window))
+        let earlierToCover = point.turnIndex != currentIndex && point.firstIncludedIndex < ask
+        guard earlierToCover || keepFrom - coveredSteps >= Compaction.minNewSteps else { return }
+
+        let maxCharacters = min(400_000, Int(Double(window) * 0.5 * 3.6))
+        let input = Compaction.input(
+            previousSummary: point.summary,
+            messages: chat.messages[min(point.firstIncludedIndex, currentIndex)..<currentIndex],
+            steps: turn.steps[coveredSteps..<keepFrom],
+            maxCharacters: maxCharacters
+        )
+        let request = ChatCompletionRequest(
+            model: route.model,
+            messages: [.system(Compaction.summaryPrompt), .user("Summarize this earlier part of the session:\n\n" + input)],
+            reasoningEffort: route.effort == nil ? nil : .low
+        )
+        let client = environment.openRouter
+        var summary = ""
+        var usage: Usage?
+        do {
+            let answer = try await AgentLoop.bounded(seconds: 300, label: "Summarizing the earlier work") {
+                var text = ""
+                var used: Usage?
+                for try await chunk in try await client.stream(request) {
+                    if let error = chunk.error { throw error }
+                    if let delta = chunk.contentDelta { text += delta }
+                    if let reported = chunk.usage { used = reported }
+                }
+                return CompactionAnswer(text: text, usage: used)
+            }
+            summary = answer.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            usage = answer.usage
+        } catch {
+            summary = ""
+        }
+        let usable = Compaction.isUsable(summary)
+        if !usable { summary = Compaction.fallback(previousSummary: point.summary, input: input) }
+        // Every summary this reply paid for counts toward its cost.
+        let paid = [turn.compaction?.usage, usage].compactMap { $0 }
+        turn.compaction = TurnCompaction(
+            summary: summary,
+            throughStepID: keepFrom > 0 ? turn.steps[keepFrom - 1].id : nil,
+            tokensBefore: size,
+            usage: paid.isEmpty ? nil : paid.reduce(Usage(), +),
+            isFallback: usable ? nil : true
+        )
+        emit(milestone: true)
     }
 
     // MARK: One request to the model

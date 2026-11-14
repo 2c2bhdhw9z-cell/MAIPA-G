@@ -222,6 +222,12 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
                 branchHeads[branch] = nil
                 return HTTPResponse(status: 204)
             }
+            if request.method == "GET", path.hasPrefix(prefix + "/contents/") {
+                let file = String(path.dropFirst((prefix + "/contents/").count))
+                let ref = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "ref" }?.value ?? head
+                guard let ref, let tree = commits[ref].flatMap({ trees[$0.tree] }), let sha = tree[file] else { return json(["message": "Not Found"], status: 404) }
+                return json(["path": .string(file), "sha": .string(sha), "type": "file"])
+            }
             if request.method == "GET", path.hasPrefix(prefix + "/git/commits/") {
                 let id = String(path.dropFirst((prefix + "/git/commits/").count))
                 guard let commit = commits[id] else { return json(["message": "Not Found"], status: 404) }

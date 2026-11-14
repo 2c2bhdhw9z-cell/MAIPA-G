@@ -224,6 +224,20 @@ public actor GitHubAppSession: GitHubTokenProvider {
         return (token, expiresAt)
     }
 
+    /// A token that can change only the contents (files and releases) of one repo, for handing to
+    /// the chat computer so a reply there can put big files and the chat in MAIPA-G-data. Never cached.
+    public func contentsToken(forRepository name: String) async throws -> (token: String, expiresAt: Date) {
+        let jwt = try GitHubAppJWT.make(clientID: credentials.clientID, signer: signer)
+        let client = GitHubClient(transport: transport, tokens: nil)
+        let body: JSONValue = ["repositories": [.string(name)], "permissions": ["contents": "write"]]
+        let response = try await client.send("POST", "/app/installations/\(installationID)/access_tokens", body: body, auth: .bearer(jwt))
+        guard let json = JSONValue.parse(response.body), let token = json["token"]?.stringValue else {
+            throw GitHubAPIError(status: response.status, message: "GitHub sent no token for \(name)")
+        }
+        let expiresAt = json["expires_at"]?.stringValue.flatMap(ISO8601.date(from:)) ?? Date().addingTimeInterval(55 * 60)
+        return (token, expiresAt)
+    }
+
     public func userToken() async throws -> String {
         guard let token = currentUserToken else { throw Failure.noUserToken }
         if token.isFresh() { return token.accessToken }

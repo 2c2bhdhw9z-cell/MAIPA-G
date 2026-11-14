@@ -622,9 +622,9 @@ struct SyncReliabilityTests {
         #expect(await rig.sync.state.lastTree != nil)
     }
 
-    // MARK: 9. A chat still streaming is saved once its reply ends
+    // MARK: 9. A chat still streaming is saved when its reply starts, now and then, and at its end
 
-    @Test func aStreamingChatWaitsForItsTurnToEnd() async throws {
+    @Test func aStreamingChatIsSavedAtItsStartThenWaitsForItsTurnToEnd() async throws {
         let rig = try await SyncRig()
         defer { rig.cleanUp() }
         var chat = DataRepoSyncTests.chat("streaming", updated: Date())
@@ -633,31 +633,38 @@ struct SyncReliabilityTests {
         try await rig.store.save(chat)
         try rig.write(Data("made by the reply".utf8), to: other)
 
-        let during = try await rig.sync.sync(holding: [path])
-        #expect(during.uploaded == [other], "everything else keeps saving")
-        #expect(rig.github.fake.remoteFile(path) == nil)
-        #expect(during.pendingPaths.contains(path))
+        let started = try await rig.sync.sync(holding: [path])
+        #expect(started.uploaded == [path, other].sorted(), "the chat is in MAIPA-G-data from the reply's start")
         chat.messages.append(.user("more"))
         try await rig.store.save(chat)
+        try rig.write(Data("made later".utf8), to: SyncRig.attachment(2))
+        let during = try await rig.sync.sync(holding: [path])
+        #expect(during.uploaded == [SyncRig.attachment(2)], "everything else keeps saving")
+        #expect(during.pendingPaths.contains(path))
         let still = try await rig.sync.sync(holding: [path])
         #expect(still.uploaded.isEmpty && still.commit == nil)
 
         let ended = try await rig.sync.sync()
         #expect(ended.uploaded == [path])
-        #expect(rig.github.fake.savedCommits == 2)
+        #expect(rig.github.fake.savedCommits == 3)
         #expect(ended.pendingPaths.isEmpty)
     }
 
     @Test func aVeryLongReplyIsStillSavedNowAndThen() async throws {
         let rig = try await SyncRig()
         defer { rig.cleanUp() }
-        await rig.sync.setPassLimits(holdSeconds: 0.3)
-        let chat = DataRepoSyncTests.chat("long reply", updated: Date())
+        // Long enough that no busy test machine reaches it between two passes; then shortened.
+        await rig.sync.setPassLimits(holdSeconds: 600)
+        var chat = DataRepoSyncTests.chat("long reply", updated: Date())
         let path = ChatStore.relativePath(for: chat.id)
+        try await rig.store.save(chat)
+        let started = try await rig.sync.sync(holding: [path])
+        #expect(started.uploaded == [path])
+        chat.messages.append(.user("more"))
         try await rig.store.save(chat)
         let held = try await rig.sync.sync(holding: [path])
         #expect(held.uploaded.isEmpty)
-        try await Task.sleep(nanoseconds: 350_000_000)
+        await rig.sync.setPassLimits(holdSeconds: 0)
         let saved = try await rig.sync.sync(holding: [path])
         #expect(saved.uploaded == [path])
     }

@@ -308,17 +308,17 @@ final class ChatLibrary {
         }
         await retryUnsavedChats()
         upsert(chat)
-        // Local disk is saved immediately. While a turn is streaming, the chat itself isn't sent to
-        // GitHub (`streamingChatPaths` holds it back from each pass); the save at the end of the
-        // turn sends it once. Saves still come every 25 seconds meanwhile, so everything else
-        // (pictures and files the reply makes) keeps going up.
+        // Local disk is saved immediately. While a turn is streaming, the chat goes to GitHub when
+        // the reply starts, every 5 minutes, and when it ends (`streamingChatPaths`, DataRepoSync's
+        // holdLimit), not every few seconds. Saves still come every 25 seconds meanwhile, so
+        // everything else (pictures and files the reply makes) keeps going up. A reply on the
+        // computer also saves the chat from there while this phone isn't following it.
         let isActivelyStreaming = sessions[chat.id]?.isRunning == true
         app?.sync.request(after: isActivelyStreaming ? 25 : 3.5)
     }
 
-    /// Chats whose reply is still streaming. A backup pass leaves them until the reply ends, so a
-    /// long reply is sent once instead of every few seconds (a reply running very long is still
-    /// saved every 10 minutes).
+    /// Chats whose reply is still streaming. A backup pass saves them when the reply starts, then
+    /// only every 5 minutes until it ends, instead of every few seconds.
     var streamingChatPaths: Set<String> {
         Set(sessions.values.filter(\.isRunning).map { ChatStore.relativePath(for: $0.id) })
     }

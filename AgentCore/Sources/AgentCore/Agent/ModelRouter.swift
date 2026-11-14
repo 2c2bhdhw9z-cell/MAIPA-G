@@ -96,6 +96,9 @@ public struct Route: Sendable, Hashable {
     public var readsPDFs: Bool
     /// True when the selected model writes images directly in `/chat/completions` (`modalities: ["image", "text"]`).
     public var generatesImages: Bool
+    /// Input size past which the provider charges more per token (TeamoRouter: over 272K, input 2x
+    /// and output 1.5x). Compaction runs before a request would cross it. Nil when the price is flat.
+    public var priceStepTokens: Int?
 
     public init(
         model: String,
@@ -110,7 +113,8 @@ public struct Route: Sendable, Hashable {
         maxOutputTokens: Int? = nil,
         readsImages: Bool = true,
         readsPDFs: Bool = true,
-        generatesImages: Bool = false
+        generatesImages: Bool = false,
+        priceStepTokens: Int? = nil
     ) {
         self.model = model
         self.plugins = plugins
@@ -125,6 +129,7 @@ public struct Route: Sendable, Hashable {
         self.readsImages = readsImages
         self.readsPDFs = readsPDFs
         self.generatesImages = generatesImages
+        self.priceStepTokens = priceStepTokens
     }
 }
 
@@ -261,7 +266,8 @@ public enum ModelRouter {
                 maxOutputTokens: maxOut,
                 readsImages: readsImages,
                 readsPDFs: readsPDFs,
-                generatesImages: info?.generatesImages ?? false
+                generatesImages: info?.generatesImages ?? false,
+                priceStepTokens: info?.contextTier?.thresholdTokens
             )
         }
     }

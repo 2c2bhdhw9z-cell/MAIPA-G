@@ -301,6 +301,7 @@ public struct VMControl: Sendable {
         """
         d="$HOME/\(VMRun.folder(id))"
         [ -d "$d" ] || { echo "maipa-g-poll-missing"; exit 0; }
+        touch "$d/\(RunningChatSaver.phoneSeenFile)" 2>/dev/null
         s=$(cat "$d/seq" 2>/dev/null | tr -dc 0-9); s=${s:-0}
         p=$(cat "$d/runner.pid" 2>/dev/null | tr -dc 0-9)
         alive=0
@@ -405,6 +406,11 @@ public struct VMControl: Sendable {
     /// A fresh GitHub token for a long run; the runner takes and deletes it on its next use.
     public func handOverToken(id: String, token: String) async throws {
         try await upload(try VMCoding.pack(VMSecrets(openRouterKey: nil, githubToken: token)), to: "\(VMRun.folder(id))/token-refresh.json.gz")
+    }
+
+    /// The next MAIPA-G-data token, for a reply that runs past the hour its first one lasts.
+    public func handOverDataToken(id: String, token: String) async throws {
+        try await upload(try VMCoding.pack(VMSecrets(openRouterKey: nil, githubToken: token)), to: "\(VMRun.folder(id))/\(VMRun.dataTokenRefreshFile)")
     }
 
     /// The last lines the runner printed, for when it stopped without finishing: a crash, or the

@@ -681,7 +681,9 @@ final class ChatSession: Identifiable {
     }
 
     var canCompact: Bool { !isRunning && !isCompacting && compactableRangeEndIndex != nil }
-    var canUncompact: Bool { !isRunning && !isCompacting && chat.compactedSummary != nil }
+    var canUncompact: Bool {
+        !isRunning && !isCompacting && (chat.compactedSummary != nil || chat.messages.contains { $0.assistantTurn?.compaction != nil })
+    }
 
     func compact() {
         guard canCompact else { return }
@@ -694,12 +696,23 @@ final class ChatSession: Identifiable {
         chat.compactedThroughMessageID = nil
         chat.previousCompactedSummary = nil
         chat.previousCompactedThroughMessageID = nil
+        // Summaries made inside replies go too.
+        for index in chat.messages.indices where chat.messages[index].assistantTurn?.compaction != nil {
+            chat.messages[index].assistantTurn?.compaction = nil
+        }
         appendNotice("Restored full conversation memory — all earlier messages are included in future AI requests again.")
         touch()
     }
 
     func undoLastCompaction() {
         guard canUncompact else { return }
+        // The newest summary made inside a reply is undone first.
+        if let index = chat.messages.lastIndex(where: { $0.assistantTurn?.compaction != nil }) {
+            chat.messages[index].assistantTurn?.compaction = nil
+            appendNotice("Undid the latest compaction: the AI gets the full conversation from there again.")
+            touch()
+            return
+        }
         if let prevSummary = chat.previousCompactedSummary, let prevThrough = chat.previousCompactedThroughMessageID {
             chat.compactedSummary = prevSummary
             chat.compactedThroughMessageID = prevThrough
@@ -711,16 +724,6 @@ final class ChatSession: Identifiable {
             return
         }
         touch()
-    }
-
-    /// Kiro compacts by itself when a chat nears the AI's context: past 80% of the model's real
-    /// window (800,000 tokens on a 1M model), the older part is summarized. It never cuts in early;
-    /// old tool output is kept short instead (Transcript), so replies stay quick without losing
-    /// what was said. "Restore full memory" still brings everything back.
-    private func shouldAutoCompact(app: AppModel) -> Bool {
-        guard compactableRangeEndIndex != nil, !isCompacting else { return false }
-        let limit = app.openRouter.contextLimit(for: chat.model, lastModelID: contextModelID) ?? 200_000
-        return contextUsedTokens > Int(Double(limit) * 0.8)
     }
 
     private func performStructuredCompaction(automatic: Bool = false) async {
@@ -1404,9 +1407,9 @@ final class ChatSession: Identifiable {
         }
         // Kiro checkpoint: the chat as it was before this message ran.
         await captureCheckpoint()
-        if resumeNote == nil, shouldAutoCompact(app: app) {
-            await performStructuredCompaction(automatic: true)
-        }
+        // Automatic compaction happens inside the reply now (AgentLoop), on the phone and on the
+        // computer alike, before any request that would pass 80% of the model's window. Here, it
+        // only ran on the phone between replies, so a long reply on the computer never compacted.
         guard app.openRouter.isSignedIn else {
             fail(.signInNeeded, "Connect an AI provider (OpenRouter, OneProvider, SayGM, TeamoRouter, or OmniRoute) in Settings first.")
             return
@@ -2276,6 +2279,12 @@ final class ChatSession: Identifiable {
             githubToken = await ComputerRuns.githubToken(app: app)
             if githubToken == nil { return fallBack("GitHub didn't give MAIPA-G a token for it") }
         }
+        // MAIPA-G-data, with a token for it alone: big files made there come back through it, and
+        // the chat is kept saved there while the phone isn't following the reply.
+        let dataRepository = await app.sync.dataRepository
+        let dataBranch = await app.sync.dataBranch
+        var dataToken: String?
+        if let dataRepository { dataToken = await ComputerRuns.dataToken(app: app, repo: dataRepository) }
         if userStoppedExplicitly { return nil }
         // The chat's files go there first, as the real files: the runner can't reach the phone's.
         var systemPrompt = input.systemPrompt
@@ -2297,9 +2306,10 @@ final class ChatSession: Identifiable {
             lastUserMessage: lastMessage, webEnabled: webEnabled, repo: repo,
             specMode: effectiveMode == .spec && repoContext != nil, specGate: chat.kiroSpec, specKind: specKind,
             supervised: permissionMode == .supervised, acceptedChanges: chat.acceptedChanges ?? [],
-            attachmentData: attachmentData, memories: app.memories.memories
+            attachmentData: attachmentData, memories: app.memories.memories,
+            dataRepository: dataToken == nil ? nil : dataRepository, dataBranch: dataBranch
         )
-        let secrets = ComputerRuns.secrets(app: app, githubToken: githubToken)
+        let secrets = ComputerRuns.secrets(app: app, githubToken: githubToken, dataToken: dataToken)
         do {
             let packed = try VMCoding.pack(request)
             try await AgentLoop.bounded(seconds: 120, label: "Handing the reply to your computer") {
@@ -2395,10 +2405,11 @@ final class ChatSession: Identifiable {
     /// Each state the computer writes: its staged files and saves come to this phone, so Review,
     /// Save and the next reply see exactly what it did.
     private func applyComputerState(_ state: VMTurnState, vm: VMControl, app: AppModel?) async {
-        // Files and pictures the reply made on the computer come to this phone before the step shows.
+        // Files and pictures the reply made on the computer come to this phone in the background:
+        // big ones from MAIPA-G-data, small ones through the computer. A failure shows on the card.
         if let app {
-            let missing = VMMedia.missing(in: state.turn, dataDirectory: app.paths.data)
-            if !missing.isEmpty { await VMMedia.fetch(missing, runID: state.id, from: vm.computer, into: app.paths.data) }
+            let missing = VMMedia.missingResults(in: state.turn, dataDirectory: app.paths.data)
+            if !missing.isEmpty { app.fileArrivals.bring(missing, runID: state.id, computer: vm.computer) }
         }
         if let staged = state.staged {
             let changes = staged.map(\.change)
@@ -2423,16 +2434,30 @@ final class ChatSession: Identifiable {
         }
         if state.isFinished {
             if chat.computerRunID == state.id { chat.computerRunID = nil }
-            Task { try? await vm.remove(id: state.id) }
+            // The run's folder holds the only copy of the small files still coming over, so it
+            // goes once they're here; one that failed keeps it for Retry.
+            let id = state.id
+            let arrivals = app?.fileArrivals
+            Task { @MainActor in
+                if let arrivals {
+                    let allHere = await arrivals.finishCommandTransfers(runID: id)
+                    if !allHere { return }
+                }
+                try? await vm.remove(id: id)
+            }
             saveSoon(immediately: true)
             return
         }
-        // GitHub tokens last about an hour; a long reply gets a fresh one while it is followed.
-        if chat.repo != nil, Date().timeIntervalSince(lastTokenHandover) > 40 * 60, let app {
+        // GitHub tokens last about an hour; a long reply gets fresh ones while it is followed.
+        if Date().timeIntervalSince(lastTokenHandover) > 40 * 60, let app {
             lastTokenHandover = Date()
             let id = state.id
+            let hasRepo = chat.repo != nil
             Task { @MainActor in
-                if let token = await ComputerRuns.githubToken(app: app) { try? await vm.handOverToken(id: id, token: token) }
+                if hasRepo, let token = await ComputerRuns.githubToken(app: app) { try? await vm.handOverToken(id: id, token: token) }
+                if let repo = await app.sync.dataRepository, let token = await ComputerRuns.dataToken(app: app, repo: repo) {
+                    try? await vm.handOverDataToken(id: id, token: token)
+                }
             }
         }
     }

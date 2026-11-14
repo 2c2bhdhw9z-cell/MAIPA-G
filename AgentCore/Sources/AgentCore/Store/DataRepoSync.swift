@@ -128,9 +128,11 @@ public actor DataRepoSync {
     /// that is stopped keeps what it sent.
     var commitEveryFiles = 25
     var commitEverySeconds: TimeInterval = 20
-    /// A chat whose reply is still streaming is left until the reply ends, then saved once. One
-    /// that streams for longer than this is saved anyway, and then left again for as long.
-    var holdLimit: TimeInterval = 10 * 60
+    /// A chat whose reply is still streaming is saved when the reply starts, then left for this
+    /// long between saves, and saved again once the reply ends. Saved only at the end, a reply that
+    /// died with the phone or the computer was lost whole (the Korg chat's 7:00-7:38 AM run of
+    /// 14 November 2026 never reached MAIPA-G-data).
+    var holdLimit: TimeInterval = 5 * 60
     private var heldSince: [String: TimeInterval] = [:]
     /// Most tree listings one pass makes when GitHub's single listing comes back cut short.
     var treeListingBudget = 400
@@ -360,7 +362,12 @@ public actor DataRepoSync {
         heldSince = heldSince.filter { requested.contains($0.key) }
         var held: Set<String> = []
         for path in requested {
-            let since = heldSince[path] ?? now
+            guard let since = heldSince[path] else {
+                // A reply just started: the chat is saved now, so it's in MAIPA-G-data from the
+                // start (and the computer can keep it up to date there), then held.
+                heldSince[path] = now
+                continue
+            }
             if now - since >= holdLimit {
                 // Held long enough: saved this pass, then held again from now.
                 heldSince[path] = now

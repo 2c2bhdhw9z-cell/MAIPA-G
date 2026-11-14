@@ -76,9 +76,16 @@ enum ComputerRuns {
         }
     }
 
+    /// A token for MAIPA-G-data only (its files and releases), so a reply on the computer can put
+    /// big files there for the phone and keep the chat saved while the phone is away.
+    static func dataToken(app: AppModel, repo: RepoRef) async -> String? {
+        guard let session = app.github.session else { return nil }
+        return try? await session.contentsToken(forRepository: repo.name).token
+    }
+
     /// The keys a run needs. They go to the computer in a file only its user can read, which the
     /// runner deletes as soon as it has read them; they are never put in a command, a log or the chat.
-    static func secrets(app: AppModel, githubToken: String?) -> VMSecrets {
+    static func secrets(app: AppModel, githubToken: String?, dataToken: String? = nil) -> VMSecrets {
         var connectorSecrets: [String: String] = [:]
         if let json = app.connectors.autonomousSecretsJSON(),
            let values = try? JSONDecoder().decode([String: String].self, from: Data(json.utf8)) {
@@ -88,7 +95,7 @@ enum ComputerRuns {
             openRouterKey: app.openRouter.autonomousSecretKey,
             providers: app.openRouter.readyExternalProviders,
             githubToken: githubToken,
-            dataToken: githubToken,
+            dataToken: dataToken,
             connectors: app.connectors.computerRunConnectors(),
             connectorSecrets: connectorSecrets
         )

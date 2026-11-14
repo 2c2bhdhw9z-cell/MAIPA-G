@@ -214,6 +214,8 @@ public struct VMTurnRunner: Sendable {
         }
         defer { pump.cancel() }
 
+        // While nobody follows the reply on the phone, the chat is kept saved in MAIPA-G-data from here.
+        let saver = setup.dataRepo.map { RunningChatSaver(dataRepo: $0, folder: folder) }
         var lastWrite = Date.distantPast
         // Staged files are written on their own, after a step and only when they changed; each
         // state says which version is current, so a phone that skips states still gets them.
@@ -235,6 +237,10 @@ public struct VMTurnRunner: Sendable {
             let memories = await setup.changedMemories()
             let snapshot = turn, current = version
             _ = try? await writer.write { VMTurnState(id: request.id, seq: $0, phase: .running, turn: snapshot, stagedVersion: current, receipts: receipts, steersTaken: taken, memories: memories) }
+            if milestone, let saver {
+                let chat = request.chat, id = request.id
+                Task { await saver.step(chat: chat, turn: snapshot, runID: id) }
+            }
         }
         pump.cancel()
         // The pump is waited for, so a steer it was handing over as the reply ended is in the
@@ -256,6 +262,7 @@ public struct VMTurnRunner: Sendable {
         let final = turn
         let finalVersion = version
         try await writer.write { VMTurnState(id: request.id, seq: $0, phase: .finished, turn: final, staged: staged, stagedVersion: finalVersion, receipts: receipts, steersTaken: taken, unconsumedSteering: unconsumed, memories: memories) }
+        await saver?.step(chat: request.chat, turn: final, runID: request.id, final: true)
         await setup.close()
         logger.progress("MAIPA-G finished reply \(request.id): \(final.status.rawValue).")
     }
@@ -288,6 +295,8 @@ public struct VMTurnRunner: Sendable {
         /// The person's memories, copied here so `add_memory` and `edit_memory` work on the computer.
         var memoryStore: ProductStore<MemoryRecord>? = nil
         var initialMemories: [UUID: MemoryRecord] = [:]
+        /// MAIPA-G-data, when the phone handed over a token for it.
+        var dataRepo: ComputerDataRepo? = nil
 
         func stagedFiles() async -> [CheckpointFile]? {
             guard let changes else { return nil }
@@ -387,7 +396,18 @@ public struct VMTurnRunner: Sendable {
         // the chat as each state arrives (VMMedia), so they show the same as on the phone.
         let media = AttachmentStore(dataDirectory: folder.appendingPathComponent(VMMedia.folder, isDirectory: true))
         let fileGitHub = handedOver.map { GitHubClient(transport: transport, tokens: $0) }
-        tools.append(SendFileTool(github: fileGitHub, transport: transport, computer: control, store: media))
+        // Big files go to the phone through MAIPA-G-data's files release (the phone hands over a
+        // token for that repo only), not in pieces through the computer's command tool.
+        let dataTokens = secrets.dataToken.flatMap { $0.isEmpty ? nil : HandedOverTokens(token: $0, refreshFile: folder.appendingPathComponent(VMRun.dataTokenRefreshFile)) }
+        var dataRepo: ComputerDataRepo?
+        if let repository = request.dataRepository, let dataTokens {
+            dataRepo = ComputerDataRepo(github: GitHubClient(transport: transport, tokens: dataTokens), repo: repository, branch: request.dataBranch)
+        }
+        var relay: (@Sendable (URL) async throws -> RelayedFile)?
+        if let dataRepo {
+            relay = { @Sendable file in try await dataRepo.relay(file) }
+        }
+        tools.append(SendFileTool(github: fileGitHub, transport: transport, computer: control, store: media, localHome: home, relay: relay))
         // Memories work here as on the phone: the AI saves what the person wants remembered, and
         // each state carries the new ones back to the phone's Memories.
         let memoryStore = ProductStore<MemoryRecord>(dataDirectory: folder.appendingPathComponent("memories-copy", isDirectory: true), folder: "memories")
@@ -471,7 +491,7 @@ public struct VMTurnRunner: Sendable {
             onOutOfCredits: {}
         )
         return Setup(tools: tools, environment: environment, changes: changes, saves: saves, initialReceiptIDs: initialReceiptIDs,
-                     connectorCount: sessions.count, sessions: sessions, memoryStore: memoryStore, initialMemories: initialMemories)
+                     connectorCount: sessions.count, sessions: sessions, memoryStore: memoryStore, initialMemories: initialMemories, dataRepo: dataRepo)
     }
 
     func prepareCheckout(repo: VMTurnRepo, token: String, path: String, logger: RedactingLogger) async {

@@ -12,14 +12,25 @@ public struct SendFileTool: AgentTool {
     let computer: ComputerControl?
     let store: AttachmentStore
     let workDirectory: URL
+    /// On the computer itself: its home folder, so a file there is copied, not read back in
+    /// pieces through commands.
+    let localHome: URL?
+    /// On the computer: puts a big file in MAIPA-G-data's files release for the phone to download.
+    let relay: (@Sendable (URL) async throws -> RelayedFile)?
 
-    public init(github: GitHubClient?, transport: any HTTPTransport, computer: ComputerControl?, store: AttachmentStore, workDirectory: URL = FileManager.default.temporaryDirectory) {
+    public init(github: GitHubClient?, transport: any HTTPTransport, computer: ComputerControl?, store: AttachmentStore, workDirectory: URL = FileManager.default.temporaryDirectory, localHome: URL? = nil, relay: (@Sendable (URL) async throws -> RelayedFile)? = nil) {
         self.github = github
         self.transport = transport
         self.computer = computer
         self.store = store
         self.workDirectory = workDirectory
+        self.localHome = localHome
+        self.relay = relay
     }
+
+    /// Bigger than this, a file that can't go through GitHub isn't sent the slow way either: it
+    /// would take hundreds of commands and never arrive.
+    public static let largestWithoutRelay = 25 * 1024 * 1024
 
     public static let maximumBytes = 250 * 1024 * 1024
 
@@ -53,8 +64,14 @@ public struct SendFileTool: AgentTool {
             progress("Bringing the file from the computer…")
             shownName = (relative as NSString).lastPathComponent
             file = folder.appendingPathComponent(shownName)
-            // As big as a chat file can be, so a rebuilt app (often 150 MB or more) comes back too.
-            try await computer.readFile(homePath: relative, maxBytes: AttachmentStore.maximumAttachmentBytes).write(to: file)
+            if let localHome {
+                let source = localHome.appendingPathComponent(relative)
+                guard FileManager.default.fileExists(atPath: source.path) else { throw ToolInputError("There's no file at ~/\(relative) on the computer.") }
+                try FileManager.default.copyItem(at: source, to: file)
+            } else {
+                // As big as a chat file can be, so a rebuilt app (often 150 MB or more) comes back too.
+                try await computer.readFile(homePath: relative, maxBytes: AttachmentStore.maximumAttachmentBytes).write(to: file)
+            }
         } else if let raw = arguments.optionalString("url"), let url = URL(string: raw), url.scheme == "https", let host = url.host?.lowercased() {
             progress("Downloading the file…")
             shownName = url.lastPathComponent.isEmpty || url.lastPathComponent == "zip" ? "download.zip" : url.lastPathComponent
@@ -81,11 +98,25 @@ public struct SendFileTool: AgentTool {
         let size = ((try? FileManager.default.attributesOfItem(atPath: file.path)[.size]) as? Int) ?? 0
         guard size > 0 else { throw ToolInputError("The file came back empty.") }
         guard size <= Self.maximumBytes else { throw ToolInputError("The file is \(size / 1_048_576) MB, bigger than MAIPA-G keeps (250 MB).") }
+        var relayed: RelayedFile?
+        if let relay, size >= ComputerDataRepo.relayThreshold {
+            progress("Sending the file to the phone through GitHub…")
+            do {
+                relayed = try await relay(file)
+            } catch {
+                guard size <= Self.largestWithoutRelay else {
+                    throw ToolInputError("\(shownName) is made, but it couldn't be sent to the phone: GitHub refused the upload (\(ErrorExplainer.describe(error).message)). It's still on the computer. Tell the person plainly; try send_file again in a minute.")
+                }
+            }
+        }
         let reference = try await store.importGeneratedFile(at: file, name: shownName, mimeType: Self.mimeType(shownName))
-        let result = GeneratedImageResult(attachment: reference, prompt: shownName, model: "file", aspectRatio: "", quality: "")
+        var result = GeneratedImageResult(attachment: reference, prompt: shownName, model: "file", aspectRatio: "", quality: "")
+        result.relay = relayed
         try await store.saveGeneratedMetadata(result)
+        let sizeText = ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
+        let delivery = relayed == nil ? "" : " It went up to MAIPA-G-data, and the phone downloads it from there and checks it; if it can't, the card says why and has Retry."
         return ToolOutput(
-            forModel: "Gave the person \(shownName) (\(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))) as a file card in the chat. Tell them it's there; don't paste a download link.",
+            forModel: "Gave the person \(shownName) (\(sizeText)) as a file card in the chat.\(delivery) Tell them it's there; don't paste a download link.",
             summary: "Sent \(shownName)",
             generatedImages: [result]
         )
