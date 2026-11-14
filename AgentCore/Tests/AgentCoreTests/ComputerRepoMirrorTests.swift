@@ -6,7 +6,15 @@ import Testing
 /// the same two files" over and over). The file tools and the computer's checkout used to be two
 /// copies that only met through sync_staged_to_computer, which reset the computer's copy. These
 /// run the real shell and real git, as the runner on the chat computer does.
-@Suite("Staged files and the computer's checkout are one copy")
+// Real shell commands hang on GitHub's Mac (see Build174Tests), so these run in the Linux job,
+// which is also the system the chat computer and its runner use.
+#if os(Linux)
+private let onLinux = true
+#else
+private let onLinux = false
+#endif
+
+@Suite("Staged files and the computer's checkout are one copy", .enabled(if: onLinux))
 struct ComputerRepoMirrorTests {
     struct Repo {
         let base: RepoWorkspace
