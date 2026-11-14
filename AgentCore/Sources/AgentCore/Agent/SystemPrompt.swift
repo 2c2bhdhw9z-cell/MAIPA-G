@@ -79,6 +79,9 @@ public enum SystemPrompt {
         public var appNote: String?
         /// True when the sync_staged_to_computer tool is available.
         public var canSyncStaged: Bool
+        /// True when MAIPA-G keeps the staged files and the computer's copy as one copy
+        /// (`ComputerRepoMirror`), the way Kiro has one folder.
+        public var mirrorsRepo = false
 
         public init(service: String, machine: String, repoFullName: String? = nil, cloneURL: String? = nil, branch: String? = nil, commit: String? = nil, repoPath: String? = nil, stagedPatch: String? = nil, approximateHourlyCost: Double? = nil, appNote: String? = nil, canSyncStaged: Bool = false) {
             self.appNote = appNote
@@ -245,7 +248,9 @@ public enum SystemPrompt {
             let commit = computer.commit.map { " at commit \($0.prefix(7))" } ?? ""
             steps.append("- Keep a copy of \(fullName) at `\(path)`\(branch)\(commit). MAIPA-G's own code copies it there (private repos too) before the first `run_command`, `computer_task` or `app_preview`; never clone it yourself with a credential, and never ask for or construct a credential URL. (Public clone address: \(cloneURL).)")
             steps.append("- Never place a token, password, secret, or credential-file location in a command, tool argument, answer, or saved chat.")
-            if computer.canSyncStaged {
+            if computer.mirrorsRepo {
+                steps.append("- Your staged changes and the copy at `\(path)` are one copy, kept in step by MAIPA-G the way an editor and its folder are: what you write with `create_file`, `edit_file`, `append_file` and `delete_file` is on the computer at once, and files your commands change there come straight back into your staged changes (each command's result says which). So run the tests right after editing, never copy changes across by hand, and you may also change files with a command when that is easier. Read a file again only when a command changed it. `save_changes` saves all of it. Keep scratch files out of the repo (use /tmp).")
+            } else if computer.canSyncStaged {
                 steps.append("- The copy on the computer is for running and checking, never stray scratch files. To change the repo, use `create_file`, `edit_file`, `append_file`, `delete_file`, and `save_changes`, then call `sync_staged_to_computer` before any build or test so the computer copy matches your staged files without retyping.")
             } else {
                 steps.append("- The copy on the computer is for running and checking. To change the repo, still use `create_file`, `edit_file`, `append_file`, `delete_file`, and `save_changes`, and make the same edits on the computer when you need to test them.")

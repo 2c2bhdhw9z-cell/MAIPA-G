@@ -1445,6 +1445,10 @@ final class ChatSession: Identifiable {
             return
         }
         let changeAuthorization = ChangeAuthorization(request: lastMessage)
+        // Set up below: the one-copy mirror between staged files and the computer's checkout.
+        var mirrorGate: ComputerRepoMirror.StageGate?
+        var phoneMirror: ComputerRepoMirror?
+        let isSingleRepoChat = chat.allRepos.count <= 1
         let allAttachments = chat.messages.flatMap { message -> [AttachmentReference] in
             if case .user(let user) = message.body { return user.attachments }
             return []
@@ -1611,6 +1615,7 @@ final class ChatSession: Identifiable {
                 repoLocalAgents = await setupStep(repoDeadline, fallback: [], label: "reading repo agents") { await RepoAgentLoader.loadAgents(from: workspace) }
                 let saves = changeSession ?? ChangeSession(receipts: chat.saveReceipts ?? [])
                 changeSession = saves
+                mirrorGate = ComputerRepoMirror.gate(authorization: changeAuthorization, rules: rules)
                 let savingChoice = SavingStyleChoice()
                 let listTool = ListFilesTool(workspace: workspace, changes: changes)
                 let searchTool = SearchCodeTool(workspace: workspace, changes: changes)
@@ -1717,9 +1722,24 @@ final class ChatSession: Identifiable {
                     let previewCommit = repoContext.commit
                     let previewToken = checkoutToken(app: app, repo: repoContext)
                     let previewChanges = changeWorkspace
+                    // One copy, like Kiro's one folder: the staged files and the computer's
+                    // checkout stay in step (single-repo chats; several repos keep the sync tool).
+                    if isSingleRepoChat, let previewChanges, let gate = mirrorGate {
+                        let repoMirror = ComputerRepoMirror(control: control, workspace: previewChanges, homePath: previewHome, commit: previewCommit, cloneURL: previewClone, token: previewToken, gate: gate)
+                        phoneMirror = repoMirror
+                        hookRunner = { command in
+                            _ = await repoMirror.prepareForCommand()
+                            let output = try await control.run("cd \"$HOME/\(previewHome)\" && \(command)")
+                            _ = await repoMirror.refresh()
+                            return output
+                        }
+                    }
+                    let previewMirror = phoneMirror
                     tools.append(AppPreviewTool(control: control, repoHome: previewHome, prepare: {
                         try await checkout.ensure()
-                        if let previewChanges, await previewChanges.hasStagedChanges() {
+                        if let previewMirror {
+                            _ = await previewMirror.prepareForCommand()
+                        } else if let previewChanges, await previewChanges.hasStagedChanges() {
                             _ = try await control.syncStagedChanges(homePath: previewHome, cloneURL: previewClone, commit: previewCommit, changes: await previewChanges.stagedChanges(), token: previewToken)
                         }
                     }))
@@ -1737,6 +1757,7 @@ final class ChatSession: Identifiable {
                 replaceLastTurn(turn)
             }
         }
+        if let phoneMirror { tools = ComputerMirroredTool.wrap(tools, mirror: phoneMirror) }
         tools = HookedTool.wrap(tools, hooks: repoHooks, runCommand: hookRunner)
         // Kiro specs: three files under .kiro/specs/<feature>/ in the chat's repo, read with
         // load_spec (Kiro's #spec), with Spec mode's approval gates enforced on the file tools.
@@ -1837,6 +1858,9 @@ final class ChatSession: Identifiable {
         }
         computer?.appNote = computerNote
         computer?.canSyncStaged = canSyncStaged
+        // A reply handed to the computer always keeps one copy there (VMTurnRunner); one on the
+        // phone does when the mirror above was set up.
+        computer?.mirrorsRepo = phoneMirror != nil || (repoContext != nil && isSingleRepoChat && app.connectors.hasConfiguredComputer)
 
         let hasRepo = chat.repo != nil
         var difficulty = TaskDifficulty.estimate(lastMessage, hasRepo: hasRepo)

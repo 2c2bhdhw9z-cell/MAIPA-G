@@ -191,6 +191,34 @@ public actor ChangeWorkspace {
         changes[(try? Self.safe(rawPath)) ?? RepoWorkspace.normalize(rawPath)] = nil
     }
 
+    /// What is staged for one file, if anything.
+    public func stagedChange(for rawPath: String) -> StagedChange? {
+        changes[(try? Self.safe(rawPath)) ?? RepoWorkspace.normalize(rawPath)]
+    }
+
+    /// Stages a file exactly as the chat computer has it, because a command changed it there.
+    /// The repo's own bytes drop the staged change instead.
+    public func stageFromComputer(path rawPath: String, data: Data) async throws {
+        let path = try Self.safe(rawPath)
+        let baseSHA = try? await baseBlob(for: path)
+        if let baseSHA, Hashing.gitBlobID(data) == baseSHA {
+            changes[path] = nil
+            return
+        }
+        changes[path] = .write(path: path, data: data, existed: baseSHA != nil)
+    }
+
+    /// Stages a deletion the chat computer made. A file the repo never had just stops being staged.
+    public func stageDeletionFromComputer(path rawPath: String) async throws {
+        let path = try Self.safe(rawPath)
+        guard (try? await baseBlob(for: path)) != nil else {
+            changes[path] = nil
+            return
+        }
+        let previous = (try? await base.readRawBytes(path, maxBytes: 64 * 1024 * 1024)) ?? Data()
+        changes[path] = .delete(path: path, previous: previous)
+    }
+
     public func stagedData(for rawPath: String) -> Data? {
         let normalized = RepoWorkspace.normalize(rawPath)
         guard let change = changes[normalized] else { return nil }

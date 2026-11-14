@@ -318,6 +318,7 @@ public struct VMTurnRunner: Sendable {
         var homePath: String?
         var hookRunner: HookedTool.CommandRunner?
         var hooks: [RepoHook] = []
+        var mirror: ComputerRepoMirror?
         // One holder for the handed-over token, shared by everything here that uses GitHub. A
         // fresh token is read from its file and the file deleted, so with two holders only one
         // got it and the other went on with the old token (and the two raced on the file).
@@ -363,20 +364,19 @@ public struct VMTurnRunner: Sendable {
             let path = "repos/\(repo.repo.ref.owner)/\(repo.repo.ref.name)"
             homePath = path
             await prepareCheckout(repo: repo, token: token, path: path, logger: logger)
-            let commit = repo.commit
-            if await staged.hasStagedChanges() {
-                _ = try? await control.syncStagedChanges(homePath: path, cloneURL: nil, commit: commit, changes: await staged.stagedChanges())
-            }
-            tools.append(SyncStagedToComputerTool(control: control, workspace: staged, homePath: path, cloneURL: nil, commit: commit))
+            // One copy, like Kiro's one folder: the staged files and this checkout stay in step.
+            let repoMirror = ComputerRepoMirror(control: control, workspace: staged, homePath: path, commit: repo.commit, gate: ComputerRepoMirror.gate(authorization: authorization, rules: rules))
+            if let problem = await repoMirror.start() { logger.progress(problem) }
+            mirror = repoMirror
             hookRunner = { command in
-                _ = try await control.syncStagedChanges(homePath: path, cloneURL: nil, commit: commit, changes: await staged.stagedChanges())
-                return try await control.run("cd \"$HOME/\(path)\" && \(command)")
+                _ = await repoMirror.prepareForCommand()
+                let output = try await control.run("cd \"$HOME/\(path)\" && \(command)")
+                _ = await repoMirror.refresh()
+                return output
             }
             hooks = await RepoHooks.load(from: workspace).hooks
             tools.append(AppPreviewTool(control: control, repoHome: path, prepare: {
-                if await staged.hasStagedChanges() {
-                    _ = try await control.syncStagedChanges(homePath: path, cloneURL: nil, commit: commit, changes: await staged.stagedChanges())
-                }
+                _ = await repoMirror.prepareForCommand()
             }))
         }
         tools.append(RunCommandTool(control: control, homePath: homePath))
@@ -426,6 +426,7 @@ public struct VMTurnRunner: Sendable {
             tools += connector.tools.filter { !connector.configuration.disabledTools.contains($0.originalName) }
                 .map { MCPTool(definition: $0, session: session) }
         }
+        if let mirror { tools = ComputerMirroredTool.wrap(tools, mirror: mirror) }
         tools = HookedTool.wrap(tools, hooks: hooks, runCommand: hookRunner)
         if request.specMode {
             let gate = request.specGate

@@ -1449,3 +1449,26 @@ so `copy_file_to_computer` said "Connect GitHub". It now uses `SyncCoordinator.d
 (known as soon as saving is set up), looks GitHub up when the file is sent, and retries once when
 saving was uploading the same file. Replies on the computer have `copy_file_to_computer` too: it
 finds the files the phone put there, or says why one is missing.
+
+## Twelfth follow-up (14 November 2026): one copy of the repo, like Kiro's one folder
+
+Owner, after the AI "read and edited the same two files" (runtime/ui.js, tests/plugins.test.mjs)
+for well over 124 actions in the Korg-Bot chat: "fix MAIPA", "explain what the issue is".
+
+**Cause (from his saved chat 6cac7c12, through 13 Nov 6:38 PM: 196 steps, 329 tool calls):** the
+file tools changed a staged copy (ChangeWorkspace) while run_command ran against a separate checkout
+on the computer. They met only through `sync_staged_to_computer`, which reset the checkout (10
+calls, 4 of them stashed the computer's work). The AI also read files 12 times with commands, i.e.
+from the other copy. So tests ran on old files, edits used text the other copy didn't have ("old_text
+was not found"), and it went round and round. Kiro has one folder.
+
+**Built:** `ComputerRepoMirror` + `ComputerMirroredTool` (MCP/ComputerRepoMirror.swift), on the runner
+and on the phone (single-repo chats). A file tool's write goes onto the computer at once (mode kept);
+after every command, files that changed there (vs the chat's commit, plus new unignored files and
+every staged path, by git blob id) come back into the staged changes; a file put back to the repo's
+version is unstaged. `sync_staged_to_computer` is dropped where the mirror runs. The file tools'
+rules still hold: build-setup files and deletions made by commands are only staged when the tools
+wouldn't have asked; secret-shaped files, node_modules/.venv/etc., files over 25 MB and more than
+400 new files stay on the computer, and the command's result says so. The synced-tree marker is
+updated after each refresh, so the next reply's start doesn't stash. Prompt: `mirrorsRepo` text.
+Tests: `ComputerRepoMirrorTests` (real git and shell).
