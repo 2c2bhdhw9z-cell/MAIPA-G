@@ -1472,3 +1472,21 @@ wouldn't have asked; secret-shaped files, node_modules/.venv/etc., files over 25
 400 new files stay on the computer, and the command's result says so. The synced-tree marker is
 updated after each refresh, so the next reply's start doesn't stash. Prompt: `mirrorsRepo` text.
 Tests: `ComputerRepoMirrorTests` (real git and shell).
+
+### Still not like Kiro (found 14 November 2026 in his Korg chat 6cac7c12; not fixed, he's out of credits)
+Evidence: the saved chat through 13 Nov 6:38 PM (196 steps, 329 tool calls). Fix in this order.
+1. **Web search doesn't work.** `web_search` failed 4 of 4 times; `read_web_page` failed 5 of 17
+   (HTTP 202 four times, HTTP 403 four times, HTTP 404 once: "The page returned HTTP 202. Try
+   again."). The AI fell back to `curl` on Google and the GitHub API from the computer. A 202 from a
+   search page is that engine refusing an automated request; find which engine web_search scrapes and
+   move to one that answers programs (an API), per the service's own docs. This is why the owner had to
+   yell "look it up, you have the internet".
+2. **Each step is huge.** About 123,000 prompt tokens per step on average (most 168,144), 24.15
+   million over 196 steps. Measure what the tokens are (system prompt, tool schemas, transcript, tool
+   results) before changing anything; don't guess.
+3. **A running chat isn't saved.** The data repo only gets a chat once its reply ends, so the 14 Nov
+   7:00–7:38 AM run (the edit loop in his screenshots) isn't in MAIPA-G-data at all. Save a running
+   chat's finished steps as it goes, so a dead phone or computer doesn't lose them.
+Also from the 12 November audit list above, still open: steers lost on the phone in the background
+(item 8), `update_session_information` on the phone (item 2), `list_files on_computer` from the
+phone (item 3).
