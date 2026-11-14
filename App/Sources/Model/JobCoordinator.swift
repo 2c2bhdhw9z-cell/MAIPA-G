@@ -777,7 +777,7 @@ final class JobCoordinator {
         guard let app, let repo = job.targetRepo, let dataRepo = job.dataRepo else { return }
         await app.sync.syncNow()
         let vm: VMControl
-        switch await ComputerRuns.prepare(app: app) {
+        switch await ComputerRuns.prepare(app: app, waitForInstall: ChatSession.runnerInstallWait) {
         case .ready(let ready): vm = ready
         case .unavailable(let reason):
             throw ComputerJobError(message: "Jobs run on your chat computer, and it can't take this one yet: \(reason). Tap Resume once it is ready.")

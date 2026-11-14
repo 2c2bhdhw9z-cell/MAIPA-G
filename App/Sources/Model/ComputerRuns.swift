@@ -53,28 +53,63 @@ enum ComputerRuns {
         case unavailable(String)
     }
 
-    /// The computer, with the runner installed. A first install (or a build there) goes on in the
-    /// background on the computer; until it finishes, work runs on the phone and the chat says so.
-    static func prepare(app: AppModel) async -> Readiness {
+    /// The computer, with the runner installed. Every app build needs its own runner, which goes
+    /// on in the background on the computer (held awake, so the 16 MB download takes seconds).
+    /// `waitForInstall`: how long to wait for an install that is under way, checking every few
+    /// seconds and telling `progress` what step it's on, before giving up. A reply waits, the way
+    /// Kiro's session setup does; it used to go straight to the phone, and the phone then froze
+    /// with the app (14 November 2026). `keepWaiting` returning false ends the wait (Stop).
+    static func prepare(
+        app: AppModel,
+        waitForInstall: TimeInterval = 0,
+        keepWaiting: @MainActor () -> Bool = { true },
+        progress: @MainActor (String?) -> Void = { _ in }
+    ) async -> Readiness {
         guard app.connectors.hasConfiguredComputer else { return .unavailable("no chat computer is set up in Settings") }
         guard let revision else { return .unavailable("this app build doesn't say which runner it needs") }
         guard let control = await app.connectors.ensureComputerSession(), control.commandTool != nil else {
             return .unavailable("the chat computer couldn't be reached")
         }
         let vm = VMControl(computer: control)
-        do {
-            switch try await AgentLoop.bounded(seconds: 45, label: "Checking MAIPA-G's runner on the computer", { try await vm.ensureRunner(revision: revision) }) {
+        let giveUpAt = Date().addingTimeInterval(waitForInstall)
+        while true {
+            let state: VMControl.RunnerState
+            do {
+                state = try await AgentLoop.bounded(seconds: 45, label: "Checking MAIPA-G's runner on the computer", { try await vm.ensureRunner(revision: revision) })
+            } catch {
+                return .unavailable("the chat computer didn't answer: \(ErrorExplainer.explain(error).message)")
+            }
+            switch state {
             case .ready:
                 return .ready(vm)
-            case .installing(let step):
-                return .unavailable("MAIPA-G's runner is still being installed on it" + (step.map { " (\($0))" } ?? ""))
             case .failed(let reason):
                 return .unavailable("installing MAIPA-G's runner on it failed: \(reason)")
+            case .installing(let step):
+                guard Date() < giveUpAt, keepWaiting(), !Task.isCancelled else {
+                    return .unavailable("MAIPA-G's runner for this app build is still being installed on it" + (step.map { " (\($0))" } ?? ""))
+                }
+                progress(step)
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
             }
-        } catch {
-            return .unavailable("the chat computer didn't answer: \(ErrorExplainer.explain(error).message)")
         }
     }
+
+    /// Installs this app build's runner on the computer ahead of the first reply: when the app
+    /// opens and when it comes back to the front (at most every 10 minutes). One check starts the
+    /// install, which then carries on by itself on the computer.
+    static func installRunnerAhead(app: AppModel) {
+        guard app.connectors.hasConfiguredComputer, revision != nil, !PreviewScenes.isActive else { return }
+        if let last = lastAhead, Date().timeIntervalSince(last) < 600 { return }
+        lastAhead = Date()
+        Task { @MainActor in
+            if case .unavailable = await prepare(app: app) {
+                // Not ready yet: the next foreground checks again rather than waiting 10 minutes.
+                lastAhead = nil
+            }
+        }
+    }
+
+    private static var lastAhead: Date?
 
     /// A token for MAIPA-G-data only (its files and releases), so a reply on the computer can put
     /// big files there for the phone and keep the chat saved while the phone is away.

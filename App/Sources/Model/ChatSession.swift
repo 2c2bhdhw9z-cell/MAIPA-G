@@ -2281,8 +2281,17 @@ final class ChatSession: Identifiable {
         // Pictures and videos are made on the phone, where the picture tools are.
         let lastAttachments = chat.messages.last(where: { $0.userText != nil })?.userAttachments ?? []
         if MediaRequest.wanted(lastMessage, hasImageAttachments: lastAttachments.contains { $0.kind == .image }, chatHasPictures: !chatPictures().isEmpty, workingOnRepo: chat.repo != nil) { return nil }
+        // A new app build's runner may still be going on the computer: the reply waits for it (a
+        // few seconds, as the computer is held awake for it), saying so, instead of running on the
+        // phone, where it stops when the app is left.
         let vm: VMControl
-        switch await ComputerRuns.prepare(app: app) {
+        let readiness = await ComputerRuns.prepare(
+            app: app, waitForInstall: Self.runnerInstallWait,
+            keepWaiting: { [weak self] in self?.userStoppedExplicitly == false },
+            progress: { [weak self] step in _ = self?.showGettingComputerReady(step) }
+        )
+        showGettingComputerReady(nil, done: true)
+        switch readiness {
         case .ready(let ready): vm = ready
         case .unavailable(let reason): return fallBack(reason)
         }
@@ -2342,6 +2351,18 @@ final class ChatSession: Identifiable {
         }
         saveSoon(immediately: true)
         return followRun(id: id, vm: vm, app: app)
+    }
+
+    /// The longest a reply waits for this app build's runner to finish installing on the computer.
+    static let runnerInstallWait: TimeInterval = 240
+    static let gettingComputerReadyPrefix = "Getting your computer ready for this app build"
+
+    /// Shows (or, with `done`, takes away) the line saying the reply waits for the runner.
+    private func showGettingComputerReady(_ step: String?, done: Bool = false) {
+        guard var turn = lastTurn else { return }
+        turn.notices.removeAll { $0.hasPrefix(Self.gettingComputerReadyPrefix) }
+        if !done { turn.notices.append(Self.gettingComputerReadyPrefix + (step.map { " (\($0))" } ?? "") + "…") }
+        replaceLastTurn(turn)
     }
 
     private func followRun(id: String, vm: VMControl, app: AppModel) -> AgentRun {

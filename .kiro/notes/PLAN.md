@@ -1605,3 +1605,18 @@ on the phone in the background (audit item 8); `update_session_information` on t
 - Korg-Bot's `main` has only README.md; his Korg work is on PR #1's branch
   (`maipa-g/build-korg-s-first-rain-based-23ecdd8e`), so test 3 found nothing to do.
 
+### Why replies kept running on the phone (his 6:28-6:31 PM screenshots, 14 November 2026)
+"Your computer couldn't take this reply (MAIPA-G's runner is still being installed on it
+(Downloading MAIPA-G's runner for this app build))", two minutes apart, for a 16 MB download.
+Every app build needs its own runner, installed in the background (`setsid nohup install.sh`).
+The install didn't hold the Sprite awake, and a Sprite pauses about 30 seconds after the last
+command even with a process running (docs.fly.io/sprites/keeping-sprites-running), so the
+download froze and only moved during the phone's checks. Replies ran on the phone meanwhile.
+Fixed: the install holds the Sprite with the Tasks API (as runs and tool setup do) and lets go on
+exit, curl can't hang (20 s connect, 10 min max), an install whose log hasn't moved in 15 minutes
+is restarted, the app starts the install at launch and on foreground (`installRunnerAhead`), and a
+reply (or a job) waits up to 4 minutes for an install under way, showing "Getting your computer
+ready for this app build (step)…", instead of going to the phone. Checked here: the real install
+script for build 205 downloaded and checksum-checked the runner and sent PUT then DELETE for
+`maipa-g-runner-install` to a stand-in for the Sprite's socket.
+

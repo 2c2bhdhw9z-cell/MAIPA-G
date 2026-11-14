@@ -440,6 +440,21 @@ struct ComputerRunnerTests {
         #expect(script.contains("runner-$rev"))
         #expect(VMControl.launchScript(id: "turn-x", mode: .job, revision: String(repeating: "c", count: 40)).contains("\" job \"$d\""))
     }
+
+    /// The install stalled on "Downloading" because a Sprite pauses 30 seconds after the last
+    /// command (14 November 2026): it holds the Sprite awake now, can't hang on a download, and an
+    /// install that stops moving is started again.
+    @Test("The runner install holds the computer awake, lets go at the end, and can't hang")
+    func runnerInstallHoldsTheComputerAwake() throws {
+        let script = try VMControl.ensureRunnerScript(revision: String(repeating: "c", count: 40))
+        #expect(script.contains("task=\"maipa-g-runner-install\""))
+        #expect(script.contains("/v1/tasks/$task"))
+        #expect(script.contains("trap '[ -n \"$hold\" ] && kill \"$hold\" 2>/dev/null; release_hold' EXIT"))
+        #expect(script.contains("--connect-timeout 20 --max-time 600"))
+        #expect(script.contains("-gt 900 ]"), "a stuck install is restarted")
+        let launch = VMControl.launchScript(id: "turn-x", mode: .turn, revision: String(repeating: "c", count: 40))
+        #expect(launch.contains("release_hold") && launch.contains("renew"))
+    }
 }
 
 actor StateLog {

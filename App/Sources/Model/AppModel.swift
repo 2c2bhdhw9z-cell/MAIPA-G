@@ -309,6 +309,8 @@ final class AppModel {
         await models
         await library.resumeRunning()
         resumedRunningChats = true
+        // This app build's runner goes on the computer now, not when the first reply needs it.
+        ComputerRuns.installRunnerAhead(app: self)
         _ = await (githubChecked, gitlabChecked)
         await startSaving()
         await jobs.updateAutonomousWorkflows()
@@ -415,6 +417,7 @@ final class AppModel {
                 self.foregroundRefresh = nil
                 await self.openRouter.refreshKeyInfo()
                 await self.connectors.reconnectIfNeeded()
+                ComputerRuns.installRunnerAhead(app: self)
                 await self.updates.check(using: self.github.publicClient)
                 self.sync.request(after: 1)
             }

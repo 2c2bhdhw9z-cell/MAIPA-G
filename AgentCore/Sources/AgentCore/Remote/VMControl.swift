@@ -61,8 +61,15 @@ public struct VMControl: Sendable {
         d="$HOME/\(runnerFolder(revision))"
         mkdir -p "$d"
         probe() { [ -x "$d/run.sh" ] && "$d/run.sh" --probe 2>/dev/null | grep -q maipag-runner-ok; }
-        installing() { p=$(cat "$d/install.pid" 2>/dev/null); [ -n "$p" ] && tr '\\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q 'install\\.sh'; }
+        installing() { p=$(cat "$d/install.pid" 2>/dev/null); [ -n "$p" ] && tr '\\0' ' ' 2>/dev/null < "/proc/$p/cmdline" | grep -q 'install\\.sh'; }
         if [ -f "$d/ready" ] && probe; then echo maipa-g-runner-ready; exit 0; fi
+        # An install whose log hasn't moved for 15 minutes is stuck (one started before installs
+        # held the Sprite awake stalled for good): it is stopped and started again.
+        if installing && [ $(( $(date +%s) - $(stat -c %Y "$d/install.log" 2>/dev/null || echo 0) )) -gt 900 ]; then
+          p=$(cat "$d/install.pid" 2>/dev/null | tr -dc 0-9)
+          [ -n "$p" ] && { kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null || true; }
+          rm -f "$d/install.pid"
+        fi
         if installing; then
           echo maipa-g-runner-installing
           grep '^==> ' "$d/install.log" 2>/dev/null | tail -n 1 | cut -c1-160 | sed 's/^==> /maipa-g-runner-step: /'
@@ -98,6 +105,17 @@ public struct VMControl: Sendable {
     . "$HOME/.maipa-g/env.sh" 2>/dev/null || true
     export PATH="$HOME/.local/share/swiftly/bin:$HOME/.local/bin:$PATH"
     fail() { echo "$1" > "$d/failed"; echo "==> $1"; exit 1; }
+    # Held awake while installing: a Sprite pauses 30 seconds after the last command and drops the
+    # download, so the install stalled on "Downloading" and every reply ran on the phone instead
+    # (14 November 2026). Released when the install ends, however it ends.
+    task="maipa-g-runner-install"
+    \#(keepAwakeFunctions)
+    hold=""
+    if { [ -S "$sock" ] || [ -x /.sprite/bin/sprite-env ]; } && renew; then
+      ( stop_at=$(( $(date +%s) + 3600 )); while sleep 60 && [ "$(date +%s)" -lt "$stop_at" ]; do renew || true; done ) </dev/null >/dev/null 2>&1 &
+      hold=$!
+    fi
+    trap '[ -n "$hold" ] && kill "$hold" 2>/dev/null; release_hold' EXIT
     libs() { command -v swift >/dev/null 2>&1 || return 0; swift -print-target-info 2>/dev/null | tr -d '\n' | sed -n 's/.*"runtimeLibraryPaths"[^[]*\[[^"]*"\([^"]*\)".*/\1/p'; }
     write_wrapper() {
       lib=$(libs)
@@ -115,8 +133,8 @@ public struct VMControl: Sendable {
       echo "==> Downloading MAIPA-G's runner for this app build"
       base="https://github.com/2c2bhdhw9z-cell/MAIPA-G/releases/download/runner-$rev"
       tmp=$(mktemp -d)
-      if curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$tmp/MAIPAGRunner-linux-x86_64.tar.gz" "$base/MAIPAGRunner-linux-x86_64.tar.gz" &&
-         curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$tmp/sum" "$base/MAIPAGRunner-linux-x86_64.tar.gz.sha256" &&
+      if curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 20 --max-time 600 -o "$tmp/MAIPAGRunner-linux-x86_64.tar.gz" "$base/MAIPAGRunner-linux-x86_64.tar.gz" &&
+         curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 20 --max-time 60 -o "$tmp/sum" "$base/MAIPAGRunner-linux-x86_64.tar.gz.sha256" &&
          (cd "$tmp" && sha256sum -c sum >/dev/null) &&
          tar -C "$tmp" -xzf "$tmp/MAIPAGRunner-linux-x86_64.tar.gz" MAIPAGRunner; then
         install -m 0755 "$tmp/MAIPAGRunner" "$d/bin/MAIPAGRunner"
@@ -212,10 +230,11 @@ public struct VMControl: Sendable {
     /// (docs.fly.io/sprites/keeping-sprites-running): a 5-minute task renewed every minute and
     /// removed at the end. It runs out by itself if everything is killed, and the hold ends after
     /// 12 hours in any case. `awake` says whether the hold worked, so the app can say so.
-    static let launchBody = #"""
-    r="$1"; mode="$2"; d="$3"
+    /// Holds a Sprite awake with its Tasks API (docs.fly.io/sprites/keeping-sprites-running): a
+    /// 5-minute task named `$task`, renewed by `renew`. Without a hold a Sprite pauses about 30
+    /// seconds after the last command and drops its open connections, even with a process running.
+    static let keepAwakeFunctions = #"""
     sock=/.sprite/api.sock
-    task="maipa-g-$(basename "$d")"
     sprite_task() {
       curl -fsS --max-time 15 --unix-socket "$sock" -H 'Content-Type: application/json' "$@" >/dev/null 2>&1 && return 0
       sudo -n curl -fsS --max-time 15 --unix-socket "$sock" -H 'Content-Type: application/json' "$@" >/dev/null 2>&1
@@ -232,6 +251,13 @@ public struct VMControl: Sendable {
       sprite_env_curl -X PUT "/v1/tasks/$task" -d '{ "expire": "5m" }' && return 0
       sprite_env_curl -X POST "/v1/tasks" -d "{ \"name\": \"$task\", \"expire\": \"5m\" }"
     }
+    release_hold() { sprite_task -X DELETE "http://sprite/v1/tasks/$task" || sprite_env_curl -X DELETE "/v1/tasks/$task" || true; }
+    """#
+
+    static let launchBody = #"""
+    r="$1"; mode="$2"; d="$3"
+    task="maipa-g-$(basename "$d")"
+    \#(keepAwakeFunctions)
     hold=""
     if [ -S "$sock" ] || [ -x /.sprite/bin/sprite-env ]; then
       if renew; then
@@ -247,7 +273,7 @@ public struct VMControl: Sendable {
     "$r" "$mode" "$d"
     code=$?
     [ -n "$hold" ] && kill "$hold" 2>/dev/null
-    sprite_task -X DELETE "http://sprite/v1/tasks/$task" || sprite_env_curl -X DELETE "/v1/tasks/$task" || true
+    release_hold
     echo "maipa-g-runner-exit $code"
     exit $code
     """#
