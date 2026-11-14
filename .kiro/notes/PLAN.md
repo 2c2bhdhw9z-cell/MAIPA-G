@@ -1531,3 +1531,12 @@ the phone streams it down with `downloadReleaseAsset` (both exist). Check the ha
 write MAIPA-G-data first. The card shows a real error and Retry when a file fails, never an endless
 "Still coming". `send_file`'s result says the phone has it only once it does. Small files keep the
 current route.
+**Part 2 of the same held fix: the canvas for replies on the computer.** `list_workstation_files`,
+`read_workstation_file` and `write_workstation_file` exist only on the phone (ChatSession ~1522);
+`VMTurnRunner.prepare` leaves them out and its prompt note says "the Workstation isn't available".
+Almost every reply runs on the computer, so the AI almost never sees the canvas (pictures it made,
+saved files, other chats' files). Give the runner the same three tools: the phone sends the
+Workstation list with the turn (names, kinds, sizes, ids; no bytes); a read brings the file to the
+computer through the MAIPA-G-data release (the chat-file route from build 195, `copy_file_to_computer`);
+a write goes back through the release like part 1, and the phone adds it to the canvas when the state
+arrives. Drop "the Workstation" from the runner's "aren't available" note once it works.
