@@ -57,6 +57,15 @@ Things that cost time to find out. Keep them short and true.
   same run with `gh api -X POST …/actions/workflows/release.yml/dispatches -f ref=main -f
   "inputs[sha]=$(git rev-parse origin/main)"`: Release finds any green iOS run of the exact commit,
   the tag's included. Don't let main build it a second time before publishing.
+- While an iOS run builds, check it every 2-5 minutes (owner, 14 November 2026: "Check every like
+  2-5 mins when doing an ipa… it will probably fail"). Look at the job steps
+  (`gh api …/actions/runs/<id>/jobs`), not only the run's status. A green run takes about 10 minutes:
+  "AgentCore tests (macOS)" about 3, "Build and package the IPA" about 6.5, the Linux tests about 7.
+  If "AgentCore tests (macOS)" is still running after 6 minutes, it has hung (its limit is 15):
+  cancel the run (`gh api -X POST …/actions/runs/<id>/cancel`), read which test was stuck from the
+  log, then re-run just the failed jobs or fix the test. Tests that run real shell commands hang
+  there; give every test that uses `ComputerControl.local` or a real process
+  `.enabled(if: onLinux)` before pushing.
 - The macOS "AgentCore tests" step sometimes hangs until its 15-minute limit with nothing failing
   (12 November 2026: four unrelated tests stuck, green on a plain re-run). Re-run just the failed
   job (`gh api -X POST …/actions/runs/<id>/rerun-failed-jobs`) before looking for a bug.
