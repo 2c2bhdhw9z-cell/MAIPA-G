@@ -52,6 +52,16 @@ for required in ("AgentCore tests (Linux)", "iPhone release candidate"):
 ios_on = ios.split("\nconcurrency:", 1)[0]
 if "push:" not in ios_on or "branches: [main]" not in ios_on:
     errors.append("ios.yml: must run on every push to main so each main commit gets checked")
+# Only notes may skip the build: anything that goes into the app, the runner, the scripts or the
+# workflows still builds on every push.
+push_block = ios_on.split("  push:", 1)[1].split("\n  pull_request:", 1)[0] if "  push:" in ios_on else ""
+if "paths-ignore:" in push_block:
+    ignored = [line.strip()[2:].strip().strip('"') for line in push_block.split("paths-ignore:", 1)[1].splitlines() if line.strip().startswith("- ")]
+    for pattern in ignored:
+        if pattern not in (".kiro/**", "*.md"):
+            errors.append(f"ios.yml: pushes may only skip notes (.kiro/** and *.md), not {pattern}")
+if "  paths:" in push_block:
+    errors.append("ios.yml: pushes to main must not be limited to some paths")
 if "github.event.pull_request.draft == false" in ios and "github.event_name != 'pull_request' || github.event.pull_request.draft == false" not in ios:
     errors.append("ios.yml: the Linux checks must not be skipped on pushes or manual runs")
 release_workflow = (ROOT / ".github/workflows/release.yml").read_text()

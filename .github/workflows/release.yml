@@ -147,7 +147,18 @@ jobs:
           echo "main=$SHA" >> "$GITHUB_OUTPUT"
           echo "head=$HEAD" >> "$GITHUB_OUTPUT"
           echo "run=$RUN_ID" >> "$GITHUB_OUTPUT"
-          if [ "$SHA" = "$(gh api "repos/$REPO/commits/main" --jq .sha)" ]; then echo "latest=true" >> "$GITHUB_OUTPUT"; else echo "latest=false" >> "$GITHUB_OUTPUT"; fi
+          # The newest build is "latest" (the download link). That is main's head, or a commit newer
+          # than the current latest build when the commits after it are only notes or CI files that
+          # build nothing. Only an older commit finishing after a newer build stays not-latest.
+          NOW_HEAD=$(gh api "repos/$REPO/commits/main" --jq .sha)
+          CURRENT=$(gh api "repos/$REPO/releases/latest" --jq .target_commitish 2>/dev/null || true)
+          if [ "$SHA" = "$NOW_HEAD" ]; then
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "$CURRENT" ] && [ "$(gh api "repos/$REPO/compare/$CURRENT...$SHA" --jq .status 2>/dev/null || true)" = "ahead" ]; then
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Publish
         if: steps.source.outputs.skip != 'true'
         env:

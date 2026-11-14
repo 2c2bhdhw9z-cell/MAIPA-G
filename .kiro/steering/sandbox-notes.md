@@ -20,8 +20,11 @@ Things that cost time to find out. Keep them short and true.
 - The sandbox can't change repo settings that need admin rights (turning on GitHub Pages gave
   403). Neither can a workflow's own token. Only the owner can, in the repo's Settings.
 - Releases are automatic; never make or publish one by hand. The flow:
-  - `ios.yml` runs on every push to `main` (no paths filter), on pull requests, and on
-    `workflow_dispatch`. Runs on `main` are never cancelled (only superseded PR runs are), so
+  - `ios.yml` runs on every push to `main`, on pull requests, and on `workflow_dispatch`. A push that
+    only changes notes (`.kiro/**`, top-level `*.md`) builds nothing (owner, 14 November 2026:
+    pushing text "shouldn't have to be a new build"); `check-ci-policy.py` allows only those two.
+    Release marks a build "latest" when it is main's head or newer than the current latest build,
+    so a notes push after it doesn't leave the download link on the old build. Runs on `main` are never cancelled (only superseded PR runs are), so
     two quick pushes both finish and the newest one is always released.
   - A push whose tree is identical to a merged PR head that already has a green iOS run with
     unexpired artifacts doesn't build again: its `reuse` job finds that run and the build jobs

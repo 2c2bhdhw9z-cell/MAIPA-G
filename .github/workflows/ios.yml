@@ -8,9 +8,14 @@ name: iOS
 # its artifact after proving the trees match) instead of building the same code again.
 on:
   workflow_dispatch:
-  # Every commit on main, so the newest one always has a checked build to release.
+  # Every commit on main, so the newest one always has a checked build to release. A push that only
+  # changes notes (.kiro/ and top-level .md files, none of which go into the app) builds nothing:
+  # the app is the same, and the newest release already is its build (owner, 14 November 2026).
   push:
     branches: [main]
+    paths-ignore:
+      - ".kiro/**"
+      - "*.md"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
