@@ -1515,3 +1515,19 @@ from memory and missed again. `ChangeWorkspace.notFoundMessage` now answers with
 lines where it was aiming (the window most like old_text, ±3 lines, at most 80 lines, numbered like
 read_file) and tells it to copy from them without reading again. Tests: `EditNotFoundTests`.
 Also in this push: the four real-shell tests that hung GitHub's Mac are Linux-only now.
+
+### Next fix, held for the owner's go (14 November 2026): files from the computer never reach the phone
+His Korg chat, 10:47 AM: the card "Korg 353 UI fix — unsigned.ipa" stayed on "Still coming from your
+computer…" while the AI said the IPA was attached. Cause: `VMMedia.fetch` (Remote/VMProtocol.swift)
+pulls each made file through Sprites `exec` with `ComputerControl.readFile`: base64 text, 384 KB per
+command, halving down to about 24 KB when output comes back cut. A ~150 MB IPA is hundreds to
+thousands of commands, and any failure is `try?`-skipped, so the card waits forever and nothing says
+why. `send_file` on the runner reports success once the file is in the run's folder, so the AI
+believes it was sent. (The Workstation/canvas only shows files already on the phone, so it can't
+help until the file arrives.)
+**The fix:** on the runner, a made file over a few MB goes to MAIPA-G-data's `maipa-g-files` release
+(named by SHA-256, like saving), streamed with `uploadReleaseAsset`; the state carries the asset, and
+the phone streams it down with `downloadReleaseAsset` (both exist). Check the handed-over token can
+write MAIPA-G-data first. The card shows a real error and Retry when a file fails, never an endless
+"Still coming". `send_file`'s result says the phone has it only once it does. Small files keep the
+current route.
