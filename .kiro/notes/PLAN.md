@@ -1589,3 +1589,19 @@ not at all while the phone was frozen. Computer files came over in base64 pieces
 **Not in this batch:** the Workstation tools on the computer (part 2 of the held fix); steers lost
 on the phone in the background (audit item 8); `update_session_information` on the phone (item 2).
 
+### His test of build 203, 14 November 2026 (Expo chat 0d0d1813), fixed in the next build
+- Test 1 (web search) worked: one `web_search`, three pages, `npm view` on the computer, $0.16.
+- Test 3 ran on the phone, not the computer, and the chat never said why: `startOnComputer`'s
+  fall-back reason went on the chat's turn, but the run started from the chat as it was before,
+  so its first update overwrote the reason. Now the run starts from the current chat. (Why the
+  computer refused isn't known yet; the next reply that falls back will say.)
+- He left the app (test 4); iOS froze the reply mid-answer, and when he came back 11 minutes
+  later the watchdog called it "The AI sent nothing for 5 minutes". Now a reply on the phone
+  pauses when iOS's background time runs out (`pauseBeforeIOSFreezes`, also when iOS 26's
+  continued processing ends) and carries on from where it was when the app opens
+  (`resumePausedChats`). A reply on the computer is untouched.
+- The chat wasn't saved when the reply started: a pass cut short used up the first save, and the
+  hold then waited 5 minutes. The hold now starts only once the chat has really gone up.
+- Korg-Bot's `main` has only README.md; his Korg work is on PR #1's branch
+  (`maipa-g/build-korg-s-first-rain-based-23ecdd8e`), so test 3 found nothing to do.
+

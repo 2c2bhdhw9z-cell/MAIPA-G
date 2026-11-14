@@ -512,6 +512,8 @@ final class AppModel {
         // notification, no balance reading yet and no end to its spend tracking. This runs again
         // when the phone picks the reply up and it really ends.
         guard !session.hasComputerRun else { return }
+        // Paused before iOS froze the app: it carries on when the app opens, and finishes then.
+        guard !session.isPausedInBackground else { return }
         // Real spend: read the balance again after the turn, and once more a little later because
         // providers can take a few seconds to charge. The turn's real cost is the difference.
         // Only the provider the turn used is read; a turn that overlapped another on that provider

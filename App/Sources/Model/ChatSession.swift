@@ -589,13 +589,22 @@ final class ChatSession: Identifiable {
         run?.cancel()
     }
 
-    func suspendForBackgroundIfNeeded() {
+    /// iOS is about to freeze the app (its background time ran out). A reply running here on the
+    /// phone is paused at once and saved, and carries on from where it was when the app is opened
+    /// again (`ChatLibrary.resumePausedChats`). Left running, its request froze mid-answer, and when
+    /// the app came back that counted as "The AI sent nothing for 5 minutes" (14 November 2026). A
+    /// reply on the computer keeps going there; the phone only stops watching it.
+    func pauseBeforeIOSFreezes() {
         guard isRunning else { return }
-        if app?.backgroundJobs.isContinuedProcessingActive == true {
+        if hasComputerRun || app?.backgroundJobs.isContinuedProcessingActive == true {
+            saveSoon(immediately: true)
             return
         }
         suspendForBackground()
     }
+
+    /// Paused because iOS was about to freeze the app; it carries on when the app is opened.
+    var isPausedInBackground: Bool { pausedInBackground }
 
     private func suspendForBackground() {
         guard isRunning else { return }
@@ -1335,9 +1344,9 @@ final class ChatSession: Identifiable {
         isRunning = true
         userStoppedExplicitly = false
         let grace = BackgroundGrace(name: "MAIPA-G reply") { [weak self] in
-            // iOS is taking the app away. Save, but do not cancel the reply. A short trip
-            // to the home screen used to kill the turn and every sub-agent.
-            self?.saveSoon(immediately: true)
+            // iOS is taking the app away: its background time ran out. A short trip to the home
+            // screen never gets here, so it doesn't touch the reply.
+            self?.pauseBeforeIOSFreezes()
         }
         Task { [weak self] in
             await self?.runTurn()
@@ -2062,6 +2071,10 @@ final class ChatSession: Identifiable {
         ) {
             run = computerRun
         } else {
+            // The chat as it is now, with startOnComputer's reason the computer couldn't take the
+            // reply. The run used to start from the chat as it was before, so the reason was
+            // overwritten by the reply's first update and never shown or saved.
+            input.chat = chat
             run = AgentLoop.start(input, environment: environment)
         }
         self.run = run

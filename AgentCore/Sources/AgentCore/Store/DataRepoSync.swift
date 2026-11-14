@@ -347,7 +347,9 @@ public actor DataRepoSync {
         while true {
             attempt += 1
             do {
-                return try await syncOnce(holding: holding)
+                let report = try await syncOnce(holding: holding)
+                noteSaved(held.subtracting(holding), report: report)
+                return report
             } catch let error as GitHubAPIError where Self.isRefConflict(error) && attempt < 4 {
                 // The branch moved while we were working: someone else saved. Start over after brief backoff.
                 try? await Task.sleep(nanoseconds: UInt64(attempt) * 120_000_000)
@@ -356,27 +358,26 @@ public actor DataRepoSync {
         }
     }
 
-    /// The paths held back this pass: asked for, and not yet held longer than `holdLimit`.
+    /// The paths held back this pass: asked for, saved since their reply started, and not yet
+    /// held longer than `holdLimit`. The rest go this pass.
     private func holdBack(_ requested: Set<String>) -> Set<String> {
         let now = ProcessInfo.processInfo.systemUptime
         heldSince = heldSince.filter { requested.contains($0.key) }
         var held: Set<String> = []
         for path in requested {
-            guard let since = heldSince[path] else {
-                // A reply just started: the chat is saved now, so it's in MAIPA-G-data from the
-                // start (and the computer can keep it up to date there), then held.
-                heldSince[path] = now
-                continue
-            }
-            if now - since >= holdLimit {
-                // Held long enough: saved this pass, then held again from now.
-                heldSince[path] = now
-            } else {
-                heldSince[path] = since
-                held.insert(path)
-            }
+            guard let since = heldSince[path], now - since < holdLimit else { continue }
+            held.insert(path)
         }
         return held
+    }
+
+    /// The hold starts again only for a chat this pass really saved. It used to start when the
+    /// pass began, so a pass cut short (the app going to the background) used up the reply's first
+    /// save, and the chat waited 5 minutes (or the whole reply) for the next one (14 November 2026).
+    private func noteSaved(_ released: Set<String>, report: Report) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let notSaved = Set(report.pendingPaths).union(report.deferred).union(report.problems.map(\.path))
+        for path in released where !notSaved.contains(path) { heldSince[path] = now }
     }
 
     /// Where the next commit goes on top of: the branch's commit and its tree.

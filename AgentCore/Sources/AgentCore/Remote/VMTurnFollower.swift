@@ -226,7 +226,7 @@ public enum VMNotices {
     public static let stopFailed = "MAIPA-G couldn't reach your computer to stop this reply, so it may still be running there. Tap Stop again to try again."
 
     public static func fellBack(_ reason: String) -> String {
-        "Your computer couldn't take this reply (\(reason)), so it runs on the phone and stops if you leave the app."
+        "Your computer couldn't take this reply (\(reason)), so it runs on the phone. If you leave the app it pauses, and it carries on when you come back."
     }
 
     static func isPhoneNotice(_ notice: String) -> Bool {

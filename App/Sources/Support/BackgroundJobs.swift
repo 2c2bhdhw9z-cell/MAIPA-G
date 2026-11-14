@@ -82,6 +82,8 @@ final class BackgroundJobs {
                     Task { @MainActor [weak owner] in
                         guard let owner else { return }
                         owner.isContinuedProcessingActive = false
+                        // iOS ended the extra time: replies on the phone pause before it freezes.
+                        owner.app?.library.pauseRepliesBeforeIOSFreezes()
                         if (owner.app?.jobs.activeCount ?? 0) > 0 {
                             let title = owner.app?.jobs.jobs.first(where: { ![.done, .failed, .stopped].contains($0.status) })?.title ?? "the active job"
                             owner.lastFailure = "iOS stopped watching \(title) in the background. The job itself keeps running on your computer (or on GitHub, for a preview build); open Jobs to see its result."

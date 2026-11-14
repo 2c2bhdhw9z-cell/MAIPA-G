@@ -269,6 +269,13 @@ final class ChatLibrary {
         }
     }
 
+    /// iOS is about to freeze the app: replies running on the phone pause, to carry on when it opens.
+    func pauseRepliesBeforeIOSFreezes() {
+        for session in sessions.values {
+            session.pauseBeforeIOSFreezes()
+        }
+    }
+
     func showHome() {
         openSession = nil
         dropIdleSessions()

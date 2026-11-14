@@ -650,6 +650,28 @@ struct SyncReliabilityTests {
         #expect(ended.pendingPaths.isEmpty)
     }
 
+    /// The reply's first save used to be used up by a pass that couldn't send the chat, so the
+    /// chat then waited the whole hold for its next save (14 November 2026).
+    @Test func aReplysFirstSaveIsNotUsedUpByAPassThatCouldNotSendIt() async throws {
+        let rig = try await SyncRig()
+        defer { rig.cleanUp() }
+        await rig.sync.setPassLimits(holdSeconds: 600)
+        var chat = DataRepoSyncTests.chat("refused at first", updated: Date())
+        let path = ChatStore.relativePath(for: chat.id)
+        try await rig.store.save(chat)
+        // GitHub refuses the pass's first upload, so the pass stops without saving anything.
+        rig.github.blobLimitAfter = 0
+        _ = try? await rig.sync.sync(holding: [path])
+        #expect(rig.github.fake.remoteFile(path) == nil)
+        rig.github.blobLimitAfter = nil
+        let next = try await rig.sync.sync(holding: [path])
+        #expect(next.uploaded == [path], "still the reply's first save")
+        chat.messages.append(.user("more"))
+        try await rig.store.save(chat)
+        let held = try await rig.sync.sync(holding: [path])
+        #expect(held.uploaded.isEmpty, "held once it has really been saved")
+    }
+
     @Test func aVeryLongReplyIsStillSavedNowAndThen() async throws {
         let rig = try await SyncRig()
         defer { rig.cleanUp() }
