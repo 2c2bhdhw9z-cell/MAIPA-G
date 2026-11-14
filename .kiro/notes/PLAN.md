@@ -1506,3 +1506,12 @@ went silent. `suspendForBackgroundIfNeeded` is still never called (audit item 7)
 
 ### Mac test hang (14 November 2026)
 The macOS "AgentCore tests" step hit its 15-minute limit on 6f22bca with 26 tests never finishing; the first stuck one was "list_files can list the real checkout on the computer" (real shell, no Linux guard). Four real-shell tests had no `.enabled(if: onLinux)`: ToolParityTests "run_command puts the exit code first...", "run_command can start a command in the background...", "list_files can list the real checkout on the computer", and ComputerRunnerTests "A failing staged sync never loses the computer's own edits". Guard them (and every new test that uses `ComputerControl.local`) with the Linux-only flag; push with the next code change.
+
+### A missed edit shows the real lines (14 November 2026)
+After build 201 the AI still looped on tests/plugins.test.mjs (his 9:43 and 9:56 AM screenshots:
+read 20 lines, edit, "didn't work", read 20 lines…). Each miss came back with only
+`"old_text" was not found … Call read_file … first`, so it read a small window, retyped the text
+from memory and missed again. `ChangeWorkspace.notFoundMessage` now answers with the file's real
+lines where it was aiming (the window most like old_text, ±3 lines, at most 80 lines, numbered like
+read_file) and tells it to copy from them without reading again. Tests: `EditNotFoundTests`.
+Also in this push: the four real-shell tests that hung GitHub's Mac are Linux-only now.

@@ -392,7 +392,7 @@ public actor ChangeWorkspace {
             replacedCount = 1
             tolerantLines = fuzzy.lines
         } else {
-            throw ToolInputError("\"old_text\" was not found in \(path). Call read_file on \(path) first to get the exact current lines.")
+            throw ToolInputError(Self.notFoundMessage(path: path, source: normalizedSource, oldText: oldNorm))
         }
 
         let existedInBase: Bool
@@ -531,6 +531,74 @@ public actor ChangeWorkspace {
 
     private func readBase(_ path: String) async throws -> DecodedFileRead {
         try await base.readDecodedFile(path)
+    }
+
+    /// When old_text isn't in the file, the reply shows the lines that look most like it, as the
+    /// file is now, so the next try can copy the exact text. Saying only "read the file again"
+    /// sent the AI into a loop: read a few lines, retype them from memory, miss, read again
+    /// (owner, 14 November 2026: the same two files read and edited over and over).
+    static func notFoundMessage(path: String, source: String, oldText: String) -> String {
+        let lines = source.components(separatedBy: "\n")
+        let wanted = oldText.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        let wantedSet = Set(wanted.filter { !$0.isEmpty })
+        let head = "\"old_text\" was not found in \(path) (it has \(lines.count) lines now)."
+        guard let best = closestRegion(lines: lines, wanted: wanted, wantedSet: wantedSet) else {
+            return head + " No part of it looks like old_text, so the text you remember isn't there. Read the part you want to change with read_file, then copy old_text from it exactly."
+        }
+        let context = 3
+        var start = max(0, best.lowerBound - context)
+        var end = min(lines.count - 1, best.upperBound + context)
+        // At most 80 lines, centred on the match.
+        if end - start + 1 > 80 {
+            start = max(0, best.lowerBound - 2)
+            end = min(lines.count - 1, start + 79)
+        }
+        var shown: [String] = []
+        var characters = 0
+        for index in start...end {
+            let number = String(index + 1)
+            let row = String(repeating: " ", count: max(0, 6 - number.count)) + number + "\t" + lines[index]
+            characters += row.count + 1
+            if characters > 8_000 { shown.append("   …\t(more lines not shown)"); break }
+            shown.append(row)
+        }
+        return head + " The closest part of the file is lines \(best.lowerBound + 1)–\(best.upperBound + 1), shown here as it is now (line \(start + 1) to \(start + shown.count), numbered like read_file; the number and the tab before each line are not part of the file):\n"
+            + shown.joined(separator: "\n")
+            + "\nCopy old_text from these lines exactly, character for character, and try again. Don't read the file again for this."
+    }
+
+    /// The run of lines most like `wanted`: the window, the same height as old_text, with the most
+    /// lines that also appear in old_text (spaces at the ends ignored). Nil when nothing matches.
+    static func closestRegion(lines: [String], wanted: [String], wantedSet: Set<String>) -> ClosedRange<Int>? {
+        guard !lines.isEmpty, !wantedSet.isEmpty else { return nil }
+        let trimmed = lines.map { $0.trimmingCharacters(in: .whitespaces) }
+        let height = min(max(1, wanted.count), trimmed.count)
+        var hits = 0
+        for index in 0..<height where !trimmed[index].isEmpty && wantedSet.contains(trimmed[index]) { hits += 1 }
+        var bestHits = hits
+        var bestStart = 0
+        if trimmed.count > height {
+            for start in 1...(trimmed.count - height) {
+                let leaving = trimmed[start - 1]
+                if !leaving.isEmpty, wantedSet.contains(leaving) { hits -= 1 }
+                let entering = trimmed[start + height - 1]
+                if !entering.isEmpty, wantedSet.contains(entering) { hits += 1 }
+                if hits > bestHits { bestHits = hits; bestStart = start }
+            }
+        }
+        if bestHits > 0 { return bestStart...(bestStart + height - 1) }
+        // No whole line matches (every line was retyped a little differently): anchor on the
+        // longest wanted line's first words.
+        let anchors = wanted.filter { $0.count >= 12 }.sorted { $0.count > $1.count }
+        for anchor in anchors.prefix(5) {
+            let probe = String(anchor.prefix(24))
+            if let found = trimmed.firstIndex(where: { $0.contains(probe) }) {
+                let offset = wanted.firstIndex(of: anchor) ?? 0
+                let start = max(0, found - offset)
+                return start...min(trimmed.count - 1, start + height - 1)
+            }
+        }
+        return nil
     }
 
     public static func safe(_ rawPath: String) throws -> String {

@@ -53,7 +53,7 @@ struct ComputerRunnerTests {
 
     // MARK: Staged edits survive a failure
 
-    @Test("A failing staged sync never loses the computer's own edits")
+    @Test("A failing staged sync never loses the computer's own edits", .enabled(if: ComputerRunnerTests.onLinux))
     func failedSyncKeepsComputerEdits() async throws {
         let home = try Self.temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }

@@ -6,6 +6,13 @@ import Testing
 /// remove something to make it better"): every change here adds a capability.
 @Suite("Kiro tool parity")
 struct ToolParityTests {
+    // Real shell commands hang on GitHub's Mac (see Build174Tests); these run in the Linux job.
+    #if os(Linux)
+    static let onLinux = true
+    #else
+    static let onLinux = false
+    #endif
+
     static func temporaryFolder(_ name: String) throws -> URL {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-\(name)-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -211,7 +218,7 @@ struct ToolParityTests {
 
     // MARK: 2. run_command
 
-    @Test("run_command puts the exit code first, runs in any existing folder, refuses a missing one, and stops at timeout_seconds")
+    @Test("run_command puts the exit code first, runs in any existing folder, refuses a missing one, and stops at timeout_seconds", .enabled(if: ToolParityTests.onLinux))
     func runCommandLikeKiro() async throws {
         let home = try Self.temporaryFolder("parity-run")
         defer { try? FileManager.default.removeItem(at: home) }
@@ -248,7 +255,7 @@ struct ToolParityTests {
         #expect(!tool.spec.function.description.contains("longer than 2 minutes"))
     }
 
-    @Test("run_command can start a command in the background and hand back its task")
+    @Test("run_command can start a command in the background and hand back its task", .enabled(if: ToolParityTests.onLinux))
     func runCommandInBackground() async throws {
         let home = try Self.temporaryFolder("parity-bg")
         defer { try? FileManager.default.removeItem(at: home) }
@@ -305,7 +312,7 @@ struct ToolParityTests {
 
     // MARK: 8. list_files on the computer
 
-    @Test("list_files can list the real checkout on the computer")
+    @Test("list_files can list the real checkout on the computer", .enabled(if: ToolParityTests.onLinux))
     func listFilesOnComputer() async throws {
         let home = try Self.temporaryFolder("parity-list")
         defer { try? FileManager.default.removeItem(at: home) }
