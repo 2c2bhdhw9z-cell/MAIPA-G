@@ -336,6 +336,8 @@ public struct AgentEnvironment: Sendable {
     /// Longest a model request may go with nothing at all arriving (keep-alives don't count)
     /// before the step ends with the early-stop notice instead of sitting on "Thinking…".
     public var modelSilenceLimit: TimeInterval = 300
+    /// Scales every retry wait (tests make it tiny).
+    public var retryDelayScale: Double = 1
     /// Longest the turn waits on background sub-agents that send nothing at all before it stops
     /// them and answers with what it has.
     public var backgroundHelperSilenceLimit: TimeInterval = 600
@@ -1169,7 +1171,7 @@ private struct Runner {
                 }
                 try Task.checkCancellation()
                 guard accumulator.hasOutput || !accumulator.reasoning.isEmpty || accumulator.finishReason != nil else {
-                    throw OpenRouterAPIError(httpStatus: 502, code: "empty_reply", message: "The AI sent back an empty reply.")
+                    throw OpenRouterAPIError(httpStatus: 502, code: Self.emptyReplyCode, message: "The AI sent back an empty reply.")
                 }
                 let measured = timing()
                 await finish(step: index, with: accumulator)
@@ -1188,6 +1190,7 @@ private struct Runner {
                     // don't say the reply carried on properly.
                     clearStoppedEarly()
                 }
+                turn.notices.removeAll { $0.contains(Self.providerDownNoticePrefix) }
                 emit(milestone: true)
                 return
             } catch {
@@ -1204,7 +1207,10 @@ private struct Runner {
                     throw error
                 }
                 turn.steps.remove(at: index)
-                if firstByteAt == nil {
+                if let api = error as? OpenRouterAPIError, api.code != Self.emptyReplyCode {
+                    // The service answered, with an error: that isn't silence.
+                    silentSeconds = 0
+                } else if firstByteAt == nil {
                     silentSeconds += Date().timeIntervalSince(sentAt)
                 } else {
                     // Something did arrive (thinking, say), so this attempt wasn't silence.
@@ -1224,6 +1230,16 @@ private struct Runner {
                     } else if delay > 0 {
                         try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                     }
+                    continue
+                case .waitForProvider(let delay):
+                    retryWaitSeconds += delay
+                    let service = (error as? OpenRouterAPIError)?.providerName ?? "The AI's provider"
+                    let notice = "\(route.label) on \(service) \(Self.providerDownNoticePrefix) (it says it's temporarily unavailable). Asking again every few seconds: the reply starts the moment it answers. Tap Stop to give up."
+                    if !turn.notices.contains(notice) {
+                        turn.notices.append(notice)
+                        emit(milestone: false)
+                    }
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                     continue
                 case .switchToFree:
                     await environment.onOutOfCredits()
@@ -1327,7 +1343,13 @@ private struct Runner {
         turn.steps[index] = step
     }
 
-    enum Recovery { case retry(TimeInterval), switchToFree, shrinkContext, simplifyRequest, giveUp }
+    enum Recovery { case retry(TimeInterval), waitForProvider(TimeInterval), switchToFree, shrinkContext, simplifyRequest, giveUp }
+
+    /// About 10 minutes of tries, 2 seconds apart; Stop ends it any time.
+    static let providerDownTries = 300
+    static let providerDownNoticePrefix = "isn't answering right now"
+    /// A stream that ended with nothing in it: not the service saying it's down.
+    static let emptyReplyCode = "empty_reply"
 
     func recovery(for error: Error, attempt: Int) async -> Recovery {
         if let api = error as? OpenRouterAPIError {
@@ -1342,8 +1364,21 @@ private struct Runner {
             case .rateLimited where attempt <= 3 && (api.retryAfter ?? 15) <= 65:
                 let suggested = api.retryAfter ?? Double(attempt * 5)
                 return .retry(min(max(suggested, 1), 60))
-            case .providerFailed where attempt <= 2, .noModelAvailable where attempt <= 2:
-                return .retry(Double(attempt) * 1.5)
+            case .noModelAvailable where (Int(api.code) ?? api.httpStatus) != 503,
+                 .providerFailed where api.code == Self.emptyReplyCode:
+                // The model isn't there (404), or a stream came back empty: a quick second look,
+                // no more.
+                return attempt <= 2 ? .retry(Double(attempt) * 1.5 * environment.retryDelayScale) : .giveUp
+            case .providerFailed, .noModelAvailable:
+                // The chosen AI's service is down for a moment (a 503 "temporarily unavailable",
+                // a 502): the same AI is asked again every couple of seconds, so the reply starts
+                // the moment it answers. It is never swapped for another AI (owner, 15 November
+                // 2026: "it's going to use whatever model I have selected"). It used to get two
+                // more tries 4.5 seconds apart, and then the reply failed.
+                // A Retry-After it sends is kept to, up to 10 seconds.
+                guard attempt <= Self.providerDownTries else { return .giveUp }
+                let pause = min(max(api.retryAfter ?? 0, attempt == 1 ? 1 : 2), 10)
+                return .waitForProvider(pause * environment.retryDelayScale)
             case .contextTooLong where attempt <= 2:
                 return .shrinkContext
             case .badRequest where attempt <= 2 && (route.effort != nil || route.automaticCaching || !fallbackModels.isEmpty):
@@ -1743,6 +1778,8 @@ private struct Runner {
                 )
             case .contextTooLong:
                 return TurnFailure(kind: .tooLong, message: "This chat is too long for this AI. Start a new chat, or pick an AI that can hold more.", detail: api.description)
+            case .noModelAvailable where (Int(api.code) ?? api.httpStatus) == 503:
+                return TurnFailure(kind: .providerFailed, message: "\(service) kept saying this AI was temporarily unavailable for 10 minutes, so I stopped asking. Tap Try again.", detail: api.description)
             case .noModelAvailable:
                 return TurnFailure(kind: .providerFailed, message: "No AI on \(service) could take this request just now. Try again, or pick another AI.", detail: api.description)
             case .providerFailed:

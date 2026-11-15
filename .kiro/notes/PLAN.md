@@ -1675,3 +1675,17 @@ in memory and a relaunch forgot the Korg turn. It's saved now (`BalanceOverlapTr
 UserDefaults), and a turn left running for a day stops counting. Plus the held investigate-first and
 iPhone-only prompt rules.
 
+
+### A chosen AI that's briefly down is asked again until it answers (owner, 15 November 2026)
+His Continuum chat (DeepSeek V4.1 Flash 1017 on OneProvider, Max) failed at 8:41 and 8:58 AM
+Eastern with "OneProvider error (503): Service temporarily unavailable; retry later", and once with
+a 502. A 503 got two more tries 4.5 seconds apart and then the reply failed. OneProvider's error
+guide says 500-504 are temporary on their side, nothing is wrong with the key or request, and to
+retry with a pause. Their own public numbers (api.oneprovider.dev/_status.json) showed errors at
+0.1% an hour overnight, 11.5% in the 8 AM Eastern hour and 37% early in the 9 AM hour, while their
+status page said all clear. He doesn't want to wait minutes for a reply to start, and doesn't want
+another AI swapped in: "it's going to use whatever model I have selected". Now a 503 or 502 asks the
+same AI again after 1 second, then every 2 (a Retry-After is kept to, up to 10 seconds), for about
+10 minutes, with a notice that goes away the moment it answers; Stop gives up any time. A 404 (model
+not there) and an empty stream still give up after two quick retries. Errors the service answers
+with no longer count toward the 5-minute silence limit. Tests: `ProviderDownTests`.
