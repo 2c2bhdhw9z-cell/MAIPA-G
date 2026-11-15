@@ -75,6 +75,33 @@ public actor ChangeWorkspace {
         changes[change.path] = change
     }
 
+    /// Kiro's `git checkout <branch>`: from now on this works on `newBase` (another branch), and
+    /// the staged changes come along, the way uncommitted edits do. A staged write is kept as it
+    /// is; a staged deletion of a file the new branch doesn't have is dropped. Every tool that
+    /// reads or saves through this sees the new branch at once.
+    @discardableResult
+    public func switchBase(to newBase: RepoWorkspace) async -> Int {
+        let carried = changes
+        baseHolder.set(newBase)
+        changes.removeAll()
+        for (_, item) in carried {
+            switch item {
+            case .write(let path, let data, _):
+                var existed = false
+                if let decoded = try? await newBase.readDecodedFile(path) {
+                    if case .missing = decoded {} else { existed = true }
+                }
+                // Already what the new branch has: nothing to stage.
+                if existed, let blob = try? await baseBlob(for: path), blob == Hashing.gitBlobID(data) { continue }
+                changes[path] = .write(path: path, data: data, existed: existed)
+            case .delete(let path, let previous):
+                if let decoded = try? await newBase.readDecodedFile(path), case .missing = decoded { continue }
+                changes[path] = .delete(path: path, previous: previous)
+            }
+        }
+        return changes.count
+    }
+
     public func hasStagedChanges() -> Bool {
         !changes.isEmpty
     }

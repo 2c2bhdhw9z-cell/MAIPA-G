@@ -95,13 +95,16 @@ public struct SaveChangesTool: AgentTool {
         return effective
     }
 
+    /// The branch the staged copy is on now: the chat's, or another one switch_branch moved to.
+    var currentBranch: String { workspace.base.branch }
+
     /// Only a repo's rules file alone asks first; when the person chose direct saves, it saves.
     func needsDirectSaveApproval() async -> Bool {
         let effective = await effectiveRules()
-        guard effective.directSave, !effective.directSaveFromPerson, selectedBranch == defaultBranch else { return false }
+        guard effective.directSave, !effective.directSaveFromPerson, currentBranch == defaultBranch else { return false }
         return await session.activeReceipt(for: workspace.base.repo) == nil
     }
-    public var spec: ToolSpec { ToolSpec(name: name, description: "Save all staged file changes safely. Repository rules decide direct save versus a pull request.", parameters: ["type": "object", "properties": ["title": ["type": "string"], "summary": ["type": "string"]], "required": ["title"]]) }
+    public var spec: ToolSpec { ToolSpec(name: name, description: "Save all staged file changes as one commit on the branch you are on (switch_branch changes it). On the default branch, the repo's rules and how the person said to save (set_saving_style) decide between saving straight to it and a pull request from a new branch; on any other branch the commit goes there.", parameters: ["type": "object", "properties": ["title": ["type": "string"], "summary": ["type": "string"]], "required": ["title"]]) }
     public func runningSummary(for arguments: JSONValue) -> String { "Saving changes…" }
     public func approvalRequest(for arguments: JSONValue) async -> ToolApprovalRequest? {
         guard await needsDirectSaveApproval() else { return nil }
@@ -123,12 +126,95 @@ public struct SaveChangesTool: AgentTool {
     }
     private func save(arguments: JSONValue) async throws -> ToolOutput {
         let title = try arguments.requiredString("title")
-        let receipt = try await service.save(workspace, selectedBranch: selectedBranch, defaultBranch: defaultBranch, rules: await effectiveRules(), title: title, body: arguments.optionalString("summary") ?? "Changes made by MAIPA-G.", activeReceipt: await session.activeReceipt(for: workspace.base.repo))
+        let receipt = try await service.save(workspace, selectedBranch: currentBranch, defaultBranch: defaultBranch, rules: await effectiveRules(), title: title, body: arguments.optionalString("summary") ?? "Changes made by MAIPA-G.", activeReceipt: await session.activeReceipt(for: workspace.base.repo))
         await session.record(receipt)
         if let pull = receipt.pullRequest {
             return ToolOutput(forModel: "Saved commit \(receipt.savedCommit) and opened \(receipt.repo.isGitLab ? "merge request !" : "pull request #")\(pull.number) in \(receipt.repo.fullName): \(pull.htmlURL)", summary: receipt.repo.isGitLab ? "Opened merge request !\(pull.number)" : "Opened pull request #\(pull.number)", detail: pull.htmlURL)
         }
         return ToolOutput(forModel: "Saved commit \(receipt.savedCommit) directly to \(receipt.branch) in \(receipt.repo.fullName).", summary: "Saved to \(receipt.branch)")
+    }
+}
+
+/// Kiro's `git checkout`: work on another branch (an open pull request's, say) or a new one, for
+/// the rest of the reply and the chat. Reads, edits, commands and save_changes all use it, and
+/// staged changes come along. The Korg chat found its work on PR #1's branch but could only save
+/// a second pull request carrying the whole tree, because the chat was on main (14 November 2026).
+public struct SwitchBranchTool: AgentTool {
+    public static let toolName = "switch_branch"
+    public let name = SwitchBranchTool.toolName
+    let workspace: ChangeWorkspace
+    let github: GitHubClient
+    let defaultBranch: String
+
+    public init(workspace: ChangeWorkspace, github: GitHubClient, defaultBranch: String) {
+        self.workspace = workspace
+        self.github = github
+        self.defaultBranch = defaultBranch
+    }
+
+    public var spec: ToolSpec {
+        ToolSpec(name: name, description: """
+        Switch the repo to another branch, like `git checkout`: an existing branch (such as an open pull request's head \
+        branch, when the work is there) or, with create: true, a new branch from where you are now. From then on \
+        read_file, search, edits, commands on the computer and save_changes all use that branch, the chat stays on it, \
+        and staged changes come along. Saving on a branch other than the default one commits to that branch (an open \
+        pull request from it gets the commit). Use it whenever the person names a branch to work on or save to, or the \
+        work you need is on another branch; to save straight to the default branch, switch to it and use \
+        set_saving_style.
+        """, parameters: [
+            "type": "object",
+            "properties": [
+                "branch": ["type": "string", "description": "The branch name, like \"feature/login\" (not a pull request number)."],
+                "create": ["type": "boolean", "description": "Make it as a new branch from the current commit. Default false."],
+            ],
+            "required": ["branch"],
+        ])
+    }
+
+    public func runningSummary(for arguments: JSONValue) -> String { "Switching to \(arguments.optionalString("branch") ?? "a branch")…" }
+
+    /// The branch name as git wants it, or nil when it isn't one.
+    static func clean(_ raw: String) -> String? {
+        var name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        for prefix in ["refs/heads/", "origin/"] where name.hasPrefix(prefix) { name.removeFirst(prefix.count) }
+        let bad = name.isEmpty || name.count > 200 || name.hasPrefix("-") || name.hasPrefix("/") || name.hasSuffix("/")
+            || name.hasSuffix(".lock") || name.contains("..") || name.contains("//") || name.contains("@{")
+            || name.unicodeScalars.contains { $0.value < 0x21 || "~^:?*[\\".unicodeScalars.contains($0) || $0.value == 0x7F }
+        return bad ? nil : name
+    }
+
+    public func run(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
+        let raw = try arguments.requiredString("branch")
+        guard let branch = Self.clean(raw) else { throw ToolInputError("\"\(raw)\" isn't a branch name git accepts.") }
+        let create = arguments.optionalBool("create") ?? false
+        let base = workspace.base
+        let repo = base.repo
+        if branch == base.branch, !create {
+            return ToolOutput(forModel: "Already on \(branch) (\(String(base.commit.prefix(7)))).", summary: "On \(branch)")
+        }
+        let head: String
+        if create {
+            if try await github.branchHead(repo, branch: branch) != nil {
+                throw ToolInputError("\(branch) already exists in \(repo.fullName). Call switch_branch without create to work on it.")
+            }
+            try await github.createBranch(repo, branch: branch, from: base.commit)
+            head = base.commit
+        } else {
+            guard let found = try await github.branchHead(repo, branch: branch) else {
+                let names = ((try? await github.branches(repo)) ?? []).map(\.name).prefix(40)
+                throw ToolInputError("\(repo.fullName) has no branch \(branch). Its branches: \(names.joined(separator: ", ")). To make it, call again with create: true.")
+            }
+            head = found
+        }
+        let carried = await workspace.switchBase(to: base.advancing(toCommit: head, branch: branch))
+        let saving = branch == defaultBranch
+            ? "save_changes follows the repo's rules here (a pull request unless the person said to save straight to \(branch))."
+            : "save_changes commits to \(branch); a pull request from it gets the commit."
+        let staged = carried == 0 ? "" : " \(carried) staged change\(carried == 1 ? "" : "s") came along."
+        return ToolOutput(
+            forModel: "Now on \(branch) at \(String(head.prefix(7)))\(create ? ", a new branch made from \(base.branch)" : ""). Reads, edits, commands and saves use it from here, and the chat stays on it.\(staged) \(saving)",
+            summary: create ? "Made and switched to \(branch)" : "Switched to \(branch)"
+        )
     }
 }
 

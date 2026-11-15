@@ -360,6 +360,7 @@ public struct VMTurnRunner: Sendable {
                 AppendFileTool(workspace: staged, authorization: authorization, rules: rules),
                 DeleteFileTool(workspace: staged, authorization: authorization, rules: rules),
                 SaveChangesTool(workspace: staged, service: service, session: session, selectedBranch: repo.workingBranch, defaultBranch: repo.repo.defaultBranch, rules: rules, choice: savingChoice),
+                SwitchBranchTool(workspace: staged, github: github, defaultBranch: repo.repo.defaultBranch),
             ]
             tools.append(LoadSpecTool(
                 read: { path in
@@ -374,7 +375,9 @@ public struct VMTurnRunner: Sendable {
             homePath = path
             await prepareCheckout(repo: repo, token: token, path: path, logger: logger)
             // One copy, like Kiro's one folder: the staged files and this checkout stay in step.
-            let repoMirror = ComputerRepoMirror(control: control, workspace: staged, homePath: path, commit: repo.commit, gate: ComputerRepoMirror.gate(authorization: authorization, rules: rules))
+            var mirrorToken: CheckoutToken?
+            if repo.repo.isPrivate { mirrorToken = { @Sendable in try? await handedOver.installationToken() } }
+            let repoMirror = ComputerRepoMirror(control: control, workspace: staged, homePath: path, commit: repo.commit, cloneURL: repo.repo.ref.webURL.absoluteString + ".git", token: mirrorToken, gate: ComputerRepoMirror.gate(authorization: authorization, rules: rules))
             if let problem = await repoMirror.start() { logger.progress(problem) }
             mirror = repoMirror
             hookRunner = { command in

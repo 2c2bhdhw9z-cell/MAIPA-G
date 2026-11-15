@@ -155,7 +155,10 @@ public actor GitHubChangeService {
         guard !staged.isEmpty else { throw ChangeWorkspaceError.noChanges }
         let repo = workspace.base.repo
         let continuing: SaveReceipt?
-        if let activeReceipt, activeReceipt.repo == repo, let pull = activeReceipt.pullRequest {
+        // An open pull request is continued only from its own branch. Moved to another branch
+        // (switch_branch), the save goes to that branch instead.
+        if let activeReceipt, activeReceipt.repo == repo, let pull = activeReceipt.pullRequest,
+           activeReceipt.branch == selectedBranch {
             let current = try? await github.pullRequest(repo, number: pull.number)
             continuing = current?.state == "open" ? activeReceipt : nil
         } else {

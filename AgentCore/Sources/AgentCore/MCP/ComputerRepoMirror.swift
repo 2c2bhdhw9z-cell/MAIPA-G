@@ -17,7 +17,7 @@ public actor ComputerRepoMirror {
     let control: ComputerControl
     let workspace: ChangeWorkspace
     let homePath: String
-    let startCommit: String
+    private(set) var startCommit: String
     let cloneURL: String?
     let token: CheckoutToken?
     let gate: StageGate
@@ -52,6 +52,16 @@ public actor ComputerRepoMirror {
     }
 
     public var isStarted: Bool { started }
+
+    /// The staged copy moved to another branch (switch_branch): the computer's copy follows it
+    /// before the next command, fetched first when it isn't there yet.
+    public func followBase() {
+        let commit = workspace.base.commit
+        guard commit != startCommit else { return }
+        startCommit = commit
+        started = false
+        unwritten.removeAll()
+    }
 
     /// Puts the computer's copy at the chat's commit with the staged files on top, once. Work that
     /// was only on the computer goes to git stash first, never lost. Returns a note when it failed.
@@ -282,7 +292,7 @@ public actor ComputerRepoMirror {
 
 /// Wraps the repo and command tools so they share one copy with the computer (ComputerRepoMirror).
 public struct ComputerMirroredTool: AgentTool {
-    enum Role { case read, write, save, command }
+    enum Role { case read, write, save, command, switchBranch }
 
     let inner: any AgentTool
     let mirror: ComputerRepoMirror
@@ -294,6 +304,7 @@ public struct ComputerMirroredTool: AgentTool {
         case "create_file", "edit_file", "append_file", "delete_file": return .write
         case "save_changes": return .save
         case "run_command", "computer_task", "code", "app_preview": return .command
+        case SwitchBranchTool.toolName: return .switchBranch
         default: return nil
         }
     }
@@ -345,6 +356,12 @@ public struct ComputerMirroredTool: AgentTool {
         case .save:
             if await mirror.isStarted { _ = await mirror.refresh() }
             return try await body()
+        case .switchBranch:
+            // What commands changed so far is staged first, so it comes along to the new branch.
+            if await mirror.isStarted { _ = await mirror.refresh() }
+            let output = try await body()
+            await mirror.followBase()
+            return output
         case .write:
             await mirror.refreshIfNeeded()
             let output = try await body()

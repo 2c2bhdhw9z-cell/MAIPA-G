@@ -1620,3 +1620,16 @@ ready for this app build (step)…", instead of going to the phone. Checked here
 script for build 205 downloaded and checksum-checked the runner and sent PUT then DELETE for
 `maipa-g-runner-install` to a stand-in for the Sprite's socket.
 
+### Save where told, like Kiro (owner, 14 November 2026)
+His Korg test 3 found the work on PR #1's branch, but the chat was on main, so it could only open
+PR #2 carrying the whole tree. Owner: "if I tell you to save to a branch, you're gonna save to a
+branch… make a PR… only push the main". New `switch_branch` (Kiro's `git checkout`): an existing
+branch, or `create: true` for a new one from where it is. The staged copy moves in place
+(`ChangeWorkspace.switchBase`, staged changes carried), the computer's copy follows before the next
+command (`ComputerRepoMirror.followBase`; the runner's mirror can now fetch, with the handed-over
+token for private repos), `save_changes` saves on whatever branch it is on, the chat (and its
+branch chip) stays on it (`rememberBranchSwitch`, phone or computer), and an open pull request is
+only continued from its own branch. Main still goes by the rules / `set_saving_style`. The prompt
+says to check other branches and open pull requests before calling a repo empty. Shipped in the
+same build: the old "couldn't take this reply" note goes once a reply runs on the computer.
+

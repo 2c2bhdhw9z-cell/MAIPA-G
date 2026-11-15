@@ -1585,7 +1585,9 @@ final class ChatSession: Identifiable {
                         activeReceipt = nil
                     }
                 }
-                let workingBranch = activeReceipt?.branch ?? repo.branch
+                // A pull request's side branch stands in for the default branch; a branch the chat
+                // was moved to (by the person or switch_branch) is worked on as it is.
+                let workingBranch = (repo.branch == repo.defaultBranch ? activeReceipt?.branch : nil) ?? repo.branch
                 let workingRepo = ChatRepo(ref: repo.ref, branch: workingBranch, defaultBranch: repo.defaultBranch, isPrivate: repo.isPrivate)
                 let commitRef = repo.ref
                 let commit = try await AgentLoop.bounded(seconds: max(repoDeadline.timeIntervalSinceNow, 30), label: "Opening \(repo.ref.fullName) on \(repo.ref.hostName)") {
@@ -1595,7 +1597,7 @@ final class ChatSession: Identifiable {
                 await setupStep(setupDeadline, fallback: (), label: "reading the repo") { await workspace.prefetch() }
                 let changes: ChangeWorkspace
                 if let existing = changeWorkspace {
-                    if existing.base.commit == commit && existing.base.repo == workspace.repo {
+                    if existing.base.commit == commit && existing.base.repo == workspace.repo && existing.base.branch == workspace.branch {
                         changes = existing
                     } else if existing.base.repo == workspace.repo {
                         // Carrying staged edits onto the moved branch reads each file again; if
@@ -1645,6 +1647,7 @@ final class ChatSession: Identifiable {
                     DeleteFileTool(workspace: changes, authorization: changeAuthorization, rules: rules),
                     SaveChangesTool(workspace: changes, service: service, session: saves, selectedBranch: workingBranch, defaultBranch: repo.defaultBranch, rules: rules, choice: savingChoice),
                     SetSavingStyleTool(choice: savingChoice, repoName: repo.ref.fullName),
+                    SwitchBranchTool(workspace: changes, github: github, defaultBranch: repo.defaultBranch),
                 ]
                 // The chat's other repos: the same tools for each, chosen with a repo argument.
                 var perRepo: [(repo: String, tools: [any AgentTool])] = [(repo.ref.fullName, repoTools)]
@@ -2591,6 +2594,7 @@ final class ChatSession: Identifiable {
         if milestone || turn.status != .running {
             refreshStagedChanges()
             rememberSavingStyle(from: turn)
+            rememberBranchSwitch(from: turn)
             applySessionInformationUpdates(from: turn)
         }
         if milestone || turn.status != .running || Date().timeIntervalSince(lastSaved) >= 4.0 {
@@ -2631,6 +2635,28 @@ final class ChatSession: Identifiable {
                     settings.directSaveRepos[repoKey] = parsed.straightToBranch
                 }
             }
+        }
+    }
+
+    @ObservationIgnored private var appliedBranchSwitchCalls = Set<String>()
+
+    /// Where switch_branch moved the repo, on the phone or the computer: the chat stays there, so
+    /// the next reply (and the branch chip) carry on on that branch, the way Kiro's folder stays
+    /// on the branch it checked out.
+    private func rememberBranchSwitch(from turn: AssistantTurn) {
+        guard var repo = chat.repo else { return }
+        for call in turn.steps.flatMap(\.toolCalls) where call.name == SwitchBranchTool.toolName && call.status == .done {
+            guard appliedBranchSwitchCalls.insert(call.id).inserted,
+                  let arguments = JSONValue.parse(Data(call.arguments.utf8)),
+                  let raw = arguments["branch"]?.stringValue, let branch = SwitchBranchTool.clean(raw),
+                  (call.result ?? "").hasPrefix("Now on ") || (call.result ?? "").hasPrefix("Already on ") else { continue }
+            // Several repos: only a switch of the chat's first repo moves the chat.
+            if let named = arguments["repo"]?.stringValue, named != repo.ref.fullName { continue }
+            repo.branch = branch
+        }
+        if repo.branch != chat.repo?.branch {
+            chat.repo = repo
+            saveSoon()
         }
     }
 
