@@ -1633,3 +1633,11 @@ only continued from its own branch. Main still goes by the rules / `set_saving_s
 says to check other branches and open pull requests before calling a repo empty. Shipped in the
 same build: the old "couldn't take this reply" note goes once a reply runs on the computer.
 
+### Held for the next build: GitHub's API on the computer (14 November 2026, 8:49 PM)
+switch_branch worked in his Korg chat (the fixes went onto PR #1's branch, CI green), but it
+couldn't close PR #2: "I have no GitHub login on this computer and no tool that can close a pull
+request." The GitHub connector's tools were phone-only. Replies on the computer now get them
+(`VMTurnRunner.gitHubAPITools`, signed in with the handed-over token), and the runner's prompt note
+says so and says never to push with git. Committed locally, not pushed: it goes out with the next
+real fix as one build. Kiro closed PR #2 for him meanwhile (both branches had the same tree).
+

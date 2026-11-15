@@ -273,12 +273,17 @@ public struct VMTurnRunner: Sendable {
         (inbox + lateFiles).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
     }
 
+    /// The GitHub connector's tools, signed in as MAIPA-G's app with `token`.
+    static func gitHubAPITools(_ configuration: ConnectorConfiguration, transport: any HTTPTransport, token: @escaping @Sendable () async -> String?) -> [any AgentTool] {
+        BuiltinIntegrationFactory.tools(for: configuration, secret: "__maipag_github_app__", transport: transport, computer: nil, githubTokenProvider: token)
+    }
+
     static func promptNote(machine: String, hasConnectors: Bool) -> String {
         """
 
 
         ## Where this reply runs
-        This reply runs on the person's own Linux computer (`\(machine)`), not on the phone. It keeps going when the app is closed. `run_command` and `computer_task` run right here in a real shell. Sub-agents (`invoke_sub_agent`) and memories work here. The phone's own features (the Workstation, making pictures and videos with picture models\(hasConnectors ? "" : ", connectors")) aren't available in this reply; if the task needs one, say so.
+        This reply runs on the person's own Linux computer (`\(machine)`), not on the phone. It keeps going when the app is closed. `run_command` and `computer_task` run right here in a real shell. Sub-agents (`invoke_sub_agent`) and memories work here. In a repo chat, GitHub's API works here too (`mcp_github_api_request`: close, merge or comment on pull requests, check runs and anything else), signed in as MAIPA-G; git itself on this computer has no GitHub sign-in, so never push with git: save with `save_changes`. The phone's own features (the Workstation, making pictures and videos with picture models\(hasConnectors ? "" : ", connectors")) aren't available in this reply; if the task needs one, say so.
         """
     }
 
@@ -411,6 +416,16 @@ public struct VMTurnRunner: Sendable {
             relay = { @Sendable file in try await dataRepo.relay(file) }
         }
         tools.append(SendFileTool(github: fileGitHub, transport: transport, computer: control, store: media, localHome: home, relay: relay))
+        // GitHub's API, as on the phone (search, and any request: close or merge a pull request,
+        // comment, rerun a check), with the token the phone handed over. It was phone-only, so a
+        // reply here couldn't close a pull request it was asked to (14 November 2026).
+        if let handedOver {
+            let github = ConnectorConfiguration(
+                serverID: "builtin:github", displayName: "GitHub", kind: .builtin, endpoint: URL(string: "https://api.github.com"),
+                launchValues: ["provider": "github", "base_url": "https://api.github.com", "auth_style": "bearer"], secretNames: ["api_key"]
+            )
+            tools += Self.gitHubAPITools(github, transport: transport, token: { try? await handedOver.installationToken() })
+        }
         // Memories work here as on the phone: the AI saves what the person wants remembered, and
         // each state carries the new ones back to the phone's Memories.
         let memoryStore = ProductStore<MemoryRecord>(dataDirectory: folder.appendingPathComponent("memories-copy", isDirectory: true), folder: "memories")

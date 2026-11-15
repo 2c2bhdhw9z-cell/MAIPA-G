@@ -106,6 +106,36 @@ struct BranchSwitchTests {
         #expect(s.github.commits[commit]?.parent == s.featureHead)
     }
 
+    /// The Korg chat on the computer: "I have no GitHub login on this computer and no tool that can
+    /// close a pull request." Replies there get the same GitHub API tool as the phone.
+    @Test("A reply on the computer can close a pull request through GitHub's API, signed in with the handed-over token")
+    func computerClosesAPullRequest() async throws {
+        final class Recorder: HTTPTransport, @unchecked Sendable {
+            let lock = NSLock()
+            var requests: [HTTPRequest] = []
+            func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+                lock.withLock { requests.append(request) }
+                return HTTPResponse(status: 200, headers: ["content-type": "application/json"], body: Data(#"{"number":2,"state":"closed"}"#.utf8))
+            }
+            func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse { HTTPStreamResponse(status: 500, headers: [:], body: AsyncThrowingStream { $0.finish() }) }
+        }
+        let recorder = Recorder()
+        let configuration = ConnectorConfiguration(
+            serverID: "builtin:github", displayName: "GitHub", kind: .builtin, endpoint: URL(string: "https://api.github.com"),
+            launchValues: ["provider": "github", "base_url": "https://api.github.com", "auth_style": "bearer"], secretNames: ["api_key"]
+        )
+        let tools = VMTurnRunner.gitHubAPITools(configuration, transport: recorder, token: { "ghs_handed_over" })
+        let request = try #require(tools.first { $0.name == "mcp_github_api_request" })
+        let output = try await request.runApproved(arguments: ["method": "PATCH", "path": "/repos/octo/korg/pulls/2", "body": ["state": "closed"]]) { _ in }
+        #expect(output.forModel.contains("closed"))
+        let sent = try #require(recorder.requests.last)
+        #expect(sent.method == "PATCH")
+        #expect(sent.url.absoluteString == "https://api.github.com/repos/octo/korg/pulls/2")
+        #expect(sent.headers["Authorization"] == "Bearer ghs_handed_over")
+        #expect(sent.body.flatMap(JSONValue.parse)?["state"]?.stringValue == "closed")
+        #expect(VMTurnRunner.promptNote(machine: "m", hasConnectors: false).contains("mcp_github_api_request"))
+    }
+
     @Test("The computer's copy follows the switch before the next command", .enabled(if: onLinux))
     func mirrorFollowsTheBranch() async throws {
         let s = try await Self.setup()
