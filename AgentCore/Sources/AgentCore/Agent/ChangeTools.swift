@@ -174,7 +174,7 @@ public struct SwitchBranchTool: AgentTool {
     public func runningSummary(for arguments: JSONValue) -> String { "Switching to \(arguments.optionalString("branch") ?? "a branch")…" }
 
     /// The branch name as git wants it, or nil when it isn't one.
-    static func clean(_ raw: String) -> String? {
+    public static func clean(_ raw: String) -> String? {
         var name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         for prefix in ["refs/heads/", "origin/"] where name.hasPrefix(prefix) { name.removeFirst(prefix.count) }
         let bad = name.isEmpty || name.count > 200 || name.hasPrefix("-") || name.hasPrefix("/") || name.hasSuffix("/")
