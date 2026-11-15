@@ -1646,3 +1646,11 @@ MAIPA-G's sign-in (token to GitHub only, not to the storage address) and unpacks
 entries that would land outside the folder. Test 2 itself passed: the 106.6 MB IPA went up to
 MAIPA-G-data's files release (asset 749496814) and arrived on the phone checked.
 
+### Held for the next build: find the cause first, never computer steps (owner "Yes", 14 November 2026)
+His Korg diagnostics ("UI attachment unverified") got a one-step answer with no tools (309,688
+prompt tokens, $0.78) telling him to check the Xcode device log, though the chat's memories said he
+has only an iPhone. The prompt now says: when something isn't working, find the actual cause with
+the tools before answering and then fix it, never a list of guesses; the person is on an iPhone with
+no Mac or PC unless told otherwise, so never steps needing Xcode, a terminal, logs or a cable; and
+memories are followed as the person's rules and facts. Committed locally; goes out with the next fix.
+

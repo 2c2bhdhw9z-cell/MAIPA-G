@@ -133,6 +133,16 @@ struct CompactionTests {
         #expect(compaction.summary.hasPrefix("# Session digest"))
     }
 
+    /// Owner, 14 November 2026: the Korg reply answered "check the Xcode device log" with no tools,
+    /// though a memory said he has only an iPhone.
+    @Test("The prompt says to find the cause with tools first, and never to give an iPhone-only person computer steps")
+    func promptInvestigatesAndKnowsTheIPhone() {
+        let prompt = SystemPrompt.make(userLogin: nil, repo: nil, memories: ["The user uses only an iPhone and has no Mac or PC."])
+        #expect(prompt.contains("find the actual cause with your tools before you answer"))
+        #expect(prompt.contains("No Xcode") || prompt.contains("no Xcode"))
+        #expect(prompt.contains("Follow these as the person's rules and facts"))
+    }
+
     @Test("Compaction starts at 80% of the window, or before the provider's price step (TeamoRouter: 272K)")
     func thresholdFollowsWindowAndPriceStep() {
         #expect(Compaction.threshold(window: 1_000_000, priceStep: nil) == 800_000)
