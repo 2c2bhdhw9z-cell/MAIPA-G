@@ -22,6 +22,8 @@ let package = Package(
         .package(url: "https://github.com/swiftlang/swift-markdown.git", from: "0.9.0"),
         // Hashes (SHA-256 for sign-in codes, SHA-1 for Git object ids). On Apple platforms this is
         // CryptoKit itself; on Linux it is the same API over BoringSSL.
+        // On Linux, `_CryptoExtras` also signs the GitHub App's tokens on the chat computer (RS256);
+        // the phone uses its own Security framework for that.
         .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"6.0.0"),
         // GitHub requires libsodium sealed boxes when repository Actions secrets are uploaded.
         // SwiftNaCl vendors libsodium source for Linux and an xcframework for Apple platforms.
@@ -40,7 +42,7 @@ let package = Package(
         ),
         .target(
             name: "AgentCore",
-            dependencies: ["MAIPAGZlib", .product(name: "Crypto", package: "swift-crypto"), .product(name: "Clibsodium", package: "swift-nacl"), .product(name: "MCP", package: "swift-sdk"), .product(name: "SystemPackage", package: "swift-system"), .product(name: "ZIPFoundation", package: "ZIPFoundation")]
+            dependencies: ["MAIPAGZlib", .product(name: "Crypto", package: "swift-crypto"), .product(name: "_CryptoExtras", package: "swift-crypto", condition: .when(platforms: [.linux])), .product(name: "Clibsodium", package: "swift-nacl"), .product(name: "MCP", package: "swift-sdk"), .product(name: "SystemPackage", package: "swift-system"), .product(name: "ZIPFoundation", package: "ZIPFoundation")]
         ),
         .executableTarget(
             name: "MAIPAGRunner",

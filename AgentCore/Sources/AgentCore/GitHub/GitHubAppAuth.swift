@@ -420,3 +420,71 @@ public enum GitHubConnect {
         return try await client.send("GET", "/app/installations", auth: .bearer(jwt)).decode([GitHubInstallation].self)
     }
 }
+
+#if !canImport(Security) && canImport(_CryptoExtras)
+import _CryptoExtras
+
+/// RS256 on Linux (the chat computer), over BoringSSL: RSASSA-PKCS1-v1_5 with SHA-256, the
+/// signature GitHub App JWTs use.
+public struct BoringRS256Signer: RS256Signer {
+    private let key: _RSA.Signing.PrivateKey
+
+    public init(pem: String) throws {
+        key = try _RSA.Signing.PrivateKey(pemRepresentation: pem)
+    }
+
+    public func sign(_ message: Data) throws -> Data {
+        Data(try key.signature(for: message, padding: .insecurePKCS1v1_5).rawRepresentation)
+    }
+}
+#endif
+
+public enum RS256Signers {
+    public struct Unavailable: Error, CustomStringConvertible {
+        public var description: String { "This system can't sign GitHub App tokens." }
+    }
+
+    /// The signer for this system: Security on Apple's, BoringSSL on Linux.
+    public static func make(pem: String) throws -> any RS256Signer {
+        #if canImport(Security)
+        return try SecurityRS256Signer(pem: pem)
+        #elseif canImport(_CryptoExtras)
+        return try BoringRS256Signer(pem: pem)
+        #else
+        throw Unavailable()
+        #endif
+    }
+}
+
+/// Makes installation tokens for MAIPA-G's GitHub App, so a reply on the chat computer renews its
+/// own GitHub access instead of waiting for the phone (an hour-long token used to run out partway
+/// through a long reply while the phone was away: "Bad credentials", 14 November 2026).
+public struct GitHubAppTokenMinter: Sendable {
+    let clientID: String
+    let installationID: Int
+    let signer: any RS256Signer
+    let transport: any HTTPTransport
+
+    public init(clientID: String, installationID: Int, signer: any RS256Signer, transport: any HTTPTransport) {
+        self.clientID = clientID
+        self.installationID = installationID
+        self.signer = signer
+        self.transport = transport
+    }
+
+    /// A new installation token. `repositories` and `permissions` narrow it (GitHub's own limits);
+    /// without them it covers what the installation covers.
+    public func mint(repositories: [String]? = nil, permissions: [String: String]? = nil) async throws -> (token: String, expiresAt: Date) {
+        let jwt = try GitHubAppJWT.make(clientID: clientID, signer: signer)
+        let client = GitHubClient(transport: transport, tokens: nil)
+        var body: [String: JSONValue] = [:]
+        if let repositories { body["repositories"] = .array(repositories.map(JSONValue.string)) }
+        if let permissions { body["permissions"] = .object(permissions.mapValues(JSONValue.string)) }
+        let response = try await client.send("POST", "/app/installations/\(installationID)/access_tokens", body: body.isEmpty ? nil : .object(body), auth: .bearer(jwt))
+        guard let json = JSONValue.parse(response.body), let token = json["token"]?.stringValue else {
+            throw GitHubAPIError(status: response.status, message: "GitHub sent no installation token")
+        }
+        let expiresAt = json["expires_at"]?.stringValue.flatMap(ISO8601.date(from:)) ?? Date().addingTimeInterval(55 * 60)
+        return (token, expiresAt)
+    }
+}

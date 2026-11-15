@@ -150,6 +150,20 @@ public struct VMConnector: Codable, Sendable, Hashable {
     }
 }
 
+/// MAIPA-G's own GitHub App (made for this person's account when they connected GitHub), so a run
+/// can renew its GitHub tokens itself. The runner keeps it in memory only.
+public struct VMGitHubApp: Codable, Sendable, Hashable {
+    public var clientID: String
+    public var installationID: Int
+    public var privateKeyPEM: String
+
+    public init(clientID: String, installationID: Int, privateKeyPEM: String) {
+        self.clientID = clientID
+        self.installationID = installationID
+        self.privateKeyPEM = privateKeyPEM
+    }
+}
+
 /// Keys for one run. Written to a 0600 file and deleted by the runner as soon as it reads them.
 public struct VMSecrets: Codable, Sendable, Hashable {
     public var openRouterKey: String?
@@ -161,10 +175,13 @@ public struct VMSecrets: Codable, Sendable, Hashable {
     public var connectors: [VMConnector]
     /// Values for stdio connectors, as Autonomous jobs had them (`<id>.<name>`).
     public var connectorSecrets: [String: String]
+    /// For renewing the GitHub tokens above while the run goes on.
+    public var githubApp: VMGitHubApp?
 
-    public init(openRouterKey: String?, providers: [AIProviderEndpoint] = [], githubToken: String?, dataToken: String? = nil, connectors: [VMConnector] = [], connectorSecrets: [String: String] = [:]) {
+    public init(openRouterKey: String?, providers: [AIProviderEndpoint] = [], githubToken: String?, dataToken: String? = nil, connectors: [VMConnector] = [], connectorSecrets: [String: String] = [:], githubApp: VMGitHubApp? = nil) {
         self.openRouterKey = openRouterKey; self.providers = providers; self.githubToken = githubToken
         self.dataToken = dataToken; self.connectors = connectors; self.connectorSecrets = connectorSecrets
+        self.githubApp = githubApp
     }
 
     /// Every value that must never appear in a log, a state file or the chat.
@@ -174,6 +191,10 @@ public struct VMSecrets: Codable, Sendable, Hashable {
         values += connectors.compactMap(\.accessToken)
         values += connectors.flatMap { $0.headers.values }
         values += connectorSecrets.values
+        if let pem = githubApp?.privateKeyPEM {
+            values.append(pem)
+            values += pem.split(whereSeparator: \.isNewline).map(String.init).filter { !$0.hasPrefix("-----") }
+        }
         return values.filter { $0.count >= 8 }
     }
 }

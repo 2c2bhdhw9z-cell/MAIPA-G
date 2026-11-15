@@ -132,8 +132,19 @@ enum ComputerRuns {
             githubToken: githubToken,
             dataToken: dataToken,
             connectors: app.connectors.computerRunConnectors(),
-            connectorSecrets: connectorSecrets
+            connectorSecrets: connectorSecrets,
+            githubApp: githubApp(app: app)
         )
+    }
+
+    /// MAIPA-G's GitHub App, so a run on the computer renews its own GitHub tokens instead of
+    /// losing GitHub partway through a long reply while the phone is away. The same key Autonomous
+    /// jobs already keep in their repos' Actions secrets; on the computer it stays in the runner's
+    /// memory only.
+    static func githubApp(app: AppModel) -> VMGitHubApp? {
+        guard let credentials = app.github.credentials, let installation = app.github.installationID,
+              !credentials.privateKeyPEM.isEmpty else { return nil }
+        return VMGitHubApp(clientID: credentials.clientID, installationID: installation, privateKeyPEM: credentials.privateKeyPEM)
     }
 
     /// A GitHub token for the computer with at least 50 minutes left (they last about an hour).

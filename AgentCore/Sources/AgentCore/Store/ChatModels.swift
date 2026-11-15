@@ -515,10 +515,16 @@ public struct AssistantTurn: Codable, Sendable, Hashable {
 /// whose spans (start to end plus that window) overlap each see the other's spend, so both are
 /// marked shared and their figures are shown as estimated. That covers a reply that starts while
 /// the previous one's recheck is still pending, which would otherwise leak into it.
-public struct BalanceOverlapTracker: Sendable {
+/// Saved on the phone (Codable), so turns that ran while the app was closed are still told apart:
+/// kept only in memory, a relaunch forgot the turns running on the computer, and two chats on one
+/// provider each showed both chats' spend as their own ($38.29 for a reply that cost about $6,
+/// 15 November 2026).
+public struct BalanceOverlapTracker: Sendable, Codable {
     public static let settleWindow: TimeInterval = 20
+    /// A turn still marked running after this long is taken as gone (a deleted chat, say).
+    public static let staleAfter: TimeInterval = 24 * 60 * 60
 
-    private struct Entry: Sendable {
+    private struct Entry: Sendable, Codable {
         var providers: Set<String>
         var started: Date
         var ended: Date?
@@ -578,7 +584,7 @@ public struct BalanceOverlapTracker: Sendable {
     /// Forgets turns that ended long enough ago that nothing can overlap them any more.
     private mutating func prune(now: Date) {
         entries = entries.filter { _, entry in
-            guard let ended = entry.ended else { return true }
+            guard let ended = entry.ended else { return now.timeIntervalSince(entry.started) < Self.staleAfter }
             return now.timeIntervalSince(ended) < Self.settleWindow * 15
         }
     }

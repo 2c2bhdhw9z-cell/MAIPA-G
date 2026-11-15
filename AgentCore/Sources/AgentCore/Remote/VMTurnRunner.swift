@@ -1,24 +1,47 @@
 import Foundation
 
-/// A GitHub token handed over by the phone. The phone can hand a fresh one over while a long run
-/// goes on (`token-refresh.json.gz` in the run's folder); it is read and deleted at once.
+/// A GitHub token handed over by the phone. With MAIPA-G's GitHub App key (`renew`), the runner
+/// makes the next token itself, 10 minutes before this one runs out or as soon as GitHub refuses
+/// it, so a reply of any length keeps its GitHub access while the phone is away. Without it, the
+/// phone hands a fresh one over while a long run goes on (`token-refresh.json.gz` in the run's
+/// folder, read and deleted at once), and a refused token waits for that. Before 15 November 2026
+/// only the phone could renew, so a reply running while the app was closed got "Bad credentials"
+/// about an hour in, and its file uploads stopped.
 public actor HandedOverTokens: GitHubTokenProvider {
+    public typealias Renew = @Sendable () async throws -> (token: String, expiresAt: Date)
     private var token: String
+    private var expiresAt: Date
     private let refreshFile: URL?
     private let waitForFresh: TimeInterval
+    private let renew: Renew?
+    private var renewing: Task<(token: String, expiresAt: Date), Error>?
     private var refused = false
+    /// Renewed this long before it runs out.
+    static let renewalMargin: TimeInterval = 10 * 60
+    /// A token the phone hands over has at least this long left.
+    static let handedOverLifetime: TimeInterval = 45 * 60
 
-    /// `waitForFresh`: after GitHub refuses the token (it lasts about an hour), how long to wait
-    /// for the phone to hand over the next one. The phone does that as soon as the app is opened,
-    /// so a long reply pauses its GitHub work instead of failing. The app's own GitHub key stays
-    /// on the phone; the computer only ever holds these hour-long tokens.
-    public init(token: String, refreshFile: URL?, waitForFresh: TimeInterval = 600) {
+    /// `waitForFresh`: without `renew`, after GitHub refuses the token, how long to wait for the
+    /// phone to hand over the next one. The app's own GitHub key stays on the phone unless it is
+    /// given to this run as `renew`; it is never written to disk here.
+    public init(token: String, refreshFile: URL?, waitForFresh: TimeInterval = 600, renew: Renew? = nil, expiresAt: Date? = nil) {
         self.token = token
         self.refreshFile = refreshFile
         self.waitForFresh = waitForFresh
+        self.renew = renew
+        self.expiresAt = expiresAt ?? Date().addingTimeInterval(Self.handedOverLifetime)
     }
 
     public func installationToken() async throws -> String {
+        _ = current()
+        if let renew, refused || expiresAt.timeIntervalSinceNow < Self.renewalMargin {
+            if let fresh = try? await renewed(renew) {
+                token = fresh.token
+                expiresAt = fresh.expiresAt
+                refused = false
+                return token
+            }
+        }
         if refused, refreshFile != nil {
             let started = Date()
             while Date().timeIntervalSince(started) < waitForFresh, !takeRefresh() {
@@ -29,9 +52,18 @@ public actor HandedOverTokens: GitHubTokenProvider {
         return current()
     }
 
-    public func userToken() async throws -> String { current() }
+    public func userToken() async throws -> String { try await installationToken() }
 
     public func forgetInstallationToken() async { refused = true }
+
+    /// One renewal at a time: everything asking meanwhile gets the same new token.
+    private func renewed(_ renew: @escaping Renew) async throws -> (token: String, expiresAt: Date) {
+        if let renewing { return try await renewing.value }
+        let task = Task { try await renew() }
+        renewing = task
+        defer { renewing = nil }
+        return try await task.value
+    }
 
     /// Takes a handed-over token when one has arrived.
     private func takeRefresh() -> Bool {
@@ -45,6 +77,8 @@ public actor HandedOverTokens: GitHubTokenProvider {
             try? FileManager.default.removeItem(at: refreshFile)
             if let fresh = try? VMCoding.unpack(VMSecrets.self, from: data), let value = fresh.githubToken, !value.isEmpty {
                 token = value
+                expiresAt = Date().addingTimeInterval(Self.handedOverLifetime)
+                refused = false
             }
         }
         return token
@@ -336,7 +370,14 @@ public struct VMTurnRunner: Sendable {
         // One holder for the handed-over token, shared by everything here that uses GitHub. A
         // fresh token is read from its file and the file deleted, so with two holders only one
         // got it and the other went on with the old token (and the two raced on the file).
-        let handedOver = secrets.githubToken.flatMap { $0.isEmpty ? nil : HandedOverTokens(token: $0, refreshFile: folder.appendingPathComponent("token-refresh.json.gz")) }
+        // With MAIPA-G's GitHub App key, the tokens here renew themselves for as long as the reply runs.
+        var minter: GitHubAppTokenMinter?
+        if let app = secrets.githubApp, let signer = try? RS256Signers.make(pem: app.privateKeyPEM) {
+            minter = GitHubAppTokenMinter(clientID: app.clientID, installationID: app.installationID, signer: signer, transport: transport)
+        }
+        var renewGitHub: HandedOverTokens.Renew?
+        if let minter { renewGitHub = { @Sendable in try await minter.mint() } }
+        let handedOver = secrets.githubToken.flatMap { $0.isEmpty ? nil : HandedOverTokens(token: $0, refreshFile: folder.appendingPathComponent("token-refresh.json.gz"), renew: renewGitHub) }
         if let repo = request.repo {
             guard let token = secrets.githubToken, !token.isEmpty, let handedOver else { throw ToolInputError("GitHub isn't connected for this reply.") }
             let github = GitHubClient(transport: transport, tokens: handedOver)
@@ -406,9 +447,12 @@ public struct VMTurnRunner: Sendable {
         let fileGitHub = handedOver.map { GitHubClient(transport: transport, tokens: $0) }
         // Big files go to the phone through MAIPA-G-data's files release (the phone hands over a
         // token for that repo only), not in pieces through the computer's command tool.
-        let dataTokens = secrets.dataToken.flatMap { $0.isEmpty ? nil : HandedOverTokens(token: $0, refreshFile: folder.appendingPathComponent(VMRun.dataTokenRefreshFile)) }
         var dataRepo: ComputerDataRepo?
-        if let repository = request.dataRepository, let dataTokens {
+        if let repository = request.dataRepository, let dataToken = secrets.dataToken, !dataToken.isEmpty {
+            // Renewed with the same narrow reach: this one repo's contents.
+            var renewData: HandedOverTokens.Renew?
+            if let minter { renewData = { @Sendable in try await minter.mint(repositories: [repository.name], permissions: ["contents": "write"]) } }
+            let dataTokens = HandedOverTokens(token: dataToken, refreshFile: folder.appendingPathComponent(VMRun.dataTokenRefreshFile), renew: renewData)
             dataRepo = ComputerDataRepo(github: GitHubClient(transport: transport, tokens: dataTokens), repo: repository, branch: request.dataBranch)
         }
         var relay: (@Sendable (URL) async throws -> RelayedFile)?

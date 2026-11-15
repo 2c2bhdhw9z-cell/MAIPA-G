@@ -1654,3 +1654,24 @@ the tools before answering and then fix it, never a list of guesses; the person 
 no Mac or PC unless told otherwise, so never steps needing Xcode, a terminal, logs or a cable; and
 memories are followed as the person's rules and facts. Committed locally; goes out with the next fix.
 
+### GitHub access on the computer renews itself (owner, 15 November 2026)
+"GitHub access shouldn't just be able to expire, doesn't for you." The Korg reply (03:23-06:19
+UTC) got "Bad credentials" from 04:22 on: the hour-long tokens could only be renewed by the phone,
+which wasn't following. Its edits, reads, the PR check and the 20-minute-stalled IPA upload all
+failed. Now the phone hands the run MAIPA-G's own GitHub App (client id, installation id, key: the
+same key Autonomous jobs keep in Actions secrets), the runner keeps it in memory only (redacted from
+logs, never written to disk; secrets.json.gz is deleted on read), and `HandedOverTokens` makes the
+next token itself 10 minutes before the current one ends or as soon as GitHub refuses it (one at a
+time). The data-repo token renews with the same narrow reach (MAIPA-G-data, contents:write). Linux
+signs with swift-crypto's `_CryptoExtras` (Linux only); its signatures match Node's for a GitHub-style
+PKCS#1 key. Tests: `GitHubTokenRenewalTests`.
+
+Also in this build, from his Continuum chat (DeepSeek V4.1 Flash, Max): "Finish cBoy" stopped after
+198 minutes with 54 of 133 timing tests still failing, and called mGBA (39/133) the ceiling without
+checking the more accurate emulators. The prompt now says finish means keep going until it's done,
+and to check the best evidence before calling something a limit. Its shown cost of $38.29 was about
+$6 of DeepSeek plus the Korg reply on the same OneProvider balance: the spend-overlap tracker lived
+in memory and a relaunch forgot the Korg turn. It's saved now (`BalanceOverlapTracker` Codable,
+UserDefaults), and a turn left running for a day stops counting. Plus the held investigate-first and
+iPhone-only prompt rules.
+

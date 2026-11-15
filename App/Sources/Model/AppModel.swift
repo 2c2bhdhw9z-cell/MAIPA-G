@@ -144,8 +144,17 @@ final class AppModel {
     let memories: MemoryLibrary
     let groups: GroupLibrary
     let specs: SpecCoordinator
-    /// Which running turns are reading the same provider's balance, for honest real spend.
-    var balanceOverlaps = BalanceOverlapTracker()
+    /// Which running turns are reading the same provider's balance, for honest real spend. Saved
+    /// as it changes, so a relaunch doesn't forget turns still running on the computer.
+    @ObservationIgnored var balanceOverlaps = AppModel.savedBalanceOverlaps() {
+        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(balanceOverlaps), forKey: Self.balanceOverlapsKey) }
+    }
+    nonisolated static let balanceOverlapsKey = "maipag.balanceOverlaps"
+    nonisolated static func savedBalanceOverlaps() -> BalanceOverlapTracker {
+        guard let data = UserDefaults.standard.data(forKey: balanceOverlapsKey),
+              let saved = try? JSONDecoder().decode(BalanceOverlapTracker.self, from: data) else { return BalanceOverlapTracker() }
+        return saved
+    }
     let connectors: ConnectorLibrary
     let previews: PreviewCoordinator
     let backgroundJobs = BackgroundJobs()
