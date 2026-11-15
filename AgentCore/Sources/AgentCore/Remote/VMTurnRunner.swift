@@ -283,7 +283,7 @@ public struct VMTurnRunner: Sendable {
 
 
         ## Where this reply runs
-        This reply runs on the person's own Linux computer (`\(machine)`), not on the phone. It keeps going when the app is closed. `run_command` and `computer_task` run right here in a real shell. Sub-agents (`invoke_sub_agent`) and memories work here. In a repo chat, GitHub's API works here too (`mcp_github_api_request`: close, merge or comment on pull requests, check runs and anything else), signed in as MAIPA-G; git itself on this computer has no GitHub sign-in, so never push with git: save with `save_changes`. The phone's own features (the Workstation, making pictures and videos with picture models\(hasConnectors ? "" : ", connectors")) aren't available in this reply; if the task needs one, say so.
+        This reply runs on the person's own Linux computer (`\(machine)`), not on the phone. It keeps going when the app is closed. `run_command` and `computer_task` run right here in a real shell. Sub-agents (`invoke_sub_agent`) and memories work here. In a repo chat, GitHub's API works here too (`mcp_github_api_request`: close, merge or comment on pull requests, check runs and anything else), signed in as MAIPA-G, and `download_from_github` brings an Actions artifact or a release file here. git and curl on this computer have no GitHub sign-in, so never push with git (save with `save_changes`) and don't try to fetch private GitHub downloads with curl. The phone's own features (the Workstation, making pictures and videos with picture models\(hasConnectors ? "" : ", connectors")) aren't available in this reply; if the task needs one, say so.
         """
     }
 
@@ -426,6 +426,8 @@ public struct VMTurnRunner: Sendable {
             )
             tools += Self.gitHubAPITools(github, transport: transport, token: { try? await handedOver.installationToken() })
         }
+        // Actions artifacts and release files onto this computer, the way `gh run download` would.
+        if let fileGitHub { tools.append(DownloadFromGitHubTool(github: fileGitHub, home: home)) }
         // Memories work here as on the phone: the AI saves what the person wants remembered, and
         // each state carries the new ones back to the phone's Memories.
         let memoryStore = ProductStore<MemoryRecord>(dataDirectory: folder.appendingPathComponent("memories-copy", isDirectory: true), folder: "memories")

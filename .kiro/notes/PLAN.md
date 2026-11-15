@@ -1638,6 +1638,11 @@ switch_branch worked in his Korg chat (the fixes went onto PR #1's branch, CI gr
 couldn't close PR #2: "I have no GitHub login on this computer and no tool that can close a pull
 request." The GitHub connector's tools were phone-only. Replies on the computer now get them
 (`VMTurnRunner.gitHubAPITools`, signed in with the handed-over token), and the runner's prompt note
-says so and says never to push with git. Committed locally, not pushed: it goes out with the next
-real fix as one build. Kiro closed PR #2 for him meanwhile (both branches had the same tree).
+says so and says never to push with git. Kiro closed PR #2 for him meanwhile (both branches had the
+same tree). Shipped together with `download_from_github` (owner: "Yes"): the Korg IPA reply couldn't
+fetch the loader its CI had just built, as git and curl on the computer have no GitHub sign-in, so it
+reused an older one. The tool downloads an Actions artifact or release file onto the computer with
+MAIPA-G's sign-in (token to GitHub only, not to the storage address) and unpacks zips, skipping
+entries that would land outside the folder. Test 2 itself passed: the 106.6 MB IPA went up to
+MAIPA-G-data's files release (asset 749496814) and arrived on the phone checked.
 
