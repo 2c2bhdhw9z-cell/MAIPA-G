@@ -152,7 +152,10 @@ extension AgentRun {
                         seq = state.seq
                         let stepped = state.turn.steps.count != turn.steps.count || state.turn.status != turn.status
                         var next = state.turn
-                        for notice in turn.notices where !next.notices.contains(notice) && VMNotices.isPhoneNotice(notice) { next.notices.append(notice) }
+                        // The reply is running on the computer, so a note that it couldn't (from
+                        // before it moved there) is out of date: it goes by itself.
+                        next.notices.removeAll(where: VMNotices.isFellBack)
+                        for notice in turn.notices where !next.notices.contains(notice) && VMNotices.isPhoneNotice(notice) && !VMNotices.isFellBack(notice) { next.notices.append(notice) }
                         turn = next
                         await onState(state)
                         if state.isFinished {
@@ -227,6 +230,11 @@ public enum VMNotices {
 
     public static func fellBack(_ reason: String) -> String {
         "Your computer couldn't take this reply (\(reason)), so it runs on the phone. If you leave the app it pauses, and it carries on when you come back."
+    }
+
+    /// "Your computer couldn't take this reply…": true only while the reply runs on the phone.
+    public static func isFellBack(_ notice: String) -> Bool {
+        notice.hasPrefix("Your computer couldn't take")
     }
 
     static func isPhoneNotice(_ notice: String) -> Bool {

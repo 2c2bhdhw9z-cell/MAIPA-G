@@ -2268,6 +2268,7 @@ final class ChatSession: Identifiable {
               let reply = chat.messages.last, reply.assistantTurn != nil else { return nil }
         func fallBack(_ reason: String) -> AgentRun? {
             if var turn = lastTurn {
+                turn.notices.removeAll { $0 == VMNotices.runningOnComputer || VMNotices.isFellBack($0) }
                 let notice = VMNotices.fellBack(reason)
                 if !turn.notices.contains(notice) { turn.notices.append(notice) }
                 replaceLastTurn(turn)
@@ -2322,8 +2323,14 @@ final class ChatSession: Identifiable {
             )
         }
         let id = ComputerRuns.runID(forReply: reply.id)
+        // Moving to the computer: a note from an earlier try that it couldn't is out of date.
+        var requestChat = input.chat
+        if let last = requestChat.messages.indices.last, var sent = requestChat.messages[last].assistantTurn {
+            sent.notices.removeAll(where: VMNotices.isFellBack)
+            requestChat.messages[last].assistantTurn = sent
+        }
         let request = VMTurnRequest(
-            id: id, chat: input.chat, route: input.route, systemPrompt: systemPrompt, allowTools: input.allowTools,
+            id: id, chat: requestChat, route: input.route, systemPrompt: systemPrompt, allowTools: input.allowTools,
             spendLimit: input.spendLimit, fallbackModels: input.fallbackModels, resumeNote: input.resumeNote,
             lastUserMessage: lastMessage, webEnabled: webEnabled, repo: repo,
             specMode: effectiveMode == .spec && repoContext != nil, specGate: chat.kiroSpec, specKind: specKind,
@@ -2346,6 +2353,7 @@ final class ChatSession: Identifiable {
         forgetPendingComputerStop(id)
         lastTokenHandover = Date()
         if var turn = lastTurn {
+            turn.notices.removeAll(where: VMNotices.isFellBack)
             if !turn.notices.contains(VMNotices.runningOnComputer) { turn.notices.append(VMNotices.runningOnComputer) }
             replaceLastTurn(turn)
         }

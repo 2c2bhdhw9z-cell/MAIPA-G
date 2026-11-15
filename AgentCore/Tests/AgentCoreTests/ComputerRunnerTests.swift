@@ -397,6 +397,34 @@ struct ComputerRunnerTests {
         #expect(await seen.staged == staged)
     }
 
+    /// Owner, 14 November 2026: "they should automatically erase itself if it fixes itself". The
+    /// note from 6:30 PM stayed under a reply that had moved to the computer.
+    @Test("Once a reply runs on the computer, the note that it couldn't goes by itself", .enabled(if: ComputerRunnerTests.onLinux))
+    func fellBackNoteGoesOnTheComputer() async throws {
+        let home = try Self.temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let id = VMRun.newTurnID()
+        let folder = home.appendingPathComponent(VMRun.folder(id), isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let handle = VMRunHandle(id: id, control: VMControl(computer: ComputerControl.local(machine: "test", home: home)))
+        let writer = VMStateWriter(folder: folder)
+        let old = VMNotices.fellBack("MAIPA-G's runner is still being installed on it")
+        var onPhone = AssistantTurn()
+        onPhone.notices = [old, VMNotices.runningOnComputer]
+        var there = onPhone
+        there.status = .done
+        there.steps = [AssistantStep()]
+        let final = there
+        try await writer.write { VMTurnState(id: id, seq: $0, phase: .finished, turn: final) }
+        var last: AssistantTurn?
+        for await event in AgentRun.onComputer(handle, startingTurn: onPhone, pollInterval: 100_000_000, onState: { _ in }).events {
+            if case .updated(let turn, _) = event { last = turn }
+        }
+        #expect(last?.status == .done)
+        #expect(last?.notices.contains(old) == false)
+        #expect(last?.notices.contains(VMNotices.runningOnComputer) == true)
+    }
+
     @Test("A runner that ends without finishing says so", .enabled(if: ComputerRunnerTests.onLinux))
     func followerNoticesADeadRunner() async throws {
         let home = try Self.temporaryHome()
