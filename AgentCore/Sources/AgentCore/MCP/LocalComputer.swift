@@ -67,8 +67,13 @@ extension ComputerControl {
     /// Runs `$1` (or the script file `$3`) in a login shell that has closed every file except input,
     /// output and errors, so nothing it starts in the background holds the command open after it
     /// has finished, and writes its exit code to the file `$2`.
+    ///
+    /// The command and everything it starts are what the computer's out-of-memory killer stops
+    /// first: two big builds at once used to be able to take the runner, and the whole reply, with
+    /// them. A build stopped that way fails like any other, and the AI tries it another way.
     static let runWithoutInheritedFiles = """
     (
+    { [ -w /proc/self/oom_score_adj ] && echo 1000 > /proc/self/oom_score_adj; } 2>/dev/null || true
     if [ -d "/proc/$BASHPID/fd" ]; then for fd in /proc/$BASHPID/fd/*; do fd=${fd##*/}; case "$fd" in 0|1|2) ;; *) eval "exec $fd>&-" 2>/dev/null || true ;; esac; done; fi
     if [ -n "$3" ]; then exec /bin/bash -l "$3"; fi
     exec /bin/bash -lc "$1"

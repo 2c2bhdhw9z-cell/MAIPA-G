@@ -95,6 +95,11 @@ enum MAIPAGRunnerMain {
     /// A chat reply or job on the chat computer. Everything useful goes to the run folder's state
     /// files; this prints only safe progress lines.
     static func runOnComputer(mode: String, folder: URL) async {
+        // Nothing else on the computer ends the reply with a stop signal (a `pkill -f runner` aimed
+        // at a test runner matched this one too): each is noted in the log and ignored. Stop goes
+        // through the stop file, then SIGKILL. A handler, unlike ignoring, isn't passed on to the
+        // commands the runner starts, so their own stop signals work as usual.
+        for stopSignal in [SIGTERM, SIGHUP, SIGINT] { signal(stopSignal, noteIgnoredStopSignal) }
         let environment = ProcessInfo.processInfo.environment
         let home = URL(fileURLWithPath: environment["HOME"] ?? NSHomeDirectory(), isDirectory: true)
         let runnerDirectory = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
@@ -111,4 +116,10 @@ enum MAIPAGRunnerMain {
             exit(1)
         }
     }
+}
+
+/// Runs inside a signal handler, so it only writes a fixed line (no allocation).
+private func noteIgnoredStopSignal(_ received: Int32) {
+    let line: StaticString = "MAIPAGRunner: something on the computer sent a stop signal; it was ignored (Stop in the app still works).\n"
+    line.withUTF8Buffer { buffer in _ = write(STDERR_FILENO, buffer.baseAddress, buffer.count) }
 }

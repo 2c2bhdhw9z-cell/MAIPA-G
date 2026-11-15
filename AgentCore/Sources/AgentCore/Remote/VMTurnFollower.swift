@@ -133,7 +133,7 @@ extension AgentRun {
                     }
                     failures = 0
                     if poll.missing {
-                        finish("The reply's files on your computer are gone (the computer may have been replaced), so it can't be picked up again. Tap retry to run it again.", stoppedEarly: true)
+                        finish(VMNotices.filesGone, stoppedEarly: true)
                         break
                     }
                     if poll.awake == "off", !warnedAwake {
@@ -182,8 +182,8 @@ extension AgentRun {
                                 // Say why, from the runner's own last words (a crash or the computer
                                 // ending it); "the runner stopped" alone told nobody anything.
                                 let id = handle.id, control = handle.control
-                                let words = (try? await AgentLoop.bounded(seconds: 20, label: "Reading why the runner stopped") { try await control.logTail(id: id) }) ?? ""
-                                finish(VMNotices.runnerEnded + (words.isEmpty ? "" : " Its last words: \(words)"), stoppedEarly: true)
+                                let ending = try? await AgentLoop.bounded(seconds: 20, label: "Reading why the runner stopped") { try await control.ending(id: id) }
+                                finish(VMNotices.runnerEnded(reason: ending?.reason, lastWords: ending?.lastWords ?? ""), stoppedEarly: true)
                             }
                             break
                         }
@@ -223,7 +223,45 @@ extension AgentRun {
 public enum VMNotices {
     public static let runningOnComputer = "Running on your computer: this reply keeps going if you close the app."
     public static let cantStayAwake = "Your computer couldn't hold itself awake, so this reply only moves on while the app is open."
-    public static let runnerEnded = "The reply ended on your computer without finishing (the runner stopped). Tap retry to carry on from where it stopped."
+    /// The start of the note when the runner stopped without finishing and nobody tapped Stop.
+    public static let runnerEnded = "The runner on your computer stopped without finishing"
+    /// How that note started before 15 November 2026, in saved chats.
+    static let earlierRunnerEnded = "The reply ended on your computer without finishing"
+    public static let tapRetry = "Tap retry to carry on from where it stopped."
+    public static let filesGone = "The reply's files on your computer are gone (the computer may have been replaced), so it can't be picked up again. Tap retry to run it again."
+    static let unreachableForLong = "MAIPA-G couldn't reach your computer for 20 minutes"
+
+    /// "The runner on your computer stopped without finishing: your computer ran out of memory and
+    /// stopped it. Its last words: … Tap retry…"
+    public static func runnerEnded(reason: String?, lastWords: String) -> String {
+        var text = runnerEnded + (reason.map { $0.isEmpty ? "." : ": \($0)." } ?? ".")
+        if !lastWords.isEmpty {
+            text += " Its last words: \(lastWords)" + (lastWords.hasSuffix(".") ? "" : ".")
+        }
+        return text + " " + tapRetry
+    }
+
+    public static func isRunnerEnded(_ notice: String) -> Bool {
+        notice.hasPrefix(runnerEnded) || notice.hasPrefix(earlierRunnerEnded)
+    }
+
+    /// The runner-stopped note once the reply has carried on by itself: what happened stays, the
+    /// "Tap retry" goes.
+    public static func carriedOn(_ ended: String, at time: String) -> String {
+        let base = ended.hasSuffix(tapRetry) ? String(ended.dropLast(tapRetry.count)) : ended
+        return base.trimmingCharacters(in: .whitespaces) + " " + carriedOnMarker + " \(time)."
+    }
+
+    static let carriedOnMarker = "The reply carried on by itself at"
+
+    public static func isCarriedOn(_ notice: String) -> Bool {
+        isRunnerEnded(notice) && notice.contains(carriedOnMarker)
+    }
+
+    /// A note saying the reply stopped and asking for Retry: out of date once the reply carries on.
+    public static func asksForRetry(_ notice: String) -> Bool {
+        (isRunnerEnded(notice) && notice.hasSuffix(tapRetry)) || notice == filesGone || notice.hasPrefix(unreachableForLong)
+    }
     public static let lostContact = "Lost contact with your computer. The reply keeps going there, and MAIPA-G keeps trying to reach it."
     public static let signInNeeded = "Your computer's connector needs you to sign in again (Settings → Connectors). The reply keeps going there, and shows up here once you do."
     public static let stopFailed = "MAIPA-G couldn't reach your computer to stop this reply, so it may still be running there. Tap Stop again to try again."

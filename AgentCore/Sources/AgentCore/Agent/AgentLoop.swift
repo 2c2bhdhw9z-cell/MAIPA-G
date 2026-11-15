@@ -656,7 +656,9 @@ private struct Runner {
         if let note = input.resumeNote {
             pendingBlankReplyNudge = note
             turn.stoppedEarly = nil
-            turn.notices.removeAll { $0 == AgentLoop.stoppedEarlyNotice }
+            // "Tap retry" notes are about the stop this carries on from (one stayed up under the
+            // reply going again, owner's screenshot, 15 November 2026, 12:29 PM).
+            turn.notices.removeAll { $0 == AgentLoop.stoppedEarlyNotice || VMNotices.asksForRetry($0) }
         }
     }
 

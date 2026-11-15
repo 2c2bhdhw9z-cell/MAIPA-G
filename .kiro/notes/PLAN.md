@@ -1689,3 +1689,25 @@ same AI again after 1 second, then every 2 (a Retry-After is kept to, up to 10 s
 10 minutes, with a notice that goes away the moment it answers; Stop gives up any time. A 404 (model
 not there) and an empty stream still give up after two quick retries. Errors the service answers
 with no longer count toward the 5-minute silence limit. Tests: `ProviderDownTests`.
+
+### Held for the next build: a reply's runner can't be stopped by anything but Stop (owner, 15 November 2026)
+"Shouldn't have been able to stop in the first place." His Continuum reply (started 10:37 AM
+Eastern, last saved still running at 10:56) ended at about 11:02 AM with "the runner stopped" and
+no last words: the runner and the script that started it were both gone and the log was empty, so
+both were killed at once. It had just launched two sub-agents building in two worktrees. The likely
+causes are a kill by name (`pkill -f runner` aimed at the cBoy test `runner` also matches
+`~/.maipa-g/runner/…`) or the computer running out of memory or restarting. The computer can't be
+reached from the sandbox to tell which, and a Retry's new log overwrote the old one. The reply
+waited, stopped, until he tapped Retry at about 12:28 PM, and the "Tap retry" note stayed up under
+it while it ran again. Now:
+- The launch script and the awake hold ignore TERM, HUP and INT; the runner notes each in its log
+  and ignores it (a handler, so the commands it starts still stop normally). Stop works as before
+  (stop file, then SIGKILL).
+- The AI's commands, and everything they start, set `oom_score_adj` 1000, so the out-of-memory
+  killer stops a build first, not the runner; the runner asks for -900 with `sudo -n` where allowed.
+- When the runner still ends without finishing, the phone asks the computer why (restarted since
+  the run began, out-of-memory kills in `dmesg`, the exit code, or both killed at once), says it in
+  the note, and carries the reply on by itself as Retry does. That happens only while it keeps
+  making steps, at most 20 times a reply. With the app closed, it carries on when the app opens.
+- A Retry keeps the last run's log as `runner.log.1`; "Tap retry" notes go once the reply carries on.
+Tests: `RunnerStopTests`.

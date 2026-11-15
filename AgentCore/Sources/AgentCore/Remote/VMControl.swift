@@ -193,6 +193,8 @@ public struct VMControl: Sendable {
         r="$HOME/\(runnerFolder(revision))/run.sh"
         [ -x "$r" ] && [ -f "$HOME/\(runnerFolder(revision))/ready" ] || { echo maipa-g-no-runner; exit 0; }
         \(staleRunCleanup)
+        # The last run's log stays beside the new one, so why it ended can still be read.
+        [ -s "$d/runner.log" ] && mv -f "$d/runner.log" "$d/runner.log.1"
         mkdir -p "$d/steer"
         cat > "$d/launch.sh" <<'MAIPA_G_LAUNCH'
         \(launchBody)
@@ -254,15 +256,22 @@ public struct VMControl: Sendable {
     release_hold() { sprite_task -X DELETE "http://sprite/v1/tasks/$task" || sprite_env_curl -X DELETE "/v1/tasks/$task" || true; }
     """#
 
+    /// Nothing else on the computer may end a reply (owner, 15 November 2026: "Shouldn't have been
+    /// able to stop in the first place"). Stop signals sent by name (`pkill -f runner` matches this
+    /// script and the runner) are ignored here and noted by the runner; Stop goes through the stop
+    /// file and then SIGKILL. The computer's out-of-memory killer picks the runner last where the
+    /// computer allows it (`sudo -n`), and the AI's commands first (`ComputerControl.local`).
     static let launchBody = #"""
     r="$1"; mode="$2"; d="$3"
     task="maipa-g-$(basename "$d")"
+    trap '' TERM HUP INT
+    { echo -900 | sudo -n tee "/proc/$$/oom_score_adj"; } >/dev/null 2>&1 || true
     \#(keepAwakeFunctions)
     hold=""
     if [ -S "$sock" ] || [ -x /.sprite/bin/sprite-env ]; then
       if renew; then
         echo on > "$d/awake"
-        ( stop_at=$(( $(date +%s) + 43200 )); while sleep 60 && [ "$(date +%s)" -lt "$stop_at" ]; do renew || true; done ) </dev/null >/dev/null 2>&1 &
+        ( trap '' TERM HUP INT; stop_at=$(( $(date +%s) + 43200 )); while sleep 60 && [ "$(date +%s)" -lt "$stop_at" ]; do renew || true; done ) </dev/null >/dev/null 2>&1 &
         hold=$!
       else
         echo off > "$d/awake"
@@ -439,12 +448,88 @@ public struct VMControl: Sendable {
         try await upload(try VMCoding.pack(VMSecrets(openRouterKey: nil, githubToken: token)), to: "\(VMRun.folder(id))/\(VMRun.dataTokenRefreshFile)")
     }
 
-    /// The last lines the runner printed, for when it stopped without finishing: a crash, or the
-    /// computer ending it, says why there.
-    public func logTail(id: String) async throws -> String {
+    /// Why a runner stopped without finishing, as far as the computer can tell, and the last lines
+    /// it printed.
+    public struct RunnerEnding: Sendable, Equatable {
+        /// Plain words: the computer restarted, ran out of memory, or the runner crashed or was killed.
+        public var reason: String?
+        public var lastWords: String
+    }
+
+    /// Asks the computer why the runner stopped: whether it restarted since the run began, whether
+    /// its out-of-memory killer acted since then, and how the runner's log ends. A runner that was
+    /// gone with an empty log, and nothing else to say why, used to show only "the runner stopped"
+    /// (owner's Continuum reply, 15 November 2026, 11:02 AM Eastern).
+    public func ending(id: String) async throws -> RunnerEnding {
         guard VMRun.isRunID(id) else { throw Failure.badID }
-        let raw = try await computer.run("tail -c 3000 \"$HOME/\(VMRun.folder(id))/runner.log\" 2>/dev/null; true")
-        return VMControl.lastWords(ComputerControl.plainOutput(raw))
+        let raw = try await computer.run(Self.endingScript(id: id))
+        return Self.ending(from: ComputerControl.plainOutput(raw))
+    }
+
+    static func endingScript(id: String) -> String {
+        #"""
+        d="$HOME/\#(VMRun.folder(id))"
+        started=$(stat -c %Y "$d/launch.sh" 2>/dev/null || echo 0)
+        up=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
+        if [ "$started" -gt 0 ] && [ "$up" -gt 0 ]; then
+          echo "maipa-g-why-started $started"
+          boot=$(( $(date +%s) - up ))
+          [ "$boot" -gt $(( started + 2 )) ] && echo "maipa-g-why-restarted $boot"
+          since=$(( started - boot )); [ "$since" -lt 0 ] && since=0
+          { dmesg 2>/dev/null || sudo -n dmesg 2>/dev/null; } | grep -iE 'out of memory|oom-kill|killed process' | awk -v since="$since" -F'[][]' '{ if ($2 + 0 >= since) print }' | tail -n 4 | cut -c1-300 | sed 's/^/maipa-g-why-oom /'
+        fi
+        echo maipa-g-log
+        tail -c 3000 "$d/runner.log" 2>/dev/null
+        true
+        """#
+    }
+
+    static func ending(from output: String) -> RunnerEnding {
+        let lines = output.split(whereSeparator: \.isNewline).map(String.init)
+        guard let logStart = lines.firstIndex(of: "maipa-g-log") else { return RunnerEnding(reason: nil, lastWords: lastWords(output)) }
+        let notes = lines[..<logStart]
+        let log = lines[(logStart + 1)...].joined(separator: "\n")
+        let words = lastWords(log)
+        func value(_ marker: String) -> String? {
+            notes.last { $0.hasPrefix(marker + " ") }.map { String($0.dropFirst(marker.count + 1)) }
+        }
+        if let boot = value("maipa-g-why-restarted").flatMap(TimeInterval.init) {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .none
+            formatter.timeStyle = .short
+            return RunnerEnding(reason: "your computer restarted at \(formatter.string(from: Date(timeIntervalSince1970: boot)))", lastWords: words)
+        }
+        let killed = notes.filter { $0.hasPrefix("maipa-g-why-oom ") }.compactMap { line -> String? in
+            guard let open = line.range(of: "Killed process "), let start = line[open.upperBound...].firstIndex(of: "("),
+                  let end = line[start...].firstIndex(of: ")") else { return nil }
+            return String(line[line.index(after: start)..<end])
+        }
+        let ranOutOfMemory = notes.contains { $0.hasPrefix("maipa-g-why-oom ") }
+        if killed.contains(where: { $0.hasPrefix("MAIPAGRunner") || $0 == "bash" || $0 == "run.sh" }) {
+            return RunnerEnding(reason: "your computer ran out of memory and stopped it", lastWords: words)
+        }
+        if let exitLine = log.split(whereSeparator: \.isNewline).last(where: { $0.hasPrefix("maipa-g-runner-exit ") }),
+           let code = Int(exitLine.dropFirst("maipa-g-runner-exit ".count).trimmingCharacters(in: .whitespaces)) {
+            let reason: String
+            switch code {
+            case 137: reason = ranOutOfMemory ? "your computer ran out of memory and force-stopped it" : "something on your computer force-stopped it"
+            case 132, 133, 134, 135, 136, 139: reason = "it crashed"
+            case 129...: reason = "something on your computer stopped it (signal \(code - 128))"
+            case 0: reason = "it ended without writing its last state"
+            default: reason = "it stopped with an error (exit code \(code))"
+            }
+            return RunnerEnding(reason: reason, lastWords: words)
+        }
+        if ranOutOfMemory {
+            let names = Array(Set(killed)).sorted().prefix(3).joined(separator: ", ")
+            return RunnerEnding(reason: "your computer ran out of memory" + (names.isEmpty ? "" : " and stopped \(names)"), lastWords: words)
+        }
+        if value("maipa-g-why-started") != nil {
+            // The script that started the runner always writes how it ended, unless it was killed
+            // at the same moment: SIGKILL to both, or everything in their session ended at once.
+            return RunnerEnding(reason: "it and the script that started it were killed at the same moment, with no error from either", lastWords: words)
+        }
+        return RunnerEnding(reason: nil, lastWords: words)
     }
 
     /// The end of a runner log as one short line: the last few non-empty lines, without secrets.

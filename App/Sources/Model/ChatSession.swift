@@ -1352,6 +1352,7 @@ final class ChatSession: Identifiable {
             await self?.runTurn()
             grace.end()
             await MainActor.run {
+                if self?.carryOnAfterRunnerStopped() == true { return }
                 guard let self,
                       !self.isRunning,
                       !self.pausedInBackground,
@@ -1362,6 +1363,38 @@ final class ChatSession: Identifiable {
                 self.send(next.text, attachments: next.attachments)
             }
         }
+    }
+
+    /// Replies that carried on by themselves after their runner stopped: how many times, and how
+    /// many steps the reply had the last time.
+    @ObservationIgnored private var runnerStopCarryOns: [UUID: (times: Int, steps: Int)] = [:]
+    static let maxRunnerStopCarryOns = 20
+
+    /// The runner on the computer stopped without finishing and nobody tapped Stop (something
+    /// killed it, the computer ran out of memory or restarted): the reply carries on by itself from
+    /// where it was, as Retry does (owner, 15 November 2026: "Shouldn't have been able to stop in
+    /// the first place"; his Continuum reply stopped at 11:02 AM and waited for him). Only while it
+    /// keeps getting somewhere: stopped again without a new step, it stays stopped and says so, so
+    /// a runner that can't start doesn't go round and round.
+    private func carryOnAfterRunnerStopped() -> Bool {
+        guard !isRunning, !isCompacting, !userStoppedExplicitly, !pausedInBackground,
+              let reply = chat.messages.last, var turn = reply.assistantTurn,
+              turn.status == .stopped, turn.stoppedEarly == true,
+              let index = turn.notices.lastIndex(where: { VMNotices.isRunnerEnded($0) && VMNotices.asksForRetry($0) })
+        else { return false }
+        let steps = turn.steps.count
+        if let earlier = runnerStopCarryOns[reply.id], earlier.steps >= steps || earlier.times >= Self.maxRunnerStopCarryOns { return false }
+        runnerStopCarryOns[reply.id] = (times: (runnerStopCarryOns[reply.id]?.times ?? 0) + 1, steps: steps)
+        let carried = VMNotices.carriedOn(turn.notices[index], at: Date().formatted(date: .omitted, time: .shortened))
+        turn.notices.remove(at: index)
+        turn.notices.removeAll(where: VMNotices.isCarriedOn)
+        turn.notices.append(carried)
+        replaceLastTurn(turn)
+        let partial = turn.steps.last(where: { !$0.text.isEmpty })?.text ?? ""
+        pendingResumeNote = AgentLoop.resumeNote(partialText: partial)
+        touch()
+        start()
+        return true
     }
 
     private func runTurn() async {
