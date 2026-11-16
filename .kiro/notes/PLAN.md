@@ -1757,3 +1757,8 @@ Tests: `OwnerChatFixesTests`.
   (OpenRouter's real free AIs) and Add credit, and says TeamoRouter's -free models need the wallet
   too. A reply carried on with another AI now names that AI (his retry still read "GPT 6.1 Sol").
 Tests: `OwnerChatFixesTests`.
+
+Owner, 16 November 2026: "I didn't ask for a use a free AI button." Taken out: another provider's
+empty-balance card has Try again and Add credit (that provider's page), as in build 213. Rule added
+to `.kiro/steering/owner-rules.md`: fix what he reports, add nothing he didn't ask for. He hadn't
+installed 213 or 214, so this goes out as one build with everything.

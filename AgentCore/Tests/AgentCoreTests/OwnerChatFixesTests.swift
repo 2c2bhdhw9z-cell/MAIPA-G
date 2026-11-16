@@ -55,7 +55,8 @@ struct OwnerChatFixesTests {
         #expect(failure.actionURL == "https://teamorouter.com/dashboard?buy=1")
         #expect(failure.message.contains("TeamoRouter balance has run out"))
         #expect(failure.message.contains("\"-free\" models need money in the wallet too"))
-        #expect(failure.message.contains("Use a free AI"))
+        #expect(!failure.message.contains("free AI"), "no button he didn't ask for")
+        #expect(failure.message.contains("then tap Try again"))
         // A 400 that isn't about money is still a bad request.
         let other = OpenRouterAPIError(status: 400, body: Data(#"{"error":{"message":"Unsupported parameter: reasoning"}}"#.utf8), headers: [:], providerName: "TeamoRouter")
         #expect(other.kind == .badRequest)

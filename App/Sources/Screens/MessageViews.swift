@@ -1402,10 +1402,10 @@ struct FailureCard: View {
         switch failure.kind {
         case .outOfCredits:
             if let provider = failure.actionURL.flatMap(URL.init(string:)) {
-                // Another provider's balance (TeamoRouter, OneProvider) ran out: a really free AI
-                // in one tap (OpenRouter's), or that provider's own top-up page. Retry this answer,
-                // under the reply, carries on after a top-up or with another AI picked.
-                Button("Use a free AI", action: actions.switchToFree)
+                // Another provider's balance (TeamoRouter, OneProvider) ran out: Try again, and
+                // that provider's own top-up page. Nothing else (owner, 16 November 2026: "I
+                // didn't ask for a use a free AI button").
+                Button("Try again", action: actions.retry)
                     .buttonStyle(.borderedProminent)
                 Button("Add credit") { actions.openURL(provider) }
                     .buttonStyle(.bordered)

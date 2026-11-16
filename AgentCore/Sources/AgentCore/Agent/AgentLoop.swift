@@ -1766,7 +1766,7 @@ private struct Runner {
                 // Add credit opens that provider's own page, not OpenRouter's. TeamoRouter's
                 // "-free" models are billed from the same wallet, so they're refused too.
                 let lowLane = service == "TeamoRouter" ? " Its \"-free\" models need money in the wallet too: TeamoRouter bills them, at a tiny price." : ""
-                return TurnFailure(kind: .outOfCredits, message: "Your \(service) balance has run out, so this AI can't answer.\(lowLane) Tap Use a free AI, add credit with \(service), or pick an AI on another provider and tap Retry this answer.", detail: api.description, actionURL: api.topUpURL?.absoluteString)
+                return TurnFailure(kind: .outOfCredits, message: "Your \(service) balance has run out, so this AI can't answer.\(lowLane) Add credit with \(service), or pick an AI on another provider, then tap Try again.", detail: api.description, actionURL: api.topUpURL?.absoluteString)
             case .spendingCapReached:
                 return TurnFailure(kind: .outOfCredits, message: "This \(service) key has reached its spending limit.", detail: api.description)
             case .freeDailyLimit:

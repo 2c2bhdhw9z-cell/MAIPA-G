@@ -30,6 +30,13 @@ PRs ... It's just fucking shit up." This replaces the 27 October exception entir
 - Keep `scripts/publish-verified-ipa.sh`'s "PR and main trees must match" proof intact: when
   there is no pull request, the tree of the published commit equals itself, so it still holds.
 
+## Fix what he reports, add nothing he didn't ask for
+Owner, 16 November 2026: "I didn't ask for a goddamn use a free AI button." It was added to the
+empty-balance card as a "helpful" extra while fixing the TeamoRouter price.
+- Fix the problem he points at. Never add a button, option, setting or behaviour he didn't ask
+  for, even as a fallback or a convenience. If something extra seems worth having, mention it in
+  one line and wait for his yes.
+
 ## "However you do it" means Kiro's factory defaults
 Owner, 27 October 2026, correcting answer 11: "the way you normally are programmed, like the way
 Amazon or whoever made you", not "the way I want you to do it".
