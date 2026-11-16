@@ -68,6 +68,55 @@ struct MessageRow: View, Equatable {
     }
 }
 
+/// When a message the person sent is shown short, with "Show full message": over 1,200 characters
+/// or 16 lines. Shared by sent messages and messages sent while a reply runs (steering), which
+/// used to show a 4,400-character report in full (owner, 15 November 2026).
+enum LongMessagePreview {
+    static let characterLimit = 1_200
+    static let lineLimit = 16
+
+    static func isLong(_ text: String) -> Bool {
+        if text.count > characterLimit { return true }
+        var lines = 1
+        for character in text where character == "\n" {
+            lines += 1
+            if lines > lineLimit { return true }
+        }
+        return false
+    }
+
+    static func preview(_ text: String) -> String {
+        let prefix = String(text.prefix(characterLimit))
+        let lines = prefix.split(separator: "\n", omittingEmptySubsequences: false)
+        if lines.count > lineLimit {
+            return lines.prefix(lineLimit).joined(separator: "\n") + "…"
+        }
+        return prefix.count < text.count ? prefix + "…" : prefix
+    }
+}
+
+/// "Show full message (4,398 characters)", under a shortened message.
+private struct ShowFullMessageButton: View {
+    let count: Int
+    let action: () -> Void
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: "doc.text.magnifyingglass")
+                Text("Show full message (\(count.formatted()) characters)")
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.bold))
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(theme.accent)
+            .padding(.top, 2)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 struct UserBubble: View {
     var message: UserMessage
     var createdAt: Date = Date()
@@ -79,27 +128,10 @@ struct UserBubble: View {
     @Environment(\.theme) private var theme
     @State private var showingFullText = false
 
-    private static let previewCharacterLimit = 1_200
-    private static let previewLineLimit = 16
-
-    private var isLongText: Bool {
-        if message.text.count > Self.previewCharacterLimit { return true }
-        var lines = 1
-        for character in message.text where character == "\n" {
-            lines += 1
-            if lines > Self.previewLineLimit { return true }
-        }
-        return false
-    }
+    private var isLongText: Bool { LongMessagePreview.isLong(message.text) }
 
     private func previewText(isLong: Bool) -> String {
-        guard isLong else { return message.text }
-        let prefix = String(message.text.prefix(Self.previewCharacterLimit))
-        let lines = prefix.split(separator: "\n", omittingEmptySubsequences: false)
-        if lines.count > Self.previewLineLimit {
-            return lines.prefix(Self.previewLineLimit).joined(separator: "\n") + "…"
-        }
-        return prefix.count < message.text.count ? prefix + "…" : prefix
+        isLong ? LongMessagePreview.preview(message.text) : message.text
     }
 
     /// Pictures and other files, in one pass over the attachments (a message can have thousands).
@@ -150,18 +182,7 @@ struct UserBubble: View {
                             .font(.body)
                             .textSelection(.enabled)
                         if isLong {
-                            Button { showingFullText = true } label: {
-                                HStack(spacing: 5) {
-                                    Image(systemName: "doc.text.magnifyingglass")
-                                    Text("Show full message (\(message.text.count.formatted()) characters)")
-                                    Image(systemName: "chevron.right")
-                                        .font(.caption2.weight(.bold))
-                                }
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(theme.accent)
-                                .padding(.top, 2)
-                            }
-                            .buttonStyle(.plain)
+                            ShowFullMessageButton(count: message.text.count) { showingFullText = true }
                         }
                     }
                     .padding(.horizontal, 14)
@@ -513,6 +534,7 @@ struct SteerBubble: View {
     let text: String
     var onTakeBack: (() -> Void)?
     @Environment(\.theme) private var theme
+    @State private var showingFullText = false
 
     init(text: String, onTakeBack: (() -> Void)? = nil) {
         self.text = text
@@ -520,23 +542,36 @@ struct SteerBubble: View {
     }
 
     var body: some View {
+        // Shortened like any other long message the person sent.
+        let isLong = LongMessagePreview.isLong(text)
         HStack {
             Spacer(minLength: 36)
-            Text(text)
-                .font(.body)
-                .textSelection(.enabled)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(theme.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(theme.accent.opacity(0.25)))
-                .contextMenu {
-                    Button { UIPasteboard.general.string = text } label: { Label("Copy", systemImage: "doc.on.doc") }
-                    if let onTakeBack {
-                        Button(action: onTakeBack) { Label("Take back", systemImage: "arrow.uturn.backward") }
-                    }
+            VStack(alignment: .leading, spacing: 8) {
+                Text(isLong ? LongMessagePreview.preview(text) : text)
+                    .font(.body)
+                    .textSelection(.enabled)
+                if isLong {
+                    ShowFullMessageButton(count: text.count) { showingFullText = true }
                 }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(theme.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(theme.accent.opacity(0.25)))
+            .contextMenu {
+                if isLong {
+                    Button { showingFullText = true } label: { Label("Show full message", systemImage: "doc.text.magnifyingglass") }
+                }
+                Button { UIPasteboard.general.string = text } label: { Label("Copy", systemImage: "doc.on.doc") }
+                if let onTakeBack {
+                    Button(action: onTakeBack) { Label("Take back", systemImage: "arrow.uturn.backward") }
+                }
+            }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
+        .sheet(isPresented: $showingFullText) {
+            FullUserMessageSheet(text: text)
+        }
     }
 }
 
@@ -1367,10 +1402,10 @@ struct FailureCard: View {
         switch failure.kind {
         case .outOfCredits:
             if let provider = failure.actionURL.flatMap(URL.init(string:)) {
-                // Another provider's balance (TeamoRouter, OneProvider): its own page, and Try
-                // again once it's topped up or another AI is picked. OpenRouter's free AIs and
-                // credit page were the wrong answer for it.
-                Button("Try again", action: actions.retry)
+                // Another provider's balance (TeamoRouter, OneProvider) ran out: a really free AI
+                // in one tap (OpenRouter's), or that provider's own top-up page. Retry this answer,
+                // under the reply, carries on after a top-up or with another AI picked.
+                Button("Use a free AI", action: actions.switchToFree)
                     .buttonStyle(.borderedProminent)
                 Button("Add credit") { actions.openURL(provider) }
                     .buttonStyle(.bordered)

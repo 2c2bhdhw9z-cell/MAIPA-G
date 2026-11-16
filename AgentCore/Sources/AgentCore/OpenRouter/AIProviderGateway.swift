@@ -74,6 +74,27 @@ public struct AIProviderPreset: Sendable, Hashable, Identifiable {
     }
 }
 
+/// TeamoRouter's "-free" models aren't free. Its own rate-limits page (teamorouter.com/docs/
+/// rate-limits, read 16 November 2026): an ID ending in -free "is still billed", at a promotional
+/// discount, 200 requests a day each, and a request on an empty wallet is refused ("wallet balance
+/// is insufficient"). Its price list (/v1/models/pricing) gives glm-5.3-flash-free a real price,
+/// $0.000114/$0.0004 per million (discount_rate 0.001). MAIPA-G ignored that and showed it as
+/// Free, 100% off list; the owner picked it when his wallet ran out (15 November 2026: "It's
+/// free… make it make sense").
+public enum TeamoRouterLowLane {
+    /// The share of the list price charged when the price list gives none (the docs say 99% off).
+    public static let listRate = 0.01
+    public static let note = "Not free: billed at a tiny price from your TeamoRouter balance, so it needs money in the wallet. 200 requests a day."
+
+    public static func isLowLane(_ rawID: String) -> Bool { rawID.lowercased().hasSuffix("-free") }
+
+    /// A full model ID (`teamorouter::glm-5.3-flash-free`) of one of these.
+    public static func isLowLaneModelID(_ id: String) -> Bool {
+        guard let decoded = AIProviderModelID.decode(id), decoded.providerID == "teamorouter" else { return false }
+        return isLowLane(decoded.rawModelID)
+    }
+}
+
 /// Non-secret metadata persisted in UserDefaults; `apiKey` is stored exclusively in Keychain on iPhone
 /// (or passed through encrypted `MAIPAG_MCP_SECRETS` to ephemeral CloudRunner jobs).
 public struct AIProviderEndpoint: Codable, Sendable, Hashable, Identifiable {
@@ -660,7 +681,20 @@ public enum AIProviderGateway {
         )
         let maxOut: Int = normalizedOut.cap ?? inferredMaxOutputTokens(for: lower)
 
-        let extractedPrices = extractPerTokenPrices(entry: entry, overlay: overlay, opMeta: opMeta, rawID: lower)
+        let isTeamoRouter = endpoint.id == "teamorouter" || endpoint.baseURL.lowercased().contains("teamorouter")
+        let teamoLowLane = isTeamoRouter && TeamoRouterLowLane.isLowLane(lower)
+        var extractedPrices = extractPerTokenPrices(entry: entry, overlay: overlay, opMeta: opMeta, rawID: lower, billedFree: teamoLowLane)
+        if teamoLowLane, (extractedPrices.prompt ?? 0) == 0, (extractedPrices.completion ?? 0) == 0,
+           let list = entry["list_cost"] ?? overlay?["list_cost"],
+           let inM = numberFromJSON(list["input"]), let outM = numberFromJSON(list["output"]) {
+            // No price of its own reported: TeamoRouter's documented 1% of list.
+            let rate = TeamoRouterLowLane.listRate / 1_000_000.0
+            extractedPrices = ExtractedPrices(
+                prompt: inM * rate, completion: outM * rate,
+                cacheRead: (numberFromJSON(list["cache_read"]) ?? numberFromJSON(list["cached_input"])).map { $0 * rate },
+                cacheWrite: (numberFromJSON(list["cache_creation"]) ?? numberFromJSON(list["cache_write_5m"])).map { $0 * rate }
+            )
+        }
         let listPrices = extractListPrices(entry: entry, overlay: overlay, current: extractedPrices)
 
         // Wire shape detection
@@ -773,6 +807,7 @@ public enum AIProviderGateway {
 
         let summaryParts: [String] = [
             "Served via \(endpoint.name)",
+            teamoLowLane ? TeamoRouterLowLane.note : nil,
             entry["owned_by"]?.stringValue.map { "Maker: \($0)" },
             entry["confidential"]?.boolValue == true ? "Confidential TEE enclave" : nil,
         ].compactMap { $0 }
@@ -813,9 +848,12 @@ public enum AIProviderGateway {
         entry: JSONValue,
         overlay: JSONValue?,
         opMeta: OneProviderOfficialCatalog.Entry?,
-        rawID: String
+        rawID: String,
+        billedFree: Bool = false
     ) -> ExtractedPrices {
-        if rawID.hasSuffix("-free") || rawID.hasSuffix(":free") {
+        // A ":free" model costs nothing. A TeamoRouter "-free" one is still billed (see
+        // TeamoRouterLowLane), so its real price is read like any other model's.
+        if !billedFree, rawID.hasSuffix("-free") || rawID.hasSuffix(":free") {
             return ExtractedPrices(prompt: 0, completion: 0, cacheRead: 0, cacheWrite: 0)
         }
         // 1. SayGM nano-dollars per 1M tokens (`1e15` nano-dollars = $1/token)

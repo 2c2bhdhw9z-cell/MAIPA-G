@@ -1740,3 +1740,20 @@ From the saved Signer (snes-tas-studio), Korg and diagnostics data:
 - Old "the runner stopped… Tap retry" notes no longer show under replies that went on and finished.
 Asked him about his Korg device-report screenshots and the circled free GLM 5.3 Flash on TeamoRouter.
 Tests: `OwnerChatFixesTests`.
+
+### His answers, 16 November 2026: the long message and the "free" GLM
+- **"That message didn't even compact in the first place."** The 4,400-character Korg report he
+  sent while a reply was running (5:22 PM, 15 November) was shown in full: messages sent while a
+  reply runs use `SteerBubble`, which had no shortening, only sent messages (`UserBubble`) did.
+  Both now use `LongMessagePreview` (over 1,200 characters or 16 lines) and the same "Show full
+  message" sheet.
+- **"It's free… make it make sense."** TeamoRouter's glm-5.3-flash-free isn't free: its rate-limits
+  page says IDs ending in -free are still billed and 200 a day, and its price list gives it
+  $0.000114/$0.0004 per million. MAIPA-G ignored that price and forced every "-free" ID to $0, so
+  the picker said Free, 100% off list, and TeamoRouter refused it on his empty wallet. Now its real
+  price is read (1% of list when none is given), it isn't free anywhere in MAIPA-G (picker, Free
+  filter, routes), the picker says "Needs TeamoRouter balance · 200 a day", and nothing that costs
+  anything says 100% off. The empty-balance card for another provider now has "Use a free AI"
+  (OpenRouter's real free AIs) and Add credit, and says TeamoRouter's -free models need the wallet
+  too. A reply carried on with another AI now names that AI (his retry still read "GPT 6.1 Sol").
+Tests: `OwnerChatFixesTests`.

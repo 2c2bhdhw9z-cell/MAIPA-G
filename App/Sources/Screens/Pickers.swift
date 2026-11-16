@@ -616,6 +616,10 @@ struct ModelPicker: View {
                         // The price actually charged right now: an offer that ended or ran out is already dropped.
                         let priced = model.pricedNow()
                         badge(text: price(priced), highlight: priced.isFree || priced.priceOffer != nil)
+                        if TeamoRouterLowLane.isLowLaneModelID(model.id) {
+                            // Not free: TeamoRouter bills it and refuses it on an empty wallet.
+                            badge(text: "Needs TeamoRouter balance · 200 a day", icon: "creditcard")
+                        }
                         if let offer = priced.priceOffer {
                             if let regularIn = offer.regularPromptPrice, let regularOut = offer.regularCompletionPrice {
                                 struckBadge(text: pairText(regularIn, regularOut), label: "Regular price")

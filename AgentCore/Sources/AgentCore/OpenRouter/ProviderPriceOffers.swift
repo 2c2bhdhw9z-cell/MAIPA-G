@@ -181,7 +181,10 @@ extension ModelInfo {
     public var percentOffList: Int? {
         guard let price = promptPrice, let list = listPromptPrice, list > 0, price >= 0, price < list else { return nil }
         let pct = Int(((1 - price / list) * 100).rounded())
-        return pct > 0 ? pct : nil
+        // Something that costs anything is never "100% off": TeamoRouter's glm-5.3-flash-free is
+        // 99.9% off and refused on an empty wallet.
+        let shown = price > 0 ? min(pct, 99) : pct
+        return shown > 0 ? shown : nil
     }
 
     /// This model with any offer that has ended (or run out of quota) removed, so prices go back to

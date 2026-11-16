@@ -137,7 +137,10 @@ public struct ModelInfo: Codable, Sendable, Hashable, Identifiable {
     }
 
     public var isFree: Bool {
-        id.hasSuffix(":free") || (promptPrice == 0 && completionPrice == 0)
+        // TeamoRouter's "-free" lane is billed (1% of list) and needs a balance, whatever an old
+        // saved catalogue says its price is.
+        if TeamoRouterLowLane.isLowLaneModelID(id) { return false }
+        return id.hasSuffix(":free") || (promptPrice == 0 && completionPrice == 0)
     }
 
     /// Re-normalizes synthetic ~75–100% context-window output caps (such as `943,718` on `1,048,576` or `235,929` on `262,144`)

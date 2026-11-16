@@ -54,12 +54,72 @@ struct OwnerChatFixesTests {
         #expect(failure.kind == .outOfCredits)
         #expect(failure.actionURL == "https://teamorouter.com/dashboard?buy=1")
         #expect(failure.message.contains("TeamoRouter balance has run out"))
+        #expect(failure.message.contains("\"-free\" models need money in the wallet too"))
+        #expect(failure.message.contains("Use a free AI"))
         // A 400 that isn't about money is still a bad request.
         let other = OpenRouterAPIError(status: 400, body: Data(#"{"error":{"message":"Unsupported parameter: reasoning"}}"#.utf8), headers: [:], providerName: "TeamoRouter")
         #expect(other.kind == .badRequest)
         // OpenRouter's own empty balance keeps OpenRouter's buttons.
         let openRouter = AgentLoop.describe(OpenRouterAPIError(status: 402, body: Data(#"{"error":{"code":402,"message":"Insufficient credits"}}"#.utf8), headers: [:]))
         #expect(openRouter.kind == .outOfCredits && openRouter.actionURL == nil)
+    }
+
+    /// TeamoRouter's own price list for its two GLM 5.3 Flash models, as it answered on 16 November 2026.
+    final class TeamoPrices: HTTPTransport, @unchecked Sendable {
+        func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+            switch request.url.path {
+            case "/v1/models":
+                return HTTPResponse(status: 200, body: Data(#"{"data":[{"id":"glm-5.3-flash-free"},{"id":"glm-5.3-flash"}]}"#.utf8))
+            case "/v1/models/pricing":
+                return HTTPResponse(status: 200, body: Data(#"""
+                {"models":[
+                 {"id":"glm-5.3-flash-free","display_name":"GLM 5.3 Flash福利版","base_model_id":"glm-5.3-flash","context_window":1000000,"cost":{"input":0.000114,"output":0.0004,"cached_input":3e-05,"cache_read":3e-05},"list_cost":{"currency":"USD","input":0.114,"output":0.4,"cached_input":0.03,"cache_read":0.03},"discount_rate":0.001},
+                 {"id":"glm-5.3-flash","display_name":"GLM-5.3-Flash (Ox Alpha)","context_window":1000000,"cost":{"input":0.057,"output":0.2,"cache_read":0.015},"list_cost":{"currency":"USD","input":0.114,"output":0.4,"cache_read":0.03},"discount_rate":0.5}
+                ]}
+                """#.utf8))
+            default:
+                return HTTPResponse(status: 404)
+            }
+        }
+        func stream(_ request: HTTPRequest) async throws -> HTTPStreamResponse {
+            HTTPStreamResponse(status: 404, headers: [:], body: AsyncThrowingStream { $0.finish() })
+        }
+    }
+
+    @Test("TeamoRouter's \"-free\" GLM isn't shown as free: it has a price and needs a balance")
+    func teamoRouterLowLaneIsNotFree() async throws {
+        let endpoint = AIProviderEndpoint(id: "teamorouter", name: "TeamoRouter", baseURL: "https://api.teamorouter.com/v1", apiKey: "sk-teamo-test", isEnabled: true)
+        let models = try await AIProviderGateway.fetchModels(for: endpoint, transport: TeamoPrices()).models
+        let glm = try #require(models.first { AIProviderModelID.rawModelID($0.id) == "glm-5.3-flash-free" })
+        #expect(!glm.isFree)
+        #expect(((glm.promptPrice ?? 0) * 1_000_000 * 1_000_000).rounded() == 114)
+        #expect(glm.percentOffList == 99)
+        #expect(glm.summary?.contains("needs money in the wallet") == true)
+        let route = ModelRouter.route(choice: .model(glm.id), difficulty: .normal, thinking: .medium, account: AccountState(), catalogue: [glm.id: glm])
+        #expect(!route.isFree)
+        // OpenRouter's ":free" models are still free.
+        #expect(ModelInfo(id: "nvidia/nemotron-3.5-lightning:free", name: "Nemotron", promptPrice: 0, completionPrice: 0).isFree)
+    }
+
+    @Test("A reply carried on with another AI says that AI, not the one it stopped on")
+    func carriedOnReplyNamesTheNewAI() async throws {
+        var step = AssistantStep()
+        step.text = "Saving these fixes to PR #1."
+        step.finishedAt = Date()
+        var stopped = AssistantTurn(status: .failed, steps: [step], notices: [AgentLoop.stoppedEarlyNotice])
+        stopped.stoppedEarly = true
+        stopped.routeLabel = "GPT 6.1 Sol"
+        var chat = Chat()
+        chat.messages = [.user("Fix it"), ChatMessage(body: .assistant(stopped))]
+        let transport = ScriptedTransport([.events([AgentLoopTests.text("Done."), AgentLoopTests.done])])
+        let environment = AgentEnvironment(openRouter: OpenRouterClient(transport: transport, apiKey: "sk-test"), freeRoute: { AgentLoopTests.route() }, onOutOfCredits: {})
+        var route = AgentLoopTests.route()
+        route.label = "GLM 5.3 Flash"
+        var last: AssistantTurn?
+        for await event in AgentLoop.run(AgentTurnInput(chat: chat, route: route, systemPrompt: "system", tools: [], resumeNote: AgentLoop.resumeNote(partialText: step.text)), environment: environment) {
+            if case .updated(let turn, _) = event { last = turn }
+        }
+        #expect(last?.routeLabel == "GLM 5.3 Flash")
     }
 
     @Test("A Tap-retry note isn't shown under a reply that carried on and finished")

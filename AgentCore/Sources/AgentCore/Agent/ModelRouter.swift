@@ -258,7 +258,7 @@ public enum ModelRouter {
                 plugins: [],
                 effort: resolvedEffort,
                 automaticCaching: id.hasPrefix("anthropic/") || AIProviderGateway.isClaudeModel(id.lowercased()),
-                isFree: info?.isFree ?? (id.hasSuffix(":free") || id.hasSuffix("-free")),
+                isFree: info?.isFree ?? (id.hasSuffix(":free") || (id.hasSuffix("-free") && !TeamoRouterLowLane.isLowLaneModelID(id))),
                 isAuto: false,
                 label: info?.shortName ?? id,
                 contextWindow: context,

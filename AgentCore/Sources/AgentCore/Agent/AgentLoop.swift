@@ -655,6 +655,9 @@ private struct Runner {
         self.continuation = continuation
         if let note = input.resumeNote {
             pendingBlankReplyNudge = note
+            // Carried on with the AI picked now: the reply says that one, not the one it stopped
+            // on (a retry on the free GLM still read "GPT 6.1 Sol", 15 November 2026).
+            turn.routeLabel = input.route.label
             turn.stoppedEarly = nil
             // "Tap retry" notes are about the stop this carries on from (one stayed up under the
             // reply going again, owner's screenshot, 15 November 2026, 12:29 PM).
@@ -1760,8 +1763,10 @@ private struct Runner {
                 if isOpenRouter {
                     return TurnFailure(kind: .outOfCredits, message: "Your \(service) credit has run out.", detail: api.description)
                 }
-                // Add credit opens that provider's own page, not OpenRouter's.
-                return TurnFailure(kind: .outOfCredits, message: "Your \(service) balance has run out, so this AI can't answer. Add credit with \(service), or pick an AI on another provider, then tap Try again.", detail: api.description, actionURL: api.topUpURL?.absoluteString)
+                // Add credit opens that provider's own page, not OpenRouter's. TeamoRouter's
+                // "-free" models are billed from the same wallet, so they're refused too.
+                let lowLane = service == "TeamoRouter" ? " Its \"-free\" models need money in the wallet too: TeamoRouter bills them, at a tiny price." : ""
+                return TurnFailure(kind: .outOfCredits, message: "Your \(service) balance has run out, so this AI can't answer.\(lowLane) Tap Use a free AI, add credit with \(service), or pick an AI on another provider and tap Retry this answer.", detail: api.description, actionURL: api.topUpURL?.absoluteString)
             case .spendingCapReached:
                 return TurnFailure(kind: .outOfCredits, message: "This \(service) key has reached its spending limit.", detail: api.description)
             case .freeDailyLimit:
