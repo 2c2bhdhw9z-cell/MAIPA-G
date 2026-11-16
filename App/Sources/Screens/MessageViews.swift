@@ -1366,10 +1366,20 @@ struct FailureCard: View {
     private var buttons: some View {
         switch failure.kind {
         case .outOfCredits:
-            Button("Switch to free AIs", action: actions.switchToFree)
-                .buttonStyle(.borderedProminent)
-            Button("Add credit") { actions.openURL(OpenRouterClient.creditsURL) }
-                .buttonStyle(.bordered)
+            if let provider = failure.actionURL.flatMap(URL.init(string:)) {
+                // Another provider's balance (TeamoRouter, OneProvider): its own page, and Try
+                // again once it's topped up or another AI is picked. OpenRouter's free AIs and
+                // credit page were the wrong answer for it.
+                Button("Try again", action: actions.retry)
+                    .buttonStyle(.borderedProminent)
+                Button("Add credit") { actions.openURL(provider) }
+                    .buttonStyle(.bordered)
+            } else {
+                Button("Switch to free AIs", action: actions.switchToFree)
+                    .buttonStyle(.borderedProminent)
+                Button("Add credit") { actions.openURL(OpenRouterClient.creditsURL) }
+                    .buttonStyle(.bordered)
+            }
         case .signInNeeded:
             Button("Sign in", action: actions.signIn)
                 .buttonStyle(.borderedProminent)

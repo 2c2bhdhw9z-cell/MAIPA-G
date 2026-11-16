@@ -60,7 +60,7 @@ public struct SendFileTool: AgentTool {
             guard let computer else { throw ToolInputError("This chat has no computer to take the file from.") }
             var relative = path
             for prefix in ["~/", "$HOME/", "/home/sprite/"] where relative.hasPrefix(prefix) { relative.removeFirst(prefix.count) }
-            guard ComputerControl.isSafeRelativePath(relative) else { throw ToolInputError("Give a path inside the computer's home folder.") }
+            guard ComputerControl.isSafeHomePath(relative) else { throw ToolInputError("Give a path inside the computer's home folder.") }
             progress("Bringing the file from the computer…")
             shownName = (relative as NSString).lastPathComponent
             file = folder.appendingPathComponent(shownName)

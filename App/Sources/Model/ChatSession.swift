@@ -1798,7 +1798,8 @@ final class ChatSession: Identifiable {
                 // Any chat file (an app, an archive, anything) goes there as the real file.
                 let files = chatFiles()
                 if !files.isEmpty { tools.append(CopyFileToComputerTool(control: control, files: files, link: ComputerRuns.chatFileLink(app: app))) }
-                tools.append(ShowComputerPictureTool(control: control, store: app.attachmentStore))
+                tools.append(ShowComputerPictureTool(control: control, store: app.attachmentStore, chatFiles: files))
+                tools.append(ViewComputerPictureTool(control: control, chatFiles: files))
             } else if var turn = lastTurn {
                 // Say it out loud. A missing computer must never look like work that simply failed.
                 turn.notices.append("The chat computer is configured but couldn't be reached, so commands can't run in this reply. The machine itself may still be on.")
@@ -3314,7 +3315,7 @@ final class ChatSession: Identifiable {
             }
             placed.append("- ~/\(path): \"\(file.name)\", \(file.bytes) bytes")
         }
-        var note = "Files attached in this chat, as the real files on this computer (work on them with run_command):\n" + placed.joined(separator: "\n")
+        var note = "Files attached in this chat, as the real files on this computer (work on them with run_command; look at a picture yourself with view_computer_picture):\n" + placed.joined(separator: "\n")
         if !failed.isEmpty { note += "\nThese couldn't be put on this computer; say so if the work needs them: " + failed.joined(separator: ", ") }
         return note
     }

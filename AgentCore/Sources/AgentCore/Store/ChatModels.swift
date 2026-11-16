@@ -626,11 +626,14 @@ public struct TurnFailure: Codable, Sendable, Hashable {
     public var message: String
     /// Raw detail for Settings, Technical details.
     public var detail: String?
+    /// Where the card's button goes, when it isn't OpenRouter's (another provider's top-up page).
+    public var actionURL: String?
 
-    public init(kind: Kind, message: String, detail: String? = nil) {
+    public init(kind: Kind, message: String, detail: String? = nil, actionURL: String? = nil) {
         self.kind = kind
         self.message = message
         self.detail = detail
+        self.actionURL = actionURL
     }
 }
 
@@ -1046,7 +1049,10 @@ public extension AssistantTurn {
     /// evidence when a reply is slow) but are not shown. Older chats saved them, so this filters
     /// rather than relying on new replies not adding them.
     var shownNotices: [String] {
-        notices.filter { !Self.isHiddenNotice($0) }
+        // "The runner stopped… Tap retry" under a reply that went on and finished, or is going
+        // again, is out of date (owner's Korg and Signer chats, 15 November 2026).
+        let carriedOn = status == .done || status == .running
+        return notices.filter { !Self.isHiddenNotice($0) && !(carriedOn && VMNotices.asksForRetry($0)) }
     }
 
     static func isHiddenNotice(_ notice: String) -> Bool {

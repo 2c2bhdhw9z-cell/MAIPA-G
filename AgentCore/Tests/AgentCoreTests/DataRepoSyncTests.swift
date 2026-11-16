@@ -12,6 +12,8 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
     var head: String?
     var branchHeads: [String: String] = [:]
     var pullState = "open"
+    /// Answers a tree that deletes a path its base doesn't have the way GitHub does (422).
+    var rejectsDeletingMissingPaths = false
     /// Runs once, just before the next branch update, to simulate another phone saving first.
     var beforeNextUpdate: (() -> Void)?
     /// Rejects one exact blob payload so per-file sync isolation can be tested.
@@ -165,6 +167,10 @@ final class FakeGitHub: HTTPTransport, @unchecked Sendable {
             var tree = body?["base_tree"]?.stringValue.flatMap { trees[$0] } ?? [:]
             for entry in body?["tree"]?.arrayValue ?? [] {
                 guard let path = entry["path"]?.stringValue else { continue }
+                if rejectsDeletingMissingPaths, entry["sha"]?.stringValue == nil, tree[path] == nil {
+                    // What GitHub answered when a save deleted a file its branch never had.
+                    return json(["message": "GitRPC::BadObjectState"], status: 422)
+                }
                 tree[path] = entry["sha"]?.stringValue
             }
             let id = newID("tree")

@@ -72,13 +72,60 @@ public actor ComputerRepoMirror {
             return "MAIPA-G couldn't keep the repo's copy on the computer in step with your staged files, so commands may see older files."
         }
         do {
-            _ = try await control.syncStagedChanges(homePath: homePath, cloneURL: cloneURL, commit: startCommit, changes: await workspace.stagedChanges(), token: token)
+            let branch = workspace.base.commit == startCommit ? workspace.base.branch : nil
+            _ = try await control.syncStagedChanges(homePath: homePath, cloneURL: cloneURL, commit: startCommit, changes: await workspace.stagedChanges(), token: token, branch: branch)
             started = true
             unwritten.removeAll()
             return nil
         } catch {
             return "MAIPA-G couldn't put the repo's copy on the computer in step with your staged files (\(ErrorExplainer.explain(error).message)), so this command may see older files."
         }
+    }
+
+    /// After `save_changes`: the computer's git moves to the saved commit, on the branch it was
+    /// saved to (a pull request's branch too), with `origin/<branch>` there and the index matching
+    /// it. The files aren't touched. So `git status` there shows only what's still unsaved, and
+    /// `git log` and `git diff origin/<branch>` match GitHub. Before, HEAD stayed detached on the
+    /// reply's first commit and origin/main went stale, so `git reset --soft origin/main` made
+    /// saved work look unsaved and "There are no staged changes" made no sense to the AI.
+    /// Returns a line for the save's result, or nil when the computer couldn't follow.
+    public func followSave() async -> String? {
+        let commit = workspace.base.commit
+        let branch = workspace.base.branch
+        guard started, commit != startCommit, commit.count >= 7, commit.count <= 64, commit.allSatisfy(\.isHexDigit),
+              ComputerControl.isSafeRelativePath(homePath) else { return nil }
+        if let cloneURL { try? await control.ensureCheckout(homePath: homePath, cloneURL: cloneURL, commit: commit, token: token) }
+        guard let output = try? await control.run(Self.followSaveScript(homePath: homePath, commit: commit, branch: branch)),
+              output.contains("maipa-g-followed") else { return nil }
+        startCommit = commit
+        let onBranch = output.contains("maipa-g-on-branch")
+        return "The repo on this computer now matches it: \(onBranch ? "on branch \(branch)" : "HEAD") at \(commit.prefix(7))\(onBranch ? ", origin/\(branch) too" : ""). `git status` there shows only what is still unsaved."
+    }
+
+    static func followSaveScript(homePath: String, commit: String, branch: String) -> String {
+        let quoted = ComputerControl.shellQuote(branch)
+        let plain = ComputerControl.isPlainBranchName(branch)
+        return """
+        set -u
+        cd "$HOME/\(homePath)" 2>/dev/null || { echo maipa-g-mirror-missing; exit 0; }
+        git cat-file -e '\(commit)^{commit}' 2>/dev/null || { echo maipa-g-commit-missing; exit 0; }
+        on=""
+        # A branch checked out in another worktree is left alone (moving it would change that one).
+        wt=$(git for-each-ref --format='%(worktreepath)' refs/heads/\(quoted) 2>/dev/null || true)
+        here=$(pwd -P)
+        if \(plain ? "true" : "false") && { [ -z "$wt" ] || [ "$wt" = "$here" ]; } && git update-ref refs/heads/\(quoted) '\(commit)' 2>/dev/null && git symbolic-ref HEAD refs/heads/\(quoted) 2>/dev/null; then
+          git update-ref refs/remotes/origin/\(quoted) '\(commit)' 2>/dev/null || true
+          on=1
+        else
+          git update-ref --no-deref HEAD '\(commit)' || { echo maipa-g-follow-failed; exit 0; }
+        fi
+        git reset --quiet 2>/dev/null || true
+        idx=$(mktemp "${TMPDIR:-/tmp}/maipa-g-index.XXXXXX"); cp "$(git rev-parse --git-path index)" "$idx" 2>/dev/null || true
+        (GIT_INDEX_FILE="$idx" git add -A >/dev/null 2>&1 && GIT_INDEX_FILE="$idx" git write-tree > "$(git rev-parse --git-path maipa-g-synced-tree)") 2>/dev/null || true
+        rm -f "$idx"
+        [ -n "$on" ] && echo maipa-g-on-branch
+        echo maipa-g-followed
+        """
     }
 
     /// A file tool changed `path`: the same file goes onto the computer now.
@@ -131,7 +178,7 @@ public actor ComputerRepoMirror {
         if let tree = try? await workspace.base.tree() {
             for entry in tree.entries where entry.isFile { baseSHA[entry.path] = entry.sha }
         }
-        var broughtIn: [String] = [], removed: [String] = [], reverted: [String] = []
+        var broughtIn: [String] = [], removed: [String] = [], reverted: [String] = [], dropped: [String] = [], undone: [String] = []
         var held: [String] = [], tooBig: [String] = [], secret: [String] = [], unread: [String] = []
         for (path, state) in seen.sorted(by: { $0.key < $1.key }) {
             let expected: String?
@@ -142,11 +189,17 @@ public actor ComputerRepoMirror {
             }
             switch state {
             case .gone:
-                guard expected != nil else { continue }
-                if case .write(_, _, false)? = staged[path] {
-                    // Made in this chat and deleted again before it was saved: nothing to keep.
+                if case .delete? = staged[path], baseSHA[path] == nil, !baseSHA.isEmpty {
+                    // A deletion of a file the branch doesn't have: GitHub refuses a save with one.
                     await workspace.unstage(path)
-                    removed.append(path)
+                    continue
+                }
+                guard expected != nil else { continue }
+                if case .write(_, _, let existed)? = staged[path], !existed || (!baseSHA.isEmpty && baseSHA[path] == nil) {
+                    // Made in this chat and deleted again before it was saved: nothing to keep,
+                    // and nothing to delete on GitHub.
+                    await workspace.unstage(path)
+                    dropped.append(path)
                 } else if gate(path, true) {
                     try? await workspace.stageDeletionFromComputer(path: path)
                     removed.append(path)
@@ -156,8 +209,10 @@ public actor ComputerRepoMirror {
             case .file(let sha, let bytes):
                 if sha == expected { continue }
                 if let base = baseSHA[path], sha == base {
+                    // Unsaved edits that a command (git checkout, git reset --hard, git stash)
+                    // put back: said plainly, so it isn't a surprise later.
+                    if case .write? = staged[path] { undone.append(path) } else { reverted.append(path) }
                     await workspace.unstage(path)
-                    reverted.append(path)
                     continue
                 }
                 if bytes > Self.maxFileBytes { tooBig.append(path); continue }
@@ -172,17 +227,21 @@ public actor ComputerRepoMirror {
                 broughtIn.append(path)
             }
         }
-        return Self.note(broughtIn: broughtIn, removed: removed, reverted: reverted, held: held, tooBig: tooBig, secret: secret, unread: unread, more: more)
+        return Self.note(broughtIn: broughtIn, removed: removed, reverted: reverted, held: held, tooBig: tooBig, secret: secret, unread: unread, more: more, dropped: dropped, undone: undone)
     }
 
-    static func note(broughtIn: [String], removed: [String], reverted: [String], held: [String], tooBig: [String], secret: [String], unread: [String], more: Int) -> String? {
+    static func note(broughtIn: [String], removed: [String], reverted: [String], held: [String], tooBig: [String], secret: [String], unread: [String], more: Int, dropped: [String] = [], undone: [String] = []) -> String? {
         func list(_ paths: [String]) -> String {
             paths.prefix(20).joined(separator: ", ") + (paths.count > 20 ? " and \(paths.count - 20) more" : "")
         }
         var parts: [String] = []
         if !broughtIn.isEmpty { parts.append("now staged as changed on the computer: \(list(broughtIn))") }
         if !removed.isEmpty { parts.append("staged as deleted: \(list(removed))") }
-        if !reverted.isEmpty { parts.append("back to the repo's version: \(list(reverted))") }
+        if !dropped.isEmpty { parts.append("new in this chat and now gone, so no longer staged (nothing to delete on GitHub): \(list(dropped))") }
+        let back = (undone + reverted).sorted()
+        if !back.isEmpty {
+            parts.append("back to the repo's version: \(list(back))" + (undone.isEmpty ? "" : " (the unsaved edits to \(list(undone.sorted())) are gone now; if that wasn't meant, `git stash list` or `git reflog` there may still have them)"))
+        }
         if !held.isEmpty { parts.append("left out until the person allows it: \(list(held))") }
         if !tooBig.isEmpty { parts.append("left on the computer only (over 25 MB): \(list(tooBig))") }
         if !secret.isEmpty { parts.append("left on the computer only (they look like secrets): \(list(secret))") }
@@ -321,7 +380,18 @@ public struct ComputerMirroredTool: AgentTool {
     }
 
     public var name: String { inner.name }
-    public var spec: ToolSpec { inner.spec }
+    public var spec: ToolSpec {
+        var spec = inner.spec
+        // With one copy, a command may change repo files (they come back into the staged changes);
+        // the plain tool's "don't edit repo files here" said the opposite of the prompt.
+        if role == .command {
+            spec.function.description = spec.function.description.replacingOccurrences(
+                of: "and don't edit repo files here that you mean to save: use edit_file/create_file and save_changes.",
+                with: "and keep scratch files out of the repo. Repo files a command changes come back into your staged changes (the result says which), and save_changes saves them."
+            )
+        }
+        return spec
+    }
     public var bringsOutsideContent: Bool { inner.bringsOutsideContent }
     public func runningSummary(for arguments: JSONValue) -> String { inner.runningSummary(for: arguments) }
     public func initialSubagents(for arguments: JSONValue, callID: String) -> [SubagentRunItem]? { inner.initialSubagents(for: arguments, callID: callID) }
@@ -355,7 +425,9 @@ public struct ComputerMirroredTool: AgentTool {
             return try await body()
         case .save:
             if await mirror.isStarted { _ = await mirror.refresh() }
-            return try await body()
+            var output = try await body()
+            if !output.isError, let note = await mirror.followSave() { output.forModel += " " + note }
+            return output
         case .switchBranch:
             // What commands changed so far is staged first, so it comes along to the new branch.
             if await mirror.isStarted { _ = await mirror.refresh() }

@@ -151,6 +151,9 @@ public actor GitHubChangeService {
         body: String = "Changes made by MAIPA-G.",
         activeReceipt: SaveReceipt? = nil
     ) async throws -> SaveReceipt {
+        // A deletion of a path the branch doesn't have makes GitHub refuse the whole commit
+        // ("422 GitRPC::BadObjectState"); there is nothing to delete, so it is dropped.
+        await workspace.dropDeletionsOfMissingFiles()
         let staged = await workspace.stagedChanges()
         guard !staged.isEmpty else { throw ChangeWorkspaceError.noChanges }
         let repo = workspace.base.repo

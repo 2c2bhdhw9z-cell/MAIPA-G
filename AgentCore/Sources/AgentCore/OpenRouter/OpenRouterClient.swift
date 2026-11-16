@@ -143,10 +143,32 @@ public struct OpenRouterAPIError: Error, Sendable, Hashable, CustomStringConvert
         return text
     }
 
+    /// An empty balance, whatever status it came with: OneProvider says 429 "insufficient_quota",
+    /// TeamoRouter says 400 "enterprise_insufficient_balance: Your TeamoRouter wallet balance is
+    /// insufficient" (owner's Korg chat, 16 November 2026), which read as a broken request.
+    var isEmptyBalance: Bool {
+        let lowered = message.lowercased()
+        let loweredCode = code.lowercased()
+        return loweredCode.contains("insufficient_balance") || loweredCode.contains("insufficient_quota") || loweredCode.contains("insufficient_credit")
+            || lowered.contains("insufficient balance") || lowered.contains("balance is insufficient") || lowered.contains("insufficient_quota")
+            || lowered.contains("insufficient credit") || (lowered.contains("wallet") && lowered.contains("insufficient"))
+    }
+
+    /// Where the person tops up, from the provider's own message, else its dashboard.
+    public var topUpURL: URL? {
+        if let range = message.range(of: #"https://[^\s"'<>)]+"#, options: .regularExpression) {
+            var text = String(message[range])
+            while let last = text.last, ".,;:".contains(last) { text.removeLast() }
+            if let url = URL(string: text) { return url }
+        }
+        return AIProviderPreset.builtIn.first { $0.name.caseInsensitiveCompare(providerName) == .orderedSame }.flatMap { URL(string: $0.dashboardURL) }
+    }
+
     public var kind: Kind {
         let status = Int(code) ?? httpStatus
         let source = metadata?["limit_source"]?.stringValue ?? ""
         let lowered = message.lowercased()
+        if status != 402, status != 401, isEmptyBalance { return .outOfCredits }
         switch status {
         case 401: return .invalidKey
         case 402:

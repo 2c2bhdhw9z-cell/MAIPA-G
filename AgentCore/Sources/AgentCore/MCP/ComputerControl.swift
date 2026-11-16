@@ -382,16 +382,16 @@ public struct ComputerControl: Sendable {
     /// `token` gives a private repo's copy: when the copy is missing, MAIPA-G clones it with this
     /// GitHub token, passed to git from a file only the computer's user can read and deleted
     /// straight after. The token never appears in a command or in the chat.
-    public func syncStagedChanges(homePath: String, cloneURL: String?, commit: String?, changes: [StagedChange], token: CheckoutToken? = nil) async throws -> String {
+    public func syncStagedChanges(homePath: String, cloneURL: String?, commit: String?, changes: [StagedChange], token: CheckoutToken? = nil, branch: String? = nil) async throws -> String {
         if let cloneURL {
             try await ensureCheckout(homePath: homePath, cloneURL: cloneURL, commit: commit, token: token)
         }
-        let output = try await run(try Self.syncScript(homePath: homePath, cloneURL: nil, commit: commit, changes: changes))
+        let output = try await run(try Self.syncScript(homePath: homePath, cloneURL: nil, commit: commit, changes: changes, branch: branch))
         guard output.contains("maipa-g-staged-ok") else { throw Failure.commandFailed(output) }
         return output.replacingOccurrences(of: "maipa-g-staged-ok", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    static func syncScript(homePath: String, cloneURL: String?, commit: String?, changes: [StagedChange]) throws -> String {
+    static func syncScript(homePath: String, cloneURL: String?, commit: String?, changes: [StagedChange], branch: String? = nil) throws -> String {
         guard Self.isSafeRelativePath(homePath) else { throw Failure.commandFailed("Unsafe checkout path \(homePath)") }
         let path = "\"$HOME/\(homePath)\""
         var script = "set -euo pipefail\n"
@@ -432,7 +432,18 @@ public struct ComputerControl: Sendable {
 
         """
         if let commit, !commit.isEmpty, commit.allSatisfy(\.isHexDigit) {
-            script += "git checkout --quiet --force --detach \(commit)\n"
+            if let branch, Self.isPlainBranchName(branch) {
+                // On the chat's real branch, with origin/<branch> where GitHub has it, so `git
+                // status`, `git log` and `git diff origin/<branch>` there tell the AI the truth.
+                // A detached HEAD and a stale origin/main had it resetting onto old commits and
+                // losing its work (owner's Signer chat, 15 November 2026).
+                let quoted = Self.shellQuote(branch)
+                // A branch already checked out in another worktree can't be taken: detached then.
+                script += "git checkout --quiet --force -B \(quoted) \(commit) 2>/dev/null || git checkout --quiet --force --detach \(commit)\n"
+                script += "git update-ref refs/remotes/origin/\(quoted) \(commit) 2>/dev/null || true\n"
+            } else {
+                script += "git checkout --quiet --force --detach \(commit)\n"
+            }
         }
         script += "git reset --quiet --hard\ngit clean -fdq\n"
         // 3. Only now do the staged files go in.
@@ -449,6 +460,22 @@ public struct ComputerControl: Sendable {
 
     static func shellQuote(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// A branch name git takes as it is (`main`, `maipa-g/fix-the-13-6da79195`), for scripts.
+    static func isPlainBranchName(_ name: String) -> Bool {
+        !name.isEmpty && name.count <= 200 && !name.hasPrefix("-") && !name.hasPrefix("/") && !name.hasSuffix("/")
+            && !name.hasSuffix(".lock") && !name.hasSuffix(".") && !name.contains("..") && !name.contains("//") && !name.contains("@{")
+            && name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "/._-+".contains($0)) }
+    }
+
+    /// A file inside the home folder with any name a person or a build gives it (spaces,
+    /// brackets, accents), for commands that quote it with `shellQuote`. Nothing that leaves the
+    /// home folder or reads as an option.
+    public static func isSafeHomePath(_ path: String) -> Bool {
+        !path.isEmpty && !path.hasPrefix("/") && !path.hasPrefix("-") && !path.hasPrefix("~")
+            && !path.split(separator: "/", omittingEmptySubsequences: false).contains { $0 == ".." || $0.isEmpty }
+            && !path.contains(where: { $0.isNewline || $0 == "\u{0}" })
     }
 
     static func isSafeRelativeRepoPath(_ path: String) -> Bool {

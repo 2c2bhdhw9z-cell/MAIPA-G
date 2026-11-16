@@ -317,7 +317,7 @@ public struct VMTurnRunner: Sendable {
 
 
         ## Where this reply runs
-        This reply runs on the person's own Linux computer (`\(machine)`), not on the phone. It keeps going when the app is closed. `run_command` and `computer_task` run right here in a real shell. Sub-agents (`invoke_sub_agent`) and memories work here. In a repo chat, GitHub's API works here too (`mcp_github_api_request`: close, merge or comment on pull requests, check runs and anything else), signed in as MAIPA-G, and `download_from_github` brings an Actions artifact or a release file here. git and curl on this computer have no GitHub sign-in, so never push with git (save with `save_changes`) and don't try to fetch private GitHub downloads with curl. The phone's own features (the Workstation, making pictures and videos with picture models\(hasConnectors ? "" : ", connectors")) aren't available in this reply; if the task needs one, say so.
+        This reply runs on the person's own Linux computer (`\(machine)`), not on the phone. It keeps going when the app is closed. `run_command` and `computer_task` run right here in a real shell. Sub-agents (`invoke_sub_agent`) and memories work here. In a repo chat, GitHub's API works here too (`mcp_github_api_request`: close, merge or comment on pull requests, check runs and anything else), signed in as MAIPA-G, and `download_from_github` brings an Actions artifact or a release file here. git and curl on this computer have no GitHub sign-in, so never push with git (save with `save_changes`) and don't try to fetch private GitHub downloads with curl. `~/attachments/` holds files from all of the person's chats: only the ones listed for this chat in your instructions are this chat's. Never open, read, use or show another chat's files; if you need a screenshot, ask for it here. To look at a picture yourself use `view_computer_picture`; `show_computer_picture` puts it in front of the person. The phone's own features (the Workstation, making pictures and videos with picture models\(hasConnectors ? "" : ", connectors")) aren't available in this reply; if the task needs one, say so.
         """
     }
 
@@ -481,13 +481,16 @@ public struct VMTurnRunner: Sendable {
         }
         tools.append(AddMemoryTool(store: memoryStore))
         tools.append(EditMemoryTool(store: memoryStore))
-        tools.append(ShowComputerPictureTool(control: control, store: media))
         // The phone puts the chat's files here before the reply starts. The tool finds them; one
         // that isn't here can't be fetched from this side, and it says why.
         let chatFiles = request.chat.messages.flatMap { message -> [AttachmentReference] in
             if case .user(let user) = message.body { return user.attachments }
             return []
         }
+        // Pictures: shown to the person, or looked at by the AI alone. Neither opens another
+        // chat's files from ~/attachments.
+        tools.append(ShowComputerPictureTool(control: control, store: media, chatFiles: chatFiles))
+        tools.append(ViewComputerPictureTool(control: control, chatFiles: chatFiles))
         if !chatFiles.isEmpty {
             tools.append(CopyFileToComputerTool(control: control, files: chatFiles, link: { file in
                 throw ToolInputError("\(file.name) isn't on this computer: the phone puts the chat's files here when a reply starts, and it couldn't this time (the reason is in your instructions, under the chat's files). Tell the person that reason in plain words and ask them to send the message again.")

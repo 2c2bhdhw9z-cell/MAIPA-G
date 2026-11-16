@@ -1711,3 +1711,32 @@ it while it ran again. Now:
   making steps, at most 20 times a reply. With the app closed, it carries on when the app opens.
 - A Retry keeps the last run's log as `runner.log.1`; "Tap retry" notes go once the reply carries on.
 Tests: `RunnerStopTests`.
+
+### His screenshots of 15-16 November 2026: saving, git, files and pictures on the computer
+From the saved Signer (snes-tas-studio), Korg and diagnostics data:
+- **save_changes to main failed six times with "GitHub 422: GitRPC::BadObjectState"**, then worked
+  on a new branch. The reply made a probe file with a command, then `delete_file` on it, which
+  staged a deletion of a file GitHub never had; every save sent it and GitHub refused the whole
+  commit. Now deleting a file made in the chat just unstages it, the mirror drops such deletions,
+  and a save drops any left over (`dropDeletionsOfMissingFiles`).
+- **"The reset wiped my changes"**: the computer's checkout sat on a detached HEAD at the reply's
+  first commit with a stale origin/main, so the AI's own `git reset --soft origin/main`,
+  cherry-picks and resets didn't match GitHub, and after a save that opened a pull request it didn't
+  know the chat was on that branch. Now the checkout is on the chat's real branch with
+  origin/<branch> set; after each save it moves to the saved commit (files untouched, index reset),
+  so `git status` there is exactly what's unsaved; the save result says when the chat moved to a
+  pull request's branch; a command that undoes unsaved edits says so; the prompt says how git works
+  there; run_command no longer says the opposite of the prompt.
+- **"IPA didn't come through"**: files under 2 MB come to the phone through the computer, and
+  `readFile` refused "Signer build 38.ipa" for its spaces. Paths are now quoted instead.
+- **Two screenshots from another chat in the Korg chat**: `~/attachments/` holds every chat's
+  files; the Korg AI found the newest photo (a Continuum screenshot) and used
+  `show_computer_picture` twice trying to read it. Now that tool refuses other chats' files, a new
+  `view_computer_picture` lets the AI look at a picture without putting it in the chat, and the
+  prompt says other chats' files aren't this chat's.
+- **TeamoRouter's empty wallet** came as HTTP 400 "enterprise_insufficient_balance" and showed as
+  a broken request. Now any provider's empty balance is out of credit, the card says so plainly and
+  its Add credit opens that provider's page (from its message, else its dashboard), with Try again.
+- Old "the runner stopped… Tap retry" notes no longer show under replies that went on and finished.
+Asked him about his Korg device-report screenshots and the circled free GLM 5.3 Flash on TeamoRouter.
+Tests: `OwnerChatFixesTests`.

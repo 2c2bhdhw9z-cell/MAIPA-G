@@ -1757,7 +1757,11 @@ private struct Runner {
             let isOpenRouter = service == "OpenRouter"
             switch api.kind {
             case .outOfCredits:
-                return TurnFailure(kind: .outOfCredits, message: "Your \(service) credit has run out.", detail: api.description)
+                if isOpenRouter {
+                    return TurnFailure(kind: .outOfCredits, message: "Your \(service) credit has run out.", detail: api.description)
+                }
+                // Add credit opens that provider's own page, not OpenRouter's.
+                return TurnFailure(kind: .outOfCredits, message: "Your \(service) balance has run out, so this AI can't answer. Add credit with \(service), or pick an AI on another provider, then tap Try again.", detail: api.description, actionURL: api.topUpURL?.absoluteString)
             case .spendingCapReached:
                 return TurnFailure(kind: .outOfCredits, message: "This \(service) key has reached its spending limit.", detail: api.description)
             case .freeDailyLimit:

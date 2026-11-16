@@ -129,7 +129,10 @@ public struct SaveChangesTool: AgentTool {
         let receipt = try await service.save(workspace, selectedBranch: currentBranch, defaultBranch: defaultBranch, rules: await effectiveRules(), title: title, body: arguments.optionalString("summary") ?? "Changes made by MAIPA-G.", activeReceipt: await session.activeReceipt(for: workspace.base.repo))
         await session.record(receipt)
         if let pull = receipt.pullRequest {
-            return ToolOutput(forModel: "Saved commit \(receipt.savedCommit) and opened \(receipt.repo.isGitLab ? "merge request !" : "pull request #")\(pull.number) in \(receipt.repo.fullName): \(pull.htmlURL)", summary: receipt.repo.isGitLab ? "Opened merge request !\(pull.number)" : "Opened pull request #\(pull.number)", detail: pull.htmlURL)
+            // Said outright: the chat moved onto the pull request's branch. The Signer reply didn't
+            // know, closed the pull request and then found "no staged changes" (15 November 2026).
+            let kind = receipt.repo.isGitLab ? "merge request" : "pull request"
+            return ToolOutput(forModel: "Saved commit \(receipt.savedCommit) and opened \(receipt.repo.isGitLab ? "merge request !" : "pull request #")\(pull.number) in \(receipt.repo.fullName): \(pull.htmlURL). This chat is on that \(kind)'s branch, \(receipt.branch), now: reads, commands and later saves use it, and later saves add to the \(kind). To work on \(defaultBranch) again, call switch_branch.", summary: receipt.repo.isGitLab ? "Opened merge request !\(pull.number)" : "Opened pull request #\(pull.number)", detail: pull.htmlURL)
         }
         return ToolOutput(forModel: "Saved commit \(receipt.savedCommit) directly to \(receipt.branch) in \(receipt.repo.fullName).", summary: "Saved to \(receipt.branch)")
     }
@@ -407,7 +410,9 @@ public struct DeleteFileTool: AgentTool {
     public func runApproved(arguments: JSONValue, progress: @escaping @Sendable (String) -> Void) async throws -> ToolOutput {
         let path = try arguments.requiredString("path")
         guard rules.permitsDeletion(at: path) else { throw ToolInputError("Repository rules do not allow deleting \(path).") }
-        try await workspace.delete(path: path, approved: true)
+        guard try await workspace.delete(path: path, approved: true) else {
+            return ToolOutput(forModel: "\(path) was a new file made in this chat and never saved, so it's simply gone: nothing to delete on GitHub.", summary: "Deleted \(path)")
+        }
         return ToolOutput(forModel: "Staged deletion of \(path).", summary: "Deleted \(path)")
     }
 }

@@ -522,10 +522,19 @@ public actor ChangeWorkspace {
         return (resultLines.joined(separator: "\n"), (idx + 1)...(idx + oldLines.count))
     }
 
-    public func delete(path rawPath: String, approved: Bool = false) async throws {
+    /// Stages the deletion of a file the repo has. A file made in this chat and never saved just
+    /// stops being staged, and this returns false: there is nothing on GitHub to delete. Staging a
+    /// deletion of it made every save fail with GitHub's "422 GitRPC::BadObjectState" (owner's
+    /// Signer chat, 15 November 2026: six saves in a row, until a new branch dropped it).
+    @discardableResult
+    public func delete(path rawPath: String, approved: Bool = false) async throws -> Bool {
         let path = try Self.safe(rawPath)
         guard approved else { throw ChangeWorkspaceError.deletionApprovalRequired(path) }
         if Self.isBuildSetup(path), !approved { throw ChangeWorkspaceError.buildSetupApprovalRequired(path) }
+        if case .write? = changes[path], (try? await baseBlob(for: path)) == nil {
+            changes[path] = nil
+            return false
+        }
         let previous: Data
         switch try await readDecoded(path) {
         case .text(let document, _): previous = document.data
@@ -537,6 +546,21 @@ public actor ChangeWorkspace {
             previous = (try? await readRawBytes(path, maxBytes: 64 * 1024 * 1024)) ?? Data()
         }
         changes[path] = .delete(path: path, previous: previous)
+        return true
+    }
+
+    /// Staged deletions of paths the base doesn't have (left from before the fix above, or by a
+    /// restored list): dropped, and their paths returned. GitHub refuses a whole save over one.
+    @discardableResult
+    public func dropDeletionsOfMissingFiles() async -> [String] {
+        guard let tree = try? await base.tree() else { return [] }
+        let present = Set(tree.entries.filter(\.isFile).map(\.path))
+        var dropped: [String] = []
+        for (path, change) in changes {
+            if case .delete = change, !present.contains(path) { dropped.append(path) }
+        }
+        for path in dropped { changes[path] = nil }
+        return dropped.sorted()
     }
 
     func baseBlob(for path: String) async throws -> String? {
