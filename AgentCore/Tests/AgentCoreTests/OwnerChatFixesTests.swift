@@ -123,6 +123,57 @@ struct OwnerChatFixesTests {
         #expect(last?.routeLabel == "GLM 5.3 Flash")
     }
 
+    @Test("Redaction leaves code alone, never grows its own marker, and still takes OAuth values out")
+    func redactionIsStable() throws {
+        let redactor = SensitiveDataRedactor()
+        // Lines from his Signer and Korg chats that the old rule "redacted".
+        let code = "nSpecial=be(cd,24,4); nCode=be(cd,28,4)\nif(finished&&transitionState=getState()){}"
+        #expect(redactor.redact(code) == code)
+        // A marker that grew on every save goes back to one, and stays one.
+        let grown = "nCode=[REDACTED SECRET] SECRET] SECRET] SECRET]"
+        let once = redactor.redact(grown)
+        #expect(once == "nCode=[REDACTED SECRET]")
+        #expect(redactor.redact(once) == once)
+        // Real OAuth values in an address are still taken out, once.
+        let address = "https://example.com/cb?code=4/0AbCdEfGhIjKl&state=xyz12345abc"
+        let redacted = redactor.redact(address)
+        #expect(!redacted.contains("4/0AbCdEfGhIjKl") && !redacted.contains("xyz12345abc"))
+        #expect(redactor.redact(redacted) == redacted)
+        #expect(redactor.redact("access_token=abcdefghijklmnop") == "access_token=[REDACTED SECRET]")
+        // So a saved chat with nothing secret in it is left byte for byte.
+        let json = Data(#"{"text":"nCode=be(cd,28,4) and ?code=[REDACTED SECRET]"}"#.utf8)
+        #expect(try redactor.redactJSON(json) == json)
+    }
+
+    @Test("Opening a chat doesn't wait for the secret check; a file with a secret is still cleaned")
+    func openingDoesNotWaitForTheCheck() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maipag-open-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ChatStore(dataDirectory: root)
+        var chat = Chat(title: "Big")
+        chat.messages = [.user("hello")]
+        try await store.save(chat)
+        // Written somewhere else, with a token in it, the way an old copy could be.
+        let secret = "ghs_abcdefghijklmnopqrstuvwxyz123456"
+        let file = store.url(for: chat.id)
+        let raw = try String(contentsOf: file, encoding: .utf8).replacingOccurrences(of: "hello", with: "token \(secret)")
+        try Data(raw.utf8).write(to: file, options: .atomic)
+        let opened = try #require(await store.load(chat.id))
+        #expect(opened.messages.count == 1)
+        var cleaned = false
+        for _ in 0..<50 where !cleaned {
+            cleaned = !(try String(contentsOf: file, encoding: .utf8)).contains(secret)
+            if !cleaned { try await Task.sleep(nanoseconds: 20_000_000) }
+        }
+        #expect(cleaned, "the file on disk loses the secret straight after")
+        // A chat MAIPA-G saved itself isn't rewritten by opening it.
+        try await store.save(chat)
+        let saved = try Data(contentsOf: file)
+        _ = await store.load(chat.id)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(try Data(contentsOf: file) == saved)
+    }
+
     @Test("A Tap-retry note isn't shown under a reply that carried on and finished")
     func staleRetryNoteHidden() {
         let old = "The reply ended on your computer without finishing (the runner stopped). Tap retry to carry on from where it stopped."

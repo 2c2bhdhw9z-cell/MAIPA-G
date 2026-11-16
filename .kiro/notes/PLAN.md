@@ -1762,3 +1762,19 @@ Owner, 16 November 2026: "I didn't ask for a use a free AI button." Taken out: a
 empty-balance card has Try again and Add credit (that provider's page), as in build 213. Rule added
 to `.kiro/steering/owner-rules.md`: fix what he reports, add nothing he didn't ask for. He hadn't
 installed 213 or 214, so this goes out as one build with everything.
+
+### Retry did nothing; opening a chat took ~30 seconds (owner, 16 November 2026)
+- **Retry this answer did nothing** (Korg chat, failed TeamoRouter reply, Nemotron picked): Retry
+  on a reply that stopped early carried it on but left it "Failed" with the old card and label
+  through the whole setup (repo, computer, a 12 MB handover), so nothing looked like it happened;
+  and a computer run id left on the chat made the retry follow the old, finished run. Now the reply
+  shows as going at once (failure cleared) and an ended run's id is dropped so a new run starts.
+- **Opening a chat took ~30 s**: every load and save of a big chat ran the secret check's slow path.
+  The OAuth rule matched its own "[REDACTED SECRET]" (and code like `nCode=`), so it grew
+  " SECRET]" on each pass, the quick no-change check never passed, and each pass rebuilt the whole
+  12 MB chat (5.1 s on the sandbox). Loading then rewrote the file, which made sync upload it again.
+  All of it sat on the store's one actor, so a tap waited behind saves and library reloads. Now:
+  the rule only takes code/state from an address and never the marker, grown markers collapse to
+  one, the patterns compile once; opening reads and decodes off the actor (12 MB chat: 0.17 s) and
+  checks for secrets afterwards in the background (files MAIPA-G saved itself aren't checked again).
+Tests: `OwnerChatFixesTests`.

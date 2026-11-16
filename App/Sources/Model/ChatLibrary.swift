@@ -226,10 +226,15 @@ final class ChatLibrary {
             openSession = session
             return
         }
-        guard let chat = await store.load(id) else { return }
-        let draft = await store.loadDocument(ComposerDraft.self, at: ComposerDraft.path(for: id.uuidString.lowercased()))
-        let session = ChatSession(chat: chat, app: app, draft: draft)
-        session.resumeFromRelaunchIfSafe()
+        // Both read at once and away from the store's actor, so opening never waits behind a save
+        // of a big chat (owner, 16 November 2026: about 30 seconds to open a chat).
+        async let loaded = store.load(id)
+        async let savedDraft = store.readDocument(ComposerDraft.self, at: ComposerDraft.path(for: id.uuidString.lowercased()))
+        guard let chat = await loaded else { return }
+        let draft = await savedDraft
+        // Opened twice in a row (two taps while it read): one session, not two.
+        let session = sessions[id] ?? ChatSession(chat: chat, app: app, draft: draft)
+        if sessions[id] == nil { session.resumeFromRelaunchIfSafe() }
         sessions[id] = session
         openSession = session
         dropIdleSessions()

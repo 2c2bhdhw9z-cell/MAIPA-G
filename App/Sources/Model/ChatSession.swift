@@ -624,9 +624,17 @@ final class ChatSession: Identifiable {
         // thrown away and started over. The model is told it was cut off; "Keep going" is still
         // the person's own message, so the two are different to it.
         if index == chat.messages.count - 1,
-           let turn = chat.messages[index].assistantTurn, turn.stoppedEarly == true {
+           var turn = chat.messages[index].assistantTurn, turn.stoppedEarly == true {
             let partial = turn.steps.last(where: { !$0.text.isEmpty })?.text ?? ""
             pendingResumeNote = AgentLoop.resumeNote(partialText: partial)
+            // Going again shows at once: the old failure card used to stay up, unchanged, through
+            // the whole setup, so the tap looked like it did nothing (owner, 16 November 2026).
+            turn.status = .running
+            turn.failure = nil
+            replaceLastTurn(turn)
+            // That run on the computer is over (the reply failed or stopped): a new one starts.
+            // Left set, the retry followed the old run and showed its old ending again.
+            if hasComputerRun { chat.computerRunID = nil }
             touch()
             start()
             return
